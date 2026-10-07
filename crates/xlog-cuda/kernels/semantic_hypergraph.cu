@@ -25,6 +25,18 @@ __device__ void charge_native(NativeWorkTally *work, NativeWorkEvent event, uint
     work->units += count;
     work->events[kind] += count;
 }
+#ifdef __CUDACC__
+// Parallel producers contribute only reached logical events to the same
+// original execution tally. Overflow is retained, never saturated or hidden.
+__device__ void charge_native_parallel(NativeWorkTally *work, NativeWorkEvent event, uint64_t count) {
+    if (!work || !count) return;
+    const auto amount = static_cast<unsigned long long>(count);
+    const auto units = atomicAdd(reinterpret_cast<unsigned long long*>(&work->units), amount);
+    const auto events = atomicAdd(reinterpret_cast<unsigned long long*>(&work->events[unsigned(event)]), amount);
+    if (units > UINT64_MAX-count || events > UINT64_MAX-count)
+        atomicExch(reinterpret_cast<unsigned long long*>(&work->overflow), 1ULL);
+}
+#endif
 __device__ uint64_t written_word(uint64_t value, NativeWorkTally *work) {
     charge_native(work, NativeWorkEvent::CanonicalByte, sizeof(value));
     return value;

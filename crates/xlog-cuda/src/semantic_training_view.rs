@@ -519,6 +519,7 @@ struct TrainingViewLaunch {
     logical_positions: u64,
     kinds: u64,
     parents: u64,
+    cold_work: u64,
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -1008,7 +1009,7 @@ impl SemanticSelectedTrainingView {
                 "prepared training-view coordinates require cursor and four RNG words",
             ));
         }
-        self.enqueue(selected_view, 0, [0; 4], Some(coordinates))
+        self.enqueue(selected_view, 0, [0; 4], Some(coordinates), None)
     }
 
     fn enqueue(
@@ -1017,6 +1018,7 @@ impl SemanticSelectedTrainingView {
         cursor: u64,
         training_rng: [u64; 4],
         coordinates: Option<DeviceMemoryView<u64>>,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
         let (origin_candidate_ptr, origin_candidate_count) =
             if let Some(candidates) = self._origin_candidates.as_ref() {
@@ -1056,6 +1058,7 @@ impl SemanticSelectedTrainingView {
             logical_positions: self.storage.logical_positions.device_ptr_value(),
             kinds: self.storage.kinds.device_ptr_value(),
             parents: self.storage.parents.device_ptr_value(),
+            cold_work: cold_work.map_or(0, |work| *work.device_ptr()),
         };
         let mut recorder = self.arena.domain.new_strict_recorder();
         recorder.read(&self.arena.descriptors);
@@ -1066,6 +1069,9 @@ impl SemanticSelectedTrainingView {
         }
         if let Some(coordinates) = &coordinates {
             recorder.read(coordinates);
+        }
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
         }
         recorder.write(&self.storage.selection);
         recorder.write(&self.storage.roster_rows);
@@ -1467,6 +1473,7 @@ impl SemanticTrainingViewArena {
         cursor: u64,
         training_rng: [u64; 4],
         origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
+        cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
         let output_bytes = self.selection_bytes()?;
         let mut reservation = self
@@ -1481,7 +1488,7 @@ impl SemanticTrainingViewArena {
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        selected.enqueue(selected_view, cursor, training_rng, None)?;
+        selected.enqueue(selected_view, cursor, training_rng, None, cold_work)?;
         Ok(selected)
     }
 }

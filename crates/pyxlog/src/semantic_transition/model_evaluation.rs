@@ -3,6 +3,7 @@
 use super::*;
 use xlog_cuda::{
     SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticModelEvaluationResult,
 };
 
 pyo3::create_exception!(
@@ -59,6 +60,29 @@ impl PySemanticCompletedModelEvaluation {
     #[getter]
     fn retained_allocation_bytes(&self) -> u64 {
         self.inner.result().retained_allocation_bytes
+    }
+}
+
+impl PySemanticCompletedModelEvaluation {
+    pub(super) fn require_phase_observation(
+        &self,
+        py: Python<'_>,
+        parent: &PySemanticPublishedParent,
+        cohort: &PySemanticEvaluationCohort,
+    ) -> PyResult<SemanticModelEvaluationResult> {
+        let session = parent.session.borrow(py);
+        let owner = session.owner()?;
+        if !self.inner.belongs_to(&owner)
+            || !self.inner.belongs_to_cohort(&cohort.inner)
+            || self.inner.parent()
+                != owner
+                    .published_identity(&*parent.lease()?)
+                    .map_err(xlog_err)?
+            || self.binding != parent.content_binding_with_owner(py, &owner)?
+        {
+            return Err(invalid("phase evaluation changed its original completed native observation, parent or cohort"));
+        }
+        Ok(self.inner.result())
     }
 }
 
@@ -451,7 +475,25 @@ impl PySemanticTransitionController {
         let session = self.session.borrow(py);
         session.require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_issued(&issued)?;
+        self.require_read_issued(&issued)?;
+        let public_use = issued.state()?.require_public_use();
+        if let Err(public_error) = public_use {
+            #[cfg(not(feature = "semantic-policy"))]
+            return Err(public_error);
+            #[cfg(feature = "semantic-policy")]
+            {
+                let pending = session
+                    .learning_transition
+                    .lock()
+                    .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+                    .as_ref()
+                    .map(|pending| pending.clone_ref(py));
+                let pending = pending.ok_or(public_error)?;
+                pending
+                    .borrow(py)
+                    .require_source_evaluation(py, self, &issued, &acquired)?;
+            }
+        }
         if acquired.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid("evaluation parent belongs to another Session"));
         }

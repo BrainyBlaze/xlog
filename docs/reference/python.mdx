@@ -523,6 +523,25 @@ return is retained before validation; the interval ends once after actual source
 joins, before cold trace delivery. Explicit `continue_preparation()` may read
 that same finished interval without repeating the serializer, joins or finish.
 
+After its joined preparation is recorded, native executes every original source
+evaluation group through the retained `execute_phase_instruction` callback, with
+the exact source controller, task, parent, model and scheduled tuple. The callback
+owns the canonical numerical decoder. A callback-scoped, single-use read-only
+admission permits the evaluation while the source remains private; it grants no
+general segment, model-update or publication rights. Each group retains its own
+native work report and whole-process physical interval, including pending work.
+Only `SemanticModelEvaluationPending` permits entering the original suspended
+frame again; a completed return or another exception cannot repeat execution.
+Native authenticates the returned observation against its actual Session, parent
+and original cohort before recording its measured preparation/evaluation history.
+The actual model-content witness exposes `learning_feedback_intervention` as a
+cold projection. Ordinary model bindings and the original held source return
+`None`; source reads remain limited to the actual serialization/evaluation
+callback. A transient capture is not a model binding, and a private child without
+its original intervention owner cannot be interpreted as an ordinary model.
+This source prefix does not implement the remaining private trajectories,
+post-comparison delivery or fresh-process recovery.
+
 `physical_peak_bytes` is usable only with `PHYSICAL_PEAK_VALID` and
 `ALLOCATOR_COMPLETED`, complete requested/enabled physical coverage without an
 unsupported gap, valid original boundaries/nonce/ordinal and no process
@@ -3237,6 +3256,12 @@ and the existing numerical/work registrar on the evaluation's `consumer_stream`.
 geometry rules, scratch layout, and device work consumer as prepared execution.
 Saved-autograd-copy recording is intentionally unavailable: this invocation is
 forward/objective-only.
+
+An acquired parent may issue a distinct next evaluation only after the previous
+invocation completed and all aliases of its model-work scratch were released.
+The previous allocation remains retained until the new allocation succeeds.
+An unknown or incomplete report never permits replacement; reusing the parent
+does not reopen the previous recording or change its separately retained cohort.
 
 Retain `evaluation.cohort` separately for later observations. Passing that native
 object as `cohort=` reuses the exact original seventeen ports and their private

@@ -78,6 +78,7 @@ impl SemanticCompletedModelEvaluation {
 
 pub(super) struct EvaluationStorage {
     invocation: Arc<()>,
+    work_aliases: Arc<()>,
     cohort: Arc<SemanticEvaluationCohort>,
     work: PreparedModelWork,
     report: TrackedCudaSlice<u64>,
@@ -99,9 +100,19 @@ impl SemanticTransitionSession {
         event_capacity: usize,
     ) -> Result<SemanticModelEvaluation, SemanticTransitionError> {
         self.checked_reader(lease)?;
-        if self.steps[&lease.token].evaluation.is_some() || self.prepared_segment.is_some() {
+        if self.steps[&lease.token]
+            .evaluation
+            .as_ref()
+            .is_some_and(|original| {
+                original
+                    .result
+                    .is_none_or(|result| !matches!(result.status, 0 | 1))
+                    || Arc::strong_count(&original.work_aliases) != 1
+            })
+            || self.prepared_segment.is_some()
+        {
             return Err(publication_input_error(
-                "evaluation requires an unused acquired parent outside a prepared segment",
+                "evaluation requires known completion and release of the previous invocation's scratch aliases outside a prepared segment",
             ));
         }
         let arena = self
@@ -181,7 +192,16 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     runtime_error("kernel lookup", "tensor content witness unavailable")
                 })?;
-            content.enqueue(&self.domain, &mut self.poisoned, &seal, false)?;
+            let cold_work = self.cold_native_work(lease.token)?;
+            content.enqueue_with_custody(
+                &self.domain,
+                &mut self.poisoned,
+                &seal,
+                false,
+                None,
+                false,
+                cold_work.as_ref(),
+            )?;
             Arc::new(SemanticEvaluationCohort {
                 issuance: Arc::new(()),
                 selected,
@@ -216,6 +236,7 @@ impl SemanticTransitionSession {
             .expect("checked acquired step")
             .evaluation = Some(EvaluationStorage {
             invocation: Arc::clone(&handle.invocation),
+            work_aliases: Arc::new(()),
             cohort,
             work,
             report,
@@ -264,6 +285,7 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
     ) -> Result<(), SemanticTransitionError> {
         let cohort = Arc::clone(&self.evaluation(handle)?.cohort);
+        let cold_work = self.cold_native_work(handle.token)?;
         let seal = self
             .provider
             .device()
@@ -273,9 +295,15 @@ impl SemanticTransitionSession {
                 "semantic_tensor_content_witness",
             )
             .ok_or_else(|| runtime_error("kernel lookup", "tensor content witness unavailable"))?;
-        cohort
-            .content
-            .enqueue(&self.domain, &mut self.poisoned, &seal, true)
+        cohort.content.enqueue_with_custody(
+            &self.domain,
+            &mut self.poisoned,
+            &seal,
+            true,
+            None,
+            false,
+            cold_work.as_ref(),
+        )
     }
 
     pub fn evaluation_stream(
@@ -332,7 +360,17 @@ impl SemanticTransitionSession {
         let view = unsafe { evaluation.work.actual.view().cast::<u8>() }
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let capacity = (evaluation.work.actual.len() / 3) as i64;
-        self.export_step_view(lease, view, vec![capacity, 3], vec![3, 1], (1, 64), stream)
+        let scratch = Arc::clone(&evaluation.work_aliases);
+        let reader = Arc::clone(&self.checked_step(lease)?.aliases);
+        self.export_owned_view(
+            view,
+            vec![capacity, 3],
+            vec![3, 1],
+            (1, 64),
+            reader,
+            stream,
+            Some(scratch),
+        )
     }
 
     pub fn begin_model_evaluation(
