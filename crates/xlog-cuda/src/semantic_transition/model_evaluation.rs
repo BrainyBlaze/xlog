@@ -321,7 +321,7 @@ impl SemanticTransitionSession {
         self.checked_evaluation_parent(lease, handle)?;
         let evaluation = self.evaluation(handle)?;
         if stream != evaluation.stream
-            || evaluation.work.evaluation_recording
+            || evaluation.work.uncaptured_recording
             || evaluation.submitted
         {
             return Err(publication_input_error(
@@ -343,7 +343,7 @@ impl SemanticTransitionSession {
         self.checked_evaluation_parent(lease, handle)?;
         let evaluation = self.evaluation(handle)?;
         if evaluation.submitted
-            || evaluation.work.evaluation_recording
+            || evaluation.work.uncaptured_recording
             || evaluation.work.recording.frozen_bound().is_some()
         {
             return Err(publication_input_error(
@@ -358,7 +358,7 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("checked evaluation")
             .work
-            .evaluation_recording = true;
+            .uncaptured_recording = true;
         Ok(())
     }
 
@@ -378,23 +378,13 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("checked evaluation");
         let work = &mut evaluation.work;
-        let slot = work.next_slot().map_err(publication_input_error)?;
-        let event = if device_produced {
-            let actual = work
-                .actual
-                .device_ptr_value()
-                .checked_add((slot * 3 * size_of::<u64>()) as u64)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            ModelWorkEvent::device_operation(kind, dimensions, actual)
-        } else {
-            ModelWorkEvent::operation(kind, dimensions)
-        }
-        .map_err(publication_input_error)?;
-        work.record_event(event).map_err(publication_input_error)?;
-        if device_produced {
-            work.reset_slots(&self.domain, &mut self.poisoned, slot, 1)?;
-        }
-        Ok(slot)
+        work.record_operation(
+            kind,
+            dimensions,
+            device_produced,
+            &self.domain,
+            &mut self.poisoned,
+        )
     }
 
     /// Same original work registrar and stream as the actual read-only model.
@@ -515,7 +505,7 @@ impl SemanticTransitionSession {
             .evaluation
             .as_mut()
             .expect("checked evaluation");
-        if !evaluation.work.evaluation_recording || evaluation.submitted {
+        if !evaluation.work.uncaptured_recording || evaluation.submitted {
             return Err(publication_input_error(
                 "evaluation result requires its original open recording",
             ));
@@ -530,7 +520,7 @@ impl SemanticTransitionSession {
             .recording
             .freeze()
             .map_err(publication_input_error)?;
-        evaluation.work.evaluation_recording = false;
+        evaluation.work.uncaptured_recording = false;
         let work = &evaluation.work;
         let mut destination = work.device.view().slice(..work.recording.events().len());
         self.provider
@@ -722,6 +712,6 @@ impl SemanticTransitionSession {
                 "state-changing work or release cannot interrupt an original read-only evaluation",
             ));
         }
-        Ok(())
+        self.require_completed_cold_model_work()
     }
 }

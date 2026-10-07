@@ -732,6 +732,30 @@ The supported scientific acceptance callback takes exactly eleven arguments.
 Checking its complete scientific prefix does not implement the private executor
 or establish full GPU execution or cold recovery.
 
+Preparation also requires `cold_model_work_capacity`, an exact positive integer
+from the original preparation instruction. Its bounded allocation arithmetic is
+checked, and both the capacity and unchanged program bytes enter the signed
+Admission. The original decoder returns the preparation tuple
+`("prepare", None, None, cold_model_work_capacity)`; native code compares the
+capacity without introducing another instruction decoder.
+
+Inside the original source serializer, before preparation returns,
+`task_use.active_cold_model_work()` or
+`controller.active_cold_model_work()` returns the same native-issued
+`SemanticColdModelWork`. Obtain its `consumer_stream` and
+`model_work_buffer(consumer_stream=...)`, an original CUDA UInt64
+`[capacity, 3]` buffer, before calling `begin()`. The existing model-work recorder
+uses `record_model_work`, `record_model_device_work` and
+`record_model_invocation`, then calls `end()` on normal exit or `fail()` on an
+exception. Registration begins once; overflow cannot grow the buffer or restart
+the operation. Drop temporary tensor aliases before returning the serializer.
+`end()` only closes registration: the enclosing native operation joins actual
+consumers and completes its report before ending the original physical interval.
+An explicitly attached, completed CPU/meta-only recorder may have no model events;
+an absent recorder, overflow or unknown completion is not a zero result.
+This owner grants no evaluation, backward-tape or content-admission rights.
+Its model-work component is not the full operation's native work or physical peak.
+
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes
 training, subject to its original rights. A later fast training segment requires

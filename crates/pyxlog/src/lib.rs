@@ -1263,6 +1263,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
     #[cfg(feature = "semantic-policy")]
     {
+        m.add_class::<semantic_transition::learning_phase::cold_model_work::PySemanticColdModelWork>()?;
         m.add(
             "SemanticCompletedSegmentPending",
             m.py()
