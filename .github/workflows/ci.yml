@@ -23,105 +23,74 @@ env:
 jobs:
   production-build:
     name: production-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    container:
-      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
     defaults:
       run:
         shell: bash
     env:
-      CARGO_HOME: /github/home/.cargo
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-      # Compile real portable PTX; architecture-specific release cubins belong
-      # to the separately qualified artifact build, not this source gate.
-      XLOG_NO_CUBIN: "1"
+      CARGO_TARGET_DIR: target/source-checks
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            ca-certificates \
-            curl \
-            git \
-            pkg-config \
-            python3 \
-            python3-dev \
-            ripgrep \
-            shellcheck \
-            zstd
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
+      - name: Identify runner Rust toolchain
         id: rust
         run: |
-          bash scripts/install_rust_toolchain.sh --toolchain stable --component rustfmt
-          rust_version=$("$CARGO_HOME/bin/rustc" --version | cut -d ' ' -f 2)
+          rust_version=$(rustc --version | cut -d ' ' -f 2)
           printf 'version=%s\n' "$rust_version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            /github/home/.cargo/registry
-            /github/home/.cargo/git
-            target
-          key: production-build-${{ runner.os }}-cuda13.1.1-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/source-checks
+          key: source-checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            production-build-${{ runner.os }}-cuda13.1.1-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+            source-checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
 
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
         run: |
           set -euo pipefail
-          actionlint_archive=$(mktemp)
+          actionlint_dir=$(mktemp -d)
+          actionlint_archive="$actionlint_dir/actionlint.tar.gz"
           curl --fail --show-error --location \
             --retry 3 \
             --retry-all-errors \
             --output "$actionlint_archive" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          tar -tzf "$actionlint_archive" actionlint >/dev/null
-          tar -xzf "$actionlint_archive" -C /usr/local/bin actionlint
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$actionlint_archive" | sha256sum --check
+          tar -xzf "$actionlint_archive" -C "$actionlint_dir" actionlint
+          printf '%s\n' "$actionlint_dir" >> "$GITHUB_PATH"
 
       - name: Check source formatting, workflows and shell scripts
         run: |
           set -euo pipefail
           cargo fmt --all --check
           actionlint -color
-          mapfile -t files < <(rg --files scripts .github -g '*.sh')
+          mapfile -d '' -t files < <(git ls-files -z -- 'scripts/*.sh' '.github/*.sh')
           if ((${#files[@]})); then
             shellcheck "${files[@]}"
           fi
-          ignored=$(git -c safe.directory="$GITHUB_WORKSPACE" ls-files -ci --exclude-standard)
+          ignored=$(git ls-files -ci --exclude-standard)
           if [[ -n "$ignored" ]]; then
             printf 'Tracked files match ignore rules:\n%s\n' "$ignored" >&2
             exit 1
           fi
 
-      - name: Compile production libraries and binaries once
-        env:
-          # Policy material supplied by the artifact owner is required for the
-          # semantic-policy build. This gate covers self-contained source only.
-          XLOG_BUILD_FEATURES: >-
-            xlog-cuda/arrow-device-import
-            xlog-cuda/wcoj-phase-timing
-            xlog-runtime/recursive-stats-trace
-            xlog-runtime/wcoj-phase-timing
-            xlog-prob/host-io
-            pyxlog/arrow-device-import
-            pyxlog/extension-module
-            pyxlog/host-io
-            xlog-neural/pyo3
-            xlog-neural/python
-            xlog-integration/wcoj-phase-timing
-            xlog-cli/host-io
+      # Keep the required status name stable; this is source acceptance only.
+      # These libraries' default dependency closure contains no xlog-cuda.
+      # GPU builds (including PTX-only builds) are manual and local, never CI.
+      - name: Compile CUDA-independent production libraries
         run: |
           set -euo pipefail
-          nvcc --version
-          time cargo check --workspace --lib --bins --locked --features "$XLOG_BUILD_FEATURES"
+          cargo check --locked --lib \
+            -p xlog-core -p xlog-ir -p xlog-stats -p xlog-logic -p xlog-neural

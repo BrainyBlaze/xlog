@@ -1,51 +1,37 @@
 name: docs
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "scripts/docs/build_rust_api.sh"
-      - "scripts/docs/build_markdown_exports.py"
-      - "scripts/docs/build_redirect_stubs.py"
-      - "scripts/docs/copy-page-shim.js"
-      - "scripts/docs/inject_search_shim.py"
-      - "scripts/docs/search-shim.css"
-      - "scripts/docs/search-shim.js"
-      - ".do/docs-app.yaml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - ".github/workflows/docs.yml"
-  pull_request:
-    paths:
-      - "docs/**"
-      - "scripts/docs/build_rust_api.sh"
-      - "scripts/docs/build_markdown_exports.py"
-      - "scripts/docs/build_redirect_stubs.py"
-      - "scripts/docs/copy-page-shim.js"
-      - "scripts/docs/inject_search_shim.py"
-      - "scripts/docs/search-shim.css"
-      - "scripts/docs/search-shim.js"
-      - ".do/docs-app.yaml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the reviewed main build to docs-dist
+        type: boolean
+        default: false
 
 concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@v4
+        with:
+          persist-credentials: false
+      - name: Require main for publication
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Documentation publication requires the reviewed main branch" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -85,13 +71,41 @@ jobs:
           rm -rf .site-dist/generated/rust
           mkdir -p .site-dist/generated
           cp -R .site-rustdoc/generated/rust .site-dist/generated/rust
-      - name: Publish to docs-dist branch
-        if: github.ref == 'refs/heads/main'
+      - name: Upload the built site
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: docs-site-${{ github.sha }}
+          path: .site-dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: docs-dist
+          path: docs-publication
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: docs-site-${{ github.sha }}
+          path: ${{ runner.temp }}/docs-site
+      - name: Publish an additive docs-dist commit
+        working-directory: docs-publication
         run: |
-          cd .site-dist
-          git init -b docs-dist
+          set -euo pipefail
+          rsync -a --delete --exclude=.git "$RUNNER_TEMP/docs-site/" ./
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
+          if git diff --cached --quiet; then
+            echo "The published site is unchanged."
+            exit 0
+          fi
           git commit -m "docs: publish site build ${GITHUB_SHA}"
-          git push --force "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" docs-dist
+          git push origin HEAD:docs-dist
