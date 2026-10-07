@@ -4,18 +4,26 @@
 
 use super::*;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use phase_record::{delivery_payloads, RecordReader};
+use phase_record::{lifecycle_payloads, RecordReader};
 use rand::rngs::OsRng;
 use serde_json::{Map, Value};
 
 pub(in crate::semantic_transition) struct VerifiedClosure {
     pub(in crate::semantic_transition) phase_id: [u8; 32],
-    pub(in crate::semantic_transition) delivery_digest: [u8; 32],
+    pub(in crate::semantic_transition) completion_digest: [u8; 32],
     pub(in crate::semantic_transition) admission: Arc<[u8]>,
     pub(in crate::semantic_transition) program: Arc<[u8]>,
     pub(in crate::semantic_transition) history: Arc<[u8]>,
     pub(in crate::semantic_transition) acceptance: Arc<[u8]>,
     pub(in crate::semantic_transition) snapshot: AuthoritySnapshot,
+    pub(in crate::semantic_transition) refusal: Option<RefusalClosure>,
+}
+
+pub(in crate::semantic_transition) struct RefusalClosure {
+    pub(in crate::semantic_transition) cause: Arc<str>,
+    pub(in crate::semantic_transition) record: Arc<[u8]>,
+    pub(in crate::semantic_transition) expense: ProposalExpense,
+    pub(super) source_native: Arc<[u8]>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -262,6 +270,62 @@ pub(super) fn require_terminal_history(
     Ok(())
 }
 
+fn require_operation_observation(
+    entry: &Value,
+    record: &Value,
+    ordinal: usize,
+    terminal: bool,
+) -> PyResult<()> {
+    let instruction = unhex(&entry["instruction"]["bytes_hex"])?;
+    let budget = entry["budget"]
+        .as_array()
+        .filter(|values| values.len() == 3)
+        .ok_or_else(|| invalid("signed phase operation lost its original whole-resource budget"))?;
+    let expenditure = record["resource_usage"]
+        .as_array()
+        .filter(|values| values.len() == 3)
+        .ok_or_else(|| invalid("signed phase operation lost its actual resource expenditure"))?;
+    if record["operation_ordinal"].as_u64() != Some(ordinal as u64)
+        || record["branch"] != entry["branch"]
+        || record["instruction_sha256"] != digest(&instruction)
+        || record.as_object().is_none()
+        || (!terminal
+            && record
+                .get("refusal")
+                .is_some_and(|reason| !reason.is_null()))
+    {
+        return Err(invalid(
+            "signed phase history changed its original operation or disposition",
+        ));
+    }
+    if matches!(
+        entry["operation"].as_str(),
+        Some("proposal" | "update" | "recompute")
+    ) && (record["step"]["skipped"] != false
+        || !record["step"]["refusal"].is_null()
+        || record["step"]["step_ordinal"] != entry["step_ordinal"]
+        || record["step"]["transition"] != entry["operation"])
+    {
+        return Err(invalid(
+            "signed phase history contains a skipped, refused or substituted numerical step",
+        ));
+    }
+    for (index, (spent, limit)) in expenditure.iter().zip(budget).enumerate() {
+        let spent = spent
+            .as_u64()
+            .ok_or_else(|| invalid("signed phase expenditure is not an exact u64"))?;
+        let limit = limit
+            .as_u64()
+            .ok_or_else(|| invalid("signed phase budget is not an exact u64"))?;
+        if (!terminal && spent > limit) || index == 1 && limit == 0 {
+            return Err(invalid(
+                "signed phase history exceeded its original operation budget",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn recipe_material(record: &xlog_cuda::SemanticLearningPhaseRecord) -> Vec<u8> {
     let integer = |value: u64| ColdValue::Integer(value.to_string());
     let views = record
@@ -340,6 +404,249 @@ pub(super) fn require_executed_lineage(
 }
 
 impl VerifiedClosure {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "terminal verification retains the already decoded original signed inputs and fence"
+    )]
+    fn read_refusal(
+        phase_id: [u8; 32],
+        admission: &[u8],
+        terminal_record: &[u8],
+        lifecycle: &phase_record::LifecyclePayloads<'_>,
+        source: &[u8],
+        program_bytes: &[u8],
+        recipe_bytes: &[u8],
+        grant: &ColdValue,
+        feedback: [&[u8]; 2],
+        destination: &str,
+        source_phase: SemanticLearningPhase,
+        target_phase: SemanticLearningPhase,
+        pending_target: Option<[u8; 32]>,
+    ) -> PyResult<Self> {
+        let mut reader = RecordReader(
+            lifecycle
+                .completion
+                .strip_prefix(b"xlog.learning-phase.refusal.v1\0")
+                .ok_or_else(|| invalid("terminal phase record has another original domain"))?,
+        );
+        let cause = std::str::from_utf8(reader.field()?)
+            .map_err(|_| invalid("terminal phase cause is not its original text"))?;
+        let retained_source = reader.field()?;
+        let private = reader.field()?;
+        let prefix_bytes = reader.field()?;
+        let result_bytes = reader.field()?;
+        let history_bytes = reader.field()?;
+        let entry_material = reader.field()?;
+        let reason = ColdValue::from_canonical_bytes(reader.field()?)?;
+        let snapshot =
+            AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(reader.field()?)?)?;
+        let mut usage = RecordReader(reader.field()?);
+        let usage_words = [usage.word()?, usage.word()?, usage.word()?];
+        usage.finish()?;
+        reader.finish()?;
+        if retained_source != source {
+            return Err(invalid(
+                "terminal phase changed its original full Source checkpoint",
+            ));
+        }
+        if pending_target.is_some_and(|target| {
+            lifecycle.preparation.is_none() || target != <[u8; 32]>::from(Sha256::digest(private))
+        }) {
+            return Err(invalid(
+                "terminal pending fence differs from its signed original private outcome",
+            ));
+        }
+        match (cause, lifecycle.preparation) {
+            ("scientific-comparison-refused", None) => {
+                if scientific_refusal_reason(program_bytes, prefix_bytes, result_bytes)? != reason {
+                    return Err(invalid(
+                        "terminal phase changed its original scientific reason",
+                    ));
+                }
+            }
+            ("private-candidate-abandoned" | "checkpoint-publication-absent", Some(prepared)) => {
+                let mut prepared = RecordReader(prepared);
+                if prepared.field()? != private
+                    || prepared.field()? != prefix_bytes
+                    || prepared.field()? != result_bytes
+                    || reason != ColdValue::Text(cause.to_owned())
+                {
+                    return Err(invalid(
+                        "terminal phase changed its original positive private outcome",
+                    ));
+                }
+                prepared.finish()?;
+            }
+            _ => {
+                return Err(invalid(
+                    "terminal phase cause contradicts its signed lifecycle position",
+                ))
+            }
+        }
+        let source_manifest = SemanticCheckpointManifest::decode(source)?;
+        let private_manifest = SemanticCheckpointManifest::decode(private)?;
+        let (source_seed, source_snapshot, _, _) =
+            TaskCheckpointSeed::decode(&source_manifest.task)?;
+        let (private_seed, private_snapshot, _, _) =
+            TaskCheckpointSeed::decode(&private_manifest.task)?;
+        let expense = private_seed.proposal_expense()?;
+        if source_manifest.session != private_manifest.session
+            || source_seed.training_domain != private_seed.training_domain
+            || source_seed.training_objective != private_seed.training_objective
+            || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
+            || source_seed.proposal_expense()?.capacity != expense.capacity
+            || source_seed.proposal_expense()?.spent > expense.spent
+        {
+            return Err(invalid(
+                "terminal phase changed original Source configuration, task or cumulative expense",
+            ));
+        }
+        require_retained_arena_authority(&source_seed.authority, &private_seed.authority)?;
+        let program = json(program_bytes)?;
+        let declared_phase =
+            phase(program["final_phase"].as_str().ok_or_else(|| {
+                invalid("terminal phase lost its original declared final phase")
+            })?)?;
+        let phases = require_executed_lineage(
+            &source_manifest.native,
+            &private_manifest.native,
+            admission,
+            recipe_bytes,
+            declared_phase,
+        )?;
+        let source_parent =
+            SemanticTransitionSession::state_material_projection(&source_manifest.native)
+                .map_err(xlog_err)?
+                .publication;
+        let private_parent =
+            SemanticTransitionSession::state_material_projection(&private_manifest.native)
+                .map_err(xlog_err)?
+                .publication;
+        let prefix = json(prefix_bytes)?;
+        let history = json(history_bytes)?;
+        let result = json(result_bytes)?;
+        require_fields(&prefix, &["format", "program_sha256", "records"])?;
+        require_fields(&history, &["format", "program_sha256", "records"])?;
+        require_fields(
+            &result,
+            &[
+                "format",
+                "program",
+                "history",
+                "outcome",
+                "comparisons",
+                "reason",
+                "boundary",
+            ],
+        )?;
+        let format = program["format"]
+            .as_str()
+            .filter(|format| !format.is_empty())
+            .ok_or_else(|| invalid("terminal program lost its original format"))?;
+        if phases[0].source != source_phase
+            || declared_phase != target_phase
+            || prefix["format"] != format
+            || history["format"] != format
+            || result["format"] != format
+            || prefix["program_sha256"] != digest(program_bytes)
+            || history["program_sha256"] != digest(program_bytes)
+            || result["program"] != program
+            || result["history"] != prefix
+            || result["comparisons"].as_array().is_none_or(Vec::is_empty)
+            || program["source_checkpoint_sha256"] != digest(source)
+            || program["source_parent"] != identity_value(source_parent)
+            || program["recipe_digest"]
+                != host(&ColdValue::Bytes(Arc::from(
+                    phases[0].recipe_digest.as_bytes().as_slice(),
+                )))?
+            || program["grant"] != host(grant)?
+            || program["destination"] != destination
+            || program["feedback_interventions"]["real"]
+                != host(&ColdValue::Bytes(Arc::from(feedback[0])))?
+            || program["feedback_interventions"]["control"]
+                != host(&ColdValue::Bytes(Arc::from(feedback[1])))?
+            || (lifecycle.preparation.is_some()
+                && (result["outcome"] != "frozen-phase-criteria-satisfied"
+                    || !result["reason"].is_null()))
+        {
+            return Err(invalid(
+                "terminal phase changed its original program, fence or comparison result",
+            ));
+        }
+        let schedule = program["schedule"]
+            .as_array()
+            .filter(|schedule| schedule.len() > 1)
+            .ok_or_else(|| invalid("terminal phase lost its original complete schedule"))?;
+        let prefix_records = prefix["records"]
+            .as_array()
+            .ok_or_else(|| invalid("terminal phase lost its original complete prefix"))?;
+        if prefix_records.len().checked_add(1) != Some(schedule.len()) {
+            return Err(invalid(
+                "terminal phase shortened its original completed prefix",
+            ));
+        }
+        let ordinal = schedule.len() - 1;
+        let last = &schedule[ordinal];
+        let instruction = unhex(&last["instruction"]["bytes_hex"])?;
+        require_terminal_history(
+            prefix_bytes,
+            history_bytes,
+            &instruction,
+            ordinal as u64,
+            &reason,
+            usage_words,
+        )?;
+        let full_records = history["records"]
+            .as_array()
+            .expect("verified full terminal history");
+        for (index, (entry, record)) in schedule.iter().zip(full_records).enumerate() {
+            require_operation_observation(entry, record, index, index == ordinal)?;
+        }
+        let fields = ColdValue::from_canonical_bytes(entry_material)?;
+        let fields = fields.fields(6)?;
+        let final_checkpoint = &prefix_records[ordinal - 1];
+        if last["operation"] != "delivery"
+            || last["branch"] != "real"
+            || last["step_ordinal"].as_u64() != Some(0)
+            || !last["comparison"].is_null()
+            || fields[0].text()? != "delivery"
+            || fields[1].text()? != "real"
+            || fields[2].unsigned()? != ordinal as u64
+            || fields[3].unsigned()? != 0
+            || host(&fields[4])? != last["budget"]
+            || fields[5] != ColdValue::None
+            || final_checkpoint["parent"] != identity_value(private_parent)
+            || final_checkpoint["full_checkpoint_sha256"] != digest(private)
+            || result["boundary"]["final_parent"] != final_checkpoint["parent"]
+            || result["boundary"]["full_final_checkpoint_sha256"] != digest(private)
+            || result["boundary"]["final_model"] != final_checkpoint["model"]
+            || result["boundary"]["completed_prefix_operations"].as_u64() != Some(ordinal as u64)
+            || result["boundary"]["delivery_operation_ordinal"].as_u64() != Some(ordinal as u64)
+        {
+            return Err(invalid("terminal phase changed its actual private checkpoint or measured final instruction"));
+        }
+        snapshot.newer_than(&source_snapshot)?;
+        snapshot.newer_than(&private_snapshot)?;
+        snapshot.newer_than(&AuthoritySnapshot::parse(&json_cold(
+            &result["boundary"]["refreshed_snapshot"],
+        )?)?)?;
+        Ok(Self {
+            phase_id,
+            completion_digest: Sha256::digest(terminal_record).into(),
+            admission: Arc::from(admission),
+            program: Arc::from(program_bytes),
+            history: Arc::from(history_bytes),
+            acceptance: Arc::from(result_bytes),
+            snapshot,
+            refusal: Some(RefusalClosure {
+                cause: Arc::from(cause),
+                record: Arc::from(terminal_record),
+                expense,
+                source_native: Arc::from(source_manifest.native.as_slice()),
+            }),
+        })
+    }
+
     pub(in crate::semantic_transition) fn read(
         checkpoint: &[u8],
         issuer: &Bound<'_, PyAny>,
@@ -356,35 +663,35 @@ impl VerifiedClosure {
         }
         let records = records.cast::<PyTuple>()?;
         let fence = fence.cast::<PyTuple>()?;
-        if records.len() != 3 || fence.len() != 6 || !limits.is_exact_instance_of::<PyTuple>() {
+        if !matches!(records.len(), 2 | 3)
+            || fence.len() != 6
+            || !limits.is_exact_instance_of::<PyTuple>()
+        {
             return Err(invalid(
-                "cold phase recovery requires all three original records and exact limits",
+                "cold phase recovery requires its complete original record chain and exact limits",
             ));
         }
         let limits = RecordLimits::read(limits)?;
         let phase_id: [u8; 32] = original_bytes(&fence.get_item(0)?, 32)?.try_into().unwrap();
         let source_digest = original_bytes(&fence.get_item(1)?, 32)?;
-        let target_digest = original_bytes(&fence.get_item(2)?, 32)?;
+        let target = fence.get_item(2)?;
         let destination = ColdValue::read(&fence.get_item(3)?, &mut (16 * 1024 * 1024), 0)?;
         let source_phase = ColdValue::read(&fence.get_item(4)?, &mut 128, 0)?;
         let target_phase = ColdValue::read(&fence.get_item(5)?, &mut 128, 0)?;
         let source_phase = phase(source_phase.text()?)?;
         let target_phase = phase(target_phase.text()?)?;
-        let retained = [
-            records.get_item(0)?,
-            records.get_item(1)?,
-            records.get_item(2)?,
-        ];
-        let mut raw = [&[][..]; 3];
-        for (index, value) in retained.iter().enumerate() {
+        let retained: Vec<_> = records.iter().collect();
+        let mut raw = Vec::with_capacity(retained.len());
+        for value in &retained {
             if !value.is_exact_instance_of::<PyBytes>() {
                 return Err(invalid(
                     "cold phase records require exact original byte materials",
                 ));
             }
-            raw[index] = value.cast::<PyBytes>()?.as_bytes();
+            raw.push(value.cast::<PyBytes>()?.as_bytes());
         }
-        let [admission, preparation, delivery] = delivery_payloads(raw, issuer, phase_id, limits)?;
+        let lifecycle = lifecycle_payloads(&raw, issuer, phase_id, limits)?;
+        let admission = lifecycle.admission;
         let mut reader = RecordReader(
             admission
                 .strip_prefix(b"xlog.learning-phase.inputs.v2\0")
@@ -408,6 +715,35 @@ impl VerifiedClosure {
                 "cold phase admission differs from its original source fence",
             ));
         }
+        if lifecycle.refused {
+            let pending_target = if target.is_none() {
+                None
+            } else {
+                Some(original_bytes(&target, 32)?.try_into().unwrap())
+            };
+            let closure = Self::read_refusal(
+                phase_id,
+                raw[0],
+                raw[raw.len() - 1],
+                &lifecycle,
+                source,
+                program_bytes,
+                recipe_bytes,
+                &grant,
+                feedback,
+                destination.text()?,
+                source_phase,
+                target_phase,
+                pending_target,
+            )?;
+            closure.require_checkpoint(checkpoint, source, checkpoint_issuer)?;
+            return Ok(closure);
+        }
+        let target_digest = original_bytes(&target, 32)?;
+        let preparation = lifecycle
+            .preparation
+            .expect("authenticated positive outcome");
+        let delivery = lifecycle.completion;
         let mut reader = RecordReader(preparation);
         let accepted_checkpoint = reader.field()?;
         let prefix_bytes = reader.field()?;
@@ -550,54 +886,7 @@ impl VerifiedClosure {
             ));
         }
         for (ordinal, (entry, record)) in schedule.iter().zip(full_records).enumerate() {
-            let instruction = unhex(&entry["instruction"]["bytes_hex"])?;
-            let budget = entry["budget"]
-                .as_array()
-                .filter(|values| values.len() == 3)
-                .ok_or_else(|| {
-                    invalid("signed phase operation lost its original whole-resource budget")
-                })?;
-            let expenditure = record["resource_usage"]
-                .as_array()
-                .filter(|values| values.len() == 3)
-                .ok_or_else(|| {
-                    invalid("signed phase operation lost its actual resource expenditure")
-                })?;
-            if record["operation_ordinal"].as_u64() != Some(ordinal as u64)
-                || record["branch"] != entry["branch"]
-                || record["instruction_sha256"] != digest(&instruction)
-                || record.as_object().is_none()
-                || record
-                    .get("refusal")
-                    .is_some_and(|refusal| !refusal.is_null())
-            {
-                return Err(invalid(
-                    "signed phase history contains a refusal or changed original operation",
-                ));
-            }
-            if matches!(
-                entry["operation"].as_str(),
-                Some("proposal" | "update" | "recompute")
-            ) && (record["step"]["skipped"] != false
-                || !record["step"]["refusal"].is_null()
-                || record["step"]["step_ordinal"] != entry["step_ordinal"]
-                || record["step"]["transition"] != entry["operation"])
-            {
-                return Err(invalid("signed phase history contains a skipped, refused or substituted numerical step"));
-            }
-            for (index, (spent, limit)) in expenditure.iter().zip(budget).enumerate() {
-                let spent = spent
-                    .as_u64()
-                    .ok_or_else(|| invalid("signed phase expenditure is not an exact u64"))?;
-                let limit = limit
-                    .as_u64()
-                    .ok_or_else(|| invalid("signed phase budget is not an exact u64"))?;
-                if spent > limit || index == 1 && limit == 0 {
-                    return Err(invalid(
-                        "signed phase history exceeded its original operation budget",
-                    ));
-                }
-            }
+            require_operation_observation(entry, record, ordinal, false)?;
         }
         let ordinal = schedule.len() - 1;
         let last = &schedule[ordinal];
@@ -640,12 +929,13 @@ impl VerifiedClosure {
         snapshot.newer_than(&accepted_snapshot)?;
         let closure = Self {
             phase_id,
-            delivery_digest: Sha256::digest(raw[2]).into(),
+            completion_digest: Sha256::digest(raw[2]).into(),
             admission: Arc::from(raw[0]),
             program: Arc::from(program_bytes),
             history: Arc::from(history_bytes),
             acceptance: Arc::from(acceptance_bytes),
             snapshot,
+            refusal: None,
         };
         closure.require_checkpoint(checkpoint, delivered_checkpoint, checkpoint_issuer)?;
         Ok(closure)
@@ -703,18 +993,30 @@ impl CheckpointCustody {
     ) -> PyResult<Vec<u8>> {
         let phases = SemanticTransitionSession::checkpoint_learning_phase_history(&manifest.native)
             .map_err(xlog_err)?;
-        if phases
-            .last()
-            .is_none_or(|phase| phase.admission.as_slice() != self.closure.admission.as_ref())
-        {
+        let valid = if let Some(refusal) = &self.closure.refusal {
+            let original = SemanticTransitionSession::checkpoint_learning_phase_history(
+                &refusal.source_native,
+            )
+            .map_err(xlog_err)?;
+            let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+            let expense = seed.proposal_expense()?;
+            phases == original
+                && expense.capacity == refusal.expense.capacity
+                && expense.spent >= refusal.expense.spent
+        } else {
+            phases
+                .last()
+                .is_some_and(|phase| phase.admission.as_slice() == self.closure.admission.as_ref())
+        };
+        if !valid {
             return Err(invalid(
-                "checkpoint signing lost this Session's completed native phase lineage",
+                "checkpoint signing lost this Session's known native lineage or cumulative expense",
             ));
         }
         let mut bytes = SEAL_DOMAIN.to_vec();
         for field in [
             self.closure.phase_id,
-            self.closure.delivery_digest,
+            self.closure.completion_digest,
             self.origin,
             self.issuer(),
             manifest.unsigned_phase_root(),
@@ -772,9 +1074,9 @@ impl VerifiedClosure {
         .try_into()
         .unwrap();
         let mut reader = seal_reader(&manifest.phase_seal)?;
-        if reader.take(32)? != self.phase_id || reader.take(32)? != self.delivery_digest {
+        if reader.take(32)? != self.phase_id || reader.take(32)? != self.completion_digest {
             return Err(invalid(
-                "descendant checkpoint belongs to another completed phase or Delivery",
+                "descendant checkpoint belongs to another known phase completion",
             ));
         }
         let _original_known_checkpoint = reader.take(32)?;
@@ -802,12 +1104,17 @@ impl VerifiedClosure {
             .map_err(xlog_err)?;
         let current_parent = SemanticTransitionSession::state_material_projection(&manifest.native)
             .map_err(xlog_err)?;
+        let current_expense = current.proposal_expense()?;
         if original_phases != actual_phases
             || saved.training_domain != current.training_domain
             || saved.checkpoint_source_limits()? != current.checkpoint_source_limits()?
-            || saved.proposal_expense()?.capacity != current.proposal_expense()?.capacity
-            || saved.proposal_expense()?.spent > current.proposal_expense()?.spent
+            || saved.proposal_expense()?.capacity != current_expense.capacity
+            || saved.proposal_expense()?.spent > current_expense.spent
             || saved_parent.model_generation > current_parent.model_generation
+            || self.refusal.as_ref().is_some_and(|refusal| {
+                current_expense.capacity != refusal.expense.capacity
+                    || current_expense.spent < refusal.expense.spent
+            })
         {
             return Err(invalid(
                 "descendant checkpoint changed its completed phase ancestry or cumulative custody",
@@ -829,5 +1136,43 @@ impl VerifiedClosure {
         )
             .into_pyobject(py)?
             .unbind())
+    }
+
+    pub(in crate::semantic_transition) fn refusal_value(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<PyTuple>>> {
+        self.refusal
+            .as_ref()
+            .map(|refusal| {
+                Ok((
+                    refusal.cause.as_ref(),
+                    PyBytes::new(py, &self.acceptance),
+                    PyBytes::new(py, &self.history),
+                    PyBytes::new(py, &refusal.record),
+                )
+                    .into_pyobject(py)?
+                    .unbind())
+            })
+            .transpose()
+    }
+
+    pub(in crate::semantic_transition) fn restored_expense(
+        &self,
+        checkpoint: &[u8],
+    ) -> PyResult<Option<Arc<Mutex<ProposalExpense>>>> {
+        let Some(refusal) = &self.refusal else {
+            return Ok(None);
+        };
+        let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+        let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let mut expense = seed.proposal_expense()?;
+        if expense.capacity != refusal.expense.capacity {
+            return Err(invalid(
+                "terminal Source restore changed its original Proposal capacity",
+            ));
+        }
+        expense.spent = expense.spent.max(refusal.expense.spent);
+        Ok(Some(Arc::new(Mutex::new(expense))))
     }
 }
