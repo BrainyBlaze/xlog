@@ -24,6 +24,59 @@ use crate::dlpack::DlpackManagedTensor;
 use crate::launch::RecorderTransaction;
 use crate::CudaDevice;
 
+/// Original direct CUDA backing owner evidence for the process resource ledger.
+/// This is the installed C ABI root layout, not an allocation/peak counter.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GpuBackingRoot {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub owner_generation: u64,
+    pub context_handle: u64,
+    pub base: u64,
+    pub bytes: u64,
+    pub device_uuid: [u8; 16],
+    pub device_ordinal: u32,
+    pub reserved: u32,
+}
+
+/// One process-owned, thread-safe native collector. Recording neither enters
+/// Python nor calls CUDA; it associates confirmations with original driver
+/// events and deduplicates them in the same ledger as external allocator roots.
+pub trait GpuBackingObserver: Send + Sync {
+    fn record(&self, root: &GpuBackingRoot) -> crate::device_runtime::ResourceResult<()>;
+}
+
+struct BackingObservationRegistry {
+    observer: Option<Arc<dyn GpuBackingObserver>>,
+    allocation_entered: bool,
+    next_generation: u64,
+}
+
+static BACKING_OBSERVATION: std::sync::Mutex<BackingObservationRegistry> =
+    std::sync::Mutex::new(BackingObservationRegistry {
+        observer: None,
+        allocation_entered: false,
+        next_generation: 1,
+    });
+
+/// Attach the original process collector before the first native allocation.
+/// There is no reset, replacement or late baseline synthesized from live views.
+pub fn install_gpu_backing_observer(
+    observer: Arc<dyn GpuBackingObserver>,
+) -> crate::device_runtime::ResourceResult<()> {
+    let mut registry = BACKING_OBSERVATION.lock().map_err(|_| {
+        ResourceError::Driver("native backing observation registry poisoned".into())
+    })?;
+    if registry.allocation_entered || registry.observer.is_some() {
+        return Err(ResourceError::Driver(
+            "process backing observer must be installed once before native allocation".into(),
+        ));
+    }
+    registry.observer = Some(observer);
+    Ok(())
+}
+
 #[cfg(test)]
 type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send + Sync + 'static>>>;
 
@@ -688,8 +741,10 @@ struct RawAllocationPayload {
     allocation_stream: Arc<CudaStream>,
     dependencies: Option<Arc<DeviceAccessDependencies>>,
     reclamation: Arc<AllocationReclamation>,
-    asynchronous: bool,
     free_state: DriverReleaseState,
+    backing_observer: Option<Arc<dyn GpuBackingObserver>>,
+    backing_root: GpuBackingRoot,
+    backing_release: DriverReleaseState,
     manager: Option<Arc<GpuMemoryManager>>,
     lifecycle_exclusion: Option<AllocationLifecyclePermit>,
 }
@@ -815,11 +870,44 @@ impl RawDeviceAllocation {
         reclamation: Arc<AllocationReclamation>,
     ) -> crate::device_runtime::ResourceResult<Arc<Self>> {
         let _capture_exclusion = crate::cuda_graph::reserve_uncaptured_stream(&stream)?;
-        let asynchronous = stream.context().has_async_alloc();
         stream.context().bind_to_thread()?;
         // Preserve the caller-prefix ordering previously carried by a private
         // ready event without retaining an event per allocation.
         stream.synchronize()?;
+        let (backing_observer, generation) = {
+            let mut registry = BACKING_OBSERVATION.lock().map_err(|_| {
+                ResourceError::Driver("native backing observation registry poisoned".into())
+            })?;
+            registry.allocation_entered = true;
+            let generation = registry.next_generation;
+            registry.next_generation = generation.checked_add(1).ok_or_else(|| {
+                ResourceError::Driver("native backing owner generation exhausted".into())
+            })?;
+            (registry.observer.clone(), generation)
+        };
+        let mut backing_root = GpuBackingRoot {
+            struct_size: std::mem::size_of::<GpuBackingRoot>() as u32,
+            kind: 3,
+            owner_generation: generation,
+            context_handle: stream.context().cu_ctx() as u64,
+            base: 0,
+            bytes: 0,
+            device_uuid: [0; 16],
+            device_ordinal: u32::try_from(stream.context().ordinal()).map_err(|_| {
+                ResourceError::Driver("native backing device ordinal exceeds u32".into())
+            })?,
+            reserved: 0,
+        };
+        if backing_observer.is_some() && bytes != 0 {
+            let mut uuid = cudarc::driver::sys::CUuuid { bytes: [0; 16] };
+            // SAFETY: original context/device is retained and this is cold,
+            // uncaptured owner construction, not an activity callback.
+            unsafe {
+                cudarc::driver::sys::cuDeviceGetUuid_v2(&mut uuid, stream.context().cu_device())
+                    .result()?;
+            }
+            backing_root.device_uuid = uuid.bytes.map(|byte| byte as u8);
+        }
         // Arm both stream owners before malloc. A post-malloc failure therefore
         // reaches the canonical cold reaper with the exact device-owned stream.
         let mut allocation = initialize_allocation(
@@ -833,8 +921,10 @@ impl RawDeviceAllocation {
                     allocation_stream,
                     dependencies: None,
                     reclamation: Arc::clone(&reclamation),
-                    asynchronous,
                     free_state: DriverReleaseState::Owned,
+                    backing_observer,
+                    backing_root,
+                    backing_release: DriverReleaseState::Owned,
                     manager,
                     lifecycle_exclusion: None,
                 }),
@@ -855,22 +945,43 @@ impl RawDeviceAllocation {
                 let ptr = if bytes == 0 {
                     0
                 } else {
-                    // SAFETY: capture is excluded and the device-owned stream
-                    // is serialized by the allocation lifecycle permit.
-                    unsafe {
-                        if asynchronous {
-                            cudarc::driver::result::malloc_async(
-                                payload.allocation_stream.cu_stream(),
-                                bytes,
-                            )?
-                        } else {
-                            cudarc::driver::result::malloc_sync(bytes)?
-                        }
-                    }
+                    // SAFETY: capture is excluded and lifecycle address reuse
+                    // is serialized. A direct root has its own confirmed extent
+                    // and release, unlike an async pool's suballocation/cache.
+                    unsafe { cudarc::driver::result::malloc_sync(bytes)? }
                 };
                 payload.ptr = ptr;
                 payload.acquired = true;
                 payload.reclamation.acquired()?;
+                if let Some(observer) = &payload.backing_observer {
+                    if bytes != 0 {
+                        payload.backing_root.base = ptr;
+                        let mut base = 0;
+                        let mut extent = 0;
+                        // SAFETY: the armed original owner retains this direct
+                        // allocation. Query cold outside producer callbacks;
+                        // never substitute requested bytes for a failed query.
+                        let query = unsafe {
+                            cudarc::driver::sys::cuMemGetAddressRange_v2(
+                                &mut base,
+                                &mut extent,
+                                ptr,
+                            )
+                            .result()
+                        };
+                        if query.is_err() || base != ptr || extent < bytes {
+                            observer.record(&payload.backing_root)?;
+                            return Err(ResourceError::Driver(
+                                "original native backing extent is unconfirmed".into(),
+                            ));
+                        }
+                        payload.backing_root.kind = 1;
+                        payload.backing_root.bytes = u64::try_from(extent).map_err(|_| {
+                            ResourceError::Driver("native backing extent exceeds u64".into())
+                        })?;
+                        observer.record(&payload.backing_root)?;
+                    }
+                }
                 let poison = payload.manager.is_some() && bytes != 0 && poison_alloc_enabled();
                 if payload.manager.is_some() {
                     alloc_guard_insert(payload.ptr, bytes as u64);
@@ -887,7 +998,7 @@ impl RawDeviceAllocation {
                         }
                     }
                 }
-                if (asynchronous && bytes != 0) || poison {
+                if poison {
                     // SAFETY: the lifecycle permit excludes any other user of
                     // this device-owned allocation stream until publication.
                     unsafe {
@@ -964,7 +1075,7 @@ impl RawDeviceAllocation {
             .reclamation
     }
 
-    /// Cold physical reclamation. A successful async free is never submitted a
+    /// Cold physical reclamation. A successful direct free is never submitted a
     /// second time, even if its following completion check fails.
     pub(crate) fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
         let admission = &mut self.reclamation_admission;
@@ -1034,29 +1145,22 @@ impl RawDeviceAllocation {
                                 if payload.manager.is_some() {
                                     alloc_guard_remove(payload.ptr);
                                 }
-                                // SAFETY: all actual-use fences completed; free matches the
-                                // chosen allocation mode and the exact allocation context.
+                                // SAFETY: all actual-use fences completed; direct free
+                                // matches the original root and allocation context.
                                 unsafe {
-                                    if payload.asynchronous {
-                                        cudarc::driver::result::free_async(
-                                            payload.ptr,
-                                            payload.allocation_stream.cu_stream(),
-                                        )?;
-                                    } else {
-                                        cudarc::driver::result::free_sync(payload.ptr)?;
-                                    }
+                                    cudarc::driver::result::free_sync(payload.ptr)?;
                                 }
                             }
                             Ok(())
                         })?;
                     }
-                    if payload.asynchronous && payload.bytes != 0 {
-                        // A failed synchronization retains Submitted state, so
-                        // retry proves the same free prefix without resubmission.
-                        unsafe {
-                            cudarc::driver::result::stream::synchronize(
-                                payload.allocation_stream.cu_stream(),
-                            )?;
+                    if let Some(observer) = &payload.backing_observer {
+                        if payload.bytes != 0 {
+                            payload.backing_release.submit(|| {
+                                let mut root = payload.backing_root;
+                                root.kind = if root.kind == 1 { 2 } else { 3 };
+                                observer.record(&root)
+                            })?;
                         }
                     }
                     payload.reclamation.complete()?;

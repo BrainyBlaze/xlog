@@ -23,7 +23,7 @@ pub(super) struct PrivateTrajectoryStart {
     report: Option<SemanticColdModelWorkResult>,
     model_binding: Option<(u64, Identity256, Identity256)>,
     observer_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     record_entered: bool,
     recorded: bool,
     released: bool,
@@ -148,7 +148,7 @@ impl PySemanticLearningPhaseTransition {
             ];
             if budget[1] == 0 {
                 return Err(invalid(
-                    "private trajectory requires its original physical memory limit",
+                    "private trajectory requires its original backing memory limit",
                 ));
             }
             *self.trajectory_start()? = Some(PrivateTrajectoryStart {
@@ -171,7 +171,7 @@ impl PySemanticLearningPhaseTransition {
                 report: None,
                 model_binding: None,
                 observer_finish_entered: false,
-                physical_peak: None,
+                backing_peak: None,
                 record_entered: false,
                 recorded: false,
                 released: false,
@@ -514,7 +514,7 @@ impl PySemanticLearningPhaseTransition {
                     .checked_add(report.model_work)
                     .ok_or_else(|| invalid("private trajectory actual work overflowed"))?;
                 let peak = operation
-                    .physical_peak
+                    .backing_peak
                     .expect("known original trajectory memory");
                 if work > operation.budget[0]
                     || peak > operation.budget[1]
@@ -541,7 +541,7 @@ impl PySemanticLearningPhaseTransition {
             .child_joined;
         if !joined {
             let restored = restored.borrow(py);
-            // Project once while this same tally and whole physical interval
+            // Project once while this same tally and whole backing interval
             // are still open. History readback never reserializes native state.
             if self
                 .trajectory_start()?
@@ -618,14 +618,11 @@ impl PySemanticLearningPhaseTransition {
         if finish {
             self.preparation_inputs.resource_observer.finish(py)?;
         }
-        let peak = self
-            .preparation_inputs
-            .resource_observer
-            .physical_peak(py)?;
+        let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
         self.trajectory_start()?
             .as_mut()
             .expect("retained original trajectory")
-            .physical_peak = Some(peak);
+            .backing_peak = Some(peak);
         let (instruction, ordinal, budget, entered, recorded) = {
             let retained = self.trajectory_start()?;
             let operation = retained.as_ref().expect("retained original trajectory");
@@ -680,6 +677,9 @@ impl PySemanticLearningPhaseTransition {
                 PyBytes::new(py, &self.source_checkpoint),
             )?;
             arguments.set_item("resource_usage", (work, peak, report.model_calls))?;
+            self.preparation_inputs
+                .resource_observer
+                .observation_arguments(py, &arguments)?;
             let callback = self
                 .scientific_owner
                 .bind(py)
@@ -689,6 +689,7 @@ impl PySemanticLearningPhaseTransition {
                 .expect("retained original trajectory")
                 .record_entered = true;
             callback.call((), Some(&arguments))?;
+            self.require_scientific_history(py)?;
             self.trajectory_start()?
                 .as_mut()
                 .expect("retained original trajectory")
@@ -769,8 +770,8 @@ impl PySemanticLearningPhaseTransition {
             .checked_add(report.model_work)
             .ok_or_else(|| invalid("trajectory work overflowed"))?;
         let peak = original
-            .physical_peak
-            .ok_or_else(|| invalid("completed trajectory lost its original physical peak"))?;
+            .backing_peak
+            .ok_or_else(|| invalid("completed trajectory lost its original backing peak"))?;
         if work > original.budget[0]
             || peak > original.budget[1]
             || report.model_calls > original.budget[2]

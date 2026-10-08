@@ -222,6 +222,145 @@ fn require_fields(value: &Value, names: &[&str]) -> PyResult<()> {
     Ok(())
 }
 
+fn require_device_certificate(certificate: &Value) -> PyResult<u64> {
+    require_fields(
+        certificate,
+        &[
+            "format",
+            "observer_identity",
+            "device_uuid",
+            "total_physical_bytes",
+            "process_id",
+            "driver_version",
+            "source",
+            "whole_device",
+        ],
+    )?;
+    let identity = unhex(&certificate["observer_identity"])?;
+    let uuid = unhex(&certificate["device_uuid"])?;
+    let capacity = certificate["total_physical_bytes"]
+        .as_u64()
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| invalid("original device capacity must be positive exact bytes"))?;
+    if certificate["format"] != "xlog.device-capacity/1"
+        || certificate["source"] != "nvml-memory-v2"
+        || certificate["whole_device"] != true
+        || identity.len() != 32
+        || identity.iter().all(|byte| *byte == 0)
+        || uuid.len() != 16
+        || certificate["process_id"].as_u64().is_none_or(|id| id == 0)
+        || certificate["driver_version"]
+            .as_str()
+            .is_none_or(|version| {
+                version.is_empty()
+                    || version.len() >= 32
+                    || !version.as_bytes().iter().all(u8::is_ascii_graphic)
+            })
+    {
+        return Err(invalid(
+            "signed history lacks its original whole-device capacity certificate",
+        ));
+    }
+    Ok(capacity)
+}
+
+/// One memory interpretation for native admission and original signed recovery.
+/// Old physical-peak programs are not re-labelled under this format.
+pub(super) fn require_program_memory(program: &Value, certificate: &Value) -> PyResult<()> {
+    if program["format"] != resource_observer::PROGRAM_FORMAT
+        || program["memory_unit"] != resource_observer::MEMORY_UNIT
+        || program["memory_admission"] != resource_observer::MEMORY_ADMISSION
+    {
+        return Err(invalid("scientific program must freeze the original backing unit and separate whole-device capacity admission"));
+    }
+    let capacity = require_device_certificate(certificate)?;
+    let schedule = program["schedule"]
+        .as_array()
+        .filter(|schedule| !schedule.is_empty())
+        .ok_or_else(|| invalid("memory admission requires every original scheduled operation"))?;
+    for limits in schedule
+        .iter()
+        .map(|entry| &entry["budget"])
+        .chain(std::iter::once(&program["terminal_cleanup"]["budget"]))
+    {
+        let limits = limits
+            .as_array()
+            .filter(|limits| {
+                limits.len() == 3 && limits.iter().all(|value| value.as_u64().is_some())
+            })
+            .ok_or_else(|| {
+                invalid("memory admission requires every original exact whole-resource budget")
+            })?;
+        let ceiling = limits[1]
+            .as_u64()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                invalid("memory admission requires an original positive byte ceiling")
+            })?;
+        if capacity > ceiling {
+            return Err(invalid("whole-device physical capacity cannot prove an original operation or cleanup ceiling; refuse before allocation/admission without rewriting its budget"));
+        }
+    }
+    Ok(())
+}
+
+/// Live signing compares to the native-retained original certificate. Recovery
+/// checks the already signed certificate without substituting the new process.
+pub(super) fn require_memory_history(
+    program: &Value,
+    history: &Value,
+    expected: Option<&Value>,
+) -> PyResult<()> {
+    if history["format"] != resource_observer::PROGRAM_FORMAT {
+        return Err(invalid(
+            "original history cannot reinterpret another memory format",
+        ));
+    }
+    let records = history["records"]
+        .as_array()
+        .ok_or_else(|| invalid("original memory history lacks its actual observations"))?;
+    let certificate = expected
+        .or_else(|| records.first().map(|record| &record["device_certificate"]))
+        .ok_or_else(|| invalid("original memory history lacks its native certificate"))?;
+    require_program_memory(program, certificate)?;
+    let capacity = require_device_certificate(certificate)?;
+    for record in records.iter().chain(
+        history
+            .get("terminal_cleanup")
+            .filter(|value| !value.is_null()),
+    ) {
+        let peak = record["resource_usage"]
+            .as_array()
+            .filter(|values| values.len() == 3)
+            .and_then(|values| values[1].as_u64())
+            .ok_or_else(|| invalid("backing history lacks its actual exact peak bytes"))?;
+        if record["memory_unit"] != resource_observer::MEMORY_UNIT
+            || record["memory_admission"] != resource_observer::MEMORY_ADMISSION
+            || record["device_certificate"] != *certificate
+            || peak > capacity
+        {
+            return Err(invalid("original backing observation changed its unit, native certificate or whole-device bound"));
+        }
+    }
+    Ok(())
+}
+
+fn observation_metadata(record: &Value) -> PyResult<(&Value, &Value, &Value)> {
+    if record["memory_unit"] != resource_observer::MEMORY_UNIT
+        || record["memory_admission"] != resource_observer::MEMORY_ADMISSION
+    {
+        return Err(invalid(
+            "terminal observation lost its original memory interpretation",
+        ));
+    }
+    require_device_certificate(&record["device_certificate"])?;
+    Ok((
+        &record["memory_unit"],
+        &record["memory_admission"],
+        &record["device_certificate"],
+    ))
+}
+
 /// Recognize only the original negative comparison of a complete prefix.
 /// A contract exception with no comparisons is not a scientific zero result.
 pub(super) fn scientific_refusal_reason(
@@ -278,12 +417,19 @@ pub(super) fn require_terminal_history(
 ) -> PyResult<()> {
     let mut prefix = json(prefix)?;
     let history = json(history)?;
+    let actual = history["records"]
+        .as_array()
+        .and_then(|records| records.last())
+        .ok_or_else(|| invalid("terminal refusal lost its actual original observation"))?;
+    let (memory_unit, memory_admission, device_certificate) = observation_metadata(actual)?;
     let records = prefix["records"]
         .as_array_mut()
         .ok_or_else(|| invalid("terminal refusal lost its original prefix records"))?;
     let record = serde_json::json!({
         "instruction_sha256": digest(instruction), "operation_ordinal": ordinal,
         "branch": branch, "resource_usage": usage, "refusal": host(reason)?,
+        "memory_unit": memory_unit, "memory_admission": memory_admission,
+        "device_certificate": device_certificate,
     });
     records.push(record);
     if prefix != history {
@@ -310,6 +456,8 @@ pub(super) fn require_segment_terminal_history(
         &["format", "program_sha256", "records", "terminal_cleanup"],
     )?;
     let history = json(history)?;
+    let (memory_unit, memory_admission, device_certificate) =
+        observation_metadata(&history["terminal_cleanup"])?;
     let records = prefix["records"]
         .as_array()
         .ok_or_else(|| invalid("segment terminal closure lost its complete original history"))?;
@@ -336,6 +484,8 @@ pub(super) fn require_segment_terminal_history(
         "operation_ordinal": ordinal, "cause": cause,
         "group_start": start, "group_count": count, "branch": branch,
         "resource_usage": usage,
+        "memory_unit": memory_unit, "memory_admission": memory_admission,
+        "device_certificate": device_certificate,
     });
     if prefix != history {
         return Err(invalid(
@@ -602,6 +752,7 @@ impl VerifiedClosure {
             let program = json(program_bytes)?;
             let prefix = json(prefix_bytes)?;
             let history = json(history_bytes)?;
+            require_memory_history(&program, &history, None)?;
             require_history(&prefix, false)?;
             require_history(&history, segment)?;
             let records = prefix["records"]
@@ -913,6 +1064,7 @@ impl VerifiedClosure {
         let prefix = json(prefix_bytes)?;
         let history = json(history_bytes)?;
         let result = json(result_bytes)?;
+        require_memory_history(&program, &history, None)?;
         require_history(&prefix, false)?;
         require_history(&history, false)?;
         require_fields(
@@ -1214,6 +1366,7 @@ impl VerifiedClosure {
         let prefix = json(prefix_bytes)?;
         let history = json(history_bytes)?;
         let acceptance = json(acceptance_bytes)?;
+        require_memory_history(&program, &history, None)?;
         require_history(&prefix, false)?;
         require_history(&history, false)?;
         require_fields(
