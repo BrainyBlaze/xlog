@@ -16,6 +16,8 @@ const STARTED_BEFORE_CUDA: u64 = 8;
 const PHYSICAL_PEAK_VALID: u64 = 32;
 const ALLOCATOR_COMPLETED: u64 = 64;
 const PHYSICAL_MEMORY: u64 = 128;
+#[cfg(feature = "semantic-policy")]
+const CANCEL_GROUP: u32 = 2;
 
 type Begin = unsafe extern "C" fn(*mut c_void, *const u8, u64, *mut *mut c_void) -> u32;
 type Finish = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
@@ -77,6 +79,7 @@ const _: () = assert!(size_of::<Api>() == 64 && size_of::<TraceView>() == 200);
 struct StepInterval {
     ordinal: u64,
     capture_stream: u64,
+    start_confirmed: bool,
     end_attempted: bool,
     capture_finished: bool,
     boundaries: Option<(u64, u64)>,
@@ -94,6 +97,8 @@ struct Interval {
     release_attempted: bool,
     released: bool,
     steps: Vec<StepInterval>,
+    cancellation_attempted: bool,
+    cancelled_roster: bool,
 }
 
 /// The capsule pins the original immutable table, context and function code.
@@ -207,6 +212,8 @@ impl ResourceObserver {
             release_attempted: false,
             released: false,
             steps: Vec::new(),
+            cancellation_attempted: false,
+            cancelled_roster: false,
         });
         let interval = retained.as_mut().expect("retained before original begin");
         let mut handle = std::ptr::null_mut();
@@ -251,6 +258,7 @@ impl ResourceObserver {
         if !interval.begun
             || interval.finish_attempted
             || interval.release_attempted
+            || interval.cancellation_attempted
             || capture_stream == 0
         {
             return Err(invalid(
@@ -265,6 +273,7 @@ impl ResourceObserver {
                 .ok_or_else(|| invalid("step capture end has no original beginning"))?;
             if current.ordinal != ordinal
                 || current.capture_stream != capture_stream
+                || !current.start_confirmed
                 || current.end_attempted
                 || step.checked_add(1) != Some(count)
             {
@@ -292,6 +301,7 @@ impl ResourceObserver {
             interval.steps.push(StepInterval {
                 ordinal,
                 capture_stream,
+                start_confirmed: false,
                 end_attempted: false,
                 capture_finished: false,
                 boundaries: None,
@@ -314,13 +324,74 @@ impl ResourceObserver {
         if status != COMPLETE {
             return Err(invalid("original graph-step boundary binding is unknown; retain the same interval and capture owners"));
         }
+        let original = interval.steps.last_mut().expect("original capture binding");
         if end {
-            interval
-                .steps
-                .last_mut()
-                .expect("original capture end")
-                .capture_finished = true;
+            original.capture_finished = true;
+        } else {
+            original.start_confirmed = true;
         }
+        Ok(())
+    }
+
+    /// Only an issued native whole-roster disposition may withdraw execution
+    /// subinterval obligations. Preserve every original attempt and its status;
+    /// an unknown bind or handoff cannot be repaired by absence of GPU activity.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn cancel_step_captures(
+        &self,
+        py: Python<'_>,
+        ordinal: u64,
+        steps: &[SemanticPreparedStep],
+        capture_stream: u64,
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<()> {
+        self.require_original(py)?;
+        let mut retained = self.interval()?;
+        let interval = retained
+            .as_mut()
+            .ok_or_else(|| invalid("capture cancellation lost its original interval"))?;
+        let count = u64::try_from(steps.len())
+            .map_err(|_| invalid("original planned roster exceeds u64"))?;
+        if !proof.matches(steps)
+            || count == 0
+            || capture_stream == 0
+            || !interval.begun
+            || interval.ordinal != ordinal
+            || interval.finish_attempted
+            || interval.release_attempted
+            || interval.cancellation_attempted
+            || interval.steps.len() > steps.len()
+            || interval.steps.iter().any(|step| {
+                !step.start_confirmed
+                    || (step.end_attempted && !step.capture_finished)
+                    || step.capture_stream != capture_stream
+            })
+        {
+            return Err(invalid(
+                "capture cancellation requires its native original roster and known binding results",
+            ));
+        }
+        interval.cancellation_attempted = true;
+        // SAFETY: site 2 is the installed whole-roster cancellation contract on
+        // this same pinned table/handle. The native proof excludes submit after
+        // known EndCapture and actual preparation joins. Here step_ordinal is
+        // the original planned count, not a manufactured execution coordinate.
+        let status = unsafe {
+            (self.bind_step)(
+                self.context as *mut c_void,
+                interval.handle as *mut c_void,
+                ordinal,
+                count,
+                capture_stream,
+                CANCEL_GROUP,
+            )
+        };
+        if status != COMPLETE {
+            return Err(invalid(
+                "original capture cancellation is unknown; retain its same interval and owners",
+            ));
+        }
+        interval.cancelled_roster = true;
         Ok(())
     }
 
@@ -331,7 +402,11 @@ impl ResourceObserver {
         let interval = retained
             .as_mut()
             .ok_or_else(|| invalid("source join lost its original resource interval"))?;
-        if !interval.begun || interval.finish_attempted || interval.release_attempted {
+        if !interval.begun
+            || interval.finish_attempted
+            || interval.release_attempted
+            || (interval.cancellation_attempted && !interval.cancelled_roster)
+        {
             return Err(invalid(
                 "resource interval finish is single-attempt after its original join",
             ));
@@ -425,8 +500,12 @@ impl ResourceObserver {
         let mut retained = self.interval()?;
         let interval = retained.as_mut().expect("known original physical interval");
         if count == 0
+            || interval.cancelled_roster
             || interval.steps.len() != count
-            || interval.steps.iter().any(|step| !step.capture_finished)
+            || interval
+                .steps
+                .iter()
+                .any(|step| !step.start_confirmed || !step.capture_finished)
         {
             return Err(invalid(
                 "physical step results require the complete original captured roster",
@@ -515,7 +594,8 @@ impl ResourceObserver {
             return Ok(());
         }
         if interval.physical_peak.is_none()
-            || interval.steps.iter().any(|step| step.peak.is_none())
+            || (interval.cancellation_attempted && !interval.cancelled_roster)
+            || (!interval.cancelled_roster && interval.steps.iter().any(|step| step.peak.is_none()))
             || interval.release_attempted
         {
             return Err(invalid(

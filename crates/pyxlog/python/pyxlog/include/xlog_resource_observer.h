@@ -18,6 +18,10 @@ extern "C" {
 #define XLOG_RESOURCE_UNKNOWN UINT32_C(2)
 #define XLOG_RESOURCE_FAILED UINT32_C(3)
 
+#define XLOG_RESOURCE_CAPTURE_ADMISSION UINT32_C(0)
+#define XLOG_RESOURCE_CAPTURE_RELEASE UINT32_C(1)
+#define XLOG_RESOURCE_CAPTURE_CANCEL_GROUP UINT32_C(2)
+
 #define XLOG_RESOURCE_COVERAGE_COPY UINT64_C(1)
 #define XLOG_RESOURCE_COVERAGE_PEER_COPY UINT64_C(2)
 #define XLOG_RESOURCE_COVERAGE_UNIFIED_MEMORY UINT64_C(4)
@@ -205,7 +209,20 @@ typedef struct XlogResourceObserverApi {
      * be skipped. Ordinals are frozen schedule coordinates, not measurements.
      * Capture timestamps are NOT execution boundaries. Never place a host
      * callback, readback or synchronization between graph steps to obtain them.
-     * Unknown registration retains the original interval and capture owners. */
+     * Unknown registration retains the original interval and capture owners.
+     * site=2 is a single whole-roster non-submission handoff OUTSIDE capture.
+     * XLOG invokes it only after a native proof that the entire original group
+     * never entered submit, capture ended and all preparation consumers joined;
+     * subsequent capture/submit is permanently forbidden. operation_ordinal is
+     * the original group start; step_ordinal is its complete PLANNED count and
+     * capture_stream remains its original stream. Keep the registered prefix
+     * and every attempted start/end status, including a known start without an
+     * attempted end. Unknown binding results must refuse cancellation. Only a
+     * COMPLETE handoff removes execution-subinterval obligations: it invents no
+     * activity/timestamps/peaks or skipped/completed outcome. Whole-process
+     * physical coverage/peak, allocator completion, drained delivery and all
+     * error/loss checks remain mandatory before original finish/read/release.
+     * Unknown cancellation retains the same interval; never repeat the handoff. */
     uint32_t (*bind_step_capture)(void *context, void *interval,
                                   uint64_t operation_ordinal,
                                   uint64_t step_ordinal, uint64_t capture_stream,

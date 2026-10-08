@@ -762,6 +762,20 @@ tail. Every step includes already-held allocations and the whole-process baselin
 neither copying nor distributing the group's peak proves those individual peaks.
 Original views and events remain held until the complete group is consumed.
 
+For a failed private build with known capture/pool cleanup, native can instead
+prove that the complete original group never entered submission and join its
+actual preparation consumers. That disposition permanently closes the original
+construction; it is not a completed/skipped result or permission to retry.
+`bind_step_capture` site `XLOG_RESOURCE_CAPTURE_CANCEL_GROUP` receives this
+once-only whole-roster cancellation on the same open interval: the group start,
+planned count and original stream. Every attempted start/end binding must have a
+known result; an unregistered suffix is not an unknown binding. Cancellation
+preserves the registered prefix and withdraws only execution-subinterval
+obligations. Whole-process physical validity, allocator completion, loss/error
+checks and original finish/read/release still apply. An unknown handoff retains
+the original owners without retry. This disposition handoff does not implement
+the remaining full private checkpoint/Source terminal recovery or grant resume.
+
 The first control and real numerical groups, control evaluations/checkpoint/
 retirement and real source restore do not implement the remaining private
 control/real schedule, post-comparison delivery or fresh-process recovery. They

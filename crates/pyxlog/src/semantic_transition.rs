@@ -2785,6 +2785,7 @@ struct PreparedBuildGuard<'a> {
     task_use: &'a PySemanticTransitionTaskUse,
     committed: bool,
     native_completion: Option<(Arc<()>, String)>,
+    native_non_submission: bool,
 }
 
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
@@ -2816,14 +2817,16 @@ impl Drop for PreparedBuildGuard<'_> {
                 if let Ok(mut state) = self.task_use.state() {
                     state.phase = TaskUsePhase::Refused;
                 }
-                if let Some(owner) = self
-                    .session
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_mut()
-                {
-                    owner.abort();
+                if !self.native_non_submission {
+                    if let Some(owner) = self
+                        .session
+                        .inner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_mut()
+                    {
+                        owner.abort();
+                    }
                 }
             }
         }
@@ -13922,6 +13925,7 @@ impl PySemanticTransitionController {
             task_use: &issued,
             committed: false,
             native_completion: None,
+            native_non_submission: false,
         };
         let (scope, snapshot, handles, stream) = {
             let mut owner = session.owner()?;
@@ -14277,6 +14281,31 @@ impl PySemanticTransitionController {
         let cleanup = memory_owner.finish(recorded.as_ref().err());
         let cleanup = finish_with_cleanup(py, before_cleanup, cleanup);
         let cleanup = finish_with_cleanup(py, cleanup, check());
+        #[cfg(feature = "semantic-policy")]
+        if recorded.is_err() && cleanup.is_ok() {
+            if let Some(private) = &private {
+                // Capture and pool exit have returned with known cleanup. The
+                // native whole roster, not a Python entered/pending flag, must
+                // exclude submission and join every actual preparation stream.
+                let native_steps = steps
+                    .iter()
+                    .map(|step| step.borrow(py).inner.clone())
+                    .collect::<Vec<_>>();
+                let cancellation = (|| {
+                    let proof = session
+                        .owner()?
+                        .cancel_prepared_segment_before_submission(&native_steps)
+                        .map_err(xlog_err)?;
+                    guard.native_non_submission = true;
+                    private
+                        .borrow(py)
+                        .retain_private_non_submission(py, &session, &issued, &scope, proof)
+                })();
+                // Preserve the original producer failure and any failed
+                // cancellation cause. No callback or interval is repeated.
+                return finish_with_cleanup(py, recorded, cancellation);
+            }
+        }
         finish_with_cleanup(py, recorded, cleanup)?;
         #[cfg(feature = "semantic-policy")]
         if let Some(private) = &private {
@@ -14356,6 +14385,7 @@ impl PySemanticTransitionController {
             task_use: &issued,
             committed: false,
             native_completion: None,
+            native_non_submission: false,
         };
         let expected = {
             let mut owner = session.owner()?;
