@@ -13831,9 +13831,10 @@ impl PySemanticPublishedParent {
     }
 
     /// Join the actual bank consumers and retire only this exact bank reader.
-    /// Every bank alias must have returned its managed owner. Original private
-    /// witnesses, model baselines, feedback outputs, continuation producers and
-    /// the original autograd graph remain owned for late verification/backward.
+    /// Every active bank/output alias must have returned its managed owner.
+    /// Passive numerical model exports retain independent allocation owners.
+    /// Original private witnesses, model baselines, feedback outputs, continuation
+    /// producers and the original autograd graph remain owned for late verification/backward.
     /// No further publication reads are allowed through this parent; original
     /// witnesses and policy final use still require current task authority.
     /// Finish with ``release`` after all late consumers and witnesses are gone.
@@ -13845,9 +13846,10 @@ impl PySemanticPublishedParent {
 
     /// Join all named consumer streams and finally release this original step.
     /// Accepts either a live bank reader or one retired by ``release_reader``.
-    /// Outstanding content witnesses or externally held DLPack aliases refuse
-    /// without destroying retained custody. A failed device release is quarantined by
-    /// Session, never retried automatically.
+    /// Outstanding content witnesses or active DLPack aliases refuse without
+    /// destroying retained custody. Passive numerical model exports retain their
+    /// exact allocations without pinning this reader. A failed device release is
+    /// quarantined by Session, never retried automatically.
     #[pyo3(signature = (*, consumer_streams))]
     fn release(&self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>) -> PyResult<()> {
         self.release_native_ownership(py, consumer_streams, false)

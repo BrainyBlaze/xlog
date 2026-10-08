@@ -1877,6 +1877,34 @@ not finish policy use or retire the step. Its returned identities are not live
 readers, complete predecessor/successor replay materials, or authorization for a
 new model invocation.
 
+### Releasing readers while retaining model tensors
+
+Use `parent.release_reader(consumer_streams=original_streams)` when the original
+bank consumers have finished but late policy, content, or gradient work still
+needs the original step. No further publication reads are allowed through that
+parent. Finish that original step's late uses before calling
+`parent.release(consumer_streams=original_streams)`. Preserve your existing
+Controller retirement and captured-executable disposal sequence; independently
+prepared future inputs retain their own allocations. Keep every real consumer
+stream in the original release calls. An outstanding active output alias or
+content witness still prevents final release.
+
+A read-only numerical model tensor has separate ownership of its exact GPU
+allocation. It does not keep the whole publication catalogue or an active output
+guard alive. Keep that tensor and its original consumer owner alive through its
+last CUDA use, including every future execution of a captured graph. Its DLPack
+managed release joins the negotiated final consumer stream; an earlier reader or
+segment completion is not that final-use fence.
+
+Acquired readers, prepared future inputs, pending model updates, historical replay
+snapshots, and the selected Session model each retain the generations they still
+need. Reader release and completed-segment retirement remove only obsolete Session
+ownership. An old allocation can be freed only after its last independent owner
+and actual final CUDA use have ended. No additional model-cleanup API or Python
+garbage-collection step is required after you relinquish your model references.
+Unknown completion retains the original owners instead of declaring them freed
+or retrying their use.
+
 ### Completed-step action projection
 
 After capture finishes and before the first `execute_segment`, every original
@@ -1920,10 +1948,13 @@ The tuple has the same format as `Controller.export_replay_materials` for held
 adjacent readers. These identities and bytes belong to this exact step, not the
 first parent or final successor of the segment. Native custody copies the full
 semantic arena and, for writable model banks, the selected model backings before reuse.
-An immutable historical model owner is retained by a native lease instead of
-being copied, without omitting its bytes from the complete cold material. It retains the
-successor's original records inside its publisher before publication. The full
-allocation roster is reserved before capture and its byte copies are charged as
+Ordinary prepared and historical immutable numerical generations are retained by
+native leases instead of being copied, without omitting their bytes from the complete
+cold material. Planning preserves this classification even after an old catalogue
+entry loses its owner; allocating a real snapshot still requires the exact live
+generation owner. The publisher retains the successor's original records before
+publication. The full allocation roster is reserved before capture and its byte
+copies are charged as
 native work; immutable model leases add no model allocation or copy work.
 An unpublished refusal returns `None`; unknown completion does not
 return material. A scheduled Proposal that actually publishes another transition
