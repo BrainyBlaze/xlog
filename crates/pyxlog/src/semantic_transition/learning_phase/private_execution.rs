@@ -118,23 +118,100 @@ impl Drop for PrivateTaskCallbackScope<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn private_segment_terminal_input(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<super::phase_evaluation::SegmentTerminalInput>> {
+        let retained = self.private_group()?;
+        let Some(group) = retained.as_ref().filter(|group| group.budget_exceeded) else {
+            return Ok(None);
+        };
+        if !group.native_retired
+            || group.kinds.is_empty()
+            || group.preparation_report.is_none()
+            || group.retirement_report.is_none()
+            || group.adoption_report.is_none()
+            || !group.observer_finish_entered
+            || group.callback_pending
+            || group.callback_error.is_some()
+            || group.record_entered.is_some()
+            || group.records_completed != group.kinds.len()
+            || !group.records_released
+            || group.physical_peak.is_none()
+        {
+            return Err(invalid(
+                "terminal cleanup requires the original complete group and known physical release",
+            ));
+        }
+        let returned = group
+            .callback_result
+            .as_ref()
+            .ok_or_else(|| invalid("terminal cleanup lost its original selected model handoff"))?
+            .bind(py)
+            .cast::<PyTuple>()?;
+        let parent = group
+            .selected_parent
+            .as_ref()
+            .ok_or_else(|| invalid("terminal cleanup lost its original selected native parent"))?;
+        if returned.len() != 3
+            || returned.get_item(0)?.as_ptr() != parent.as_ptr()
+            || returned.get_item(1)?.is_none()
+        {
+            return Err(invalid(
+                "terminal cleanup cannot replace its original completed handoff",
+            ));
+        }
+        let restored = group.restored.borrow(py);
+        let original_parent = parent.borrow(py);
+        let identity = original_parent
+            .session
+            .borrow(py)
+            .owner()?
+            .published_identity(&*original_parent.lease()?)
+            .map_err(xlog_err)?;
+        Ok(Some(super::phase_evaluation::SegmentTerminalInput {
+            owners: super::phase_evaluation::EvaluationOwners {
+                controller: restored.controller.clone_ref(py),
+                task: restored.task_use.clone_ref(py),
+                parent: parent.clone_ref(py),
+                model: returned.get_item(1)?.unbind(),
+            },
+            branch: group.branch,
+            instruction: group.instruction.clone(),
+            completed: super::phase_evaluation::CompletedSegmentTerminal {
+                group_ordinal: group.ordinal,
+                count: u64::try_from(group.kinds.len())
+                    .map_err(|_| invalid("terminal original group extent overflowed"))?,
+                parent: identity,
+            },
+        }))
+    }
+
     pub(super) fn drop_completed_private_execution_owners(
         &self,
         branch: &'static str,
     ) -> PyResult<()> {
         let original = {
             let mut retained = self.private_group()?;
-            if retained.as_ref().is_some_and(|group| {
-                group.branch != branch
+            let mut cursor = retained.as_ref();
+            while let Some(group) = cursor {
+                if group.branch != branch
+                    || !group.native_retired
                     || group.records_completed != group.kinds.len()
                     || !group.records_released
-                    || group.budget_exceeded
                     || group.callback_error.is_some()
-                    || group.previous.is_some()
-            }) {
-                return Err(invalid(
-                    "model retirement cannot discard unfinished private execution owners",
-                ));
+                    || group.budget_exceeded
+                        && !self.completed_segment_terminal_matches(
+                            branch,
+                            group.ordinal,
+                            group.kinds.len() as u64,
+                        )?
+                {
+                    return Err(invalid(
+                        "model retirement cannot discard unfinished private execution owners",
+                    ));
+                }
+                cursor = group.previous.as_deref();
             }
             retained.take()
         };
@@ -884,6 +961,29 @@ impl PySemanticLearningPhaseTransition {
     }
 
     pub(super) fn execute_private_numerical_sequence(
+        &self,
+        py: Python<'_>,
+        pending: &Py<Self>,
+        branch: &'static str,
+    ) -> PyResult<()> {
+        if self.readonly_terminal_refusal_retained()? {
+            return self.finish_readonly_terminal_refusal(py);
+        }
+        // Return out of the numerical stack before full private retirement:
+        // local handoff tuples must not keep the original model/Session alive.
+        match self.execute_private_numerical_operations(py, pending, branch) {
+            Ok(()) => Ok(()),
+            Err(original) => {
+                if self.private_segment_terminal_input(py)?.is_some() {
+                    self.finish_segment_budget_refusal(py, original)
+                } else {
+                    Err(original)
+                }
+            }
+        }
+    }
+
+    fn execute_private_numerical_operations(
         &self,
         py: Python<'_>,
         pending: &Py<Self>,

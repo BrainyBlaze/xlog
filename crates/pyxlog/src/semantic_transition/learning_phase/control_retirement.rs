@@ -77,8 +77,11 @@ impl PySemanticLearningPhaseTransition {
         if !self.control_retirement_retained()? {
             self.prepare_private_trajectory(py, pending, "control")?;
             self.execute_private_numerical_sequence(py, pending, "control")?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
             self.execute_private_evaluations(py, "control")?;
-            if self.cancelled_evaluation_refusal_retained()? {
+            if self.readonly_terminal_refusal_retained()? {
                 return Ok(());
             }
             self.execute_private_checkpoint(py, "control")?;

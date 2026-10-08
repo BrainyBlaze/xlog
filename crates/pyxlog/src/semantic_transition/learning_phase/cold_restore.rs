@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 
 pub(super) const SOURCE_EVALUATION_CANCELLED: &str = "source-evaluation-cancelled";
 pub(super) const PRIVATE_EVALUATION_CANCELLED: &str = "private-evaluation-cancelled";
+pub(super) const PRIVATE_SEGMENT_BUDGET_REFUSED: &str = "private-segment-budget-refused";
 
 pub(super) fn cancelled_evaluation_reason(
     proof: &xlog_cuda::SemanticCancelledModelEvaluation,
@@ -292,6 +293,59 @@ pub(super) fn require_terminal_history(
     Ok(())
 }
 
+pub(super) fn require_segment_terminal_history(
+    prefix: &[u8],
+    history: &[u8],
+    ordinal: u64,
+    start: u64,
+    count: u64,
+    branch: &str,
+    usage: [u64; 3],
+) -> PyResult<()> {
+    let mut prefix = json(prefix)?;
+    require_fields(
+        &prefix,
+        &["format", "program_sha256", "records", "terminal_cleanup"],
+    )?;
+    let history = json(history)?;
+    let records = prefix["records"]
+        .as_array()
+        .ok_or_else(|| invalid("segment terminal closure lost its complete original history"))?;
+    if !prefix["terminal_cleanup"].is_null()
+        || count == 0
+        || start.checked_add(count) != u64::try_from(records.len()).ok()
+        || !matches!(branch, "real" | "control")
+    {
+        return Err(invalid(
+            "segment terminal closure changed its original completed group extent",
+        ));
+    }
+    prefix["terminal_cleanup"] = serde_json::json!({
+        "operation_ordinal": ordinal, "cause": PRIVATE_SEGMENT_BUDGET_REFUSED,
+        "group_start": start, "group_count": count, "branch": branch,
+        "resource_usage": usage,
+    });
+    if prefix != history {
+        return Err(invalid(
+            "segment terminal cleanup must preserve every original step and its expenditure",
+        ));
+    }
+    Ok(())
+}
+
+fn require_history(history: &Value, terminal_cleanup: bool) -> PyResult<()> {
+    require_fields(
+        history,
+        &["format", "program_sha256", "records", "terminal_cleanup"],
+    )?;
+    if !terminal_cleanup && !history["terminal_cleanup"].is_null() {
+        return Err(invalid(
+            "ordinary phase history cannot contain a terminal cleanup observation",
+        ));
+    }
+    Ok(())
+}
+
 fn require_operation_observation(
     entry: &Value,
     record: &Value,
@@ -323,10 +377,10 @@ fn require_operation_observation(
     if matches!(
         entry["operation"].as_str(),
         Some("proposal" | "update" | "recompute")
-    ) && (record["step"]["skipped"] != false
-        || !record["step"]["refusal"].is_null()
-        || record["step"]["step_ordinal"] != entry["step_ordinal"]
-        || record["step"]["transition"] != entry["operation"])
+    ) && (record["step"]["step_ordinal"] != entry["step_ordinal"]
+        || record["step"]["transition"] != entry["operation"]
+        || !terminal
+            && (record["step"]["skipped"] != false || !record["step"]["refusal"].is_null()))
     {
         return Err(invalid(
             "signed phase history contains a skipped, refused or substituted numerical step",
@@ -498,9 +552,12 @@ impl VerifiedClosure {
         }
         if matches!(
             cause,
-            SOURCE_EVALUATION_CANCELLED | PRIVATE_EVALUATION_CANCELLED
+            SOURCE_EVALUATION_CANCELLED
+                | PRIVATE_EVALUATION_CANCELLED
+                | PRIVATE_SEGMENT_BUDGET_REFUSED
         ) {
             let source_only = cause == SOURCE_EVALUATION_CANCELLED;
+            let segment = cause == PRIVATE_SEGMENT_BUDGET_REFUSED;
             if lifecycle.preparation.is_some()
                 || source_only != private.is_empty()
                 || !result_bytes.is_empty()
@@ -531,22 +588,35 @@ impl VerifiedClosure {
             let program = json(program_bytes)?;
             let prefix = json(prefix_bytes)?;
             let history = json(history_bytes)?;
-            require_fields(&prefix, &["format", "program_sha256", "records"])?;
-            require_fields(&history, &["format", "program_sha256", "records"])?;
+            require_history(&prefix, false)?;
+            require_history(&history, segment)?;
             let records = prefix["records"]
                 .as_array()
                 .ok_or_else(|| invalid("cancelled Source lacks its original actual prefix"))?;
-            let ordinal = records.len();
+            let prefix_count = records.len();
             let schedule = program["schedule"]
                 .as_array()
                 .filter(|schedule| schedule.len() > 1)
                 .ok_or_else(|| invalid("cancelled Source lost its original frozen schedule"))?;
+            let reason_fields = reason.fields(if segment { 5 } else { 4 })?;
+            let group_start = if segment {
+                usize::try_from(reason_fields[2].unsigned()?)
+                    .map_err(|_| invalid("terminal segment group position overflowed"))?
+            } else {
+                prefix_count
+            };
             let entry = schedule
-                .get(ordinal)
-                .ok_or_else(|| invalid("cancelled Source invented a terminal ordinal"))?;
+                .get(group_start)
+                .ok_or_else(|| invalid("terminal refusal invented an original group position"))?;
             let branch = entry["branch"]
                 .as_str()
-                .ok_or_else(|| invalid("cancelled evaluation lost its original branch"))?;
+                .ok_or_else(|| invalid("terminal refusal lost its original branch"))?;
+            let target = TerminalCleanupTarget::read(program_bytes)?;
+            let ordinal = if segment {
+                target.ordinal
+            } else {
+                prefix_count as u64
+            };
             let cancelled_parent = if source_only {
                 if branch != "source" {
                     return Err(invalid("Source cancellation changed its original branch"));
@@ -575,11 +645,11 @@ impl VerifiedClosure {
                 )?;
                 let restored = schedule
                     .iter()
-                    .take(ordinal)
+                    .take(prefix_count)
                     .filter(|entry| entry["branch"] == branch && entry["operation"] == "restore")
                     .count();
                 if added.len() > restored
-                    || !schedule.iter().take(ordinal).any(|entry| {
+                    || !schedule.iter().take(prefix_count).any(|entry| {
                         entry["branch"] == branch && entry["operation"] == "trajectory-start"
                     })
                 {
@@ -591,15 +661,14 @@ impl VerifiedClosure {
                     .map_err(xlog_err)?
                     .publication
             };
-            let reason_fields = reason.fields(4)?;
             let entry_fields = ColdValue::from_canonical_bytes(entry_material)?;
             let entry_fields = entry_fields.fields(6)?;
             let format = program["format"]
                 .as_str()
                 .filter(|format| !format.is_empty())
                 .ok_or_else(|| invalid("cancelled Source lost its original program format"))?;
-            if ordinal == 0
-                || ordinal >= schedule.len() - 1
+            if prefix_count == 0
+                || prefix_count >= schedule.len() - 1
                 || source_only
                     && records
                         .iter()
@@ -632,36 +701,105 @@ impl VerifiedClosure {
                     != host(&ColdValue::Bytes(Arc::from(
                         original_recipe.inner.recipe_digest().as_bytes().as_slice(),
                     )))?
-                || entry["operation"] != "evaluation"
-                || entry["step_ordinal"].as_u64() != Some(0)
-                || entry_fields[0].text()? != "evaluation"
                 || entry_fields[1].text()? != branch
-                || entry_fields[2].unsigned()? != ordinal as u64
+                || entry_fields[2].unsigned()? != ordinal
                 || entry_fields[3].unsigned()? != 0
-                || host(&entry_fields[4])? != entry["budget"]
-                || host(&entry_fields[5])? != entry["comparison"]
                 || reason_fields[0].text()? != cause
                 || host(&reason_fields[1])? != identity_value(cancelled_parent)
-                || reason_fields[2].unsigned()? > usage_words[0]
-                || reason_fields[3].unsigned()? > usage_words[2]
             {
                 return Err(invalid("cancelled Source changed its native proof, actual position, frozen inputs or measured expense"));
             }
-            let instruction = unhex(&entry["instruction"]["bytes_hex"])?;
-            require_terminal_history(
-                prefix_bytes,
-                history_bytes,
-                &instruction,
-                ordinal as u64,
-                branch,
-                &reason,
-                usage_words,
-            )?;
-            let full_records = history["records"]
-                .as_array()
-                .expect("verified actual terminal history");
-            for (index, (entry, record)) in schedule.iter().zip(full_records).enumerate() {
-                require_operation_observation(entry, record, index, index == ordinal)?;
+            if segment {
+                let count = reason_fields[3].unsigned()?;
+                let group_count = usize::try_from(count)
+                    .map_err(|_| invalid("terminal segment group count overflowed"))?;
+                if group_start == 0
+                    || group_count == 0
+                    || group_start.checked_add(group_count) != Some(prefix_count)
+                    || schedule[0]["operation"] != "prepare"
+                    || schedule[0]["branch"] != "source"
+                    || entry["step_ordinal"].as_u64() != Some(0)
+                    || reason_fields[4].text()? != branch
+                    || entry_fields[0].text()? != "terminal-cleanup"
+                    || host(&entry_fields[4])? != program["terminal_cleanup"]["budget"]
+                    || entry_fields[5] != ColdValue::None
+                    || schedule[group_start..prefix_count].iter().enumerate().any(
+                        |(index, operation)| {
+                            operation["branch"] != branch
+                                || !matches!(
+                                    operation["operation"].as_str(),
+                                    Some("proposal" | "update" | "recompute")
+                                )
+                                || operation["step_ordinal"].as_u64() != Some(index as u64)
+                                || operation["instruction"]["bytes_hex"]
+                                    != entry["instruction"]["bytes_hex"]
+                        },
+                    )
+                    || matches!(
+                        schedule[prefix_count]["operation"].as_str(),
+                        Some("proposal" | "update" | "recompute")
+                    ) && schedule[prefix_count]["step_ordinal"].as_u64() != Some(0)
+                {
+                    return Err(invalid("segment terminal closure changed its complete original roster or frozen reserve"));
+                }
+                // The native-signed group is complete, but at least one actual
+                // original operation exceeded its own budget. No limit moves
+                // into this separate cold-only interval.
+                let mut exceeded = false;
+                for (index, (operation, record)) in schedule.iter().zip(records).enumerate() {
+                    require_operation_observation(operation, record, index, index >= group_start)?;
+                    if index >= group_start {
+                        let usage = record["resource_usage"]
+                            .as_array()
+                            .expect("verified actual expenditure");
+                        let budget = operation["budget"]
+                            .as_array()
+                            .expect("verified original budget");
+                        exceeded |= usage.iter().zip(budget).any(|(actual, limit)| {
+                            actual.as_u64().expect("verified unsigned expense")
+                                > limit.as_u64().expect("verified unsigned limit")
+                        });
+                    }
+                }
+                if !exceeded {
+                    return Err(invalid("segment terminal budget refusal requires an actual original budget exceedance"));
+                }
+                require_segment_terminal_history(
+                    prefix_bytes,
+                    history_bytes,
+                    target.ordinal,
+                    group_start as u64,
+                    count,
+                    branch,
+                    usage_words,
+                )?;
+            } else {
+                if entry["operation"] != "evaluation"
+                    || entry["step_ordinal"].as_u64() != Some(0)
+                    || entry_fields[0].text()? != "evaluation"
+                    || host(&entry_fields[4])? != entry["budget"]
+                    || host(&entry_fields[5])? != entry["comparison"]
+                    || reason_fields[2].unsigned()? > usage_words[0]
+                    || reason_fields[3].unsigned()? > usage_words[2]
+                {
+                    return Err(invalid("cancelled evaluation changed its actual native proof or original instruction"));
+                }
+                let instruction = unhex(&entry["instruction"]["bytes_hex"])?;
+                require_terminal_history(
+                    prefix_bytes,
+                    history_bytes,
+                    &instruction,
+                    ordinal,
+                    branch,
+                    &reason,
+                    usage_words,
+                )?;
+                let full_records = history["records"]
+                    .as_array()
+                    .expect("verified actual terminal history");
+                for (index, (operation, record)) in schedule.iter().zip(full_records).enumerate() {
+                    require_operation_observation(operation, record, index, index == prefix_count)?;
+                }
             }
             if records[0]["parent"] != identity_value(source_parent)
                 || records[0]["source_checkpoint_sha256"] != digest(source)
@@ -749,8 +887,8 @@ impl VerifiedClosure {
         let prefix = json(prefix_bytes)?;
         let history = json(history_bytes)?;
         let result = json(result_bytes)?;
-        require_fields(&prefix, &["format", "program_sha256", "records"])?;
-        require_fields(&history, &["format", "program_sha256", "records"])?;
+        require_history(&prefix, false)?;
+        require_history(&history, false)?;
         require_fields(
             &result,
             &[
@@ -941,6 +1079,9 @@ impl VerifiedClosure {
                 "cold phase admission differs from its original source fence",
             ));
         }
+        // The reserve is part of the original signed program on every path,
+        // including ordinary Delivery. Recovery cannot add one after Admission.
+        TerminalCleanupTarget::read(program_bytes)?;
         if lifecycle.refused {
             let pending_target = if target.is_none() {
                 None
@@ -1047,8 +1188,8 @@ impl VerifiedClosure {
         let prefix = json(prefix_bytes)?;
         let history = json(history_bytes)?;
         let acceptance = json(acceptance_bytes)?;
-        require_fields(&prefix, &["format", "program_sha256", "records"])?;
-        require_fields(&history, &["format", "program_sha256", "records"])?;
+        require_history(&prefix, false)?;
+        require_history(&history, false)?;
         require_fields(
             &acceptance,
             &[
