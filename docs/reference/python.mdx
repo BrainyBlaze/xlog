@@ -1852,8 +1852,9 @@ reconciliation retains the existing unknown/abort boundary instead.
 
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
-complete model backings. Their private storage is preallocated before capture
-and populated by that step's recorded acquisition. The observation does not
+complete model backings. Numerical ranges retain the original immutable
+generation through native allocation leases; each step's other private state is
+preallocated before capture and populated by its recorded acquisition. The observation does not
 acquire an old publication bank or allocate another history of model states.
 Treat every export as read-only, retain it until final
 use, and include every original consumer stream in the binding call. Recheck the
@@ -1956,8 +1957,8 @@ inspection neither proves past publication nor enables an actor. Initial-prefill
 evidence remains separate and must not be discarded or fabricated.
 
 After known completion, the existing `tensor` and `tensor_allocation` getters
-read that step's private acquired model backings, not the reused publication
-banks. They preserve the original allocation-sharing partition, complete backing
+read-lease that step's acquired numerical generation, independently of the
+publication bank. They preserve the original allocation-sharing partition, complete backing
 capacity, typed layout, and byte offsets. The supplied bank must be the branch
 that actually executed. Prefix and cache aliases use the same custody in cold
 exports and input guards. During original construction these getters still
@@ -1969,9 +1970,41 @@ own retained bytes. No new baseline is sealed during cold observation.
 
 Original input custody belongs to every prepared Proposal, Recompute, and Update,
 not just exported Proposals. Later transitions cannot replace an earlier step's
-completed binding or Update measurement basis. Admission reserves all of these
-step owners before capture, including their full backing and semantic arena
-copies; actual device copies count as native work.
+completed binding or Update measurement basis. Admission reserves all native
+owners before capture, including distinct pending generations and per-step
+nonnumerical state and semantic arena copies. Retaining a numerical generation
+does not copy it; actual device copies still count as native work.
+
+During original construction, an Update's
+`update_tensor_allocation(role, index, bank, consumer_stream=...)` exports its
+genuine unpublished native backing as `(NativeTensorAllocation, DLPack capsule)`.
+The role and index select a view in the original complete model geometry; the
+export and provenance name the full `U8[allocation_bytes]` allocation, with
+`byte_offset=0` and `view_bytes=allocation_bytes`. Both alternative publication
+banks of one Update use the same pending generation; another Update has a
+distinct generation, and no pending backing aliases its selected source. The
+export does not initialize any bytes or grant permission to mutate source.
+
+The original captured producer must initialize every pending allocation from
+its acquired source after the original read guards and before any candidate
+read, gradient reset or backward. Register gradient, presence and accumulation
+destinations on that exact pending owner before capturing edges. Both ordinary
+and historical gradient deliveries require `activate()` immediately before the
+single combined backward and `finish_recording()` after recording. Activation
+temporarily attaches the authenticated destination to the original physical
+`AccumulateGrad` node; finishing restores the original `.grad` slot. Historical
+members share the ordinary delivery's single reset. AdamW and candidate canaries
+consume the initialized pending state, without a second source copy after
+backward. Native acceptance binds this exact owner and publishes it by the sole
+descriptor switch, without copying a producer model into another bank.
+
+Refusal leaves the complete source authoritative; unknown completion retains
+the original owners and cannot retry mutation or cleanup. Numerical leases do
+not merge complete step snapshots by weight generation or hash: prefix, cache,
+optimizer, gradient, schedule, random state and restoration materials retain
+their exact original identities and alias geometry. All genuinely distinct live
+generations count toward pre-draw memory admission. These ownership rules alone
+do not prove a memory capacity or measured zero-transfer runtime boundary.
 
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the

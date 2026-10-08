@@ -4580,7 +4580,7 @@ struct ModelUpdateContinuationInputs {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ModelUpdateBinding {
-    source: u64,
+    candidate: u64,
     bytes: u64,
     slots: [u64; 2],
 }
@@ -8122,6 +8122,7 @@ struct PublicationStorage {
     model_memory: ModelMemoryGeometry,
     physical_parameter_roster: Option<Vec<String>>,
     model_slots: Vec<[usize; 2]>,
+    model_generations: Vec<Vec<usize>>,
     bank_templates: [Vec<PublicationRange>; 2],
     continuation_templates: Vec<PublicationRange>,
     layouts: BTreeMap<(u64, u64), SemanticTensorLayout>,
@@ -8352,14 +8353,12 @@ impl PublicationStorage {
                 allocations.push(allocation);
                 slots = [slot; 2];
             } else {
-                for slot in &mut slots {
-                    *slot = allocations.len();
-                    allocations.push(PublicationAllocation::Writable(allocate_publication::<u8>(
-                        provider,
-                        bytes as usize,
-                    )?));
-                    uploads.push((*slot, payload.clone()));
-                }
+                let slot = allocations.len();
+                allocations.push(PublicationAllocation::Generation(Arc::new(
+                    allocate_publication::<u8>(provider, bytes as usize)?,
+                )));
+                uploads.push((slot, payload.clone()));
+                slots = [slot; 2];
             }
             model_slots.push(slots);
         }
@@ -8487,6 +8486,7 @@ impl PublicationStorage {
                 allocations,
                 model_memory,
                 physical_parameter_roster,
+                model_generations: model_slots.iter().map(|slots| slots.to_vec()).collect(),
                 model_slots,
                 bank_templates,
                 continuation_templates,
@@ -8519,6 +8519,66 @@ impl PublicationStorage {
                 recorder.read_write(allocation.slice());
             }
         }
+    }
+
+    /// Extend only the cold storage catalogue. Previously published numerical
+    /// allocations and their original budget owners remain at the same address.
+    /// Every Update gets one distinct pending generation, never a recycled bank.
+    fn allocate_model_generations(
+        &self,
+        count: usize,
+        reservation: &mut GpuMemoryReservation,
+    ) -> Result<(Self, Vec<Vec<usize>>), SemanticTransitionError> {
+        let mut allocations = self
+            .allocations
+            .iter()
+            .map(PublicationAllocation::retain)
+            .collect::<Vec<_>>();
+        let mut model_generations = self.model_generations.clone();
+        let mut pending = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut slots = Vec::with_capacity(self.model_memory.allocation_bytes.len());
+            for (index, &bytes) in self.model_memory.allocation_bytes.iter().enumerate() {
+                let slot = allocations.len();
+                let owner = reservation
+                    .alloc::<u8>(
+                        usize::try_from(bytes)
+                            .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                    )
+                    .map_err(|error| runtime_error("pending model generation allocation", error))?;
+                allocations.push(PublicationAllocation::Generation(Arc::new(owner)));
+                model_generations[index].push(slot);
+                slots.push(slot);
+            }
+            pending.push(slots);
+        }
+        let storage = reservation
+            .alloc(allocations.len())
+            .map_err(|error| runtime_error("model generation catalogue allocation", error))?;
+        Ok((
+            Self {
+                control: self.control.retain(),
+                banks: self.banks.each_ref().map(TrackedCudaSlice::retain),
+                directories: self.directories.each_ref().map(TrackedCudaSlice::retain),
+                storage,
+                contract: self.contract.retain(),
+                role_counts: self.role_counts.retain(),
+                terminals: self.terminals.retain(),
+                continuation: self.continuation.retain(),
+                continuation_directory: self.continuation_directory.retain(),
+                allocations,
+                model_memory: self.model_memory.clone(),
+                physical_parameter_roster: self.physical_parameter_roster.clone(),
+                model_slots: self.model_slots.clone(),
+                model_generations,
+                bank_templates: self.bank_templates.clone(),
+                continuation_templates: self.continuation_templates.clone(),
+                layouts: self.layouts.clone(),
+                contract_value: self.contract_value,
+                instance: self.instance,
+            },
+            pending,
+        ))
     }
 
     fn immutable_model_owners(&self) -> Option<Vec<Arc<ReplayModelBacking>>> {
@@ -8993,6 +9053,7 @@ struct PreparedStepInputs {
     bindings: [TrackedCudaSlice<PublicationStepInput>; 2],
     binding_values: [Vec<PublicationStepInput>; 2],
     plans: Vec<StepInputPlan>,
+    model_slots: Vec<[usize; 2]>,
     views: [BTreeMap<(u64, u64), DeviceMemoryView<u8>>; 2],
     private: Vec<TrackedCudaSlice<u8>>,
     execute: CudaFunction,
@@ -9037,21 +9098,41 @@ impl PreparedStepInputs {
         reader: DeviceMemoryView<PublicationLease>,
     ) -> Result<Self, SemanticTransitionError> {
         let plans = Self::plan(&storage)?;
+        let model_slots = storage.model_slots.clone();
         let mut reservation = provider
             .memory()
             .reserve_bytes(Self::allocation_bytes(&plans)? as u64)
             .map_err(|error| runtime_error("step input reservation", error))?;
-        Self::allocate_reserved(provider, storage, reader, plans, &mut reservation)
+        Self::allocate_reserved(
+            provider,
+            storage,
+            reader,
+            plans,
+            model_slots,
+            &mut reservation,
+        )
     }
 
     fn allocate_reserved(
         provider: &CudaKernelProvider,
         storage: Arc<PublicationStorage>,
         reader: DeviceMemoryView<PublicationLease>,
-        plans: Vec<StepInputPlan>,
+        mut plans: Vec<StepInputPlan>,
+        model_slots: Vec<[usize; 2]>,
         reservation: &mut GpuMemoryReservation,
     ) -> Result<Self, SemanticTransitionError> {
         let contract = storage.contract_value;
+        if model_slots.len() != storage.model_memory.allocation_bytes.len() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        for input in &mut plans {
+            if matches!(input.role, 18..=25) {
+                let (allocation, _) = storage.model_memory.location(input.role, input.index)?;
+                for bank in 0..2 {
+                    input.banks[bank].storage_slot = model_slots[allocation][bank];
+                }
+            }
+        }
         if contract.abi != 1
             || contract.model_generation == 0
             || contract.window_capacity != 32
@@ -9174,6 +9255,7 @@ impl PreparedStepInputs {
             storage,
             reader,
             plans,
+            model_slots,
             views,
             private,
             binding_values,
@@ -10218,6 +10300,7 @@ struct PreparedBranchStorage {
 }
 
 struct PreparedModelUpdate {
+    pending_slots: Vec<usize>,
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     evidence: Arc<TrackedCudaSlice<ModelUpdateEvidenceSource>>,
     evidence_owners: Arc<Vec<ModelUpdateEvidenceOwner>>,
@@ -10237,14 +10320,6 @@ struct PreparedModelUpdate {
     )]
     admissibility_copy: CudaFunction,
     forward_receipt: CudaFunction,
-    #[cfg_attr(
-        not(feature = "semantic-policy"),
-        expect(
-            dead_code,
-            reason = "model updates are copied by the semantic-policy graph"
-        )
-    )]
-    copy: CudaFunction,
 }
 
 struct BoundModelUpdate {
@@ -10258,8 +10333,6 @@ struct BoundModelUpdate {
     _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
     accounted_reserved_bytes: u64,
-    #[cfg(feature = "semantic-policy")]
-    copy_bytes: u64,
     _witness: SemanticTensorContentWitness,
     _forward_witnesses: [SemanticModelForwardWitness; 2],
 }
@@ -10338,7 +10411,7 @@ impl PreparedModelUpdate {
         clippy::too_many_arguments,
         reason = "the update gate joins publication, training, task and original model-work owners"
     )]
-    fn enqueue_copy(
+    fn enqueue_acceptance(
         &self,
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
@@ -10351,20 +10424,6 @@ impl PreparedModelUpdate {
         let output = self.output.as_ref().ok_or_else(|| {
             publication_input_error("prepared update has no original model output binding")
         })?;
-        let allocation_count = u32::try_from(output.values.len())
-            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-        if allocation_count == 0 || allocation_count > 65_535 {
-            return Err(publication_input_error(
-                "prepared update model allocation roster exceeds the CUDA launch geometry",
-            ));
-        }
-        let maximum_bytes = output
-            .values
-            .iter()
-            .map(|binding| binding.bytes)
-            .max()
-            .unwrap_or(0);
-        let blocks = maximum_bytes.div_ceil(256).clamp(1, 65_535) as u32;
         let mut recorder = domain.new_strict_recorder();
         storage.record(&mut recorder);
         recorder.read(reader);
@@ -10438,20 +10497,18 @@ impl PreparedModelUpdate {
             vocabulary_stride_bytes: logits.strides_bytes[2],
             model_work: model_work.descriptor(),
             accounted_reserved_bytes,
-            copy_bytes: output.copy_bytes,
+            // Initialization is original producer work. Native acceptance
+            // publishes this exact pending generation without a second copy.
+            copy_bytes: 0,
             admissibility_source,
             results: canary_results,
             admissibility_destination,
             refusal_destination,
         };
-        let arguments = (
-            storage.control.device_ptr_value(),
-            reader.device_ptr_value(),
-        );
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: the producer gate was checked by the same captured
             // content witness as the complete update backing. The native byte
-            // is the stable predicate consumed by both copy and publication.
+            // is the stable predicate consumed by the sole publication.
             unsafe {
                 self.admissibility_copy.clone().launch_in(
                     enqueue,
@@ -10461,21 +10518,6 @@ impl PreparedModelUpdate {
                         shared_mem_bytes: 0,
                     },
                     (canary_inputs,),
-                )
-            }
-            .map_err(|error| XlogError::Kernel(error.to_string()))?;
-            // SAFETY: the continuation kernel validated this immutable binding
-            // roster first. Each CUDA grid row copies one disjoint allocation
-            // into the inactive neural bank retained by PublicationStorage.
-            unsafe {
-                self.copy.clone().launch_in(
-                    enqueue,
-                    LaunchConfig {
-                        grid_dim: (blocks, allocation_count, 1),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    arguments,
                 )
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))
@@ -15808,6 +15850,73 @@ impl SemanticTransitionSession {
         })
     }
 
+    fn install_model_generation_catalogue(
+        &mut self,
+        original: &PublicationStorage,
+        expanded: &PublicationStorage,
+    ) -> Result<(), SemanticTransitionError> {
+        let values = expanded
+            .allocations
+            .iter()
+            .map(|allocation| PublicationStorageEntry {
+                pointer: allocation.device_ptr_value(),
+                bytes: allocation.len() as u64,
+                generation: 1,
+            })
+            .collect::<Vec<_>>();
+        upload_publication(&self.provider, &values, &expanded.storage)?;
+        let kernel = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                "xlog_semantic_transition",
+                "semantic_publication_extend_model_storage",
+            )
+            .ok_or_else(|| {
+                runtime_error(
+                    "kernel lookup",
+                    "model generation catalogue admission unavailable",
+                )
+            })?;
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read_write(&expanded.control);
+        recorder.read(&original.storage);
+        recorder.read(&expanded.storage);
+        let args = (
+            expanded.control.device_ptr_value(),
+            original.storage.device_ptr_value(),
+            original.allocations.len() as u64,
+            expanded.storage.device_ptr_value(),
+            expanded.allocations.len() as u64,
+        );
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
+            // SAFETY: both catalogues and the sole idle publication control
+            // retain their genuine native owners before this launch. The
+            // kernel proves byte-identical old entries and changes no word,
+            // descriptor, source allocation or selected generation.
+            unsafe {
+                kernel.launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    args,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "cold model generation catalogue admission",
+            CudaStream::synchronize,
+        )
+    }
+
     /// Allocate every native step owner before the first capture begins.
     /// Freeze requested modes and reserve the complete segment before creating
     /// per-step storage. Device admission alone selects terminal drain.
@@ -15857,6 +15966,39 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "historical replay model leases grant reads, not pending Update ownership",
             ));
+        }
+        // This cold read fixes only the original source lineage. Runtime
+        // admission still acquires and verifies the actual descriptor once.
+        // A refused slot stops the segment; terminal Drain makes later slots
+        // ineligible, so every executed Update has this exact prior lineage.
+        let control = self.publication_read(storage.control.view())?[0];
+        if control.abi != 1 || control.reader_counts != [0; 2] || control.reader_gate != 0 {
+            return Err(publication_input_error(
+                "model generation preparation requires native reader quiescence",
+            ));
+        }
+        let directory =
+            self.publication_read(storage.directories[(control.word & 1) as usize].view())?;
+        let mut source_model_slots = Vec::with_capacity(storage.model_slots.len());
+        for (allocation, slots) in storage.model_slots.iter().enumerate() {
+            let mut selected = None;
+            for range in directory
+                .iter()
+                .filter(|range| matches!(range.role, 18..=25))
+            {
+                if storage.model_memory.location(range.role, range.index)?.0 == allocation {
+                    let slot = usize::try_from(range.storage_slot)
+                        .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                    if selected
+                        .replace(slot)
+                        .is_some_and(|previous| previous != slot)
+                        || !storage.model_generations[allocation].contains(&slot)
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                }
+            }
+            source_model_slots.push(selected.unwrap_or(slots[0]));
         }
         let replay_bytes = PreparedReplayCustody::allocation_bytes(
             &storage,
@@ -15956,6 +16098,30 @@ impl SemanticTransitionSession {
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .and_then(|bytes| bytes.checked_add(replay_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let generation_bytes = if update_count == 0 {
+            0
+        } else {
+            let numerical = storage
+                .model_memory
+                .allocation_bytes
+                .iter()
+                .try_fold(0u64, |sum, &bytes| {
+                    sum.checked_add(bytes)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)
+                })?
+                .checked_mul(update_count as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let entries = storage
+                .model_slots
+                .len()
+                .checked_mul(update_count)
+                .and_then(|count| count.checked_add(storage.allocations.len()))
+                .and_then(|count| count.checked_mul(size_of::<PublicationStorageEntry>()))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            numerical
+                .checked_add(entries as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?
+        };
         // Each model-bearing prepared branch binds the complete roster once. Its
         // ranges, contract snapshot, and roster are native cold allocations,
         // even though the live producer addresses arrive after this claim.
@@ -15999,7 +16165,8 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let late_native_bytes = cold_capacity.late_native_bytes(transition_bound)?;
         let bytes = base_bytes
-            .checked_add(model_content_bytes)
+            .checked_add(generation_bytes)
+            .and_then(|bytes| bytes.checked_add(model_content_bytes))
             .and_then(|bytes| bytes.checked_add(late_native_bytes))
             .and_then(|bytes| bytes.checked_add(external_floor))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -16012,6 +16179,7 @@ impl SemanticTransitionSession {
         unsafe { sys::cuMemGetInfo_v2(&mut free_bytes, &mut total_bytes) }
             .result()
             .map_err(|error| runtime_error("prepared segment physical memory snapshot", error))?;
+        drop(_ordinary);
         if u128::from(bytes) > free_bytes as u128 {
             return Err(runtime_error(
                 "prepared segment physical memory admission",
@@ -16025,6 +16193,20 @@ impl SemanticTransitionSession {
             .memory()
             .reserve_bytes(bytes)
             .map_err(|error| runtime_error("prepared segment reservation", error))?;
+        let (storage, pending_generations) = if update_count == 0 {
+            (storage, Vec::new())
+        } else {
+            let (expanded, pending) =
+                storage.allocate_model_generations(update_count, &mut reservation)?;
+            let expanded = Arc::new(expanded);
+            // Install actual owners before the first may-enqueue boundary.
+            self.publication = Some(Arc::clone(&expanded));
+            if let Err(error) = self.install_model_generation_catalogue(&storage, &expanded) {
+                self.poisoned = true;
+                return Err(error);
+            }
+            (expanded, pending)
+        };
         let training_origins = if training_origin_bytes == 0 {
             None
         } else {
@@ -16070,10 +16252,10 @@ impl SemanticTransitionSession {
             kernel("semantic_publication_prepare_model_update_admissibility")?;
         let model_update_forward_receipt =
             kernel("semantic_publication_record_model_forward_receipts")?;
-        let model_update_copy = kernel("semantic_publication_apply_model_update")?;
         self.prepared_segment = Some(build);
         self.next_reader = end;
         let result = (|| {
+            let mut update_ordinal = 0;
             for (ordinal, (handle, kind)) in handles.iter().zip(&transitions).enumerate() {
                 let reader = reservation
                     .alloc(1)
@@ -16193,6 +16375,7 @@ impl SemanticTransitionSession {
                         &refusal,
                     )?;
                     Ok(Some(PreparedModelUpdate {
+                        pending_slots: pending_generations[update_ordinal].clone(),
                         bindings,
                         evidence: Arc::clone(
                             update_evidence
@@ -16213,7 +16396,6 @@ impl SemanticTransitionSession {
                         forward_recorded: 0,
                         admissibility_copy: model_update_admissibility_copy.clone(),
                         forward_receipt: model_update_forward_receipt.clone(),
-                        copy: model_update_copy.clone(),
                     }))
                 };
                 let model_updates: [Option<PreparedModelUpdate>; 2] =
@@ -16223,8 +16405,13 @@ impl SemanticTransitionSession {
                     Arc::clone(&storage),
                     reader.view(),
                     input_plans.clone(),
+                    source_model_slots.iter().map(|&slot| [slot; 2]).collect(),
                     &mut reservation,
                 )?);
+                if *kind == SemanticTransitionKind::Update {
+                    source_model_slots = pending_generations[update_ordinal].clone();
+                    update_ordinal += 1;
+                }
                 let feedback = FeedbackBuffers::allocate_reserved(
                     &self.provider,
                     schema.clone(),
@@ -17030,6 +17217,149 @@ impl SemanticTransitionSession {
         })?;
         let allocation = view
             .allocation_view()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let bytes = i64::try_from(allocation.len())
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let tensor = self.export_prepared_view(
+            step,
+            allocation,
+            vec![bytes],
+            vec![1],
+            (1, 8),
+            consumer_stream,
+        )?;
+        Ok((provenance, tensor))
+    }
+
+    fn pending_model_view(
+        &self,
+        step: &SemanticPreparedStep,
+        role: u64,
+        index: u64,
+        bank: usize,
+    ) -> Result<(DeviceMemoryView<u8>, SemanticTensorLayout), SemanticTransitionError> {
+        if bank > 1 || !(18..=25).contains(&role) {
+            return Err(publication_input_error(
+                "pending model export requires a typed model role and bank zero or one",
+            ));
+        }
+        let owner = self
+            .steps
+            .get(&step.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let prepared = owner
+            .prepared
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        let update = prepared.branches[bank]
+            .model_update
+            .as_ref()
+            .ok_or_else(|| {
+                publication_input_error("pending model writes belong only to an original Update")
+            })?;
+        let storage = owner
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .storage
+            .as_ref();
+        let layout = *storage
+            .layouts
+            .get(&(role, index))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let (allocation, offset) = storage.model_memory.location(role, index)?;
+        let backing = &storage.allocations[update.pending_slots[allocation]];
+        let end = offset
+            .checked_add(tensor_layout_bytes(&layout)?)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let view = backing
+            .view()
+            .try_slice(offset..end)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        Ok((view, layout))
+    }
+
+    fn owns_pending_model_tensor(
+        &self,
+        step: &SemanticPreparedStep,
+        tensor: &PreparedSemanticTensor,
+    ) -> Result<bool, SemanticTransitionError> {
+        let owner = &self.steps[&step.token];
+        let prepared = owner
+            .prepared
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        let Some(update) = &prepared.branches[0].model_update else {
+            return Ok(false);
+        };
+        let storage = &owner
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .storage;
+        let (view, layout) = if tensor.layout.role == 0 {
+            let Ok(index) = usize::try_from(tensor.layout.index) else {
+                return Ok(false);
+            };
+            let Some(&slot) = update.pending_slots.get(index) else {
+                return Ok(false);
+            };
+            let view = storage.allocations[slot].view();
+            let layout = SemanticTensorLayout {
+                role: 0,
+                index: tensor.layout.index,
+                element_bytes: 1,
+                scalar_type: 1,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [view.len() as u64, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            };
+            (view, layout)
+        } else if (18..=25).contains(&tensor.layout.role) {
+            self.pending_model_view(step, tensor.layout.role, tensor.layout.index, 0)?
+        } else {
+            return Ok(false);
+        };
+        Ok(tensor.native_allocation.is_some()
+            && tensor.layout == layout
+            && tensor.data == *view.device_ptr()
+            && tensor.logical_begin == 0
+            && tensor.logical_end == 0
+            && tensor
+                .source
+                .as_ref()
+                .is_some_and(|source| source.len() == view.len())
+            && step_input_allocation_matches(tensor, &view))
+    }
+
+    /// The full, genuinely native pending allocation for one original Update.
+    /// Both alternative branch banks retain this same generation. It is absent
+    /// from every selected descriptor until the sole accepted publication.
+    /// Export performs no initialization: the original captured producer must
+    /// initialize all bytes before reset, backward, AdamW or candidate reads.
+    pub fn prepared_update_tensor_allocation(
+        &mut self,
+        step: &SemanticPreparedStep,
+        role: SemanticStateRole,
+        index: u64,
+        bank: usize,
+        consumer_stream: u64,
+    ) -> Result<(DeviceAllocationProvenance, DlpackManagedTensor), SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "pending model export requires original Update construction",
+            ));
+        }
+        dlpack_consumer_stream(consumer_stream)?;
+        let (view, _) = self.pending_model_view(step, role as u64, index, bank)?;
+        let allocation = view
+            .allocation_view()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        // Provenance names the complete backing, not the typed view offset.
+        let provenance = allocation
+            .allocation_provenance()
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let bytes = i64::try_from(allocation.len())
             .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
@@ -20183,7 +20513,11 @@ impl SemanticTransitionSession {
                     .iter()
                     .any(|original| same_tensor_content_owner(original, tensor))
             } else {
-                inputs.owns_bank_model_tensor(bank, tensor)?
+                if (18..=20).contains(&tensor.layout.role) {
+                    inputs.owns_bank_model_tensor(bank, tensor)?
+                } else {
+                    self.owns_pending_model_tensor(step, tensor)?
+                }
             };
             if !authentic {
                 return Err(publication_input_error(
@@ -20305,10 +20639,11 @@ impl SemanticTransitionSession {
             let prepared = owner.prepared.as_ref().expect("prepared content owner");
             let mut next = prepared.next_digest;
             for tensor in original {
+                let pending = self.owns_pending_model_tensor(step, tensor)?;
                 let mut native = owner.feedback_origin_digest(tensor)?;
                 if native.is_none() {
                     let inputs = owner.inputs.as_ref().expect("fixed step inputs");
-                    if inputs.owns_tensor(tensor)? {
+                    if !pending && inputs.owns_tensor(tensor)? {
                         native = Some(CapturedTensorDigest::Publication(Arc::clone(inputs)));
                     }
                 }
@@ -20317,6 +20652,9 @@ impl SemanticTransitionSession {
                     continue;
                 }
                 for (&token, other) in &self.steps {
+                    if pending {
+                        break;
+                    }
                     if token == step.token {
                         continue;
                     }
@@ -20330,7 +20668,7 @@ impl SemanticTransitionSession {
                         ));
                     }
                 }
-                if tensor.native_allocation.is_some() {
+                if tensor.native_allocation.is_some() && !pending {
                     return Err(publication_input_error("native allocation origin has no original content producer in this prepared step"));
                 }
                 tensor_content_range(
@@ -21050,7 +21388,31 @@ impl SemanticTransitionSession {
         let (_, candidate_digest_cells) = forward_digest(candidate_forward)?;
         digest_cells.push(baseline_digest_cells);
         digest_cells.push(candidate_digest_cells);
-        for allocation in allocations {
+        let pending_slots = self.steps[&step.token]
+            .prepared
+            .as_ref()
+            .expect("prepared update owner")
+            .branches[bank]
+            .model_update
+            .as_ref()
+            .expect("prepared update binding")
+            .pending_slots
+            .clone();
+        let source_slots = self.steps[&step.token]
+            .inputs
+            .as_ref()
+            .expect("fixed model inputs")
+            .model_slots
+            .clone();
+        for (index, allocation) in allocations.iter().enumerate() {
+            let expected = storage.allocations[pending_slots[index]].view();
+            if allocation.data != *expected.device_ptr()
+                || tensor_layout_bytes(&allocation.layout)? != expected.len()
+                || !self.owns_pending_model_tensor(step, allocation)?
+                || pending_slots[index] == source_slots[index][bank]
+            {
+                return Err(publication_input_error("model update requires its exact native unpublished generation, not producer clones or selected aliases"));
+            }
             let bytes = tensor_layout_bytes(&allocation.layout)?;
             if step_input_overlap(allocation.data, bytes, admissibility.data, 1)? {
                 return Err(publication_input_error(
@@ -21065,7 +21427,10 @@ impl SemanticTransitionSession {
                     "model update canary logits alias an output allocation",
                 ));
             }
-            for owned in &storage.allocations {
+            for (slot, owned) in storage.allocations.iter().enumerate() {
+                if slot == pending_slots[index] {
+                    continue;
+                }
                 if step_input_overlap(
                     allocation.data,
                     bytes,
@@ -21111,12 +21476,15 @@ impl SemanticTransitionSession {
         }
         let values = allocations
             .iter()
-            .zip(&storage.model_slots)
+            .enumerate()
             .zip(&geometry.allocation_bytes)
-            .map(|((allocation, slots), &bytes)| ModelUpdateBinding {
-                source: allocation.data,
+            .map(|((index, allocation), &bytes)| ModelUpdateBinding {
+                candidate: allocation.data,
                 bytes,
-                slots: [slots[0] as u64, slots[1] as u64],
+                slots: [
+                    source_slots[index][bank] as u64,
+                    pending_slots[index] as u64,
+                ],
             })
             .collect::<Vec<_>>();
         let retained_allocations = allocations.to_vec();
@@ -21142,18 +21510,9 @@ impl SemanticTransitionSession {
         }
         #[cfg(feature = "semantic-policy")]
         let accounted_reserved_bytes = accounted_tensor_allocations(
-            &outputs
-                .iter()
-                .chain([&baseline_logits, &candidate_logits])
-                .collect::<Vec<_>>(),
+            &[admissibility, &baseline_logits, &candidate_logits],
             &slab,
         )?;
-        #[cfg(feature = "semantic-policy")]
-        let copy_bytes = values.iter().try_fold(0u64, |total, binding| {
-            total
-                .checked_add(binding.bytes)
-                .ok_or(SemanticTransitionError::GenerationExhausted)
-        })?;
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -21188,8 +21547,6 @@ impl SemanticTransitionSession {
             _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
             accounted_reserved_bytes,
-            #[cfg(feature = "semantic-policy")]
-            copy_bytes,
             _witness: witness.clone(),
             _forward_witnesses: [baseline_forward.clone(), candidate_forward.clone()],
         });
@@ -25241,7 +25598,7 @@ impl SemanticTransitionSession {
                 }
             }
             let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
-            if !slots.contains(&slot) {
+            if !storage.model_generations[allocation_index].contains(&slot) {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             let allocation = storage
@@ -25970,7 +26327,7 @@ impl SemanticTransitionSession {
                 }
             }
             let slot = selected_slot.unwrap_or(slots[(lease.identity.word & 1) as usize]);
-            if !slots.contains(&slot) {
+            if !storage.model_generations[allocation_index].contains(&slot) {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             let allocation = &storage.allocations[slot];
@@ -28812,7 +29169,7 @@ impl SemanticTransitionSession {
                 let training_view = prepared.training_view.as_ref().ok_or_else(|| {
                     publication_input_error("prepared update has no native training view")
                 })?;
-                update.enqueue_copy(
+                update.enqueue_acceptance(
                     &self.domain,
                     &mut self.poisoned,
                     self.publication.as_ref().expect("prepared publication"),

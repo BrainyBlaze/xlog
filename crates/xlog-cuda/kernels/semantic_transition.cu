@@ -389,7 +389,8 @@ struct SourceSlot {
 };
 struct TextRow { uint64_t source_slot,logical_position; };
 struct TextBinding { uint64_t rows,count,selected; };
-struct ModelUpdateBinding { uint64_t source,bytes,slots[2]; };
+// slots name the immutable source and this Update's exact pending generation.
+struct ModelUpdateBinding { uint64_t candidate,bytes,slots[2]; };
 struct ContinuationInputs {
     TextBinding text;
     uint64_t active_rows,active_row_count,numerical_admissibility,transition_kind,authority_bytes;
@@ -2074,7 +2075,6 @@ __device__ uint64_t publication_validate_model_update(const PublicationControl& 
        pending.model_update_canary_results%alignof(SemanticTrainingCanaryResultRecord) ||
        pending.model_update_canary_results>UINT64_MAX-5*sizeof(SemanticTrainingCanaryResultRecord))return 1;
     if(base.header.neural_bank>1)return 1;
-    const uint64_t bank=base.header.neural_bank;
     const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[base.header.publication_word&1]);
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
@@ -2087,7 +2087,7 @@ __device__ uint64_t publication_validate_model_update(const PublicationControl& 
         if(!first)continue;
         ++allocations;bool found=false;
         for(uint64_t item=0;item<pending.model_update_binding_count;++item)
-            if(bindings[item].slots[bank]==old[i].storage_slot)found=true;
+            if(bindings[item].slots[0]==old[i].storage_slot)found=true;
         if(!found)return 1;
     }
     if(allocations!=pending.model_update_binding_count)return 1;
@@ -2096,25 +2096,26 @@ __device__ uint64_t publication_validate_model_update(const PublicationControl& 
         if(binding.slots[0]>=control.storage_count || binding.slots[1]>=control.storage_count ||
            binding.slots[0]==binding.slots[1] || storage[binding.slots[0]].bytes!=binding.bytes ||
            storage[binding.slots[1]].bytes!=binding.bytes ||
-           (binding.bytes && (!binding.source || binding.source>UINT64_MAX-binding.bytes ||
+           binding.candidate!=storage[binding.slots[1]].pointer ||
+           (binding.bytes && (!binding.candidate || binding.candidate>UINT64_MAX-binding.bytes ||
             storage[binding.slots[0]].pointer==storage[binding.slots[1]].pointer)))return 1;
         bool used=false;
         for(uint64_t i=0;i<base.header.range_count;++i)
             if(old[i].role>=18 && old[i].role<=25 &&
-               old[i].storage_slot==binding.slots[bank])used=true;
+               old[i].storage_slot==binding.slots[0])used=true;
         if(!used)return 1;
         for(uint64_t slot=0;slot<control.storage_count;++slot) {
             const auto& owned=storage[slot];
-            if(binding.bytes && owned.bytes &&
-               publication_model_spans_overlap(binding.source,binding.bytes,owned.pointer,owned.bytes))return 1;
+            if(slot!=binding.slots[1] && binding.bytes && owned.bytes &&
+               publication_model_spans_overlap(binding.candidate,binding.bytes,owned.pointer,owned.bytes))return 1;
         }
         for(uint64_t prior=0;prior<item;++prior)
             if(binding.slots[0]==bindings[prior].slots[0] ||
                binding.slots[0]==bindings[prior].slots[1] ||
                binding.slots[1]==bindings[prior].slots[0] ||
                binding.slots[1]==bindings[prior].slots[1] ||
-               publication_model_spans_overlap(binding.source,binding.bytes,
-                   bindings[prior].source,bindings[prior].bytes))return 1;
+               publication_model_spans_overlap(binding.candidate,binding.bytes,
+                   bindings[prior].candidate,bindings[prior].bytes))return 1;
     }
     return 0;
 }
@@ -2853,52 +2854,6 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     *reinterpret_cast<SemanticTrainingCanaryRefusalRecord*>(inputs.refusal_destination)=refusal;
     *reinterpret_cast<uint8_t*>(inputs.admissibility_destination)=admissible;
 }
-extern "C" __global__ void semantic_publication_apply_model_update(uint64_t control_ptr,
-        uint64_t lease_ptr) {
-    if(!control_ptr || control_ptr%alignof(PublicationControl) ||
-       control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
-       !lease_ptr || lease_ptr%alignof(PublicationLease) ||
-       lease_ptr>UINT64_MAX-sizeof(PublicationLease)) {
-        semantic_content_integrity_trap();return;
-    }
-    auto& control=*reinterpret_cast<PublicationControl*>(control_ptr);
-    const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
-    const auto* base=publication_acquired_bank(control,lease);
-    if(!base || lease.transition_kind!=4 || !control.continuation ||
-       control.continuation%alignof(PendingContinuation) || !control.storage ||
-       base->header.neural_bank>1) {
-        semantic_content_integrity_trap();return;
-    }
-    const auto& pending=*reinterpret_cast<const PendingContinuation*>(control.continuation);
-    if(pending.base_word!=lease.word || pending.transition_kind!=4 ||
-       !pending.model_update_bindings ||
-       pending.model_update_bindings%alignof(ModelUpdateBinding) ||
-       !pending.model_update_admissibility || pending.model_update_admissibility==UINT64_MAX ||
-       blockIdx.y>=pending.model_update_binding_count) {
-        semantic_content_integrity_trap();return;
-    }
-    const uint8_t admissibility=
-        *reinterpret_cast<const uint8_t*>(pending.model_update_admissibility);
-    if(admissibility>1) { semantic_content_integrity_trap();return; }
-    if(!admissibility)return;
-    const auto& binding=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings)[blockIdx.y];
-    const uint64_t destination_slot=binding.slots[base->header.neural_bank^1];
-    if(destination_slot>=control.storage_count ||
-       (binding.bytes && (!binding.source || binding.source>UINT64_MAX-binding.bytes))) {
-        semantic_content_integrity_trap();return;
-    }
-    const auto& destination=reinterpret_cast<const PublicationStorageEntry*>(control.storage)[destination_slot];
-    if(destination.bytes!=binding.bytes ||
-       (binding.bytes && (!destination.pointer || destination.pointer>UINT64_MAX-binding.bytes ||
-        destination.pointer==binding.source))) {
-        semantic_content_integrity_trap();return;
-    }
-    auto* output=reinterpret_cast<uint8_t*>(destination.pointer);
-    const auto* source=reinterpret_cast<const uint8_t*>(binding.source);
-    const uint64_t start=uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
-    const uint64_t stride=uint64_t(gridDim.x)*blockDim.x;
-    for(uint64_t offset=start;offset<binding.bytes;offset+=stride)output[offset]=source[offset];
-}
 extern "C" __global__ void semantic_publication_prepare_drain(uint64_t control_ptr,uint64_t lease_ptr) {
     if(blockIdx.x || threadIdx.x)return;
     if(!control_ptr || control_ptr%alignof(PublicationControl) ||
@@ -2995,8 +2950,8 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
             const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
             bool found=false;
             for(uint64_t item=0;item<pending.model_update_binding_count;++item)
-                if(bindings[item].slots[base.header.neural_bank]==old[i].storage_slot) {
-                    const uint64_t destination_slot=bindings[item].slots[base.header.neural_bank^1];
+                if(bindings[item].slots[0]==old[i].storage_slot) {
+                    const uint64_t destination_slot=bindings[item].slots[1];
                     if(destination_slot>=control.storage_count)return 1;
                     to[i]=old[i];
                     to[i].storage_slot=destination_slot;
@@ -3429,6 +3384,40 @@ __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& he
     const uint64_t roster_extent[4]={binding_count,0,0,0};
     publication_fold(output[0],0,0,roster_extent);
     return 0;
+}
+
+// Cold, quiescent catalogue growth is not publication. All old entries retain
+// their exact address, extent and generation; only unreachable storage is added.
+extern "C" __global__ void semantic_publication_extend_model_storage(uint64_t control_ptr,
+        uint64_t original_ptr,uint64_t original_count,uint64_t expanded_ptr,uint64_t expanded_count) {
+    if(blockIdx.x || threadIdx.x)return;
+    if(!publication_pointer_span(control_ptr,sizeof(PublicationControl),alignof(PublicationControl)) ||
+       original_count>UINT64_MAX/sizeof(PublicationStorageEntry) ||
+       expanded_count>UINT64_MAX/sizeof(PublicationStorageEntry) || expanded_count<=original_count ||
+       !publication_pointer_span(original_ptr,original_count*sizeof(PublicationStorageEntry),alignof(PublicationStorageEntry)) ||
+       !publication_pointer_span(expanded_ptr,expanded_count*sizeof(PublicationStorageEntry),alignof(PublicationStorageEntry))) {
+        semantic_content_integrity_trap();return;
+    }
+    auto& control=*reinterpret_cast<PublicationControl*>(control_ptr);
+    if(control.abi!=1 || control.storage!=original_ptr || control.storage_count!=original_count ||
+       control.reader_gate || control.reader_counts[0] || control.reader_counts[1]) {
+        semantic_content_integrity_trap();return;
+    }
+    const auto* original=reinterpret_cast<const PublicationStorageEntry*>(original_ptr);
+    const auto* expanded=reinterpret_cast<const PublicationStorageEntry*>(expanded_ptr);
+    for(uint64_t i=0;i<original_count;++i)
+        if(original[i].pointer!=expanded[i].pointer || original[i].bytes!=expanded[i].bytes ||
+           original[i].generation!=expanded[i].generation) { semantic_content_integrity_trap();return; }
+    for(uint64_t i=original_count;i<expanded_count;++i) {
+        if(!expanded[i].generation || (expanded[i].bytes &&
+           (!expanded[i].pointer || expanded[i].pointer>UINT64_MAX-expanded[i].bytes))) {
+            semantic_content_integrity_trap();return;
+        }
+        for(uint64_t j=0;j<i;++j)
+            if(publication_spans_overlap(expanded[i].pointer,expanded[i].bytes,
+                    expanded[j].pointer,expanded[j].bytes)) { semantic_content_integrity_trap();return; }
+    }
+    control.storage=expanded_ptr;control.storage_count=expanded_count;
 }
 
 // One admission selects one actual parent and one mode for the whole captured

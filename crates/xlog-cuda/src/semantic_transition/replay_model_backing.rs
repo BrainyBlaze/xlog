@@ -173,6 +173,7 @@ impl SemanticReplayModelBackings {
 
 pub(super) enum PublicationAllocation {
     Writable(TrackedCudaSlice<u8>),
+    Generation(Arc<TrackedCudaSlice<u8>>),
     Immutable(Arc<ReplayModelBacking>),
 }
 
@@ -180,17 +181,19 @@ impl PublicationAllocation {
     pub(super) fn slice(&self) -> &TrackedCudaSlice<u8> {
         match self {
             Self::Writable(allocation) => allocation,
+            Self::Generation(allocation) => allocation,
             Self::Immutable(owner) => &owner.allocation,
         }
     }
 
     pub(super) fn immutable(&self) -> bool {
-        matches!(self, Self::Immutable(_))
+        matches!(self, Self::Generation(_) | Self::Immutable(_))
     }
 
     pub(super) fn initializing(&self) -> bool {
         match self {
             Self::Writable(_) => true,
+            Self::Generation(_) => true,
             Self::Immutable(owner) => !owner.sealed.load(Ordering::Acquire),
         }
     }
@@ -198,6 +201,14 @@ impl PublicationAllocation {
     pub(super) fn seal_restoration(&self) {
         if let Self::Immutable(owner) = self {
             owner.sealed.store(true, Ordering::Release);
+        }
+    }
+
+    pub(super) fn retain(&self) -> Self {
+        match self {
+            Self::Writable(allocation) => Self::Writable(allocation.retain()),
+            Self::Generation(owner) => Self::Generation(Arc::clone(owner)),
+            Self::Immutable(owner) => Self::Immutable(Arc::clone(owner)),
         }
     }
 }

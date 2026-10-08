@@ -80,10 +80,11 @@ pub(super) struct PreparedReplayCustody {
 fn replay_plan(
     storage: &PublicationStorage,
     parent: bool,
+    model_slots: &[[usize; 2]],
 ) -> Result<Vec<ReplayCopyRow>, SemanticTransitionError> {
     let mut rows = Vec::new();
     if parent {
-        for (index, slots) in storage.model_slots.iter().enumerate() {
+        for (index, slots) in model_slots.iter().enumerate() {
             rows.push(ReplayCopyRow {
                 index: index as u64,
                 model: if storage.allocations[slots[0]].immutable() && slots[0] == slots[1] {
@@ -163,8 +164,20 @@ impl PreparedReplayCustody {
         arena_words: usize,
     ) -> Result<u64, SemanticTransitionError> {
         let count = storage.bank_templates[0].len();
-        let parent = snapshot_allocation_bytes(&replay_plan(storage, true)?, count, arena_words)?;
-        let successor = snapshot_allocation_bytes(&replay_plan(storage, false)?, count, 0)?;
+        // Prepared numerical generations are read-leased, independent of the
+        // PublicationWord bank. Only per-step nonnumerical state is copied.
+        let model_slots = storage
+            .model_slots
+            .iter()
+            .map(|slots| [slots[0]; 2])
+            .collect::<Vec<_>>();
+        let parent = snapshot_allocation_bytes(
+            &replay_plan(storage, true, &model_slots)?,
+            count,
+            arena_words,
+        )?;
+        let successor =
+            snapshot_allocation_bytes(&replay_plan(storage, false, &model_slots)?, count, 0)?;
         let input_bytes = PreparedStepInputs::plan(storage)?
             .len()
             .checked_mul(size_of::<PublicationStepInput>())
@@ -196,7 +209,7 @@ impl PreparedReplayCustody {
         let parent = ReplaySnapshot::allocate(
             provider,
             storage,
-            replay_plan(storage, true)?,
+            replay_plan(storage, true, &inputs.model_slots)?,
             storage.bank_templates[0].len(),
             arena_words,
             reservation,
@@ -254,7 +267,7 @@ impl PreparedReplayCustody {
             successor: ReplaySnapshot::allocate(
                 provider,
                 storage,
-                replay_plan(storage, false)?,
+                replay_plan(storage, false, &inputs.model_slots)?,
                 storage.bank_templates[0].len(),
                 0,
                 reservation,
@@ -945,15 +958,11 @@ impl ReplaySnapshot {
         let mut backings = Vec::with_capacity(plan.len());
         for row in &mut plan {
             let backing = if row.model == 2 {
-                let PublicationAllocation::Immutable(owner) =
-                    &storage.allocations[row.slots[0] as usize]
-                else {
-                    return Err(SemanticTransitionError::ObservationMismatch);
-                };
-                if row.slots[0] != row.slots[1] {
+                let original = &storage.allocations[row.slots[0] as usize];
+                if !original.immutable() || row.slots[0] != row.slots[1] {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
-                PublicationAllocation::Immutable(Arc::clone(owner))
+                original.retain()
             } else {
                 PublicationAllocation::Writable(
                     reservation
