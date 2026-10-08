@@ -15,6 +15,8 @@ from typing import Any, Iterator, Optional
 from pyxlog._native import (
     # Module constant
     __version__ as __version__,
+    register_process_resource_observer as register_process_resource_observer,
+    resource_observer_device_certificate as resource_observer_device_certificate,
     SemanticTransitionTaskUse as SemanticTransitionTaskUse,
     SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
     CarrierRefused as CarrierRefused,

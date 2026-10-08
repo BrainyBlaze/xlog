@@ -7,11 +7,13 @@
 extern "C" {
 #endif
 
-#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(2)
-#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v2"
+#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(3)
+#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v3"
+#define XLOG_RESOURCE_MEMORY_UNIT "owned-gpu-backing-peak-bytes"
+#define XLOG_RESOURCE_MEMORY_ADMISSION "whole-device-total-physical-bytes"
 
 /* Completion and coverage are independent. COMPLETE means the requested
- * supported trace was delivered; it does not certify physical memory peaks,
+ * supported trace was delivered; it does not certify owned backing peaks,
  * asynchronous allocator completion, or access through host mappings. */
 #define XLOG_RESOURCE_COMPLETE UINT32_C(0)
 #define XLOG_RESOURCE_INCOMPLETE UINT32_C(1)
@@ -29,15 +31,74 @@ extern "C" {
 #define XLOG_RESOURCE_COVERAGE_GRAPH_RESOURCE UINT64_C(16)
 #define XLOG_RESOURCE_COVERAGE_DEVICE_GRAPH UINT64_C(32)
 #define XLOG_RESOURCE_COVERAGE_HOST_MAPPING_ACCESS UINT64_C(64)
-#define XLOG_RESOURCE_COVERAGE_PHYSICAL_MEMORY UINT64_C(128)
+#define XLOG_RESOURCE_COVERAGE_OWNED_BACKING UINT64_C(128)
 
 #define XLOG_RESOURCE_START_VALID UINT64_C(1)
 #define XLOG_RESOURCE_END_VALID UINT64_C(2)
 #define XLOG_RESOURCE_DELIVERY_DRAINED UINT64_C(4)
 #define XLOG_RESOURCE_STARTED_BEFORE_CUDA UINT64_C(8)
 #define XLOG_RESOURCE_TOTALS_VALID UINT64_C(16)
-#define XLOG_RESOURCE_PHYSICAL_PEAK_VALID UINT64_C(32)
+#define XLOG_RESOURCE_BACKING_PEAK_VALID UINT64_C(32)
 #define XLOG_RESOURCE_ALLOCATOR_COMPLETED UINT64_C(64)
+#define XLOG_RESOURCE_BASELINE_COMPLETE UINT64_C(128)
+
+#define XLOG_RESOURCE_DEVICE_WHOLE UINT64_C(1)
+#define XLOG_RESOURCE_DEVICE_BEFORE_CUDA UINT64_C(2)
+#define XLOG_RESOURCE_DEVICE_NVML_MEMORY_V2 UINT32_C(1)
+
+/* A capacity proof, NEVER an observation or C_raw. The producer verifies a
+ * whole physical device, not a MIG partition, free/used memory or CUDA's
+ * available capacity. Native binds this immutable certificate to its actual
+ * CUDA UUID and original process before admission. Every frozen memory ceiling,
+ * including cleanup and delivery, must be at least total_physical_bytes.
+ * observer_identity is a nonzero 32-byte nonce minted once before CUDA and
+ * never reset. Trace.certificate_identity is exactly this nonce, identifying
+ * this one immutable certificate (not a hash of a Python projection). Repeated
+ * reads must preserve all fields; a second GPU cannot share its identity.
+ * driver_version
+ * is the original NUL-terminated NVML driver version; reserved must be zero.
+ * A fresh process/device needs a fresh certificate without changing history.
+ * A bound process ledger covers application roots on that one whole device;
+ * another device/context cannot silently contribute an unbounded baseline. */
+typedef struct XlogResourceDeviceCertificate {
+    uint32_t struct_size;
+    uint32_t state;
+    uint8_t observer_identity[32];
+    uint8_t device_uuid[16];
+    uint64_t total_physical_bytes;
+    uint64_t flags;
+    uint64_t process_id;
+    char driver_version[32];
+    uint32_t source;
+    uint32_t reserved;
+} XlogResourceDeviceCertificate;
+
+#define XLOG_RESOURCE_BACKING_ACQUIRED UINT32_C(1)
+#define XLOG_RESOURCE_BACKING_RELEASED UINT32_C(2)
+#define XLOG_RESOURCE_BACKING_UNKNOWN UINT32_C(3)
+
+/* Original native storage-owner evidence, not a second allocation counter.
+ * Installation precedes the first native allocation. ACQUIRED carries the
+ * cold cuMemGetAddressRange-confirmed root extent, not its requested bytes.
+ * RELEASED follows actual-use fences and successful cuMemFree, once for that
+ * same generation. The collector associates these confirmations with original
+ * successful driver events in its timestamp scale, never callback arrival time.
+ * It deduplicates the same root with driver/Torch records, retains cache roots,
+ * and never counts aliases or slab/private-pool suballocations again. UNKNOWN
+ * supplies no size/release proof, even if bytes is zero. Loss, unresolved roots,
+ * wraparound or uncertain completion forbid a numerical interval witness.
+ * No callback enters Python, calls CUDA, throws, polls or waits for GPU work. */
+typedef struct XlogResourceBackingRoot {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint64_t owner_generation;
+    uint64_t context_handle;
+    uint64_t base;
+    uint64_t bytes;
+    uint8_t device_uuid[16];
+    uint32_t device_ordinal;
+    uint32_t reserved;
+} XlogResourceBackingRoot;
 
 #define XLOG_RESOURCE_EVENT_COPY UINT32_C(1)
 #define XLOG_RESOURCE_EVENT_PEER_COPY UINT32_C(2)
@@ -134,17 +195,17 @@ typedef struct XlogResourceEvent {
  * Process loss/error counters are sticky: reading or changing models does not
  * reset them. Copy totals do not prove completeness or mapped-memory coverage;
  * copy_count is retained separately and must not multiply the original bytes. */
-/* physical_peak_bytes is the absolute maximum simultaneously occupied physical
- * GPU memory of the whole original process in this exact interval, including
- * its already occupied initial baseline, RM/GSP backing and physical managed
- * residency. It is neither a delta, reservation nor sum of separate maxima.
- * Consume it only from the original confirmed producer with both PHYSICAL_PEAK_VALID
- * and ALLOCATOR_COMPLETED, full requested/enabled PHYSICAL_MEMORY coverage,
- * no unsupported physical coverage, no loss/error/overflow and valid original
- * context/nonce/ordinal/start/end. A missing baseline, coverage gap, unsupported
- * source or overflow must not set validity or substitute/saturate a number.
- * Delivery flags, capacities, lifetime peaks, copy events and joins alone do
- * not prove physical memory. Boundaries must never move to obtain a result. */
+/* backing_peak_bytes is the maximum sum of simultaneously retained original
+ * application-owned GPU backing roots in this exact interval. Include the full
+ * initial baseline, allocated cache/pool blocks and pending asynchronous uses;
+ * count each confirmed original root extent once. It is not tensor bytes,
+ * a requested/reserved total, a delta or a sum of separately observed maxima.
+ * Unattributable driver/profiler memory is excluded from this observation and
+ * bounded separately by the whole-device certificate, not renamed as measured.
+ * Require BACKING_PEAK_VALID, BASELINE_COMPLETE, ALLOCATOR_COMPLETED, complete
+ * OWNED_BACKING coverage, original certificate identity, nonce and boundaries,
+ * and no loss/error/overflow. Incomplete coverage or unknown roots must never
+ * substitute zero or saturate a number. Boundaries cannot move to get a result. */
 typedef struct XlogResourceTraceView {
     uint32_t struct_size;
     uint32_t state;
@@ -159,7 +220,9 @@ typedef struct XlogResourceTraceView {
     uint64_t process_dropped_records;
     uint64_t process_errors;
     uint64_t process_buffer_overflows;
-    uint64_t physical_peak_bytes;
+    uint8_t certificate_identity[32];
+    uint64_t backing_baseline_bytes;
+    uint64_t backing_peak_bytes;
     uint64_t host_to_device_bytes;
     uint64_t device_to_host_bytes;
     uint64_t device_to_device_bytes;
@@ -180,11 +243,11 @@ typedef struct XlogResourceTraceView {
  * finish is called once, only after the original native/model stream joins.
  * Its end timestamp precedes cold delivery/flush, not the end of the flush.
  * read only reads a stable sealed view: it never repeats finish, flush or work.
- * Unknown delivery or physical/allocator completion cannot be released. Trace
- * COMPLETE/read success/DELIVERY_DRAINED alone never resolve physical memory.
- * A consumed view may be released only after its physical result is known under
+ * Unknown delivery or backing/allocator completion cannot be released. Trace
+ * COMPLETE/read success/DELIVERY_DRAINED alone never resolve backing memory.
+ * A consumed view may be released only after its backing result is known under
  * the conditions above and DELIVERY_DRAINED proves callback delivery has ended.
- * Missing physical validity/coverage retains even a completed trace: do not
+ * Missing backing validity/coverage retains even a completed trace: do not
  * consume its stored scalar, record numerical usage or admit subsequent work.
  * Preserve any already returned model result without repeating it or finish.
  * Retain the
@@ -219,8 +282,8 @@ typedef struct XlogResourceObserverApi {
      * and every attempted start/end status, including a known start without an
      * attempted end. Unknown binding results must refuse cancellation. Only a
      * COMPLETE handoff removes execution-subinterval obligations: it invents no
-     * activity/timestamps/peaks or skipped/completed outcome. Whole-process
-     * physical coverage/peak, allocator completion, drained delivery and all
+     * activity/timestamps/peaks or skipped/completed outcome. Whole-interval
+     * backing coverage/peak, allocator completion, drained delivery and all
      * error/loss checks remain mandatory before original finish/read/release.
      * Unknown cancellation retains the same interval; never repeat the handoff. */
     uint32_t (*bind_step_capture)(void *context, void *interval,
@@ -228,18 +291,23 @@ typedef struct XlogResourceObserverApi {
                                   uint64_t step_ordinal, uint64_t capture_stream,
                                   uint32_t site);
     /* Read a stable original step view only after whole-interval finish. The
-     * same continuous physical producer authenticates GPU execution boundaries
+     * same continuous backing producer authenticates GPU execution boundaries
      * in its original activity timestamp scale. First start equals whole start
      * before group allocations; interiors join contiguously at the next step's
      * real GPU admission; last end equals whole end after retirement/adoption.
      * Every interval includes already-held shared allocations and the absolute
-     * process baseline. All validity/coverage/loss/completion requirements above
+     * backing baseline. All validity/coverage/loss/completion requirements above
      * apply independently to every step. Group maxima, capture-time timestamps,
-     * ordinal ordering or a copied scalar never prove a step's physical peak.
+     * ordinal ordering or a copied scalar never prove a step's backing peak.
      * This read never flushes, registers, finishes or executes anything. */
     uint32_t (*read_step_interval)(void *context, void *interval,
                                    uint64_t operation_ordinal,
                                    XlogResourceTraceView *view);
+    uint32_t (*read_device_certificate)(void *context,
+                                        const uint8_t cuda_uuid[16],
+                                        XlogResourceDeviceCertificate *certificate);
+    uint32_t (*record_native_backing_root)(void *context,
+                                          const XlogResourceBackingRoot *root);
 } XlogResourceObserverApi;
 
 #ifdef __cplusplus

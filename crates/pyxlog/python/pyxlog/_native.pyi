@@ -18,6 +18,35 @@ from typing import Any, Callable, Literal, Optional, Sequence, TypedDict, Union
 
 __version__: str
 
+class _ResourceDeviceCertificate(TypedDict):
+    format: Literal["xlog.device-capacity/1"]
+    observer_identity: str
+    device_uuid: str
+    total_physical_bytes: int
+    process_id: int
+    driver_version: str
+    source: Literal["nvml-memory-v2"]
+    whole_device: Literal[True]
+
+def register_process_resource_observer(capsule: Any) -> None:
+    """Pin the original ABI3 collector before native GPU allocation.
+
+    The same capsule is idempotent; replacement, late attachment and an old ABI
+    are errors. Native root lifetime evidence enters this one collector.
+    """
+    ...
+
+def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDeviceCertificate:
+    """Project the original immutable whole-device NVML capacity certificate.
+
+    The registered collector must precede CUDA. This cold actual-UUID lookup
+    allocates no native GPU storage and is not an observation or admission flag.
+    Compare U against every original operation/cleanup ceiling before model
+    allocation. Signed native restore repeats that check without changing old
+    certificates or expense.
+    """
+    ...
+
 _Path = Union[str, PathLike[str]]
 
 _PublishedIdentity = tuple[bytes, int, bytes, bytes]

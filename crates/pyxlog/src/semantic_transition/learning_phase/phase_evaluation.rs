@@ -68,7 +68,7 @@ pub(super) struct PhaseEvaluationAndTerminal {
     observer_finish_entered: bool,
     record_entered: bool,
     recorded: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     released: bool,
     budget_exceeded: bool,
     refusal: Option<ReadOnlyTerminalRefusal>,
@@ -353,7 +353,7 @@ impl PySemanticLearningPhaseTransition {
                 observer_finish_entered: false,
                 record_entered: false,
                 recorded: false,
-                physical_peak: None,
+                backing_peak: None,
                 released: false,
                 budget_exceeded: false,
                 refusal: Some(ReadOnlyTerminalRefusal {
@@ -382,7 +382,7 @@ impl PySemanticLearningPhaseTransition {
             });
         }
         // Begin before the first allocation/save/cleanup on this frozen target,
-        // after the original group has released its known physical interval.
+        // after the original group has released its known backing interval.
         if !cancelled {
             self.preparation_inputs
                 .resource_observer
@@ -1439,6 +1439,9 @@ impl PySemanticLearningPhaseTransition {
             arguments.set_item("operation_ordinal", ordinal)?;
             arguments.set_item("branch", branch)?;
             arguments.set_item("resource_usage", (usage[0], usage[1], usage[2]))?;
+            self.preparation_inputs
+                .resource_observer
+                .observation_arguments(py, &arguments)?;
             let callback = if let Some((start, count, cause)) = segment {
                 arguments.set_item("cause", cause)?;
                 arguments.set_item("group_start", start)?;
@@ -1456,6 +1459,7 @@ impl PySemanticLearningPhaseTransition {
                 .expect("retained cancellation")
                 .record_entered = true;
             callback.call((), Some(&arguments))?;
+            self.require_scientific_history(py)?;
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained cancellation");
             current.recorded = true;
@@ -2084,7 +2088,7 @@ impl PySemanticLearningPhaseTransition {
     }
 
     /// Project each original private observation only after the selected group
-    /// and its physical interval are fully consumed. No new model is restored.
+    /// and its backing interval are fully consumed. No new model is restored.
     pub(super) fn execute_private_evaluations(
         &self,
         py: Python<'_>,
@@ -2212,7 +2216,7 @@ impl PySemanticLearningPhaseTransition {
                 observer_finish_entered: false,
                 record_entered: false,
                 recorded: false,
-                physical_peak: None,
+                backing_peak: None,
                 released: false,
                 budget_exceeded: false,
                 refusal: None,
@@ -2411,6 +2415,9 @@ impl PySemanticLearningPhaseTransition {
             PyBytes::new(py, &self.source_checkpoint),
         )?;
         arguments.set_item("resource_usage", (work, peak, result.model_calls))?;
+        self.preparation_inputs
+            .resource_observer
+            .observation_arguments(py, &arguments)?;
         let callback = self
             .scientific_owner
             .bind(py)
@@ -2420,6 +2427,7 @@ impl PySemanticLearningPhaseTransition {
             .expect("retained original preparation")
             .record_entered = true;
         callback.call((), Some(&arguments))?;
+        self.require_scientific_history(py)?;
         self.source_preparation()?
             .as_mut()
             .expect("retained original preparation")
@@ -2525,7 +2533,7 @@ impl PySemanticLearningPhaseTransition {
                     observer_finish_entered: false,
                     record_entered: false,
                     recorded: false,
-                    physical_peak: None,
+                    backing_peak: None,
                     released: false,
                     budget_exceeded: false,
                     refusal: None,
@@ -2846,6 +2854,9 @@ impl PySemanticLearningPhaseTransition {
             arguments.set_item(name, field(name)?)?;
         }
         arguments.set_item("resource_usage", (work, peak, calls))?;
+        self.preparation_inputs
+            .resource_observer
+            .observation_arguments(py, &arguments)?;
         let callback = self
             .scientific_owner
             .bind(py)
@@ -2859,6 +2870,7 @@ impl PySemanticLearningPhaseTransition {
             .expect("retained evaluation")
             .budget_exceeded = work > budget[0] || peak > budget[1] || calls > budget[2];
         callback.call((), Some(&arguments))?;
+        self.require_scientific_history(py)?;
         self.phase_evaluations()?
             .last_mut()
             .expect("retained evaluation")
@@ -2891,7 +2903,7 @@ impl PySemanticLearningPhaseTransition {
     }
 
     /// Both known observation and known cancellation consume this same original
-    /// cold report and physical interval. Neither can replay the model callback.
+    /// cold report and backing interval. Neither can replay the model callback.
     fn finish_evaluation_expense(
         &self,
         py: Python<'_>,
@@ -2927,7 +2939,7 @@ impl PySemanticLearningPhaseTransition {
                     .as_ref()
                     .map(|owners| owners.parent.clone_ref(py)),
                 current.custody.clone(),
-                current.physical_peak,
+                current.backing_peak,
             )
         };
         let source = self.source.borrow(py);
@@ -3002,14 +3014,11 @@ impl PySemanticLearningPhaseTransition {
         let peak = match cached_peak {
             Some(peak) => peak,
             None => {
-                let peak = self
-                    .preparation_inputs
-                    .resource_observer
-                    .physical_peak(py)?;
+                let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
                 self.phase_evaluations()?
                     .last_mut()
                     .expect("retained evaluation")
-                    .physical_peak = Some(peak);
+                    .backing_peak = Some(peak);
                 peak
             }
         };
@@ -3025,7 +3034,7 @@ impl PySemanticLearningPhaseTransition {
             self.capture_cancelled_evaluation_refusal(py)?;
             // The native proof, not this exception or its traceback, carries the
             // known disposition. Release failed numerical frames before sealing
-            // the same original physical interval.
+            // the same original backing interval.
             drop(original);
             return self.finish_readonly_terminal_refusal(py);
         }

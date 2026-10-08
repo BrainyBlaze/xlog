@@ -643,7 +643,7 @@ the exact source controller, task, parent, model and scheduled tuple. The callba
 owns the canonical numerical decoder. A callback-scoped, single-use read-only
 admission permits the evaluation while the source remains private; it grants no
 general segment, model-update or publication rights. Each group retains its own
-native work report and whole-process physical interval, including pending work.
+native work report and whole-process backing interval, including pending work.
 Only `SemanticModelEvaluationPending` permits entering the original suspended
 frame again; a completed return or another exception cannot repeat execution.
 Native authenticates the returned observation against its actual Session, parent
@@ -682,7 +682,7 @@ controller/task/model owners and the original frozen entry; only the original
 pending evaluation frame may resume. The scientific callback supplies the held
 source cohort, and native authenticates its issued observation against that same
 cohort and acquired private parent. Control feedback still uses the original
-positive-zero tensor path. Joined native/model reports and physical memory are
+positive-zero tensor path. Joined native/model reports and backing memory are
 recorded for each original evaluation without another model restore or forward.
 
 The same evaluation owns one continuous cold work report with three one-shot
@@ -702,7 +702,7 @@ proof, not a successful observation, admits cleanup once. Only regions proved
 not entered by that cancellation may be skipped; failed or unknown registration
 is never reopened or declared complete. After known cancellation and cleanup,
 native retains the original error and actual expenditure, completes the same
-physical interval, and does not issue a scientific evaluation observation or
+backing interval, and does not issue a scientific evaluation observation or
 advance the schedule. A complete terminal scientific refusal remains a separate
 required part of the full phase executor.
 
@@ -730,7 +730,7 @@ before joining and destroying the private Session, invalidates its original task
 aliases, drains actual pending deallocations and drops completed control frames
 outside their locks. The original shared source allocations remain held; their
 nonzero baseline is not private retirement failure. These releases belong to one
-continuous physical interval, whose measured native/model work and peak are
+continuous backing interval, whose measured native/model work and peak are
 recorded against the original retirement budget before the next branch. Unknown
 model or Session release cannot replay its original callback or destructor.
 
@@ -740,7 +740,7 @@ constructor and their actual frozen lifecycle decoder, without a top-level
 copy/reset substituted for the source entry. The real model factory receives
 the original identity-feedback intervention; the control model factory keeps
 its positive-zero intervention. Each source restore retains its own entry,
-native/model owners, work report and physical interval before calling the model
+native/model owners, work report and backing interval before calling the model
 factory. The phase's entered marker is never reset to manufacture another
 admission. Unknown factory or resource completion retains the same original
 branch and cannot repeat the factory or replace its child Session.
@@ -755,7 +755,7 @@ Unknown completion resumes only its original group. After a group's complete
 original receipts, history, budget check and physical release, another original
 numerical group consumes its exact selected parent/model through the same native
 issuer and Worker. The predecessor's actual owners remain held until the next
-group's physical preparation interval and shared native tally cover their
+group's backing preparation interval and shared native tally cover their
 destruction outside phase mutexes. No partial roster, original step ordinal,
 instruction or budget is reset. Intermediate restore instructions still require
 their canonical lifecycle executor.
@@ -782,14 +782,15 @@ The initial restored publication is not substituted for the learned successor.
 This handoff alone does not measure the subsequent model verification callbacks
 or implement the budgeted delivery tail.
 
-ABI version 2 extends the same observer with `bind_step_capture` and
-`read_step_interval`. Registration passes the actual capture stream immediately
+ABI version 3 retains `bind_step_capture` and `read_step_interval` on the same
+original observer and adds device capacity and native backing-root callbacks.
+Registration passes the actual capture stream immediately
 after enqueueing the admission or release kernel, inside its original capture.
 The collector must retain the precise graph/node identity and correlate its
 actual GPU activity, including conditional releases, skipped steps and graph
 clones. CPU callback timestamps and callback order are not execution boundaries.
 After the original whole-interval finish, sealed step views partition that same
-continuous physical observation: first start precedes group allocations, interior
+continuous backing-root observation: first start precedes group allocations, interior
 boundaries are actual next-step GPU admissions, and last end follows the complete
 tail. Every step includes already-held allocations and the whole-process baseline;
 neither copying nor distributing the group's peak proves those individual peaks.
@@ -804,7 +805,7 @@ once-only whole-roster cancellation on the same open interval: the group start,
 planned count and original stream. Every attempted start/end binding must have a
 known result; an unregistered suffix is not an unknown binding. Cancellation
 preserves the registered prefix and withdraws only execution-subinterval
-obligations. Whole-process physical validity, allocator completion, loss/error
+obligations. Whole-process backing validity, allocator completion, loss/error
 checks and original finish/read/release still apply. An unknown handoff retains
 the original owners without retry. This disposition handoff does not implement
 the remaining full private checkpoint/Source terminal recovery or grant resume.
@@ -814,17 +815,51 @@ retirement and real source restore do not implement the remaining private
 control/real schedule, post-comparison delivery or fresh-process recovery. They
 cannot issue a prepared or accepted outcome before that complete original schedule.
 
-`physical_peak_bytes` is usable only with `PHYSICAL_PEAK_VALID` and
-`ALLOCATOR_COMPLETED`, complete requested/enabled physical coverage without an
-unsupported gap, valid original boundaries/nonce/ordinal and no process
-loss/error/overflow. It is the absolute simultaneously occupied physical GPU
-peak of the entire original process, including the initial occupied baseline,
-driver backing and physical managed residency, not a reservation or delta.
-Trace completion alone does not establish physical memory. Unknown physical
-completion retains the original pending, capsule, interval, model and returned
-source bytes, without release, a numeric observation or subsequent execution.
-The header and consumer do not supply a physical producer, whole-operation work
-accounting or the complete private-trajectory executor.
+`register_process_resource_observer(original_capsule)` pins the ABI3 collector
+before the first native GPU allocation. The exact same table is idempotent; an
+old ABI, late attachment or replacement cannot reset custody. Actual XLOG cold
+storage owners use direct allocation/free, query their containing extent with
+`cuMemGetAddressRange` outside activity callbacks, and report the original UUID,
+context, address and never-reused generation into that same collector. Release
+requires original use fences and successful physical free. A failed confirmation
+retains unknown custody and cannot authorize a duplicate free.
+
+`resource_observer_device_certificate(device_ordinal)` returns that producer's
+immutable `xlog.device-capacity/1` projection, bound to the actual CUDA UUID and
+process, without creating native GPU storage. Its fields are `observer_identity`
+(64 lowercase hexadecimal characters), `device_uuid` (32),
+`total_physical_bytes`, `process_id`, `driver_version`, `source="nvml-memory-v2"`
+and `whole_device=True`. This is verified whole physical capacity U, not free,
+used, arena, MIG or observed peak bytes. The initial application must compare U
+to every original operation and terminal-cleanup ceiling before model allocation.
+Phase admission and canonical signed checkpoint restore repeat that check over
+the unchanged full program; U greater than any ceiling means no admission proof,
+not a measured exceedance. Fresh recovery uses a new original process certificate
+without altering the past certificate or signed expenditure.
+
+`backing_peak_bytes` requires `BACKING_PEAK_VALID`, `BASELINE_COMPLETE` and
+`ALLOCATOR_COMPLETED`, complete requested/enabled owned-backing coverage without
+an unsupported gap, valid original boundaries/nonce/ordinal and no process
+loss/error/overflow. It is the high-water sum of simultaneously retained
+application-owned GPU backing roots, including the entire initial baseline,
+allocator caches and unfinished asynchronous uses. Aliases, slab suballocations
+and private-pool views do not count their containing root again. The collector
+uses original allocation/completed-free timestamps, not late callback arrival.
+Unattributable driver/profiler memory is not falsely labelled application backing;
+the separate whole-device capacity conservatively bounds it. Trace
+`certificate_identity` is exactly the original certificate's 32-byte
+`observer_identity`, which identifies one immutable certificate, not a Python
+dictionary hash.
+
+Scientific callbacks carry `memory_unit="owned-gpu-backing-peak-bytes"`,
+`memory_admission="whole-device-total-physical-bytes"` and `device_certificate`
+separately from `(work, backing_peak_bytes, model_calls)`. Native checks the
+original certificate in every returned observation before signing the full
+history and preserves the eleven-argument acceptance call. Only the new explicitly
+frozen program format can use this interpretation; old physical-peak histories
+cannot be re-labelled. Trace completion alone does not prove the baseline,
+whole-operation work or ZERO TRANSFER. Unknown coverage/completion retains the
+original owners without a numerical observation, release or subsequent execution.
 The private candidate uses the actual source Session's allocation provider and
 unchanged `memory_bytes` limit. Its graph and native state allocations share the
 source's live resource stack and serial stream; a clone does not receive a second
@@ -861,7 +896,7 @@ acceptance bytes. Acceptance stays outside the checkpoint whose bytes it binds.
 Cold recovery consumes these same original records in the canonical loader
 described above. A preparation outcome is not a complete signed Delivery;
 refusing an incomplete prefix does not complete the scientific executor or
-establish its whole-operation work, physical memory or GPU transfer evidence.
+establish its whole-operation work, backing memory or GPU transfer evidence.
 
 Destination acceptance must be derived from the original durable-training
 permission's resolved scope, never merely from the caller's destination string,
@@ -908,7 +943,7 @@ source-cleanup region. The same ordinal and whole-operation work, memory and
 call limits cover pre-acceptance verification, preparation-outcome verification,
 commit verification, activation verification and actual source retirement. No
 continuation resets that report or repeats an entered model callback. Native
-finishes the whole report and original physical observer only after known cleanup
+finishes the whole report and original backing observer only after known cleanup
 and the last candidate native verification. It records actual delivery history
 and obtains exact signed delivery readback before releasing the observer or
 making the candidate runnable. Budget excess preserves actual measured history
@@ -1033,7 +1068,7 @@ private Q is neither delivered nor exposed as an accepted result. Numerical
 segment cancellation does not acquire evaluation-cancellation authority.
 
 An original completed private segment whose step budgets are exceeded after
-known physical finish, full/per-step peak readout, complete history append and
+known backing finish, full/per-step peak readout, complete history append and
 release uses cause `private-segment-budget-refused`. Its original selected model,
 publication and entire native-issued roster must already be held after genuine
 adoption. Unknown submission, completion, adoption, peak, append or release does
@@ -1043,7 +1078,7 @@ The phase then opens its predeclared terminal cleanup interval, before any full
 private save or cleanup. Its four actual cold regions contain canonical full
 private Q save, the original failed-frame release, private model/Session
 retirement, and unchanged Source verification/serialization, in that order.
-Already-live frames, models and readers remain inside the absolute physical
+Already-live frames, models and readers remain inside the absolute backing
 measurement. The original group's expenditure and budget exceedance stay in all
 its original records; terminal usage is separate, with its own sole finish and
 known release. Work/calls are not refunded or charged twice; peaks are maxima,
@@ -1113,10 +1148,10 @@ retirement only after the entire native body and common context exit succeed,
 not merely after the model callback returns. No completion flag or numerical
 result is fabricated.
 
-This recovery does not open a new physical interval or spend the terminal cleanup
+This recovery does not open a new backing interval or spend the terminal cleanup
 reserve. Its sole original finish measures preparation, full Q, failed-frame
 cleanup, graph/private retirement and unchanged Source verification/serialization.
-`resource_usage` records their actual work/calls and absolute physical peak once.
+`resource_usage` records their actual work/calls and absolute backing peak once.
 The terminal record still uses the predeclared `operation_ordinal=len(schedule)`;
 `group_start` identifies the original interval and `group_count` the full planned
 roster. Live and fresh verification require `len(records)==group_start`, preserve
@@ -1218,7 +1253,7 @@ starts with `xlog.learning-phase.delivery.v1` followed by a zero byte and six
 U64-little-endian-length-prefixed fields in order: unchanged full checkpoint,
 full history including actual delivery, original canonical delivery entry,
 canonical final published-parent identity, verified fresh authority snapshot,
-and three U64-little-endian resource values `(work, physical_peak, model_calls)`.
+and three U64-little-endian resource values `(work, backing_peak, model_calls)`.
 The acceptance's prefix and checkpoint are not rewritten to include this later
 observation. Each record binds its phase ID, issuer,
 ordinal, predecessor digest, cumulative serialized bytes and immutable limits.
@@ -1239,7 +1274,7 @@ The store's `resolve_phase_record` callback is unchanged.
 Once exact checkpoint readback is known, resolution proceeds directly to the
 original delivery report and any original signed delivery write. It does not
 re-resolve or undo checkpoint publication, repeat source serializers or cleanup,
-resubmit a signed write, or repeat physical finish or release. A signed delivery
+resubmit a signed write, or repeat backing finish or release. A signed delivery
 record is not a fresh-process recovery loader or proof of full GPU execution;
 terminal refusal and whole-path runtime qualification
 remain separate required capabilities.
@@ -1311,7 +1346,7 @@ uses `record_model_work`, `record_model_device_work` and
 exception. Registration begins once; overflow cannot grow the buffer or restart
 the operation. Drop temporary tensor aliases before returning the serializer.
 `end()` only closes registration: the enclosing native operation joins actual
-consumers and completes its report before ending the original physical interval.
+consumers and completes its report before ending the original backing interval.
 An explicitly attached, completed CPU/meta-only recorder may have no model events;
 an absent recorder, overflow or unknown completion is not a zero result.
 This owner grants no evaluation, backward-tape or content-admission rights.
@@ -1327,7 +1362,7 @@ also prevent state-changing work and release.
 The connected Python path still issues this scope only for the first source
 preparation serializer. Mandatory later source/candidate serializers require
 their own original checkpoint or delivery operation, registrar and continuous
-whole-operation physical interval; Session-scoped lookup alone does not implement
+whole-operation backing interval; Session-scoped lookup alone does not implement
 that executor or attest its expense.
 
 The same original owner also retains one private native tally. Actually reached
@@ -1346,7 +1381,7 @@ These are new cold occurrences,
 not charges copied from an old resident receipt. The original completion report
 joins them with model work and checks their sum against the unchanged operation
 budget; overflow or unknown completion retains the original allocation without
-resetting or replaying commands. Other cold producers and the physical peak are
+resetting or replaying commands. Other cold producers and the backing peak are
 still required before this can be the full operation expense.
 
 The returned native-issued `SemanticLearningPhaseTransition` retains both

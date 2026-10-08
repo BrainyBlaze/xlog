@@ -14731,6 +14731,29 @@ fn validate_prepared_completion(
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticTransitionSession {
+    /// Cold identity of the actual original allocation/execution context.
+    /// UUID v2 distinguishes a partition from its physical parent device.
+    pub fn resource_device_identity(&self) -> Result<([u8; 16], u64), SemanticTransitionError> {
+        let _uncaptured = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("resource device identity", error))?;
+        self.stream
+            .context()
+            .bind_to_thread()
+            .map_err(|error| runtime_error("resource device context binding", error))?;
+        let mut uuid = cudarc::driver::sys::CUuuid { bytes: [0; 16] };
+        // SAFETY: this session retains its actual context/device; the cold
+        // query does not construct another context or execute captured work.
+        unsafe {
+            cudarc::driver::sys::cuDeviceGetUuid_v2(&mut uuid, self.stream.context().cu_device())
+                .result()
+                .map_err(|error| runtime_error("resource device UUID", error))?;
+        }
+        Ok((
+            uuid.bytes.map(|byte| byte as u8),
+            self.stream.context().cu_ctx() as u64,
+        ))
+    }
+
     /// Submit this Session's complete graph once with the freshly validated
     /// canonical authority snapshot. The metadata upload precedes graph launch.
     pub fn launch_prepared_segment(

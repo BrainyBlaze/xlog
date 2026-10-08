@@ -10,7 +10,11 @@ mod phase_record;
 use phase_record::{PhaseRecords, RecordKind, RecordLimits};
 pub(super) mod cold_restore;
 mod resource_observer;
+pub(super) use resource_observer::require_restore_memory_admission;
 use resource_observer::ResourceObserver;
+pub(crate) use resource_observer::{
+    register_process_resource_observer, resource_observer_device_certificate,
+};
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod cold_model_work;
 #[cfg(feature = "semantic-policy")]
@@ -317,7 +321,7 @@ impl TerminalCleanupTarget {
         }
         if budget[1] == 0 {
             return Err(invalid(
-                "terminal cleanup requires a nonzero absolute physical memory limit",
+                "terminal cleanup requires a nonzero absolute backing memory limit",
             ));
         }
         Ok(Self { ordinal, budget })
@@ -389,7 +393,9 @@ fn feedback_materials<'py>(value: &Bound<'py, PyAny>) -> PyResult<[Bound<'py, Py
 impl PreparationInputs {
     fn require_program(&self, py: Python<'_>, scientific_owner: &Py<PyAny>) -> PyResult<()> {
         let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
-        require_model_bytes(&original_program, &self.frozen_program)
+        require_model_bytes(&original_program, &self.frozen_program)?;
+        self.resource_observer
+            .require_memory_admission(&self.frozen_program)
     }
 
     fn require_execution_inputs(
@@ -425,7 +431,7 @@ struct SourcePreparation {
     entries: Py<PyTuple>,
     entry_material: Vec<u8>,
     instruction: Vec<u8>,
-    physical_memory_limit: u64,
+    memory_byte_ceiling: u64,
     work_limit: u64,
     model_calls_limit: u64,
     #[cfg(feature = "semantic-policy")]
@@ -436,7 +442,7 @@ struct SourcePreparation {
     decoded_verified: bool,
     model_result: Option<Py<PyAny>>,
     resource_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     verified: bool,
     record_entered: bool,
     recorded: bool,
@@ -797,14 +803,14 @@ impl PySemanticLearningPhaseTransition {
             .collect::<PyResult<Vec<_>>>()?;
         if limits[1] == 0 {
             return Err(invalid(
-                "source preparation requires its original positive physical memory limit",
+                "source preparation requires its original positive backing memory limit",
             ));
         }
         *self.source_preparation()? = Some(SourcePreparation {
             entries: entries.clone().unbind(),
             entry_material: material,
             instruction: instruction_material,
-            physical_memory_limit: limits[1],
+            memory_byte_ceiling: limits[1],
             work_limit: limits[0],
             model_calls_limit: limits[2],
             #[cfg(feature = "semantic-policy")]
@@ -815,7 +821,7 @@ impl PySemanticLearningPhaseTransition {
             decoded_verified: false,
             model_result: None,
             resource_finish_entered: false,
-            physical_peak: None,
+            backing_peak: None,
             verified: false,
             record_entered: false,
             recorded: false,
@@ -1085,22 +1091,22 @@ impl PySemanticLearningPhaseTransition {
         if finish_needed {
             inputs.resource_observer.finish(py)?;
         }
-        // Missing physical producer/baseline/coverage/allocator completion is
+        // Missing backing producer/baseline/coverage/allocator completion is
         // not zero or a reservation. Keep the completed source result and all
         // original owners; explicit continuation only reads this same interval.
         let saved_peak = self
             .source_preparation()?
             .as_ref()
             .expect("retained original source group")
-            .physical_peak;
+            .backing_peak;
         let peak = match saved_peak {
             Some(peak) => peak,
             None => {
-                let peak = inputs.resource_observer.physical_peak(py)?;
+                let peak = inputs.resource_observer.backing_peak(py)?;
                 self.source_preparation()?
                     .as_mut()
                     .expect("retained original source group")
-                    .physical_peak = Some(peak);
+                    .backing_peak = Some(peak);
                 peak
             }
         };
@@ -1125,9 +1131,9 @@ impl PySemanticLearningPhaseTransition {
             .source_preparation()?
             .as_ref()
             .expect("retained original source group")
-            .physical_memory_limit;
+            .memory_byte_ceiling;
         if peak > memory_limit {
-            return Err(invalid("source preparation exceeded its original physical memory budget; retain the actual result without admitting private work"));
+            return Err(invalid("source preparation exceeded its original backing memory budget; retain the actual result without admitting private work"));
         }
         #[cfg(feature = "semantic-policy")]
         {
@@ -1242,6 +1248,22 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    #[cfg(feature = "semantic-policy")]
+    fn require_scientific_history(&self, py: Python<'_>) -> PyResult<()> {
+        let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+        if !history.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "native scientific history requires original exact bytes",
+            ));
+        }
+        self.preparation_inputs
+            .resource_observer
+            .require_observed_history(
+                &self.preparation_inputs.frozen_program,
+                history.cast::<PyBytes>()?.as_bytes(),
+            )
+    }
+
     fn finish_scientific_acceptance(&self, py: Python<'_>) -> PyResult<()> {
         if self.acceptance()?.is_none() {
             self.records()?.require_preparation_admission()?;
@@ -1281,6 +1303,9 @@ impl PySemanticLearningPhaseTransition {
                 ));
             }
             let history: Arc<[u8]> = Arc::from(history.cast::<PyBytes>()?.as_bytes());
+            self.preparation_inputs
+                .resource_observer
+                .require_observed_history(&self.preparation_inputs.frozen_program, &history)?;
             let latest = self.refresh_snapshot.bind(py).call0()?;
             let snapshot =
                 AuthoritySnapshot::parse(&ColdValue::read(&latest, &mut (16 * 1024 * 1024), 0)?)?;
@@ -1901,7 +1926,7 @@ impl PySemanticLearningPhaseTransition {
             self.finish_delivery_expense(py)?;
             // External history/store/observer calls do not extend expired
             // authority. This cold refresh cannot read the retired source or
-            // add native/model work after the original physical interval.
+            // add native/model work after the original backing interval.
             self.refresh_delivery_authority(py)?;
             self.install_delivered_checkpoint_custody(py)?;
         }
@@ -2455,7 +2480,14 @@ impl PySemanticTransitionController {
                 "phase preparation requires its original source model, instruction execution and cancelled-frame release owners",
             ));
         }
-        let resource_observer = ResourceObserver::capture(resource_observer.cast::<PyCapsule>()?)?;
+        let device_identity = source
+            .owner()?
+            .resource_device_identity()
+            .map_err(xlog_err)?;
+        let resource_observer =
+            ResourceObserver::capture(resource_observer.cast::<PyCapsule>()?, device_identity)?;
+        resource_observer
+            .require_memory_admission(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?;
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         task.authority.check_snapshot(&saved_snapshot)?;

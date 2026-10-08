@@ -30,7 +30,7 @@ pub(super) struct ControlRetirement {
     owners_dropped: bool,
     report: Option<SemanticColdModelWorkResult>,
     observer_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     record_entered: bool,
     recorded: bool,
     released: bool,
@@ -169,7 +169,7 @@ impl PySemanticLearningPhaseTransition {
                 owners_dropped: false,
                 report: None,
                 observer_finish_entered: false,
-                physical_peak: None,
+                backing_peak: None,
                 record_entered: false,
                 recorded: false,
                 released: false,
@@ -315,18 +315,15 @@ impl PySemanticLearningPhaseTransition {
             .control_retirement()?
             .as_ref()
             .expect("original control retirement")
-            .physical_peak;
+            .backing_peak;
         let peak = if let Some(peak) = peak {
             peak
         } else {
-            let peak = self
-                .preparation_inputs
-                .resource_observer
-                .physical_peak(py)?;
+            let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
             self.control_retirement()?
                 .as_mut()
                 .expect("original control retirement")
-                .physical_peak = Some(peak);
+                .backing_peak = Some(peak);
             peak
         };
         let work = report
@@ -353,6 +350,9 @@ impl PySemanticLearningPhaseTransition {
         arguments.set_item("operation_ordinal", ordinal)?;
         arguments.set_item("retired_parent", parent.bind(py))?;
         arguments.set_item("resource_usage", (work, peak, report.model_calls))?;
+        self.preparation_inputs
+            .resource_observer
+            .observation_arguments(py, &arguments)?;
         let callback = self
             .scientific_owner
             .bind(py)
@@ -365,6 +365,7 @@ impl PySemanticLearningPhaseTransition {
                 work > budget[0] || peak > budget[1] || report.model_calls > budget[2];
         }
         callback.call((), Some(&arguments))?;
+        self.require_scientific_history(py)?;
         self.control_retirement()?
             .as_mut()
             .expect("original control retirement")

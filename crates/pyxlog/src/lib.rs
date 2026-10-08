@@ -1334,6 +1334,14 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dlpack_is_cuda, m)?)?;
     m.add_function(wrap_pyfunction!(intern_symbols, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_symbols, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        semantic_transition::learning_phase::register_process_resource_observer,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        semantic_transition::learning_phase::resource_observer_device_certificate,
+        m
+    )?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]

@@ -1741,6 +1741,12 @@ impl PySemanticTransitionSession {
             .map(|closure| closure.restored_expense(raw))
             .transpose()?
             .flatten();
+        if let Some(closure) = &closure {
+            // Fresh recovery preserves the old signed certificate/history.
+            // Admit this actual process/device against every unchanged B before
+            // provider allocation, model restoration or checkpoint upload.
+            learning_phase::require_restore_memory_admission(py, device_ordinal, &closure.program)?;
+        }
         let restored = Self::restore_checkpoint_impl(
             py,
             checkpoint,

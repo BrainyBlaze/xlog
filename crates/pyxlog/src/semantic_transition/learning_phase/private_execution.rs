@@ -51,7 +51,7 @@ pub(super) struct PrivateExecutionGroup {
     callback_result: Option<Py<PyAny>>,
     callback_error: Option<PyErr>,
     observer_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     record_entered: Option<usize>,
     records_completed: usize,
     records_released: bool,
@@ -846,7 +846,7 @@ impl PySemanticLearningPhaseTransition {
             || group.record_entered.is_some()
             || group.records_completed != group.kinds.len()
             || !group.records_released
-            || group.physical_peak.is_none()
+            || group.backing_peak.is_none()
         {
             return Err(invalid(
                 "terminal cleanup requires the original complete group and known physical release",
@@ -2184,7 +2184,7 @@ impl PySemanticLearningPhaseTransition {
                 callback_result: None,
                 callback_error: None,
                 observer_finish_entered: false,
-                physical_peak: None,
+                backing_peak: None,
                 record_entered: None,
                 records_completed: 0,
                 records_released: false,
@@ -2640,15 +2640,12 @@ impl PySemanticLearningPhaseTransition {
         let peaks = self
             .preparation_inputs
             .resource_observer
-            .step_physical_peaks(py, count)?;
-        let peak = self
-            .preparation_inputs
-            .resource_observer
-            .physical_peak(py)?;
+            .step_backing_peaks(py, count)?;
+        let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
         self.private_group()?
             .as_mut()
             .expect("retained original group")
-            .physical_peak = Some(peak);
+            .backing_peak = Some(peak);
         let add = |a: u64, b: u64| {
             a.checked_add(b)
                 .ok_or_else(|| invalid("private actual resource sum overflowed"))
@@ -2749,12 +2746,16 @@ impl PySemanticLearningPhaseTransition {
             };
             arguments.set_item("feedback_intervention_bytes", intervention)?;
             arguments.set_item("resource_usage", (work, peaks[index], calls))?;
+            self.preparation_inputs
+                .resource_observer
+                .observation_arguments(py, &arguments)?;
             let callback = self.scientific_owner.bind(py).getattr("record_step")?;
             self.private_group()?
                 .as_mut()
                 .expect("retained original group")
                 .record_entered = Some(index);
             callback.call((), Some(&arguments))?;
+            self.require_scientific_history(py)?;
             let mut retained = self.private_group()?;
             let group = retained.as_mut().expect("retained original group");
             group.records_completed += 1;

@@ -49,7 +49,7 @@ pub(super) struct IntermediateRestore {
     closed: bool,
     report: Option<SemanticColdModelWorkResult>,
     observer_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     record_entered: bool,
     recorded: bool,
     released: bool,
@@ -131,7 +131,7 @@ impl PySemanticLearningPhaseTransition {
         ];
         if budget[1] == 0 {
             return Err(invalid(
-                "intermediate restore requires its original physical memory limit",
+                "intermediate restore requires its original backing memory limit",
             ));
         }
         let source_identity = owners.parent.borrow(py).identity(py)?;
@@ -183,7 +183,7 @@ impl PySemanticLearningPhaseTransition {
             closed: false,
             report: None,
             observer_finish_entered: false,
-            physical_peak: None,
+            backing_peak: None,
             record_entered: false,
             recorded: false,
             released: false,
@@ -1032,18 +1032,15 @@ impl PySemanticLearningPhaseTransition {
             .intermediate()?
             .as_ref()
             .expect("original intermediate restore")
-            .physical_peak;
+            .backing_peak;
         let peak = if let Some(peak) = peak {
             peak
         } else {
-            let peak = self
-                .preparation_inputs
-                .resource_observer
-                .physical_peak(py)?;
+            let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
             self.intermediate()?
                 .as_mut()
                 .expect("original intermediate restore")
-                .physical_peak = Some(peak);
+                .backing_peak = Some(peak);
             peak
         };
         let work = report
@@ -1101,6 +1098,9 @@ impl PySemanticLearningPhaseTransition {
             arguments.set_item("source_checkpoint", checkpoint.bind(py))?;
             arguments.set_item("restored_checkpoint", restored_checkpoint.bind(py))?;
             arguments.set_item("resource_usage", (work, peak, report.model_calls))?;
+            self.preparation_inputs
+                .resource_observer
+                .observation_arguments(py, &arguments)?;
             let callback = self.scientific_owner.bind(py).getattr("record_restore")?;
             {
                 let mut retained = self.intermediate()?;
@@ -1110,6 +1110,7 @@ impl PySemanticLearningPhaseTransition {
                     work > budget[0] || peak > budget[1] || report.model_calls > budget[2];
             }
             callback.call((), Some(&arguments))?;
+            self.require_scientific_history(py)?;
             self.intermediate()?
                 .as_mut()
                 .expect("original intermediate restore")

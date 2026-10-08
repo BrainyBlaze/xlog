@@ -26,7 +26,7 @@ pub(super) struct PrivateCheckpoint {
     closed: bool,
     report: Option<SemanticColdModelWorkResult>,
     observer_finish_entered: bool,
-    physical_peak: Option<u64>,
+    backing_peak: Option<u64>,
     record_entered: bool,
     recorded: bool,
     released: bool,
@@ -394,7 +394,7 @@ impl PySemanticLearningPhaseTransition {
                 closed: false,
                 report: None,
                 observer_finish_entered: false,
-                physical_peak: None,
+                backing_peak: None,
                 record_entered: false,
                 recorded: false,
                 released: false,
@@ -636,18 +636,15 @@ impl PySemanticLearningPhaseTransition {
             .private_checkpoints()?
             .last()
             .expect("original checkpoint")
-            .physical_peak;
+            .backing_peak;
         let peak = match cached_peak {
             Some(peak) => peak,
             None => {
-                let peak = self
-                    .preparation_inputs
-                    .resource_observer
-                    .physical_peak(py)?;
+                let peak = self.preparation_inputs.resource_observer.backing_peak(py)?;
                 self.private_checkpoints()?
                     .last_mut()
                     .expect("original checkpoint")
-                    .physical_peak = Some(peak);
+                    .backing_peak = Some(peak);
                 peak
             }
         };
@@ -687,6 +684,9 @@ impl PySemanticLearningPhaseTransition {
         )?;
         arguments.set_item("full_checkpoint", saved.bind(py))?;
         arguments.set_item("resource_usage", (work, peak, report.model_calls))?;
+        self.preparation_inputs
+            .resource_observer
+            .observation_arguments(py, &arguments)?;
         let callback = self
             .scientific_owner
             .bind(py)
@@ -699,6 +699,7 @@ impl PySemanticLearningPhaseTransition {
             current.record_entered = true;
         }
         callback.call((), Some(&arguments))?;
+        self.require_scientific_history(py)?;
         self.private_checkpoints()?
             .last_mut()
             .expect("original checkpoint")
