@@ -21989,6 +21989,13 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .record(&mut recorder);
+        if let Some(token) = build.parent_reader {
+            let reader = self
+                .readers
+                .get(&token)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            recorder.read_write(&reader.device);
+        }
         for token in &build.tokens {
             let owner = self
                 .steps
