@@ -192,7 +192,7 @@ pub(crate) fn register_process_resource_observer(capsule: &Bound<'_, PyCapsule>)
     xlog_cuda::memory::install_gpu_backing_observer(
         Arc::clone(&observer) as Arc<dyn xlog_cuda::memory::GpuBackingObserver>
     )
-    .map_err(|error| invalid(error.to_string()))?;
+    .map_err(|error| invalid(&error.to_string()))?;
     *retained = Some(observer);
     Ok(())
 }
@@ -359,7 +359,7 @@ pub(crate) fn resource_observer_device_certificate(
         .unbind())
 }
 
-pub(super) fn require_restore_memory_admission(
+pub(in crate::semantic_transition) fn require_restore_memory_admission(
     py: Python<'_>,
     device_ordinal: usize,
     program: &[u8],
