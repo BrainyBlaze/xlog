@@ -33,7 +33,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     mem::size_of,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use cudarc::driver::sys;
@@ -9773,6 +9776,8 @@ impl SemanticCompletedExecutionObservation {
 pub struct SemanticPreparedSegmentCapture {
     builder: crate::cuda_graph::ConditionalCudaGraphSequenceBuilder,
     scope: Arc<()>,
+    cancelled: Arc<AtomicBool>,
+    construction: Arc<Mutex<()>>,
 }
 
 impl SemanticPreparedSegmentCapture {
@@ -9789,10 +9794,33 @@ impl SemanticPreparedSegmentCapture {
             &crate::cuda_graph::ConditionalCudaGraphBody,
         ) -> Result<(), crate::cuda_graph::CudaConditionalGraphUnavailable>,
     {
+        let construction = Arc::clone(&self.construction);
+        let _construction = construction.try_lock().map_err(|error| {
+            crate::cuda_graph::CudaConditionalGraphUnavailable::BodyPopulationFailed {
+                detail: format!("original prepared construction is unavailable: {error}"),
+            }
+        })?;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(
+                crate::cuda_graph::CudaConditionalGraphUnavailable::BodyPopulationFailed {
+                    detail: "the original prepared construction was cancelled before submission"
+                        .to_owned(),
+                },
+            );
+        }
         self.builder.add_conditional_if(stream, preflight, body)
     }
 
     pub fn instantiate(self) -> Result<SemanticPreparedExecutable, SemanticTransitionError> {
+        let construction = Arc::clone(&self.construction);
+        let _construction = construction
+            .try_lock()
+            .map_err(|error| runtime_error("original prepared construction exclusion", error))?;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(publication_input_error(
+                "cancelled original construction cannot instantiate a graph",
+            ));
+        }
         let graph = self
             .builder
             .instantiate()
@@ -9811,6 +9839,21 @@ pub struct SemanticPreparedExecutable {
     graph: CapturedCudaGraph,
 }
 
+/// Native disposition of one original whole roster after capture has ended and
+/// its actual preparation consumers have joined, before any submission attempt.
+/// It is not a completed/skipped execution observation or permission to retry.
+#[derive(Clone)]
+pub struct SemanticPreparedSegmentNonSubmission {
+    steps: Vec<SemanticPreparedStep>,
+}
+
+impl SemanticPreparedSegmentNonSubmission {
+    pub fn matches(&self, steps: &[SemanticPreparedStep]) -> bool {
+        self.steps.len() == steps.len()
+            && self.steps.iter().zip(steps).all(|(a, b)| a.same_handle(b))
+    }
+}
+
 struct PreparedSegmentState {
     issuer: Arc<()>,
     scope: Arc<()>,
@@ -9824,6 +9867,8 @@ struct PreparedSegmentState {
     capturing: bool,
     submitted: bool,
     completed: bool,
+    cancelled: Arc<AtomicBool>,
+    construction: Arc<Mutex<()>>,
 }
 
 impl PreparedSegmentState {
@@ -9862,6 +9907,8 @@ impl PreparedSegmentState {
             capturing: false,
             submitted: false,
             completed: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            construction: Arc::new(Mutex::new(())),
         })
     }
 
@@ -9886,6 +9933,7 @@ impl PreparedSegmentState {
     ) -> Result<(), SemanticTransitionError> {
         self.check_retained(step, issuer)?;
         if self.finished
+            || self.cancelled.load(Ordering::Acquire)
             || (recording && (!self.active || self.tokens.get(self.next) != Some(&step.token)))
         {
             return Err(publication_input_error(
@@ -9953,7 +10001,11 @@ impl PreparedSegmentState {
     }
 
     fn finish(&mut self) -> Result<(), SemanticTransitionError> {
-        if self.finished || self.active || self.next != self.tokens.len() {
+        if self.finished
+            || self.cancelled.load(Ordering::Acquire)
+            || self.active
+            || self.next != self.tokens.len()
+        {
             return Err(publication_input_error(
                 "prepared segment has unrecorded or unfinished steps",
             ));
@@ -9969,6 +10021,7 @@ impl PreparedSegmentState {
             || self.next != self.tokens.len()
             || self.submitted
             || self.completed
+            || self.cancelled.load(Ordering::Acquire)
         {
             return Err(publication_input_error(
                 "prepared segment submission requires one complete unused construction",
@@ -9976,6 +10029,39 @@ impl PreparedSegmentState {
         }
         self.submitted = true;
         Ok(())
+    }
+
+    fn require_cancellable(
+        &self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.submitted
+            || self.completed
+            || self.cancelled.load(Ordering::Acquire)
+            || steps.len() != self.tokens.len()
+            || steps.iter().zip(&self.tokens).any(|(step, token)| {
+                step.token != *token || self.check_retained(step, &self.issuer).is_err()
+            })
+        {
+            return Err(publication_input_error(
+                "non-submission requires the complete original unused prepared roster",
+            ));
+        }
+        Ok(())
+    }
+
+    // The Session closes construction under known capture exclusion before any
+    // join attempt. It may return the retained proof only after all joins finish;
+    // unknown completion keeps construction closed without issuing that proof.
+    fn cancel(
+        &mut self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<SemanticPreparedSegmentNonSubmission, SemanticTransitionError> {
+        self.require_cancellable(steps)?;
+        self.cancelled.store(true, Ordering::Release);
+        Ok(SemanticPreparedSegmentNonSubmission {
+            steps: steps.to_vec(),
+        })
     }
 }
 
@@ -14634,6 +14720,7 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::NotCaptured)?;
         if !build.finished
             || build.submitted
+            || build.cancelled.load(Ordering::Acquire)
             || self.captured.is_none()
             || authority_decisions.is_empty()
         {
@@ -14712,6 +14799,50 @@ impl SemanticTransitionSession {
         self.prepared_segment
             .as_ref()
             .is_some_and(|build| build.completed)
+    }
+
+    /// Close this exact construction against any later capture or submission.
+    /// A false pending flag is insufficient: submit is marked before upload or
+    /// graph launch, and an unknown capture reservation cannot admit this join.
+    /// No reader decrement, result row, allocation release or rights is issued.
+    pub fn cancel_prepared_segment_before_submission(
+        &mut self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<SemanticPreparedSegmentNonSubmission, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?
+            .require_cancellable(steps)?;
+        let construction = Arc::clone(
+            &self
+                .prepared_segment
+                .as_ref()
+                .expect("checked original construction")
+                .construction,
+        );
+        // Never wait while holding the Session: a capture callback may need it.
+        // Exclude the entire builder call, not just its BeginCapture boundary.
+        let _construction = construction.try_lock().map_err(|error| {
+            runtime_error("unsubmitted preparation construction exclusion", error)
+        })?;
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("unsubmitted preparation capture exclusion", error))?;
+        let proof = self
+            .prepared_segment
+            .as_mut()
+            .expect("retained original unsubmitted construction")
+            .cancel(steps)?;
+        for step in steps {
+            self.checked_prepared_step(step, false)?;
+            let streams = self.steps[&step.token]
+                .consumer_streams
+                .iter()
+                .copied()
+                .collect::<Vec<_>>();
+            self.complete_step_consumers_by_token(step.token, &streams)?;
+        }
+        Ok(proof)
     }
 
     pub fn complete_prepared_segment(
@@ -19473,7 +19604,7 @@ impl SemanticTransitionSession {
             .prepared_segment
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        if build.capturing || build.finished {
+        if build.capturing || build.finished || build.cancelled.load(Ordering::Acquire) {
             return Err(publication_input_error(
                 "prepared segment construction already began",
             ));
@@ -19505,13 +19636,20 @@ impl SemanticTransitionSession {
         )
         .map_err(|error| runtime_error("bounded segment capture", error))?;
         let scope = Arc::clone(&build.scope);
+        let cancelled = Arc::clone(&build.cancelled);
+        let construction = Arc::clone(&build.construction);
         self.prepared_segment
             .as_mut()
             .expect("checked build")
             .capturing = true;
         self.graph.enter_transition();
         Ok((
-            SemanticPreparedSegmentCapture { builder, scope },
+            SemanticPreparedSegmentCapture {
+                builder,
+                scope,
+                cancelled,
+                construction,
+            },
             Arc::clone(&self.stream),
         ))
     }
@@ -21417,7 +21555,8 @@ impl SemanticTransitionSession {
             .prepared_segment
             .as_mut()
             .ok_or(SemanticTransitionError::NotBound)?;
-        if self.captured.is_some()
+        if build.cancelled.load(Ordering::Acquire)
+            || self.captured.is_some()
             || executable
                 .as_ref()
                 .is_none_or(|executable| !Arc::ptr_eq(&executable.scope, &build.scope))

@@ -33,6 +33,7 @@ pub(super) struct PrivateExecutionGroup {
     build_entered: bool,
     build_scope: Option<Arc<()>>,
     native_steps: Vec<SemanticPreparedStep>,
+    non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
     selected_parent: Option<Py<PySemanticPublishedParent>>,
     native_retired: bool,
     retirement_work: Option<Py<PySemanticColdModelWork>>,
@@ -744,6 +745,55 @@ impl PySemanticLearningPhaseTransition {
             .map(|_| ())
     }
 
+    /// Consume only the native original whole-roster disposition, while its
+    /// preparation interval is still open. Retain it before any external
+    /// observer handoff; unknown completion cannot issue another cancellation.
+    pub(in crate::semantic_transition) fn retain_private_non_submission(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task: &PySemanticTransitionTaskUse,
+        scope: &Arc<()>,
+        proof: xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<()> {
+        self.require_private_group_owner(py, session, task)?;
+        let (steps, ordinal, detached) = {
+            let mut retained = self.private_group()?;
+            let group = retained.as_mut().expect("original private group");
+            if group.non_submission.is_some()
+                || !proof.matches(&group.native_steps)
+                || group
+                    .build_scope
+                    .as_ref()
+                    .is_none_or(|original| !Arc::ptr_eq(original, scope))
+                || group.observer_finish_entered
+                || group.selected_parent.is_some()
+                || group.native_retired
+            {
+                return Err(invalid(
+                    "private cancellation changed its original unsubmitted construction",
+                ));
+            }
+            group.non_submission = Some(proof.clone());
+            (
+                group.native_steps.clone(),
+                group.ordinal,
+                group.preparation_detached,
+            )
+        };
+        if detached {
+            self.private_capture_boundary(py, session, task, true)?;
+        }
+        self.finish_private_group_preparation(py, session, task, scope)?;
+        let stream = session
+            .owner()?
+            .prepared_stream(&steps[0])
+            .map_err(xlog_err)?;
+        self.preparation_inputs
+            .resource_observer
+            .cancel_step_captures(py, ordinal, &steps, stream.cu_stream() as u64, &proof)
+    }
+
     pub(in crate::semantic_transition) fn begin_private_segment_retirement(
         &self,
         py: Python<'_>,
@@ -1154,6 +1204,7 @@ impl PySemanticLearningPhaseTransition {
                 build_entered: false,
                 build_scope: None,
                 native_steps: Vec::new(),
+                non_submission: None,
                 selected_parent: None,
                 native_retired: false,
                 adoption_work: None,
