@@ -109,8 +109,16 @@ impl PrivateReplayChildCustody {
         let group = retained
             .as_ref()
             .ok_or_else(|| invalid("private replay lost its original group"))?;
+        // Completed members finish only after their target step has retired.
+        // Keep their original callback access until that same retirement work
+        // closes; cancelled members still finish before target storage release.
+        let completed_final_use = retirement
+            && group.native_retired
+            && group.non_submission.is_none()
+            && group.retirement_report.is_none()
+            && phase.private_execution_active.load(Ordering::Acquire);
         if group.ordinal != self.group_ordinal
-            || group.native_retired
+            || (group.native_retired && !completed_final_use)
             || !group
                 .replay_children
                 .iter()
@@ -1778,7 +1786,6 @@ impl PySemanticLearningPhaseTransition {
         task: &PySemanticTransitionTaskUse,
     ) -> PyResult<()> {
         self.require_private_group_owner(py, session, task)?;
-        self.release_replay_children(py)?;
         let mut retained = self.private_group()?;
         let group = retained.as_mut().expect("retained original group");
         if group.selected_parent.is_none() || !group.retirement_entered || group.native_retired {
@@ -1820,6 +1827,10 @@ impl PySemanticLearningPhaseTransition {
                     .ok_or_else(|| invalid("private adoption position overflowed"))?,
             )
         };
+        // The original Runtime finishes completed source members after
+        // retire_segment returns. Release their Sessions only now, before
+        // reporting that same retirement interval or admitting adoption work.
+        self.release_replay_children(py)?;
         self.finish_private_cold_report(py, PrivateColdRole::Retirement)?;
         self.issue_private_cold_callback(py, session, PrivateColdRole::Adoption, &parent, ordinal)
     }

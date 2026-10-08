@@ -136,7 +136,9 @@ be removed. The producer then retires its remaining Runtime aliases before
 returning from its original `finish_segment()`. Native joins/releases the retained
 child Sessions in that same cold region and shared accounting owner before target
 storage retirement. Normal completed segments still use the ordinary member
-final-use path. Unknown child import, final use or graph destruction retains its
+final-use path after target-step retirement; their child Sessions release before
+the same retirement report closes and before model adoption begins.
+Unknown child import, final use or graph destruction retains its
 own original custody; target non-submission does not prove that child's outcome.
 
 The semantic controller's `task_observation_roots` and `import_task` methods
