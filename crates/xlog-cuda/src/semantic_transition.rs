@@ -9009,7 +9009,7 @@ impl PreparedStepInputs {
             &storage
                 .allocations
                 .iter()
-                .map(TrackedCudaSlice::len)
+                .map(|allocation| allocation.len())
                 .collect::<Vec<_>>(),
         )
     }
@@ -15962,7 +15962,7 @@ impl SemanticTransitionSession {
         let publication_allocation_bytes = storage
             .allocations
             .iter()
-            .map(TrackedCudaSlice::len)
+            .map(|allocation| allocation.len())
             .collect::<Vec<_>>();
         let model_content_bytes = storage
             .bank_templates
@@ -19962,7 +19962,7 @@ impl SemanticTransitionSession {
             &storage
                 .allocations
                 .iter()
-                .map(TrackedCudaSlice::len)
+                .map(|allocation| allocation.len())
                 .collect::<Vec<_>>(),
         )?;
         let values = original
@@ -24777,7 +24777,7 @@ impl SemanticTransitionSession {
                 &storage
                     .allocations
                     .iter()
-                    .map(TrackedCudaSlice::len)
+                    .map(|allocation| allocation.len())
                     .collect::<Vec<_>>(),
             )?)
         } else {
