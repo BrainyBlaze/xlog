@@ -3429,6 +3429,23 @@ extern "C" __global__ void semantic_publication_replace_model_storage(uint64_t c
             if(publication_spans_overlap(expanded[i].pointer,expanded[i].bytes,
                     expanded[j].pointer,expanded[j].bytes)) { semantic_content_integrity_trap();return; }
     }
+    // The next transition validates both directories before applying its
+    // continuation. An unleased inactive bank cannot keep a numerical range
+    // pointing at a retired slot: ordinary continuations share the selected
+    // generation, while a model update installs its own prepared destination.
+    auto* inactive=reinterpret_cast<PublicationRange*>(control.directories[(control.word&1)^1]);
+    for(uint64_t i=0;i<selected.header.range_count;++i) {
+        if(ranges[i].role<18 || ranges[i].role>25)continue;
+        if(!publication_find_range(inactive,selected.header.range_count,ranges[i].role,ranges[i].index)) {
+            semantic_content_integrity_trap();return;
+        }
+    }
+    for(uint64_t i=0;i<selected.header.range_count;++i) {
+        if(ranges[i].role<18 || ranges[i].role>25)continue;
+        auto* destination=const_cast<PublicationRange*>(publication_find_range(
+            inactive,selected.header.range_count,ranges[i].role,ranges[i].index));
+        *destination=ranges[i];
+    }
     control.storage=expanded_ptr;control.storage_count=expanded_count;
 }
 
