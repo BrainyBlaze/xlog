@@ -856,7 +856,7 @@ static_assert(sizeof(ReplayCopyRow)==88 && sizeof(ReplayCopyDescriptor)==64,
 // Resolve its original directory references, never the most recently used bank.
 __device__ uint64_t replay_copy_source(const PublicationControl& control,
         const PublicationBank& bank,const ReplayCopyRow& row,uint64_t* count) {
-    if(row.model>1 || (row.capacity && !row.destination) || row.capacity<row.bytes[0] || row.capacity<row.bytes[1] ||
+    if(row.model>2 || (row.capacity && !row.destination) || row.capacity<row.bytes[0] || row.capacity<row.bytes[1] ||
        row.slots[0]>=control.storage_count || row.slots[1]>=control.storage_count)
         { semantic_content_integrity_trap();return 0; }
     const auto* directory=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
@@ -881,6 +881,12 @@ __device__ uint64_t replay_copy_source(const PublicationControl& control,
     if(row.offsets[selected]>allocation.bytes || row.bytes[selected]!=allocation.bytes-row.offsets[selected] ||
        (allocation.bytes && !allocation.pointer) || allocation.pointer>UINT64_MAX-allocation.bytes ||
        row.destination>UINT64_MAX-row.capacity) { semantic_content_integrity_trap();return 0; }
+    // Only native immutable replay owners create a borrowed model row. Both
+    // descriptor banks name the same full original allocation; it is retained
+    // and sealed, never copied onto itself or made writable by this snapshot.
+    if(row.model==2 && (!found || row.slots[0]!=row.slots[1] || row.offsets[0] || row.offsets[1] ||
+       row.bytes[0]!=row.bytes[1] || row.destination!=allocation.pointer || row.capacity!=allocation.bytes))
+        { semantic_content_integrity_trap();return 0; }
     *count=row.bytes[selected];
     return allocation.pointer+row.offsets[selected];
 }
@@ -899,6 +905,7 @@ __device__ uint64_t replay_copy_extent(const PublicationControl& control,
     const auto* rows=reinterpret_cast<const ReplayCopyRow*>(copy.rows);
     for(uint64_t i=0;i<copy.count;++i) {
         uint64_t count=0;replay_copy_source(control,bank,rows[i],&count);
+        if(rows[i].model==2)continue;
         if(count>UINT64_MAX-bytes) { semantic_content_integrity_trap();return 0; }
         bytes+=count;
     }
@@ -912,6 +919,7 @@ __device__ void replay_copy_snapshot(const PublicationControl& control,
     for(uint64_t row=0;row<copy.count;++row) {
         uint64_t count=0;
         const auto* source=reinterpret_cast<const uint8_t*>(replay_copy_source(control,bank,rows[row],&count));
+        if(rows[row].model==2)continue;
         auto* destination=reinterpret_cast<uint8_t*>(rows[row].destination);
         for(uint64_t i=first;i<count;i+=stride)destination[i]=source[i];
     }
