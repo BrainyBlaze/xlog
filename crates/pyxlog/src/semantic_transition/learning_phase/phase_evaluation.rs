@@ -994,10 +994,13 @@ impl PySemanticLearningPhaseTransition {
                 let session = session.borrow(py);
                 let original_parent = parent.borrow(py);
                 let issued = task.borrow(py);
-                let _reads = ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
                 let work = region.borrow(py);
                 let _scope = ColdCallbackScope::enter(py, &session, &work, region.clone_ref(py))?;
+                // Native graph/step retirement requires import exclusion and
+                // the original private task, not a checkpoint-read wrapper.
+                // Both operations remain inside the same measured cold region.
                 self.retire_cancelled_private_segment(py)?;
+                let _reads = ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
                 if !callback.bind(py).call1((model,))?.is_none() {
                     return Err(invalid(
                         "cancelled private retirement requires its original known None completion",
