@@ -27513,6 +27513,7 @@ impl SemanticTransitionSession {
             return result;
         }
         lease.active = false;
+        lease._model_owners.clear();
         self.readers.remove(&lease.token);
         if self
             .admitted_transition
