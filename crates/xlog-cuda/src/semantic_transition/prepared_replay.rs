@@ -720,6 +720,23 @@ impl SemanticTransitionSession {
             ));
         }
         let original = self.checked_prepared_step(step, false)?;
+        let inputs = original
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let original_generations = inputs
+            .model_slots
+            .iter()
+            .map(|slots| {
+                if slots[0] != slots[1] {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                let owner = inputs.storage.allocations[slots[0]]
+                    .model_generation_owner()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                Ok((slots[0] as u64, owner))
+            })
+            .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
         let prepared = original.prepared.as_ref().expect("checked original owner");
         let custody = prepared
             .replay_custody
@@ -865,6 +882,14 @@ impl SemanticTransitionSession {
                 decision: range(39)?.clone(),
             };
             provenance.validate(&material)?;
+            // Full native observation above authenticated the actual acquired
+            // origin and bytes. Historical import can now read-lease these
+            // genuine immutable owners, including on its first restoration.
+            replay_model_backing::register_original_model_generations(
+                &self.provider,
+                &material,
+                &original_generations,
+            )?;
             Ok(Some(SemanticCompletedReplayMaterials {
                 predecessor: identity(header),
                 successor: identity(next.header),

@@ -126,9 +126,13 @@ exception does not turn an unfinished child into an ordinary aborted Session or
 authorize a retry. Saved child aliases grant native access only in their
 original phase callback; public abort and observed-only close cannot discard them.
 
-Within that original private group, canonical historical restoration owns one
-immutable native allocation for each original numerical backing generation.
-Later readers share that actual allocation only when the original instance,
+Canonical completed-Proposal export registers its genuine immutable numerical
+allocation owners after authenticating the full acquired checkpoint. The
+historical importer read-leases these same owners even on its first import;
+its weak native lookup does not allocate or extend numerical lifetimes. If no
+live original owner survives, the unchanged complete cold restoration creates
+and seals one allocation for that original private group. Readers share an
+actual owner only when the original instance,
 storage coordinate, generation, complete seal, typed layouts and storage/view
 alias partition agree. Equal hashes or a shared CUDA provider do not establish
 sharing. Both child publication directories refer to this same read-only model
