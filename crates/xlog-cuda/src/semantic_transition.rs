@@ -26267,6 +26267,7 @@ impl SemanticTransitionSession {
         // SAFETY: exact final entry extent follows from the checked queue count.
         let entry_view = unsafe {
             owner
+                .slice()?
                 .view()
                 .slice(begin..begin + size_of::<IntentEntry>())
                 .cast::<IntentEntry>()
