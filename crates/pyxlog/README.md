@@ -68,3 +68,40 @@ same Python interpreter your downstream project uses:
 ```bash
 python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
 ```
+
+## Completed semantic observations
+
+With the `semantic-policy` build feature, the native prepared step's
+`execution_measurements` returns `SemanticCompletedExecutionObservation` after
+the original segment completes and its receipts and work are validated. Obtain
+it before step retirement and read `device_work`, `model_work`, `native_work`,
+and `model_calls` as read-only attributes, not dictionary keys.
+
+`SemanticModelEvaluation.finish` similarly returns
+`SemanticCompletedModelEvaluation`. Its read-only attributes are `status`,
+`loss_bits`, `model_work`, `model_calls`, `operation_count`, `work_bound`, and
+`retained_allocation_bytes`. A known numerical refusal still has a completed
+observation; an incomplete or unknown invocation raises and retains its original
+owner instead of returning measurement values.
+
+If a submitted evaluation's late cold completion remains resolvable,
+`SemanticModelEvaluationPending` requires retaining its original Runtime,
+objective and output owners. Call `evaluation.resolve_completion()` without
+arguments, never another forward or `finish`. The native owner retains the
+original consumer streams and report; resolution cannot resubmit its result
+kernel. Once issued, it returns the same immutable observation object. Fatal
+CUDA quarantine and known incomplete work remain retained without this signal.
+
+Neither completed type has a public constructor or retains the retired model,
+selected cohort, CUDA storage, or reader. Retain the original object when passing
+native execution custody; a cold dictionary projection is only a serialization,
+not a replacement for that object. These observations describe the original
+execution, not preparation expenditure or a whole-process physical memory peak.
+The step observation also retains its original native-reconciled transition,
+skip or refusal, selected bank, and parent/model binding as CPU-only evidence.
+Those facts remain tied to the original issuance after prepared storage retires;
+an editable cold record cannot replace them or keep retired model owners alive.
+The completed evaluation retains a CPU-only issuance token for its original
+cohort, not the cohort itself. The original `SemanticEvaluationCohort` must be
+retained separately and passed unchanged to subsequent paired evaluations;
+reselecting equal inputs or reconstructing their digest is not the same owner.

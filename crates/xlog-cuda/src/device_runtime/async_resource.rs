@@ -5,6 +5,8 @@
 //! Deallocation moves real owners into the existing pending queue. Cold reaping
 //! proves physical free before releasing accounting; pool IDs alone are not
 //! completion evidence. Device/sanitizer qualification remains a separate gate.
+//! Deferred reclamation does not mean an async CUDA pool request: each shared
+//! raw owner is a direct backing root in the original process collector.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -118,8 +120,8 @@ impl AsyncCudaResource {
         self.live_bytes.load(Ordering::Relaxed)
     }
 
-    /// Bytes queued for `cuMemFreeAsync` whose stream has not yet
-    /// been synchronized by us. Test/diagnostic accessor.
+    /// Bytes held by original owners awaiting use-fence completion and direct
+    /// physical free. Test/diagnostic accessor, not a backing high-water witness.
     pub fn pending_free_bytes(&self) -> usize {
         self.pending_bytes.load(Ordering::Relaxed)
     }

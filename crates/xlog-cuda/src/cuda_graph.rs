@@ -40,7 +40,10 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::{
     fmt, mem, ptr,
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, OnceLock,
+    },
 };
 
 use cudarc::driver::{result::DriverError, sys, CudaContext, CudaStream};
@@ -930,6 +933,7 @@ impl<'a> DriverStreamCapture<'a> {
                     raw: graph,
                     context: self.stream.context().clone(),
                     modules: self.lease.modules.clone(),
+                    retirement: CudaGraphRetirement::default(),
                 });
             }
             return Err(CudaConditionalGraphUnavailable::body_population(
@@ -949,6 +953,7 @@ impl Drop for DriverStreamCapture<'_> {
                         raw: graph,
                         context: self.stream.context().clone(),
                         modules: self.lease.modules.clone(),
+                        retirement: CudaGraphRetirement::default(),
                     });
                 }
                 _ => {}
@@ -1082,10 +1087,31 @@ fn conditional_driver_call(
     }
 }
 
+/// Native destruction acknowledgement shared across builder and executable.
+/// Dropping a Rust owner or queuing retirement never sets this acknowledgement.
+#[derive(Clone, Default)]
+pub(crate) struct CudaGraphRetirement(Arc<AtomicBool>);
+
+impl CudaGraphRetirement {
+    pub(crate) fn is_completed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn require_completed(&self) -> Result<()> {
+        if !self.is_completed() {
+            return Err(XlogError::Kernel(
+                "original CUDA graph destruction is not known complete".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct UninstantiatedCudaGraph {
     raw: sys::CUgraph,
     context: Arc<CudaContext>,
     modules: CaptureOwners,
+    retirement: CudaGraphRetirement,
 }
 
 impl UninstantiatedCudaGraph {
@@ -1108,6 +1134,7 @@ impl UninstantiatedCudaGraph {
                 raw,
                 context,
                 modules: Arc::default(),
+                retirement: CudaGraphRetirement::default(),
             })
         }
     }
@@ -1129,11 +1156,15 @@ impl Drop for UninstantiatedCudaGraph {
             let graph = self.raw as usize;
             let context = self.context.clone();
             let modules = self.modules.clone();
+            let retirement = self.retirement.clone();
             retire_resources_after_completion(
                 (graph, context, modules),
                 |(_, context, _)| context.bind_to_thread(),
                 |(graph, _, _)| unsafe { sys::cuGraphDestroy(*graph as sys::CUgraph).result() },
-                |_| Ok(()),
+                move |_| {
+                    retirement.0.store(true, Ordering::Release);
+                    Ok(())
+                },
                 |(_, context, _), error| context.record_err::<()>(Err(error)),
             );
         }
@@ -1259,6 +1290,10 @@ pub struct ConditionalCudaGraphSequenceBuilder {
 }
 
 impl ConditionalCudaGraphSequenceBuilder {
+    pub(crate) fn retirement(&self) -> CudaGraphRetirement {
+        self.graph.retirement.clone()
+    }
+
     /// Retain original resources and the native stream before recording any
     /// segment. They follow the same graph ownership and uncertain-retirement
     /// path as captured modules and memory manifests.
@@ -1799,9 +1834,14 @@ pub struct CapturedCudaGraph {
     _resident_lifecycle_lease: Option<Box<dyn Send + Sync>>,
     modules: CaptureOwners,
     execution: Mutex<GraphExecution>,
+    retirement: CudaGraphRetirement,
 }
 
 impl CapturedCudaGraph {
+    pub(crate) fn retirement(&self) -> CudaGraphRetirement {
+        self.retirement.clone()
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn captured_launch_bindings(&self) -> Vec<CapturedCudaLaunchBinding> {
         self.modules
@@ -2172,6 +2212,7 @@ impl CapturedCudaGraph {
             raw: graph,
             context: Arc::clone(&context),
             modules: Arc::default(),
+            retirement: CudaGraphRetirement::default(),
         })
     }
 
@@ -2210,6 +2251,7 @@ impl CapturedCudaGraph {
             let mut owners = modules.lock().unwrap_or_else(|error| error.into_inner());
             crate::memory::MemoryAccessManifest::combine(&mem::take(&mut owners.memory))
         };
+        let retirement = owned_graph.retirement.clone();
         Ok(Self {
             graph: owned_graph.into_raw(),
             exec,
@@ -2224,6 +2266,7 @@ impl CapturedCudaGraph {
                     unusable: false,
                 },
             }),
+            retirement,
         })
     }
 
@@ -2291,6 +2334,7 @@ impl CapturedCudaGraph {
                         raw: graph,
                         context: stream.context().clone(),
                         modules: modules.clone(),
+                        retirement: CudaGraphRetirement::default(),
                     });
                 }
             }
@@ -2309,6 +2353,7 @@ impl CapturedCudaGraph {
             raw: graph,
             context: stream.context().clone(),
             modules,
+            retirement: CudaGraphRetirement::default(),
         })
         .map_err(|error| XlogError::Kernel(error.decline_detail()))
     }
@@ -2701,6 +2746,7 @@ impl Drop for CapturedCudaGraph {
         let binding = mem::take(&mut execution.binding);
         let conditional_api = self._conditional_api.take();
         let resident_lease = self._resident_lifecycle_lease.take();
+        let retirement = self.retirement.clone();
         retire_resources_after_completion(
             (
                 graph,
@@ -2719,7 +2765,10 @@ impl Drop for CapturedCudaGraph {
                 sys::cuGraphExecDestroy(*exec as sys::CUgraphExec).result()?;
                 sys::cuGraphDestroy(*graph as sys::CUgraph).result()
             },
-            |_| Ok(()),
+            move |_| {
+                retirement.0.store(true, Ordering::Release);
+                Ok(())
+            },
             |(_, _, context, _, _, _, _, _), error| context.record_err::<()>(Err(error)),
         );
     }

@@ -23,13 +23,14 @@ The first public support contract is:
 - NVIDIA GPU
 - CUDA Toolkit 13.x
 
-General GitHub-hosted pull-request CI is non-GPU. The path-filtered CUDA workflow's
-Python wheel job also runs for qualifying same-repository pull requests and pushes to
-`main`; fork pull requests are excluded from the persistent runner. Maintainers can
-dispatch the remaining CUDA suites from `main` for an explicitly reviewed full commit
-SHA. Fork code must be validated on an isolated CUDA host. If you change CUDA kernels,
-GPU execution paths, packaging, or installation flows, validate on supported hardware
-before asking for review.
+GitHub-hosted pull-request CI checks source hygiene and compiles only the five
+CUDA-independent production libraries described in
+[the CI policy](ENGINEERING.md#source-ci-and-manual-validation). It neither builds
+GPU artifacts nor runs tests. GPU builds are manual and LOCAL only; heavy
+integration/end-to-end, benchmark, and certification runs are separately selected
+manual procedures. A source change may be reviewed and integrated before runtime
+qualification, but it must not be described as GPU-validated until the real run
+has completed. Fork code requires an isolated, authorized execution host.
 
 ## Local Setup
 
@@ -53,31 +54,41 @@ If you want local parity with the workflow/shell lint jobs, install:
 
 ## Local Checks
 
-Run the checks that match your change before opening a pull request.
-
-Minimum checks for most changes:
+Run bounded source checks before opening a pull request:
 
 ```bash
 cargo fmt --all --check
+make lint-workflows
+make lint-shell
+make check-tracked-ignored
 make check
 ```
 
-Recommended checks when your change affects examples, docs that reference commands, or Python packaging:
+`make test` is the explicit manual workspace suite, not a source check. Runtime
+and resource authority is required independently for it and for certifications.
+
+Example validators require an already installed `pyxlog` wheel in their selected
+Python interpreter. Use the canonical `scripts/install_pyxlog_for_python.py`
+procedure for an authorized manual LOCAL build/install; validators do not build
+and stage competing debug copies or modify driver-library search paths.
+
+Select the following only for an explicitly authorized manual example/runtime
+validation. Despite its historical mode name, this command builds CLI artifacts
+and executes examples; it is not a fast-CI command:
 
 ```bash
 python scripts/validate_examples.py --mode ci
 ```
 
-Required on a supported CUDA machine when your change affects CUDA kernels or
-low-level GPU execution:
+For an authorized manual validation of CUDA kernels or low-level GPU execution:
 
 ```bash
 cargo test -p xlog-cuda-tests --test certification_suite --release
 ```
 
-When your change affects `pyxlog`, persistent relations, DLPack ownership or
-stream ordering, Python packaging, or the release path, run the complete release
-validator instead:
+For package-level runtime/release acceptance of `pyxlog`, persistent relations,
+DLPack ownership, stream ordering, or packaging, select the complete manual
+release validator instead:
 
 ```bash
 bash scripts/validate_release_gpu.sh --mode release
@@ -100,9 +111,9 @@ export XLOG_CUBIN_DIR=$PWD/crates/pyxlog/python/pyxlog/kernels
 
 `main` is protected by an active repository ruleset with no bypass actors. Every
 change must arrive through a pull request, resolve its review threads, and pass the
-up-to-date universal jobs in `.github/workflows/ci.yml`; force pushes to `main` and
-deletion of `main` are prohibited. Path-filtered hardware workflows remain additional gates
-for changes in their scope rather than substitutes for the universal checks.
+up-to-date `production-build` source check in `.github/workflows/ci.yml`; force
+pushes to `main` and deletion of `main` are prohibited. Hardware/runtime acceptance
+is recorded separately and is not inferred from that check or from source merge.
 
 Each pull request should:
 
