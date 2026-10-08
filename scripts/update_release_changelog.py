@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import tempfile
@@ -79,14 +80,27 @@ def main() -> None:
         if generated.count(marker) != 1 or not generated.endswith("".join(retained[1:])):
             raise RuntimeError("Generator changed retained release history or its boundary.")
         updated = generated.replace(marker, unreleased, 1)
-    if (
-        git(repository, "rev-parse", "HEAD") != head
-        or git(repository, "symbolic-ref", "--short", "HEAD") != branch
-        or config_path.read_bytes() != config_bytes
-        or changelog_path.read_text(encoding="utf-8") != original
-    ):
-        raise RuntimeError("Release inputs changed during generation; no notes were replaced.")
-    changelog_path.write_text(updated, encoding="utf-8")
+    replacement = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=changelog_path.parent,
+        prefix=f".{changelog_path.name}.", delete=False,
+    )
+    replacement_path = Path(replacement.name)
+    try:
+        with replacement:
+            replacement.write(updated)
+            replacement.flush()
+            os.fsync(replacement.fileno())
+            os.fchmod(replacement.fileno(), changelog_path.stat().st_mode)
+        if (
+            git(repository, "rev-parse", "HEAD") != head
+            or git(repository, "symbolic-ref", "--short", "HEAD") != branch
+            or config_path.read_bytes() != config_bytes
+            or changelog_path.read_text(encoding="utf-8") != original
+        ):
+            raise RuntimeError("Release inputs changed during generation; no notes were replaced.")
+        replacement_path.replace(changelog_path)
+    finally:
+        replacement_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
