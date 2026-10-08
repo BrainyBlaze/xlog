@@ -12,8 +12,22 @@ This page explains how a release is built, validated, and published. It covers
 release mechanics only, not promises about which features are available.
 `CHANGELOG.md` records which tagged release first contains a change. Contributor
 pull requests do not edit it. `release-plz` generates package-specific entries from
-Conventional Commit history in the rolling release pull request and keeps
-`[Unreleased]` as the boundary above the generated release sections.
+Conventional Commit history in the maintainer-owned release pull request.
+
+To refresh its unpublished notes, use Python 3.11 or newer with `release-plz`
+0.3.157 on `PATH`. Commit package inputs first and run from an attached branch:
+
+```bash
+python3.11 scripts/update_release_changelog.py
+```
+
+The command runs the generator in an independent temporary Git clone, replaces
+the unpublished package sections, and preserves handwritten `[Unreleased]` notes
+and released history. It refuses to rewrite a version with an existing release
+tag. `release-plz.toml` normalizes misplaced breaking markers and historical
+internal phase prefixes before generating entries. This command does not commit,
+push, tag, or publish; merging the preparation pull request is not release
+acceptance.
 
 XLOG separates source integration from release acceptance. GitHub Actions check
 source hygiene and compile only CUDA-independent libraries. GPU builds are
