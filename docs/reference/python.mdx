@@ -1625,6 +1625,16 @@ integrity failure after a completed CUDA stream remains unknown and cannot use
 this resolver. These retained in-process results are not durable admission,
 private-program recovery, scientific acceptance, or process-restart evidence.
 
+If native reconciliation succeeds but construction of the Python result roster
+fails, the original task also remains pending rather than aborting the completed
+native graph. The original outcomes and preparation owners stay retained; a
+missing Python roster still cannot enter `resolve_completed_segment`, receive
+its pending-result exception, or authorize reconstruction, resubmission or
+Source recovery. A phase independently refused or changed is not repaired by
+that cleanup. The owning learning-phase Runtime must retain its original failed
+handoff for the terminal segment owner. A failed launch or incomplete native
+reconciliation retains the existing unknown/abort boundary instead.
+
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
 complete model backings. Their private storage is preallocated before capture
