@@ -397,8 +397,10 @@ impl PublicationAllocation {
     }
 
     pub(super) fn immutable(&self) -> bool {
-        self.model_owner()
-            .is_some_and(|owner| owner.replay.is_some())
+        // Model generations are read-leased regardless of their backing origin.
+        // Planning must retain this classification after a catalogue owner expires;
+        // actual snapshot allocation still requires the exact live generation owner.
+        matches!(self, Self::Model { .. })
     }
 
     pub(super) fn initializing(&self) -> bool {
