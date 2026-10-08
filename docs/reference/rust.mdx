@@ -132,6 +132,11 @@ arbitrary-width decimal training seed, and mask-policy identity. Native binding
 validates and retains this domain before actions. `None` explicitly denotes no
 prospective arena; training admission cannot invent a domain afterwards.
 `task_training_domain()` reads the same retained owner without a device transfer.
+`task_actor_eligible()` reads the original ex-ante actor decision from the bound
+task as `Option<bool>` (`None` only when no task is bound). This decision is sealed
+into task identity and restored from the original checkpoint, without deriving
+new eligibility from current rights or completed actions. Reading it performs no
+device transfer and grants no training use.
 The task and checkpoint scoring identities seal the entire domain. Initial and
 restored arena admission check the real rows against its manifest/seed/mask and
 packed geometry, separate episode/anchor record bounds, and each group's actual

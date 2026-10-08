@@ -27736,6 +27736,14 @@ impl SemanticTransitionSession {
             .and_then(|(binding, _)| binding.spec.training_domain.as_ref())
     }
 
+    /// Original ex-ante actor decision, sealed into the task identity and
+    /// restored from its checkpoint. No device read or use grant occurs.
+    pub fn task_actor_eligible(&self) -> Option<bool> {
+        self.task
+            .as_ref()
+            .map(|(binding, _)| binding.spec.actor_eligible)
+    }
+
     /// Original pre-draw actor/full domains. Reading them grants no execution
     /// or training use. The consumer retains all capsules through final use;
     /// aliases must not be written while any original consumer remains live.
