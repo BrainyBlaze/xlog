@@ -3421,6 +3421,78 @@ fn model_physical_parameter_roster(
     Ok(Some(names))
 }
 
+/// Authenticate parameter-leaf coordinates independently of the full model
+/// content roster, which also includes non-differentiable buffers. Frozen
+/// Parameters remain leaves even when they have no gradient allocation.
+fn model_physical_parameter_coordinates(
+    record: &[u8],
+    layout: SemanticModelContractLayout,
+) -> Result<Option<BTreeSet<(u64, u64)>>, SemanticTransitionError> {
+    let Some(names) = model_physical_parameter_roster(record, layout)? else {
+        return Ok(None);
+    };
+    let schema = retained_model_schema(record, layout)?
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let Some(learning) = schema["model"]
+        .get("learning")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let views = learning
+        .get("views")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| publication_input_error("model learning schema lacks its typed views"))?;
+    let leaves = learning
+        .get("leaves")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            publication_input_error("model learning schema lacks its parameter leaves")
+        })?;
+    let expected = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let mut owners = BTreeSet::new();
+    let mut coordinates = BTreeSet::new();
+    for leaf in leaves {
+        let view = leaf
+            .get("effective")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| views.get(index))
+            .ok_or_else(|| {
+                publication_input_error("parameter leaf has no original effective view")
+            })?;
+        let name = view
+            .get("owner")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                publication_input_error("parameter effective view lacks its physical owner")
+            })?;
+        let coordinate = view
+            .get("layout")
+            .and_then(serde_json::Value::as_array)
+            .filter(|layout| layout.len() >= 2)
+            .and_then(|layout| Some((layout[0].as_u64()?, layout[1].as_u64()?)))
+            .ok_or_else(|| {
+                publication_input_error("parameter effective view lacks its native coordinates")
+            })?;
+        if !expected.contains(name)
+            || !owners.insert(name)
+            || !(18..=20).contains(&coordinate.0)
+            || !coordinates.insert(coordinate)
+        {
+            return Err(publication_input_error(
+                "parameter leaf roster changed its original physical owners or coordinates",
+            ));
+        }
+    }
+    if owners != expected {
+        return Err(publication_input_error(
+            "parameter leaf roster omits an original physical Parameter",
+        ));
+    }
+    Ok(Some(coordinates))
+}
+
 /// Identity of one packed active-cache row in its original forward. Kinds are
 /// FILLED=1, MASK=2 and FEEDBACK=3; physical_row is not the packed coordinate.
 #[repr(C)]
@@ -8121,6 +8193,7 @@ struct PublicationStorage {
     allocations: Vec<PublicationAllocation>,
     model_memory: ModelMemoryGeometry,
     physical_parameter_roster: Option<Vec<String>>,
+    physical_parameter_coordinates: Option<BTreeSet<(u64, u64)>>,
     model_slots: Vec<[usize; 2]>,
     model_generations: Vec<Vec<usize>>,
     bank_templates: [Vec<PublicationRange>; 2],
@@ -8333,6 +8406,18 @@ impl PublicationStorage {
             .map(|record| model_physical_parameter_roster(record, contract.model_contract_layout))
             .transpose()?
             .flatten();
+        let physical_parameter_coordinates = plans
+            .iter()
+            .find(|plan| (plan.role, plan.index) == (44, 0))
+            .and_then(|plan| match &plan.payload {
+                PublicationPayload::Metadata(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .map(|record| {
+                model_physical_parameter_coordinates(record, contract.model_contract_layout)
+            })
+            .transpose()?
+            .flatten();
         let mut model_slots = Vec::new();
         for (index, (&bytes, payload)) in model_memory
             .allocation_bytes
@@ -8340,8 +8425,7 @@ impl PublicationStorage {
             .zip(model_payloads)
             .enumerate()
         {
-            let mut slots = [0; 2];
-            if let Some(owners) = immutable_models {
+            let slots = if let Some(owners) = immutable_models {
                 let slot = allocations.len();
                 let allocation = PublicationAllocation::Immutable(Arc::clone(&owners[index]));
                 if allocation.len() as u64 != bytes {
@@ -8351,15 +8435,15 @@ impl PublicationStorage {
                     uploads.push((slot, payload.clone()));
                 }
                 allocations.push(allocation);
-                slots = [slot; 2];
+                [slot; 2]
             } else {
                 let slot = allocations.len();
                 allocations.push(PublicationAllocation::Generation(Arc::new(
                     allocate_publication::<u8>(provider, bytes as usize)?,
                 )));
                 uploads.push((slot, payload.clone()));
-                slots = [slot; 2];
-            }
+                [slot; 2]
+            };
             model_slots.push(slots);
         }
         for plan in plans {
@@ -8486,6 +8570,7 @@ impl PublicationStorage {
                 allocations,
                 model_memory,
                 physical_parameter_roster,
+                physical_parameter_coordinates,
                 model_generations: model_slots.iter().map(|slots| slots.to_vec()).collect(),
                 model_slots,
                 bank_templates,
@@ -8569,6 +8654,7 @@ impl PublicationStorage {
                 allocations,
                 model_memory: self.model_memory.clone(),
                 physical_parameter_roster: self.physical_parameter_roster.clone(),
+                physical_parameter_coordinates: self.physical_parameter_coordinates.clone(),
                 model_slots: self.model_slots.clone(),
                 model_generations,
                 bank_templates: self.bank_templates.clone(),
@@ -20467,12 +20553,21 @@ impl SemanticTransitionSession {
                 "original replay has no unique authenticated physical model roster",
             ));
         };
+        let source_parameters = source
+            .publication
+            .as_ref()
+            .and_then(|storage| storage.physical_parameter_coordinates.as_ref())
+            .ok_or_else(|| {
+                publication_input_error(
+                    "original replay has no authenticated parameter-leaf roster",
+                )
+            })?;
         let binding = self.bind_gradient_delivery(
             step,
             bank,
             tensors,
             consumer_stream,
-            Some(&model.tensors),
+            Some((&model.tensors, source_parameters)),
         )?;
         self.steps
             .get_mut(&step.token)
@@ -20491,7 +20586,7 @@ impl SemanticTransitionSession {
         bank: usize,
         tensors: Vec<SemanticTensorInput>,
         consumer_stream: u64,
-        foreign_model: Option<&[PreparedSemanticTensor]>,
+        foreign_model: Option<(&[PreparedSemanticTensor], &BTreeSet<(u64, u64)>)>,
     ) -> Result<SemanticGradientDeliveryBinding, SemanticTransitionError> {
         self.check_prepared_cold(step)?;
         dlpack_consumer_stream(consumer_stream)?;
@@ -20506,7 +20601,7 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("fixed input owner");
         for tensor in &imported {
-            let authentic = if let Some(model) =
+            let authentic = if let Some((model, _)) =
                 foreign_model.filter(|_| (18..=20).contains(&tensor.layout.role))
             {
                 model
@@ -20525,24 +20620,25 @@ impl SemanticTransitionSession {
                 ));
             }
         }
-        if let Some(model) = foreign_model {
-            let expected = model
-                .iter()
-                .filter(|tensor| (18..=20).contains(&tensor.layout.role))
-                .map(|tensor| (tensor.layout.role, tensor.layout.index))
-                .collect::<BTreeSet<_>>();
-            let actual_rows = imported
-                .iter()
-                .filter(|tensor| (18..=20).contains(&tensor.layout.role));
-            let actual = actual_rows
-                .clone()
-                .map(|tensor| (tensor.layout.role, tensor.layout.index))
-                .collect::<BTreeSet<_>>();
-            if actual != expected || actual_rows.count() != actual.len() {
-                return Err(publication_input_error(
-                    "group gradient delivery requires every original physical model leaf exactly once",
-                ));
-            }
+        let expected = foreign_model
+            .map(|(_, coordinates)| coordinates)
+            .or(inputs.storage.physical_parameter_coordinates.as_ref())
+            .ok_or_else(|| {
+                publication_input_error(
+                    "gradient delivery requires its authenticated parameter-leaf roster",
+                )
+            })?;
+        let actual_rows = imported
+            .iter()
+            .filter(|tensor| (18..=20).contains(&tensor.layout.role));
+        let actual = actual_rows
+            .clone()
+            .map(|tensor| (tensor.layout.role, tensor.layout.index))
+            .collect::<BTreeSet<_>>();
+        if &actual != expected || actual_rows.count() != actual.len() {
+            return Err(publication_input_error(
+                "gradient delivery requires every original physical Parameter exactly once, not model buffers",
+            ));
         }
         for role in [
             SemanticStateRole::Gradients as u64,

@@ -148,6 +148,12 @@ restores the historical gradient reference after the single GraphTask. It must
 not accumulate into the historical allocation. Unknown restoration or final use
 retains the original owner; the registry itself cannot release live readers.
 
+Gradient delivery authenticates the complete original parameter-leaf roster
+from the retained model schema, including frozen Parameters with no gradient
+allocation. This is distinct from the full model-content witness, which also
+retains buffers. Buffers do not gain fabricated gradient, presence or phase-mask
+leaves; all genuine parameter destinations must still be present exactly once.
+
 After genuine whole-target cancellation and confirmed original graph destruction,
 the same prepared producer may call
 `member.finish_cancelled_private_segment()` in the original private-retirement
