@@ -1517,7 +1517,9 @@ impl VerifiedClosure {
                     refusal.cause.as_ref(),
                     if matches!(
                         refusal.cause.as_ref(),
-                        SOURCE_EVALUATION_CANCELLED | PRIVATE_EVALUATION_CANCELLED
+                        SOURCE_EVALUATION_CANCELLED
+                            | PRIVATE_EVALUATION_CANCELLED
+                            | PRIVATE_SEGMENT_BUDGET_REFUSED
                     ) {
                         py.None()
                     } else {
