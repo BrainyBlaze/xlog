@@ -16120,7 +16120,7 @@ impl SemanticTransitionSession {
             recorder.read(bank);
         }
         for directory in &expanded.directories {
-            recorder.read(directory);
+            recorder.read_write(directory);
         }
         let args = (
             expanded.control.device_ptr_value(),
