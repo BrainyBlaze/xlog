@@ -157,6 +157,8 @@ pub(crate) struct PySemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     active_cold_model_work:
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
+    #[cfg(feature = "semantic-policy")]
+    private_replay_child: Mutex<Option<Arc<learning_phase::PrivateReplayChildCustody>>>,
     issuance: Arc<AtomicU64>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
@@ -184,12 +186,40 @@ impl std::ops::DerefMut for SemanticSessionGuard<'_> {
 }
 
 impl PySemanticTransitionSession {
+    #[cfg(feature = "semantic-policy")]
+    fn private_replay_custody(
+        &self,
+    ) -> PyResult<Option<Arc<learning_phase::PrivateReplayChildCustody>>> {
+        self.private_replay_child
+            .lock()
+            .map(|child| child.as_ref().map(Arc::clone))
+            .map_err(|_| invalid("original private replay Session custody is poisoned"))
+    }
+
+    fn refuse_failed_import(&self, owner: &mut SemanticTransitionSession) {
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = self
+            .private_replay_child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            child.fail();
+            return;
+        }
+        owner.abort();
+    }
+
     fn require_creator(&self) -> PyResult<()> {
         require_creator_thread(self.owner_thread)
     }
 
     fn owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
         self.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = self.private_replay_custody()? {
+            Python::attach(|py| child.require_access(py))?;
+        }
         if !self.recording.load(Ordering::Acquire) {
             drain_export_owners();
         }
@@ -210,6 +240,12 @@ impl PySemanticTransitionSession {
 
     fn release_observed_cold(&self) -> PyResult<()> {
         self.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if self.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "private replay Session release belongs to its original native phase",
+            ));
+        }
         if self.importing.load(Ordering::Acquire)
             || self.recording.load(Ordering::Acquire)
             || self.retiring.load(Ordering::Acquire)
@@ -379,6 +415,8 @@ impl PySemanticTransitionSession {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            private_replay_child: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense,
             checkpoint_sources,
@@ -8132,13 +8170,17 @@ impl<'a> ColdImportGuard<'a> {
                 "learning-phase preparation retains the original Session until durable resolution",
             ));
         }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            Python::attach(|py| child.begin_import(py))?;
+        }
         let mut owner = session.owner()?;
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
             || owner.is_poisoned()
         {
-            owner.abort();
+            session.refuse_failed_import(&mut owner);
             return Err(invalid(
                 "native session cannot enter a nested or aborted import",
             ));
@@ -8146,7 +8188,7 @@ impl<'a> ColdImportGuard<'a> {
         let issuance = match TaskIssuance::issue(Arc::clone(&session.issuance)) {
             Ok(issuance) => issuance,
             Err(error) => {
-                owner.abort();
+                session.refuse_failed_import(&mut owner);
                 return Err(error);
             }
         };
@@ -8163,6 +8205,21 @@ impl<'a> ColdImportGuard<'a> {
 
 impl Drop for ColdImportGuard<'_> {
     fn drop(&mut self) {
+        #[cfg(feature = "semantic-policy")]
+        if !self.committed {
+            let child = self
+                .session
+                .private_replay_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(child) = child.as_ref() {
+                // Preserve the actual partial Session, reader and callbacks in
+                // the original phase. Target cancellation cannot heal this
+                // child's unknown import or authorize ordinary abort/retry.
+                child.fail();
+                return;
+            }
+        }
         let mut owner = self
             .session
             .inner
@@ -9104,6 +9161,7 @@ impl PySemanticCompletedTaskGround {
                 .unbind(),
         )
     }
+
     #[getter]
     fn task_identity(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.task_identity.as_bytes()).unbind()
@@ -10242,6 +10300,9 @@ impl PySemanticPreparedStep {
             let member = member.borrow(py);
             let source = member.session.borrow(py);
             source.require_creator()?;
+            if let Some(child) = source.private_replay_custody()? {
+                child.require_target(py, self)?;
+            }
             if member.completed.load(Ordering::Acquire)
                 || !source.importing.load(Ordering::Acquire)
                 || self.session.as_ptr() == member.session.as_ptr()
@@ -11770,6 +11831,16 @@ impl Drop for PySemanticRetainedReplayMember {
         }
         let _ = Python::try_attach(|py| {
             let session = self.session.borrow(py);
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = session
+                .private_replay_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                child.fail();
+                return;
+            }
             if let Some(owner) = session
                 .inner
                 .lock()
@@ -11822,6 +11893,9 @@ impl PySemanticRetainedReplayMember {
         let target_session = update.session.borrow(py);
         target_session.require_creator()?;
         update.require_task(py, &update.task_use.borrow(py))?;
+        if let Some(child) = source_session.private_replay_custody()? {
+            child.require_target(py, &update)?;
+        }
         let mut use_state = self
             .group_use
             .lock()
@@ -11924,6 +11998,64 @@ impl PySemanticRetainedReplayMember {
         update_step: Py<PySemanticPreparedStep>,
     ) -> PyResult<()> {
         self.finish_retained_import(py, Some(update_step))
+    }
+
+    /// Finish this original replay after genuine whole-target cancellation.
+    /// The native phase authenticates its original Update and actual graph
+    /// destruction; no VJP or target completion is inferred or fabricated.
+    fn finish_cancelled_private_segment(&self, py: Python<'_>) -> PyResult<()> {
+        if self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay member has already finished"));
+        }
+        let session = self.session.borrow(py);
+        let child = session.private_replay_custody()?.ok_or_else(|| {
+            invalid("cancelled replay requires its original early native custody")
+        })?;
+        child.require_cancelled_final_use(py, self)?;
+        let deliveries = {
+            let state = self
+                .group_use
+                .lock()
+                .map_err(|_| invalid("retained replay group use is poisoned"))?;
+            if state.completion.is_some() {
+                return Err(invalid(
+                    "cancelled replay cannot replace actual target completion",
+                ));
+            }
+            state
+                .deliveries
+                .iter()
+                .flatten()
+                .map(|delivery| delivery.clone_ref(py))
+                .collect::<Vec<_>>()
+        };
+        for delivery in &deliveries {
+            let delivery = delivery.borrow(py);
+            if delivery
+                .handles
+                .lock()
+                .map_err(|_| invalid("cancelled gradient hook custody is poisoned"))?
+                .is_some()
+                || !delivery
+                    .restores
+                    .lock()
+                    .map_err(|_| invalid("cancelled gradient restoration custody is poisoned"))?
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "cancelled replay still owns active original gradient delivery",
+                ));
+            }
+        }
+        let retained = {
+            let mut state = self
+                .group_use
+                .lock()
+                .map_err(|_| invalid("retained replay group use is poisoned"))?;
+            std::mem::replace(&mut state.deliveries, std::array::from_fn(|_| None))
+        };
+        drop((retained, deliveries));
+        self.finish_original_import(py)
     }
 }
 
@@ -12060,6 +12192,10 @@ impl PySemanticRetainedReplayMember {
                 .require_retired_prepared_step(&update.inner)
                 .map_err(xlog_err)?;
         }
+        self.finish_original_import(py)
+    }
+
+    fn finish_original_import(&self, py: Python<'_>) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         if !session.importing.load(Ordering::Acquire) {
@@ -13936,6 +14072,43 @@ impl PySemanticTransitionController {
         )
     }
 
+    /// Retain one original historical replay before its ColdTask allocates.
+    /// step_index addresses the unchanged private group's frozen roster.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, step_index, replay_ordinal))]
+    fn prepare_private_replay_child(
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        step_index: &Bound<'_, PyAny>,
+        replay_ordinal: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<learning_phase::PySemanticPrivateReplayChild>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        self.require_issued(&task_use.borrow(py))?;
+        if self.session.as_ptr() != task_use.borrow(py).session.as_ptr() {
+            return Err(invalid("private replay task belongs to another Session"));
+        }
+        let phase = private_execution_owner(py, &session)?.ok_or_else(|| {
+            invalid("private replay construction requires its original native phase")
+        })?;
+        let step_index = usize::try_from(ColdValue::read(step_index, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("private replay step index exceeds native address space"))?;
+        let replay_ordinal = ColdValue::read(replay_ordinal, &mut 128, 0)?.unsigned()?;
+        let child = phase.borrow(py).prepare_original_replay_child(
+            py,
+            &phase,
+            &self.session,
+            &task_use,
+            step_index,
+            replay_ordinal,
+        )?;
+        Py::new(
+            py,
+            learning_phase::PySemanticPrivateReplayChild { inner: child },
+        )
+    }
+
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
     /// with memory_scope, prepare_unpublished_successors(),
@@ -14984,6 +15157,12 @@ impl PySemanticTransitionController {
     fn abort(&self, py: Python<'_>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if session.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "original private replay custody prohibits ordinary abort",
+            ));
+        }
         if session.learning_preparing.load(Ordering::Acquire) {
             return Err(invalid("resolve or abandon the retained learning-phase transition before aborting its Session"));
         }
@@ -15289,7 +15468,20 @@ impl PySemanticTransitionController {
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.require_controller(&self.identity)?;
+        }
         let mut import = ColdImportGuard::begin(&session, None)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.retain_callbacks(vec![
+                restore_invocation.clone().unbind(),
+                pack_policy.clone().unbind(),
+                finish_invocation.clone().unbind(),
+                refresh_snapshot.clone().unbind(),
+            ])?;
+        }
         let mut budget = 16 * 1024 * 1024;
         let proposal_capacity = ColdValue::read(proposal_capacity, &mut 128, 0)?.unsigned()?;
         session
@@ -15384,6 +15576,15 @@ impl PySemanticTransitionController {
         let replay_selection = ColdValue::read(replay_selection, &mut budget, 0)?;
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &replay_selection)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            if !retain_policy {
+                return Err(invalid(
+                    "private replay must retain its original policy invocation",
+                ));
+            }
+            child.require_projection(py, selection, &training_objective_value, &values[3])?;
+        }
         let observations = session
             .owner()?
             .task_observation_roots(
@@ -15499,6 +15700,10 @@ impl PySemanticTransitionController {
             },
         )?;
         let mut retained = None;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.retain_import_task(py, &task_use)?;
+        }
         if let (Some(ordinal), Some(material), Some(kind)) =
             (selection, selected_material, transition)
         {
@@ -15526,6 +15731,10 @@ impl PySemanticTransitionController {
             }
         }
         if let Some(member) = retained {
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = session.private_replay_custody()? {
+                child.retain_member(py, &member)?;
+            }
             let result = (task_use, member).into_pyobject(py)?.unbind().into_any();
             import.committed = true;
             import.deferred = true;
@@ -17752,6 +17961,10 @@ impl PySemanticTransitionController {
             },
         )?;
         let acquired = parent.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = import.session.private_replay_custody()? {
+            child.retain_parent(py, &parent)?;
+        }
         let expected = {
             let owner = import.session.owner()?;
             let state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
@@ -18882,6 +19095,8 @@ mod tests {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            private_replay_child: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense: Arc::new(Mutex::new(super::ProposalExpense {
                 capacity: None,

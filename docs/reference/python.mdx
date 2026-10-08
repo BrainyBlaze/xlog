@@ -108,6 +108,37 @@ observer again and must reproduce the same identities and truths; a mismatch
 refuses the native session. Cold content observation does not run the model or
 prefill its cache.
 
+An original private Update can issue a one-shot historical child with
+`controller.prepare_private_replay_child(task_use, step_index=..., replay_ordinal=...)`.
+`step_index` is the zero-based position in that private group's unchanged roster,
+not a replacement schedule or an execution result. The native owner requires an
+original Update and an episode row in its frozen actor/edit membership; the same
+row in another Update has separate custody. Pass the returned
+`SemanticPrivateReplayChild` unchanged as `private_replay_child=` to the same
+`SemanticTransitionColdTask` constructor before construction begins. Ordinary
+fresh-task callers omit this keyword.
+
+The child uses the original provider, allocation budget, serial stream and cold
+native-work owner. The phase retains its actual Session before the observer runs,
+then the original Controller, import callbacks, issued task, acquired reader,
+retained member and each target-bound gradient delivery. A construction/import
+exception does not turn an unfinished child into an ordinary aborted Session or
+authorize a retry. Saved child aliases grant native access only in their
+original phase callback; public abort and observed-only close cannot discard them.
+
+After genuine whole-target cancellation and confirmed original graph destruction,
+the same prepared producer may call
+`member.finish_cancelled_private_segment()` in the original private-retirement
+region. This finishes the source's actual retained policy invocation and canonical
+import cleanup/full successor verification once, without a VJP, publication or
+fabricated target completion. Original gradient hooks/restorations must already
+be removed. The producer then retires its remaining Runtime aliases before
+returning from its original `finish_segment()`. Native joins/releases the retained
+child Sessions in that same cold region and shared accounting owner before target
+storage retirement. Normal completed segments still use the ordinary member
+final-use path. Unknown child import, final use or graph destruction retains its
+own original custody; target non-submission does not prove that child's outcome.
+
 The semantic controller's `task_observation_roots` and `import_task` methods
 share five explicit keyword arguments in addition to their admission and
 authority inputs. `import_task` also requires `task_priority_levels`:

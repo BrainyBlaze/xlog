@@ -32,6 +32,8 @@ mod private_execution;
 #[cfg(feature = "semantic-policy")]
 use private_execution::PrivateExecutionGroup;
 #[cfg(feature = "semantic-policy")]
+pub(crate) use private_execution::{PrivateReplayChildCustody, PySemanticPrivateReplayChild};
+#[cfg(feature = "semantic-policy")]
 mod private_checkpoint;
 #[cfg(feature = "semantic-policy")]
 use private_checkpoint::PrivateCheckpoint;

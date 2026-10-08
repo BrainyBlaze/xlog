@@ -1311,6 +1311,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticPolicyInvocation>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticRetainedReplayMember>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::learning_phase::PySemanticPrivateReplayChild>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;

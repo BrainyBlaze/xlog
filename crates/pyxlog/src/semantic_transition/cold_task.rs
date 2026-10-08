@@ -291,7 +291,7 @@ pub(crate) struct PySemanticTransitionColdTask {
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, private_replay_child=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -322,7 +322,30 @@ impl PySemanticTransitionColdTask {
         training_rng: [u64; 4],
         fuel: u64,
         rng: (u64, u8, u32),
+        private_replay_child: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        #[cfg(feature = "semantic-policy")]
+        let replay_custody = private_replay_child
+            .map(|child| {
+                child
+                    .extract::<PyRef<'_, super::learning_phase::PySemanticPrivateReplayChild>>()
+                    .map(|child| Arc::clone(&child.inner))
+            })
+            .transpose()?;
+        #[cfg(feature = "semantic-policy")]
+        let allocation = replay_custody
+            .as_ref()
+            .map(|child| child.allocation(py))
+            .transpose()?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let allocation = {
+            if private_replay_child.is_some() {
+                return Err(invalid(
+                    "private replay construction requires semantic-policy",
+                ));
+            }
+            None
+        };
         let initial_theory = exact_text(initial_theory, "initial_theory")?;
         let input_facts = exact_text(input_facts, "input_facts")?;
         let observer_program = exact_text(observer_program, "observer_program")?;
@@ -420,20 +443,50 @@ impl PySemanticTransitionColdTask {
                 spent: 0,
             })),
             Arc::new(Mutex::new(CheckpointSources::default())),
-            None,
-        )?;
-        if let Some(editable) = native_session.editable_program.as_ref() {
-            program = program.with_editable_program(Arc::clone(editable));
-        }
-        let content = native_session
-            .owner()?
-            .observe_cold_task_content(statement_records, &[], &program)
-            .map_err(xlog_err)?;
+            allocation,
+        );
+        let native_session = native_session.map_err(|error| {
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = &replay_custody {
+                child.fail();
+            }
+            error
+        })?;
         let session = Py::new(py, native_session)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &replay_custody {
+            child.retain_session(py, &session)?;
+        }
+        let content = (|| {
+            let native_session = session.borrow(py);
+            if let Some(editable) = native_session.editable_program.as_ref() {
+                program = program.with_editable_program(Arc::clone(editable));
+            }
+            let result = native_session
+                .owner()?
+                .observe_cold_task_content(statement_records, &[], &program)
+                .map_err(xlog_err);
+            result
+        })()
+        .map_err(|error| {
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = &replay_custody {
+                child.fail();
+            }
+            error
+        })?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &replay_custody {
+            child.observed()?;
+        }
         let controller = Py::new(
             py,
             PySemanticTransitionController::new(py, session.clone_ref(py))?,
         )?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &replay_custody {
+            child.retain_controller(&controller.borrow(py).identity)?;
+        }
         Ok(Self {
             session,
             controller,
