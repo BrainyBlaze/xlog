@@ -4,226 +4,297 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-10-07
+### Changed
 
-### Added
-
-- *(resolver)* expose portable executable program IR ([#282](https://github.com/BrainyBlaze/xlog/pull/282))
-- *(cli)* export completed runtime relations as JSON ([#289](https://github.com/BrainyBlaze/xlog/pull/289))
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
+- Epistemic execution classifies modal dependencies before single-pass planning.
+  Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
+  ordinary founded least fixpoint; supported positive exact-tuple
+  Gelfond-1991 possibility cycles run to a greatest compatible tuple fixpoint;
+  and supported cycles through negation use the GPU-backed WFS plan. The
+  Gelfond-1991 route computes a GPU upper bound, then reevaluates against frozen
+  relation snapshots until the concrete tuples converge, so predicate-level
+  recursion cannot manufacture support across disjoint tuple domains.
+- An unseeded FAEEL modal cycle, including `p() :- possible p().`, executes to an
+  empty founded extension instead of returning an unsupported-construct error.
+- *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
+- *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
+- *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.
+- *(python)* define `trainable_rule` and `train` as Python training-document declarations lowered through the native XLOG compiler, distinct from native `learnable(mask)` rules.
 
 ### Fixed
 
-- *(logic)* report logical query row counts ([#296](https://github.com/BrainyBlaze/xlog/pull/296))
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/pull/263))
-- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/pull/258))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/pull/254))
-- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/pull/225))
-- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/pull/213))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
+- *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
+- *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
+- *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
+- *(runtime)* honor `RuntimeConfig.max_iterations` in every fixpoint execution path.
+- *(cuda)* compose lifecycle logging outside the shared byte budget so rejected allocations remain observable.
+- *(python)* release the GIL during exact, Monte Carlo, device, compiled-logic, and retained-session evaluation.
+- *(python)* preserve registered neural-network lineage metadata alongside defensively copied influence records and reject records for unregistered networks.
+
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-10-08
+
+### Added
+
+- *(resolver)* expose portable executable program IR ([#282](https://github.com/BrainyBlaze/xlog/issues/282))
+- *(cli)* export completed runtime relations as JSON ([#289](https://github.com/BrainyBlaze/xlog/issues/289))
+- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/issues/189))
+
+### Fixed
+
+- *(logic)* report logical query row counts ([#296](https://github.com/BrainyBlaze/xlog/issues/296))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/issues/263))
+- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/issues/258))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/issues/254))
+- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/issues/225))
+- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/issues/213))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
+- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/issues/193))
 - *(cli)* drop the epistemic-evidence tests that need an untracked fixture
 
 ### Other
 
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/pull/207))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- separate fast source checks from manual validation
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/issues/207))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.11.0...xlog-gpu-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.11.0...xlog-gpu-v0.12.0) - 2026-10-08
 
 ### Added
 
-- *(cli)* export completed runtime relations as JSON ([#289](https://github.com/BrainyBlaze/xlog/pull/289))
-- *(pyxlog)* compile resolved module entrypoints ([#287](https://github.com/BrainyBlaze/xlog/pull/287))
+- *(cli)* export completed runtime relations as JSON ([#289](https://github.com/BrainyBlaze/xlog/issues/289))
+- *(pyxlog)* compile resolved module entrypoints ([#287](https://github.com/BrainyBlaze/xlog/issues/287))
 - *(cuda)* execute dependency-closed plans in one resident graph
-- *(pyxlog)* condition exact queries on accepted epistemic evidence ([#201](https://github.com/BrainyBlaze/xlog/pull/201))
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
+- *(pyxlog)* condition exact queries on accepted epistemic evidence ([#201](https://github.com/BrainyBlaze/xlog/issues/201))
+- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/issues/189))
+- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/issues/188))
 
 ### Fixed
 
-- *(logic)* report logical query row counts ([#296](https://github.com/BrainyBlaze/xlog/pull/296))
-- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/pull/258))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/pull/254))
-- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/pull/225))
-- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/pull/213))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- *(logic)* report logical query row counts ([#296](https://github.com/BrainyBlaze/xlog/issues/296))
+- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/issues/258))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/issues/254))
+- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/issues/225))
+- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/issues/213))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Connect native semantic episode materials and prefill capture ([#307](https://github.com/BrainyBlaze/xlog/pull/307))
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- *(logic)* fact fast path in the compiler frontend (parser + owned passes) ([#272](https://github.com/BrainyBlaze/xlog/pull/272))
-- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/pull/255))
-- *(logic)* share ground-term encoding ([#231](https://github.com/BrainyBlaze/xlog/pull/231))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- connect test sanitation to its manual callers
+- remove source-only checks and duplicate CUDA wrappers
+- Connect native semantic episode materials and prefill capture ([#307](https://github.com/BrainyBlaze/xlog/issues/307))
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- *(logic)* fact fast path in the compiler frontend (parser + owned passes) ([#272](https://github.com/BrainyBlaze/xlog/issues/272))
+- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/issues/255))
+- *(logic)* share ground-term encoding ([#231](https://github.com/BrainyBlaze/xlog/issues/231))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.11.0...xlog-prob-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.11.0...xlog-prob-v0.12.0) - 2026-10-08
 
 ### Added
 
-- *(prob)* [**breaking**] reuse conditioned exact circuits ([#257](https://github.com/BrainyBlaze/xlog/pull/257))
-- *(pyxlog)* expose exact log-evidence and the CNF variable to fact mapping ([#180](https://github.com/BrainyBlaze/xlog/pull/180))
+- *(prob)* [**breaking**] reuse conditioned exact circuits ([#257](https://github.com/BrainyBlaze/xlog/issues/257))
+- *(pyxlog)* expose exact log-evidence and the CNF variable to fact mapping ([#180](https://github.com/BrainyBlaze/xlog/issues/180))
 
 ### Fixed
 
 - *(cuda)* preserve native policy content and original invocations
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(prob)* [**breaking**] remove unreachable exact GPU compiler ([#233](https://github.com/BrainyBlaze/xlog/pull/233))
-- *(prob)* align circuit log-sum-exp semantics across CPU and GPU ([#230](https://github.com/BrainyBlaze/xlog/pull/230))
-- *(cuda)* [**breaking**] remove unselectable dense D4 frontier ([#236](https://github.com/BrainyBlaze/xlog/pull/236))
-- *(prob)* [**breaking**] remove unused CSR CNF module ([#235](https://github.com/BrainyBlaze/xlog/pull/235))
-- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/pull/225))
-- *(prob)* restore G91 evidence GPU coverage ([#200](https://github.com/BrainyBlaze/xlog/pull/200))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(prob)* [**breaking**] remove unreachable exact GPU compiler ([#233](https://github.com/BrainyBlaze/xlog/issues/233))
+- *(prob)* align circuit log-sum-exp semantics across CPU and GPU ([#230](https://github.com/BrainyBlaze/xlog/issues/230))
+- *(cuda)* [**breaking**] remove unselectable dense D4 frontier ([#236](https://github.com/BrainyBlaze/xlog/issues/236))
+- *(prob)* [**breaking**] remove unused CSR CNF module ([#235](https://github.com/BrainyBlaze/xlog/issues/235))
+- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/issues/225))
+- *(prob)* restore G91 evidence GPU coverage ([#200](https://github.com/BrainyBlaze/xlog/issues/200))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
+- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/issues/193))
 
 ### Other
 
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
+- separate fast source checks from manual validation
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
 - *(cuda)* [**breaking**] skip redundant certified unions
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
 - *(prob)* make MC benches measure real inference and fail loudly on evaluate errors
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.11.0...xlog-solve-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.11.0...xlog-solve-v0.12.0) - 2026-10-08
 
 ### Fixed
 
 - *(cuda)* preserve native policy content and original invocations
-- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/pull/263))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/issues/263))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
+- separate fast source checks from manual validation
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
 - serialize GPU-state-sharing test binaries
 - *(solve)* align production-gate message asserts with the host-to-device wording
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.11.0...xlog-runtime-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.11.0...xlog-runtime-v0.12.0) - 2026-10-08
 
 ### Added
 
 - *(cuda)* execute dependency-closed plans in one resident graph
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-- feat!(runtime): mark the output stats structs non_exhaustive
+- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/issues/188))
+- *(runtime)* [**breaking**] mark the output stats structs non_exhaustive
 
 ### Fixed
 
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/pull/263))
-- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/pull/258))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/pull/254))
-- *(runtime)* [**breaking**] remove dormant epistemic export ([#228](https://github.com/BrainyBlaze/xlog/pull/228))
-- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/pull/225))
-- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/pull/213))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(production)* [**breaking**] derive diagnostics from real boundaries ([#263](https://github.com/BrainyBlaze/xlog/issues/263))
+- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/issues/258))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/issues/254))
+- *(runtime)* [**breaking**] remove dormant epistemic export ([#228](https://github.com/BrainyBlaze/xlog/issues/228))
+- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/issues/225))
+- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/issues/213))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
+- separate fast source checks from manual validation
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
 - *(cuda)* [**breaking**] skip redundant certified unions
-- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/pull/255))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/issues/255))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/issues/183))
+- apply rustfmt to the epistemic sources
+- Merge epistemic possible-source probes into main
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.11.0...xlog-logic-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.11.0...xlog-logic-v0.12.0) - 2026-10-08
 
 ### Added
 
-- *(resolver)* expose portable executable program IR ([#282](https://github.com/BrainyBlaze/xlog/pull/282))
+- *(resolver)* expose portable executable program IR ([#282](https://github.com/BrainyBlaze/xlog/issues/282))
 - *(cuda)* execute dependency-closed plans in one resident graph
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
+- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/issues/189))
 
 ### Fixed
 
-- *(logic)* resolve open procfd entry sources ([#295](https://github.com/BrainyBlaze/xlog/pull/295))
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/pull/258))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(logic)* [**breaking**] remove dormant type and name scaffolding ([#234](https://github.com/BrainyBlaze/xlog/pull/234))
-- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/pull/225))
-- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/pull/213))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
+- *(logic)* resolve open procfd entry sources ([#295](https://github.com/BrainyBlaze/xlog/issues/295))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/issues/258))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(logic)* [**breaking**] remove dormant type and name scaffolding ([#234](https://github.com/BrainyBlaze/xlog/issues/234))
+- *(cli)* align explain with normalized execution ([#225](https://github.com/BrainyBlaze/xlog/issues/225))
+- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/issues/213))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
+- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/issues/193))
 - *(logic)* reject cross-predicate schema mismatches at compilation
 
 ### Other
 
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- *(logic)* fact fast path in the compiler frontend (parser + owned passes) ([#272](https://github.com/BrainyBlaze/xlog/pull/272))
-- *(logic)* remove frontend quadratics and make compiler output deterministic ([#252](https://github.com/BrainyBlaze/xlog/pull/252))
-- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/pull/255))
-- *(logic)* share ground-term encoding ([#231](https://github.com/BrainyBlaze/xlog/pull/231))
-- align strict Clippy with current stable ([#237](https://github.com/BrainyBlaze/xlog/pull/237))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- separate fast source checks from manual validation
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- *(logic)* fact fast path in the compiler frontend (parser + owned passes) ([#272](https://github.com/BrainyBlaze/xlog/issues/272))
+- *(logic)* remove frontend quadratics and make compiler output deterministic ([#252](https://github.com/BrainyBlaze/xlog/issues/252))
+- *(logic)* remove redundant executable fact rules ([#255](https://github.com/BrainyBlaze/xlog/issues/255))
+- *(logic)* share ground-term encoding ([#231](https://github.com/BrainyBlaze/xlog/issues/231))
+- align strict Clippy with current stable ([#237](https://github.com/BrainyBlaze/xlog/issues/237))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- apply rustfmt to the epistemic sources
+- Merge epistemic possible-source probes into main
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.11.0...xlog-stats-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.11.0...xlog-stats-v0.12.0) - 2026-10-08
 
 ### Fixed
 
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- separate fast source checks from manual validation
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.11.0...xlog-cuda-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.11.0...xlog-cuda-v0.12.0) - 2026-10-08
 
 ### Added
 
+- *(pyxlog)* resume signed Source custody after native evaluation cancellation
+- *(pyxlog)* retain signed terminal refusal through private retirement
+- restore completed learning phases through signed checkpoint custody
 - *(cuda)* bound complete original proposal exports before submit
 - *(cuda)* support arbitrary-arity joint constraints
 - *(cuda)* execute dependency-closed plans in one resident graph
-- *(induce)* bounded exact n-ary rule induction — enumeration, reference scorer, CUDA kernel, device-resident engine ([#240](https://github.com/BrainyBlaze/xlog/pull/240))
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
+- *(induce)* bounded exact n-ary rule induction — enumeration, reference scorer, CUDA kernel, device-resident engine ([#240](https://github.com/BrainyBlaze/xlog/issues/240))
+- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/issues/188))
 
 ### Fixed
 
+- *(cuda)* preserve immutable model generation replay leases
+- *(cuda)* resolve exact backing in evaluation and final intent reads
+- *(cuda)* release model reader custody at confirmed retirement
+- *(cuda)* track cold model directory reuse writes
+- *(cuda)* rebind inactive model ranges before slot retirement
+- *(cuda)* reclaim retired model generation backing
+- *(semantic)* admit original reader in prepared launch manifest
+- *(semantic)* preserve original owners through private cancellation
+- *(cuda)* retain borrowed accounting after local completion
 - *(cuda)* export each completed acquired semantic root
 - *(cuda)* preserve native policy content and original invocations
-- *(cuda)* make resident kernel builds reproducible ([#294](https://github.com/BrainyBlaze/xlog/pull/294))
-- *(cuda)* compute compaction and permutation byte offsets in 64 bits ([#291](https://github.com/BrainyBlaze/xlog/pull/291))
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/pull/254))
-- *(cuda)* honour XLOG_REQUIRE_CUDA in the n-ary launcher unit tests ([#245](https://github.com/BrainyBlaze/xlog/pull/245))
-- *(prob)* align circuit log-sum-exp semantics across CPU and GPU ([#230](https://github.com/BrainyBlaze/xlog/pull/230))
-- *(cuda)* remove dormant RawCudaView recorder contract ([#229](https://github.com/BrainyBlaze/xlog/pull/229))
-- *(cuda)* [**breaking**] remove unselectable dense D4 frontier ([#236](https://github.com/BrainyBlaze/xlog/pull/236))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- *(cuda)* make resident kernel builds reproducible ([#294](https://github.com/BrainyBlaze/xlog/issues/294))
+- *(cuda)* compute compaction and permutation byte offsets in 64 bits ([#291](https://github.com/BrainyBlaze/xlog/issues/291))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(cuda)* report exact memory pressure and peak usage ([#254](https://github.com/BrainyBlaze/xlog/issues/254))
+- *(cuda)* honour XLOG_REQUIRE_CUDA in the n-ary launcher unit tests ([#245](https://github.com/BrainyBlaze/xlog/issues/245))
+- *(prob)* align circuit log-sum-exp semantics across CPU and GPU ([#230](https://github.com/BrainyBlaze/xlog/issues/230))
+- *(cuda)* remove dormant RawCudaView recorder contract ([#229](https://github.com/BrainyBlaze/xlog/issues/229))
+- *(cuda)* [**breaking**] remove unselectable dense D4 frontier ([#236](https://github.com/BrainyBlaze/xlog/issues/236))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
+- Resolve model generations from acquired directories and reconcile allocation claims
+- Preserve named parameter leaves across serialized tensor aliases
+- Authenticate complete parameter leaves without treating buffers as gradients
+- Lease original completed model generations during historical import
+- Use native pending generations and immutable model snapshot leases
+- Read retained publication allocation extents through their owners
+- Share immutable model backing owners across private replay readers
+- Expose original native task actor decision for restoration
+- Bind owned GPU backing observations to original device capacity
+- Require prior executable destruction before native Session release
+- Recover cancelled private segments through original checkpoint custody
+- Retain native non-submission and cancel original captured roster
+- Retire original control model and private native Session
+- Account original evaluation cold regions and known cancellation
+- Execute the original private control segment with retained resource custody
+- Format the canonical cold graph custody conversion
+- Preserve cold graph custody errors at the canonical allocator boundary
+- Restore the original control source with operation-owned native and model work
+- Execute original source observations before private phase restoration
+- Account canonical GPU writes in the original cold work tally
+- Bind cold callback registrars to their actual Session and scratch lifetime
+- Merge current main source CI policy into cold model work
+- connect test sanitation to its manual callers
+- remove source-only checks and duplicate CUDA wrappers
 - Separate native phase admission from final scientific acceptance
 - Resolve original submitted model evaluations without resubmission
 - Bind completed evaluations to original cohort issuance
@@ -251,23 +322,23 @@ All notable changes to this project are documented in this file.
 - Authenticate cold exports against the completed original schedule
 - Preserve program-resource refusal outcomes in completed Proposal export
 - Export original pre-draw physical bounds from completed policy custody
-- Expose original accepted and refused Update measurements ([#312](https://github.com/BrainyBlaze/xlog/pull/312))
-- Own cold learning phase checkpoint transitions ([#311](https://github.com/BrainyBlaze/xlog/pull/311))
+- Expose original accepted and refused Update measurements ([#312](https://github.com/BrainyBlaze/xlog/issues/312))
+- Own cold learning phase checkpoint transitions ([#311](https://github.com/BrainyBlaze/xlog/issues/311))
 - Complete semantic transition ownership and numerical delivery
-- Connect native semantic episode materials and prefill capture ([#307](https://github.com/BrainyBlaze/xlog/pull/307))
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Make CUDA wheel builds reproducible and validate exact artifacts ([#281](https://github.com/BrainyBlaze/xlog/pull/281))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
+- Connect native semantic episode materials and prefill capture ([#307](https://github.com/BrainyBlaze/xlog/issues/307))
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Make CUDA wheel builds reproducible and validate exact artifacts ([#281](https://github.com/BrainyBlaze/xlog/issues/281))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
 - *(cuda)* [**breaking**] skip redundant certified unions
-- align strict Clippy with current stable ([#237](https://github.com/BrainyBlaze/xlog/pull/237))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/pull/207))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
+- align strict Clippy with current stable ([#237](https://github.com/BrainyBlaze/xlog/issues/237))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/issues/207))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/issues/183))
 - *(cuda)* retain freed mempool blocks so drop-and-reuse tests observe reuse on large-VRAM GPUs
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.11.0...xlog-ir-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.11.0...xlog-ir-v0.12.0) - 2026-10-08
 
 ### Added
 
@@ -275,365 +346,35 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/pull/258))
-- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/pull/256))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- *(epistemic)* [**breaking**] preserve authored constraint identity ([#258](https://github.com/BrainyBlaze/xlog/issues/258))
+- *(epistemic)* [**breaking**] replace vacuous fallback telemetry ([#256](https://github.com/BrainyBlaze/xlog/issues/256))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
+- separate fast source checks from manual validation
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.11.0...xlog-core-v0.12.0) - 2026-10-07
+## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.11.0...xlog-core-v0.12.0) - 2026-10-08
 
 ### Fixed
 
-- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/pull/278))
-- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/pull/213))
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
+- enforce production contracts and benchmark integrity ([#278](https://github.com/BrainyBlaze/xlog/issues/278))
+- *(runtime)* preserve epistemic constraint diagnostics ([#213](https://github.com/BrainyBlaze/xlog/issues/213))
+- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/issues/195))
 
 ### Other
 
-- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/pull/302))
-- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/pull/279))
-- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/pull/203))
-- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/pull/207))
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-### Changed
-
-- *(gpu)* [**breaking**] bind reusable materialized stores and retained session runtimes to the exact compiled `LogicProgram`. Cached evaluation and relation-delta cache parameters now use the opaque `LogicMaterializedStore` returned by `evaluate_with_relation_store_and_cache` or `evaluate_with_session_runtime`; use `as_relation_store` for read-only result inspection. Raw `RelationStore` values remain supported as authoritative input stores but can no longer be supplied as trusted derived caches.
-- *(runtime)* expose actual WCOJ-family fallback executions by attempted route, separately from pipeline-error declines.
-- *(configuration)* apply one strict boolean parser to production environment switches in runtime, build, diagnostics, benchmarks, solver tracing, and Python bindings.
-- *(python)* define `trainable_rule` and `train` as Python training-document declarations lowered through the native XLOG compiler, distinct from native `learnable(mask)` rules.
-
-### Fixed
-
-- *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
-- *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
-- *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.
-- *(runtime)* honor `RuntimeConfig.max_iterations` in every fixpoint execution path.
-- *(cuda)* compose lifecycle logging outside the shared byte budget so rejected allocations remain observable.
-- *(python)* release the GIL during exact, Monte Carlo, device, compiled-logic, and retained-session evaluation.
-- *(python)* preserve registered neural-network lineage metadata alongside defensively copied influence records and reject records for unregistered networks.
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-- *(cli)* drop the epistemic-evidence tests that need an untracked fixture
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.11.0...xlog-gpu-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.11.0...xlog-prob-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(pyxlog)* expose exact log-evidence and the CNF variable to fact mapping ([#180](https://github.com/BrainyBlaze/xlog/pull/180))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(prob)* make MC benches measure real inference and fail loudly on evaluate errors
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.11.0...xlog-solve-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- serialize GPU-state-sharing test binaries
-- *(solve)* align production-gate message asserts with the host-to-device wording
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.11.0...xlog-runtime-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-- feat!(runtime): mark the output stats structs non_exhaustive
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.11.0...xlog-logic-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-- *(logic)* reject cross-predicate schema mismatches at compilation
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.11.0...xlog-stats-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.11.0...xlog-cuda-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
-- *(cuda)* retain freed mempool blocks so drop-and-reuse tests observe reuse on large-VRAM GPUs
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.11.0...xlog-ir-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.11.0...xlog-core-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.11.0...xlog-cli-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-- *(cli)* drop the epistemic-evidence tests that need an untracked fixture
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.11.0...xlog-gpu-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.11.0...xlog-prob-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(pyxlog)* expose exact log-evidence and the CNF variable to fact mapping ([#180](https://github.com/BrainyBlaze/xlog/pull/180))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(prob)* make MC benches measure real inference and fail loudly on evaluate errors
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.11.0...xlog-solve-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- serialize GPU-state-sharing test binaries
-- *(solve)* align production-gate message asserts with the host-to-device wording
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.11.0...xlog-runtime-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-- feat!(runtime): mark the output stats structs non_exhaustive
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.11.0...xlog-logic-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(logic)* warn when imported-module pragmas are ignored ([#189](https://github.com/BrainyBlaze/xlog/pull/189))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-- *(cli)* evaluate imported rules in probabilistic programs ([#193](https://github.com/BrainyBlaze/xlog/pull/193))
-- *(logic)* reject cross-predicate schema mismatches at compilation
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- apply rustfmt to the TIER-2 epistemic sources
-- Merge TIER-2 epistemic possible-source probes into main
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.11.0...xlog-stats-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.11.0...xlog-cuda-v0.12.0) - 2026-08-06
-
-### Added
-
-- *(python)* [**breaking**] make n-ary provenance native and delta-safe ([#188](https://github.com/BrainyBlaze/xlog/pull/188))
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- *(runtime)* batch same-head rule unions into one multiway pass per head ([#183](https://github.com/BrainyBlaze/xlog/pull/183))
-- *(cuda)* retain freed mempool blocks so drop-and-reuse tests observe reuse on large-VRAM GPUs
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.11.0...xlog-ir-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-## [0.12.0](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.11.0...xlog-core-v0.12.0) - 2026-08-06
-
-### Fixed
-
-- *(logic)* preserve predicate unions and recursive epistemic semantics ([#195](https://github.com/BrainyBlaze/xlog/pull/195))
-
-### Other
-
-- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/pull/191))
-- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/pull/176))
-
-### Changed
-
-- Epistemic execution classifies modal dependencies before single-pass planning.
-  Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
-  ordinary founded least fixpoint; supported positive exact-tuple
-  Gelfond-1991 possibility cycles run to a greatest compatible tuple fixpoint;
-  and supported cycles through negation use the GPU-backed WFS plan. The
-  Gelfond-1991 route computes a GPU upper bound, then reevaluates against frozen
-  relation snapshots until the concrete tuples converge, so predicate-level
-  recursion cannot manufacture support across disjoint tuple domains.
-- An unseeded FAEEL modal cycle, including `p() :- possible p().`, executes to an
-  empty founded extension instead of returning an unsupported-construct error.
+- separate fast source checks from manual validation
+- Integrate resident semantic transition stack through authentic replay binding ([#302](https://github.com/BrainyBlaze/xlog/issues/302))
+- Complete second-audit remediation across runtime, Python, telemetry, and CI ([#279](https://github.com/BrainyBlaze/xlog/issues/279))
+- realign the public documentation with v0.12.0 ([#203](https://github.com/BrainyBlaze/xlog/issues/203))
+- *(deps)* bump arrow from 53.4.1 to 59.2.0 ([#207](https://github.com/BrainyBlaze/xlog/issues/207))
+- align runtime contracts and release status ([#191](https://github.com/BrainyBlaze/xlog/issues/191))
+- truth-align public claims and complete discovery metadata ([#176](https://github.com/BrainyBlaze/xlog/issues/176))
 
 ## [0.11.0](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.10.0...xlog-cli-v0.11.0) - 2026-07-29
 

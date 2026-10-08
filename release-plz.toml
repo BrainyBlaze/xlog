@@ -15,6 +15,16 @@ pr_labels = ["release"]
 git_release_enable = false
 git_tag_enable = false
 
+[changelog]
+# Normalize misplaced breaking markers before conventional-commit parsing.
+# Historical epistemic subjects describe behavior without internal phase prefixes.
+# Keep parenthesized repository references clickable during manual generation.
+commit_preprocessors = [
+  { pattern = '^([A-Za-z][A-Za-z0-9-]*)!\(([^()]+)\):', replace = '${1}(${2})!:' },
+  { pattern = 'TIER-[0-9]+ epistemic', replace = 'epistemic' },
+  { pattern = '\(#([0-9]+)\)', replace = '([#${1}](https://github.com/BrainyBlaze/xlog/issues/${1}))' },
+]
+
 [[package]]
 name = "xlog-core"
 release = true
