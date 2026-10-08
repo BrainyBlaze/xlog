@@ -2784,6 +2784,7 @@ struct PreparedBuildGuard<'a> {
     session: &'a PySemanticTransitionSession,
     task_use: &'a PySemanticTransitionTaskUse,
     committed: bool,
+    native_completion: Option<(Arc<()>, String)>,
 }
 
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
@@ -2797,17 +2798,33 @@ impl Drop for PreparedRetirementGuard<'_> {
 impl Drop for PreparedBuildGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            if let Ok(mut state) = self.task_use.state() {
-                state.phase = TaskUsePhase::Refused;
-            }
-            if let Some(owner) = self
-                .session
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_mut()
-            {
-                owner.abort();
+            if let Some((scope, operation)) = &self.native_completion {
+                // Native already reconciled every original step and reader.
+                // A missing Python handoff cannot undo that completion, grant
+                // public use, or justify poisoning its retained native owners.
+                // Never repair a phase that was independently refused/changed.
+                if let Ok(mut state) = self.task_use.state() {
+                    if matches!(&state.phase, TaskUsePhase::Segment(original) if original == operation)
+                    {
+                        state.phase = TaskUsePhase::CompletedPending {
+                            scope: Arc::clone(scope),
+                            operation: operation.clone(),
+                        };
+                    }
+                }
+            } else {
+                if let Ok(mut state) = self.task_use.state() {
+                    state.phase = TaskUsePhase::Refused;
+                }
+                if let Some(owner) = self
+                    .session
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_mut()
+                {
+                    owner.abort();
+                }
             }
         }
         self.session.recording.store(false, Ordering::Release);
@@ -13904,6 +13921,7 @@ impl PySemanticTransitionController {
             session: &session,
             task_use: &issued,
             committed: false,
+            native_completion: None,
         };
         let (scope, snapshot, handles, stream) = {
             let mut owner = session.owner()?;
@@ -14337,6 +14355,7 @@ impl PySemanticTransitionController {
             session: &session,
             task_use: &issued,
             committed: false,
+            native_completion: None,
         };
         let expected = {
             let mut owner = session.owner()?;
@@ -14355,6 +14374,10 @@ impl PySemanticTransitionController {
             let mut owner = shared.witness_owner()?;
             owner.complete_prepared_segment().map_err(xlog_err)
         })?;
+        // Set this only after the native whole-roster reconciliation returned.
+        // It retains completion even if the following Python handoff fails;
+        // failed launch/readback and incomplete native outcomes never set it.
+        guard.native_completion = Some((Arc::clone(&scope), operation.clone()));
         {
             let mut retained = session
                 .prepared_segment
