@@ -24,7 +24,9 @@ def main() -> None:
     repository = Path(__file__).resolve().parents[1]
     head = git(repository, "rev-parse", "HEAD")
     branch = git(repository, "symbolic-ref", "--short", "HEAD")
-    git(repository, "diff", "--quiet", "HEAD", "--", "Cargo.toml", "Cargo.lock", "crates")
+    if git(repository, "status", "--porcelain=v1", "--untracked-files=all", "--",
+           "Cargo.toml", "Cargo.lock", "crates"):
+        raise RuntimeError("Commit package inputs before generating release notes.")
     manifest = tomllib.loads((repository / "Cargo.toml").read_text())
     config_path = repository / "release-plz.toml"
     config_bytes = config_path.read_bytes()
@@ -79,6 +81,7 @@ def main() -> None:
         updated = generated.replace(marker, unreleased, 1)
     if (
         git(repository, "rev-parse", "HEAD") != head
+        or git(repository, "symbolic-ref", "--short", "HEAD") != branch
         or config_path.read_bytes() != config_bytes
         or changelog_path.read_text(encoding="utf-8") != original
     ):
