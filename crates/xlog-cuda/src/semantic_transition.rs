@@ -8608,6 +8608,34 @@ impl PublicationStorage {
         }
     }
 
+    fn model_slots_for_directory(
+        &self,
+        directory: &[PublicationRange],
+    ) -> Result<Vec<[usize; 2]>, SemanticTransitionError> {
+        let mut model_slots = Vec::with_capacity(self.model_slots.len());
+        for (allocation, slots) in self.model_slots.iter().enumerate() {
+            let mut selected = None;
+            for range in directory
+                .iter()
+                .filter(|range| matches!(range.role, 18..=25))
+            {
+                if self.model_memory.location(range.role, range.index)?.0 == allocation {
+                    let slot = usize::try_from(range.storage_slot)
+                        .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                    if selected
+                        .replace(slot)
+                        .is_some_and(|previous| previous != slot)
+                        || !self.model_generations[allocation].contains(&slot)
+                    {
+                        return Err(SemanticTransitionError::ObservationMismatch);
+                    }
+                }
+            }
+            model_slots.push([selected.unwrap_or(slots[0]); 2]);
+        }
+        Ok(model_slots)
+    }
+
     /// Extend only the cold storage catalogue. Previously published numerical
     /// allocations and their original budget owners remain at the same address.
     /// Every Update gets one distinct pending generation, never a recycled bank.
@@ -9184,9 +9212,10 @@ impl PreparedStepInputs {
         provider: &CudaKernelProvider,
         storage: Arc<PublicationStorage>,
         reader: DeviceMemoryView<PublicationLease>,
+        directory: &[PublicationRange],
     ) -> Result<Self, SemanticTransitionError> {
         let plans = Self::plan(&storage)?;
-        let model_slots = storage.model_slots.clone();
+        let model_slots = storage.model_slots_for_directory(directory)?;
         let mut reservation = provider
             .memory()
             .reserve_bytes(Self::allocation_bytes(&plans)? as u64)
@@ -16067,27 +16096,11 @@ impl SemanticTransitionSession {
         }
         let directory =
             self.publication_read(storage.directories[(control.word & 1) as usize].view())?;
-        let mut source_model_slots = Vec::with_capacity(storage.model_slots.len());
-        for (allocation, slots) in storage.model_slots.iter().enumerate() {
-            let mut selected = None;
-            for range in directory
-                .iter()
-                .filter(|range| matches!(range.role, 18..=25))
-            {
-                if storage.model_memory.location(range.role, range.index)?.0 == allocation {
-                    let slot = usize::try_from(range.storage_slot)
-                        .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
-                    if selected
-                        .replace(slot)
-                        .is_some_and(|previous| previous != slot)
-                        || !storage.model_generations[allocation].contains(&slot)
-                    {
-                        return Err(SemanticTransitionError::ObservationMismatch);
-                    }
-                }
-            }
-            source_model_slots.push(selected.unwrap_or(slots[0]));
-        }
+        let mut source_model_slots = storage
+            .model_slots_for_directory(&directory)?
+            .into_iter()
+            .map(|slots| slots[0])
+            .collect::<Vec<_>>();
         let replay_bytes = PreparedReplayCustody::allocation_bytes(
             &storage,
             self.graph.transition_arena_view().len(),
@@ -16676,7 +16689,7 @@ impl SemanticTransitionSession {
                 )?;
                 inputs.initialize(&self.provider)?;
             }
-            if reservation.remaining_bytes() != bytes - base_bytes {
+            if reservation.remaining_bytes() != bytes - base_bytes - generation_bytes {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             self.training_origins = training_origins;
@@ -25525,6 +25538,7 @@ impl SemanticTransitionSession {
             &self.provider,
             storage,
             self.readers[&lease.token].device.view(),
+            &lease.directory,
         )?);
         // Retain every output before the first upload or producer enqueue. A
         // partially initialized step remains owned by the poisoned Session.
