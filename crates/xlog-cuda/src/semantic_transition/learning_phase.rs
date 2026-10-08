@@ -954,7 +954,7 @@ impl SemanticTransitionSession {
             .collect::<Result<Vec<_>, _>>()?;
         let mut recorder = self.domain.new_strict_recorder();
         for (index, destination) in scratch.iter().enumerate() {
-            recorder.read(storage.allocations[storage.model_slots[index][0]].slice());
+            recorder.read(&storage.allocations[storage.model_slots[index][0]].slice()?);
             recorder.write(destination);
         }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
@@ -967,7 +967,9 @@ impl SemanticTransitionSession {
                 unsafe {
                     sys::cuMemcpyDtoDAsync_v2(
                         destination.device_ptr_value(),
-                        storage.allocations[storage.model_slots[index][0]].device_ptr_value(),
+                        storage.allocations[storage.model_slots[index][0]]
+                            .entry()
+                            .pointer,
                         destination.len(),
                         enqueue.stream().cu_stream(),
                     )
@@ -980,7 +982,9 @@ impl SemanticTransitionSession {
         let pointer = |key: (u64, u64), bank: usize| {
             let (allocation, offset) = storage.model_memory.location(key.0, key.1)?;
             let base = if bank == 0 {
-                storage.allocations[storage.model_slots[allocation][0]].device_ptr_value()
+                storage.allocations[storage.model_slots[allocation][0]]
+                    .entry()
+                    .pointer
             } else {
                 scratch[allocation].device_ptr_value()
             };
@@ -1138,7 +1142,7 @@ impl SemanticTransitionSession {
         storage.record(&mut recorder);
         for (index, allocation) in scratch.iter().enumerate() {
             recorder.read(allocation);
-            recorder.write(storage.allocations[storage.model_slots[index][0]].slice());
+            recorder.write(&storage.allocations[storage.model_slots[index][0]].slice()?);
         }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
             for (index, slots) in storage.model_slots.iter().enumerate() {
@@ -1150,7 +1154,7 @@ impl SemanticTransitionSession {
                 // original view before this first candidate-bank assignment.
                 unsafe {
                     sys::cuMemcpyDtoDAsync_v2(
-                        destination.device_ptr_value(),
+                        destination.entry().pointer,
                         scratch[index].device_ptr_value(),
                         destination.len(),
                         enqueue.stream().cu_stream(),

@@ -532,6 +532,9 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::NotBound)?
             .allocations
         {
+            let Some(allocation) = allocation.live_slice() else {
+                continue;
+            };
             if step_input_overlap(
                 slab.data,
                 slab_bytes,

@@ -3386,14 +3386,14 @@ __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& he
     return 0;
 }
 
-// Cold, quiescent catalogue growth is not publication. All old entries retain
-// their exact address, extent and generation; only unreachable storage is added.
-extern "C" __global__ void semantic_publication_extend_model_storage(uint64_t control_ptr,
+// Cold catalogue replacement is not publication. Live entries keep their exact
+// address and generation; expired, unselected slots never retain reused addresses.
+extern "C" __global__ void semantic_publication_replace_model_storage(uint64_t control_ptr,
         uint64_t original_ptr,uint64_t original_count,uint64_t expanded_ptr,uint64_t expanded_count) {
     if(blockIdx.x || threadIdx.x)return;
     if(!publication_pointer_span(control_ptr,sizeof(PublicationControl),alignof(PublicationControl)) ||
        original_count>UINT64_MAX/sizeof(PublicationStorageEntry) ||
-       expanded_count>UINT64_MAX/sizeof(PublicationStorageEntry) || expanded_count<=original_count ||
+       expanded_count>UINT64_MAX/sizeof(PublicationStorageEntry) || expanded_count<original_count ||
        !publication_pointer_span(original_ptr,original_count*sizeof(PublicationStorageEntry),alignof(PublicationStorageEntry)) ||
        !publication_pointer_span(expanded_ptr,expanded_count*sizeof(PublicationStorageEntry),alignof(PublicationStorageEntry))) {
         semantic_content_integrity_trap();return;
@@ -3405,9 +3405,21 @@ extern "C" __global__ void semantic_publication_extend_model_storage(uint64_t co
     }
     const auto* original=reinterpret_cast<const PublicationStorageEntry*>(original_ptr);
     const auto* expanded=reinterpret_cast<const PublicationStorageEntry*>(expanded_ptr);
-    for(uint64_t i=0;i<original_count;++i)
+    const auto& selected=*reinterpret_cast<const PublicationBank*>(control.banks[control.word&1]);
+    const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+    if(selected.header.abi!=1 || selected.header.publication_word!=control.word ||
+       selected.header.range_count>contract.range_capacity) { semantic_content_integrity_trap();return; }
+    const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[control.word&1]);
+    for(uint64_t i=0;i<original_count;++i) {
         if(original[i].pointer!=expanded[i].pointer || original[i].bytes!=expanded[i].bytes ||
-           original[i].generation!=expanded[i].generation) { semantic_content_integrity_trap();return; }
+           original[i].generation!=expanded[i].generation) {
+            if(expanded[i].pointer || expanded[i].bytes || original[i].generation!=expanded[i].generation) {
+                semantic_content_integrity_trap();return;
+            }
+            for(uint64_t j=0;j<selected.header.range_count;++j)
+                if(ranges[j].storage_slot==i) { semantic_content_integrity_trap();return; }
+        }
+    }
     for(uint64_t i=original_count;i<expanded_count;++i) {
         if(!expanded[i].generation || (expanded[i].bytes &&
            (!expanded[i].pointer || expanded[i].pointer>UINT64_MAX-expanded[i].bytes))) {
@@ -3416,6 +3428,23 @@ extern "C" __global__ void semantic_publication_extend_model_storage(uint64_t co
         for(uint64_t j=0;j<i;++j)
             if(publication_spans_overlap(expanded[i].pointer,expanded[i].bytes,
                     expanded[j].pointer,expanded[j].bytes)) { semantic_content_integrity_trap();return; }
+    }
+    // The next transition validates both directories before applying its
+    // continuation. An unleased inactive bank cannot keep a numerical range
+    // pointing at a retired slot: ordinary continuations share the selected
+    // generation, while a model update installs its own prepared destination.
+    auto* inactive=reinterpret_cast<PublicationRange*>(control.directories[(control.word&1)^1]);
+    for(uint64_t i=0;i<selected.header.range_count;++i) {
+        if(ranges[i].role<18 || ranges[i].role>25)continue;
+        if(!publication_find_range(inactive,selected.header.range_count,ranges[i].role,ranges[i].index)) {
+            semantic_content_integrity_trap();return;
+        }
+    }
+    for(uint64_t i=0;i<selected.header.range_count;++i) {
+        if(ranges[i].role<18 || ranges[i].role>25)continue;
+        auto* destination=const_cast<PublicationRange*>(publication_find_range(
+            inactive,selected.header.range_count,ranges[i].role,ranges[i].index));
+        *destination=ranges[i];
     }
     control.storage=expanded_ptr;control.storage_count=expanded_count;
 }
