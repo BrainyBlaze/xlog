@@ -28,6 +28,35 @@ Standing human authorization for commit and push must not be replaced by a peer'
 older or narrower interpretation. Resource, installation, and execution limits remain
 separate. No unreviewed bulk staging, unrelated edits, or AI attribution trailers.
 
+## Source CI and Manual Validation
+
+The human-directed suite and CI sanitation separates source integration from
+expensive validation. The required `production-build` status checks Rust formatting,
+workflow and shell hygiene, and compilation of the CUDA-independent production
+libraries: `xlog-core`, `xlog-ir`, `xlog-stats`, `xlog-logic`, and default-feature
+`xlog-neural`. It does not build the GPU workspace, run tests, or certify a release.
+
+GPU builds, including portable PTX and Python wheels, are explicit manual LOCAL
+operations only. No CI workflow may build GPU artifacts, even by manual dispatch
+or on a runner without a physical GPU. Heavy integration/end-to-end suites,
+benchmarks, and certifications are manual, not prerequisites for every source
+contribution. Existing runtime, resource, and release authority still applies:
+manual availability is not execution permission or acceptance evidence.
+
+Retain unique behavioral regressions and meaningful fixtures. Remove source-spelling
+assertions, obsolete procedures, duplicated execution, and synthetic certification
+claims together with their callers. A CPU oracle comparing an actual GPU result
+or a packaging fixture is not a substitute production backend. Never infer measured
+ZERO TRANSFER, restoration, numerical correctness, or release readiness from a
+green source check or a count of tests. Report manual validation separately from
+commit, push, and source integration.
+
+Automatic Actions use bounded GitHub-hosted runners, read-only tokens, pinned
+actions, and cancellation of superseded runs. Optional CPU fuzzing and complete
+documentation builds are explicit bounded manual jobs. Documentation publication
+has a separate write-scoped job and preserves `docs-dist` ancestry; package and
+release publication is not performed by Actions.
+
 ## Lessons Applied to Production Work
 
 - The design's complete observable behavior is the target. An opcode declaration,
@@ -235,8 +264,10 @@ Before requesting merge, verify all of the following:
 2. The root cause or requested behavior is implemented in production code.
 3. No obsolete, unreachable, placeholder, fallback, compatibility, or temporary code was
    introduced or left behind.
-4. Behavior-level regressions pass through every affected public boundary.
-5. Relevant formatting, lint, unit, integration, packaging, documentation, and hardware
-   checks pass on the exact commit.
+4. Unique behavior-level regressions remain available at affected public boundaries;
+   removal of a redundant test does not remove its real behavior coverage.
+5. Required source checks pass on the exact commit. State which separately authorized
+   manual integration, packaging, documentation, or hardware checks ran and which
+   acceptance boundaries remain unverified; source merge is not runtime acceptance.
 6. Documentation and examples describe the implemented behavior without overclaiming.
 7. The diff is focused, understandable, and free of unrelated or local-only artifacts.

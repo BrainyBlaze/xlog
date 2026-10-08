@@ -15,10 +15,11 @@ pull requests do not edit it. `release-plz` generates package-specific entries f
 Conventional Commit history in the rolling release pull request and keeps
 `[Unreleased]` as the boundary above the generated release sections.
 
-XLOG uses a split release model. GitHub Actions check source hygiene and package
-metadata automatically, and a targeted workflow can exercise trusted commits on
-a self-hosted CUDA runner. A maintainer still runs the complete CUDA release gate
-on a real GPU host before publication.
+XLOG separates source integration from release acceptance. GitHub Actions check
+source hygiene and compile only CUDA-independent libraries. GPU builds are
+explicit manual LOCAL operations, never CI jobs; integration/end-to-end suites,
+benchmarks, and certifications are manual. Release preparation and publication
+are maintainer procedures, not automatic main-push workflows.
 
 ## Published Artifacts
 
@@ -81,15 +82,10 @@ consumers run GPU code without recompiling kernels the first time.
 
 ## GPU Release Validation
 
-GitHub-hosted CI cannot prove the GPU path works because those runners have no
-CUDA hardware. A targeted workflow runs native Python relation tests and focused
-Rust GPU suites on the self-hosted CUDA runner after pushes to `main`, when a
-maintainer dispatches the workflow from `main` for an explicitly reviewed full
-commit SHA, or for a pull request whose head branch belongs to this repository.
-Its job condition skips external forks before assigning the CUDA runner, and the
-workflow never uses `pull_request_target`. This targeted workflow is not the
-release gate. Before publication a maintainer runs the validation script on a
-real GPU host:
+GitHub-hosted CI neither builds nor exercises the GPU path. There is no CUDA,
+wheel, benchmark, or package-publication workflow in Actions. Before publication,
+a maintainer selects the complete manual validation script under the applicable
+runtime/resource authority; all GPU compilation is LOCAL:
 
 ```bash
 scripts/validate_release_gpu.sh --mode release
@@ -114,17 +110,17 @@ The public docs live at `https://xlog.md`. Here is how a change to them reaches
 that site.
 
 Source pages are MDX files under `docs/`. The GitHub workflow
-`.github/workflows/docs.yml` runs whenever `docs/**` changes on a pull
-request or on `main`. It pins Node 22 and `mint@4.2.666`. It validates the
-Mintlify site, exports a static bundle, and force-pushes the generated site to
-the `docs-dist` branch on `main`.
+`.github/workflows/docs.yml` is manual only. It pins Node 22 and `mint@4.2.666`,
+generates rustdoc without compiling GPU artifacts, validates the Mintlify site,
+and uploads the exported static bundle. With `publish=true` from reviewed `main`,
+a separate write-scoped job adds a commit to `docs-dist`. It never force-pushes.
 
 DigitalOcean App Platform serves the `docs-dist` branch, configured by
 `.do/docs-app.yaml`. That app owns both `xlog.md` and `www.xlog.md`.
 
 The generated static HTML is never hand-edited in the source tree. To change the
-docs, edit the MDX in `docs/`, then let validation, export, and the workflow
-publish `docs-dist`.
+docs, edit the MDX in `docs/`, then explicitly select validation/export and,
+when publication is authorized, the manual `docs-dist` publication option.
 
 ## Source and package availability
 
@@ -142,17 +138,20 @@ declares a pragma, since pragmas apply only in the entry file.
 
 ## Required Secrets
 
-Release workflows read repository secrets to publish to crates.io and PyPI and
-to automate GitHub releases. Store those secrets in GitHub Actions settings. Do
-not commit tokens or generated credentials to the repository.
+Only the authorized maintainer's manual publication process needs crates.io,
+PyPI, and GitHub release credentials. Source CI does not consume publishing
+secrets. Supply credentials securely to the local publication tools; do not
+commit tokens or generated credentials, and do not put them in build artifacts.
 
 ## Release Checklist
 
 For a release candidate:
 
 1. Confirm `CHANGELOG.md` separates `[Unreleased]` from the target release.
-2. Run ordinary CI and docs validation.
-3. Run CUDA release validation on a supported GPU host.
-4. Build and inspect the Python wheel and CLI archive layouts.
-5. Publish Rust crates, Python wheels, and GitHub release artifacts.
-6. Confirm `xlog.md` serves the exported docs over HTTPS.
+2. Pass source CI; select docs validation manually.
+3. Build GPU artifacts explicitly and locally, and complete the authorized
+   manual CUDA release validation on a supported execution host.
+4. Inspect the exact Python wheel and CLI archive layouts.
+5. Publish Rust crates, Python wheels, and GitHub release artifacts only under
+   separate release authority; main-push Actions do not publish packages.
+6. Select docs publication explicitly and confirm `xlog.md` serves that export.

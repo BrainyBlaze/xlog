@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use xlog_core::{symbol, RelId, ScalarType, Schema, XlogError};
 
 use crate::launch::LaunchEnqueueError;
-use crate::memory::TrackedCudaSlice;
+use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
 use crate::semantic_transition::Identity256;
 use crate::{
@@ -2437,6 +2437,7 @@ struct SemanticKernelLaunchSpec<'a> {
     owner: u64,
     capacities: SemanticHypergraphCapacities,
     arena_words: u64,
+    cold_work: Option<&'a DeviceMemoryView<u64>>,
 }
 
 #[repr(C)]
@@ -2558,11 +2559,86 @@ pub struct SemanticHypergraph {
     stats: SemanticHypergraphExecutionStats,
     device_controlled: bool,
     poisoned: bool,
+    // The enclosing cold operation retains this same private allocation until
+    // its original completion is known. Ordinary resident attempts own theirs.
+    cold_work: Option<DeviceMemoryView<u64>>,
+    // A child graph borrows the original operation's tally, not a new report.
+    // Its guard prevents that original report from closing before child joins.
+    cold_work_custody: Option<Arc<()>>,
     // Retire device state before releasing its allocation and driver owner.
     provider: Arc<CudaKernelProvider>,
 }
 
 impl SemanticHypergraph {
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn begin_cold_work(
+        &mut self,
+        work: DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.is_some() || work.len() != 11 {
+            return Err(admission_error(
+                "cold semantic work requires its sole original native tally",
+            ));
+        }
+        self.cold_work = Some(work);
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn complete_cold_work(
+        &mut self,
+        work: &DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.as_ref().is_none_or(|original| {
+            original.device_ptr() != work.device_ptr() || original.len() != work.len()
+        }) {
+            return Err(admission_error(
+                "cold semantic completion lost its original native tally",
+            ));
+        }
+        self.cold_work = None;
+        self.cold_work_custody = None;
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn begin_borrowed_cold_work(
+        &mut self,
+        work: DeviceMemoryView<u64>,
+        custody: Arc<()>,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.begin_cold_work(work)?;
+        self.cold_work_custody = Some(custody);
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn borrowed_cold_work(&self) -> Option<DeviceMemoryView<u64>> {
+        self.cold_work_custody
+            .as_ref()
+            .and_then(|_| self.cold_work.clone())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn require_cold_work_owner(
+        &self,
+        work: &DeviceMemoryView<u64>,
+        borrowed: bool,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        if self.cold_work.as_ref().is_none_or(|original| {
+            original.device_ptr() != work.device_ptr() || original.len() != work.len()
+        }) || self.cold_work_custody.is_some() != borrowed
+        {
+            return Err(admission_error(
+                "cold ownership handoff changed its original tally or custody",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn transition_owner(
         &self,
     ) -> Result<(Arc<CudaKernelProvider>, ResidentExecutionDomain), SemanticHypergraphError> {
@@ -2724,6 +2800,33 @@ impl CudaKernelProvider {
         domain: &ResidentExecutionDomain,
         capacities: SemanticHypergraphCapacities,
     ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
+        self.allocate_semantic_hypergraph_impl(domain, capacities, None)
+    }
+
+    /// Use the canonical allocator and initializer with the original cold
+    /// operation's tally already attached before its first CUDA command.
+    #[cfg(feature = "semantic-policy")]
+    pub fn allocate_semantic_hypergraph_for_cold_work(
+        self: &Arc<Self>,
+        domain: &ResidentExecutionDomain,
+        capacities: SemanticHypergraphCapacities,
+        work: crate::SemanticColdNativeWork,
+    ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
+        let custody =
+            work.graph_custody(self, domain)
+                .map_err(|error| SemanticHypergraphError::Runtime {
+                    operation: "cold graph custody",
+                    detail: error.to_string(),
+                })?;
+        self.allocate_semantic_hypergraph_impl(domain, capacities, Some(custody))
+    }
+
+    fn allocate_semantic_hypergraph_impl(
+        self: &Arc<Self>,
+        domain: &ResidentExecutionDomain,
+        capacities: SemanticHypergraphCapacities,
+        cold_work: Option<(DeviceMemoryView<u64>, Arc<()>)>,
+    ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
         validate_execution_domain(self, domain)
             .map_err(|error| runtime_error("domain validation", error))?;
         let execute = self
@@ -2791,6 +2894,10 @@ impl CudaKernelProvider {
                 kind: SemanticHandleKind::Root,
                 slot: 0,
             })?;
+        let (cold_work, cold_work_custody) = match cold_work {
+            Some((work, custody)) => (Some(work), Some(custody)),
+            None => (None, None),
+        };
         let mut graph = SemanticHypergraph {
             provider: Arc::clone(self),
             domain: domain.clone(),
@@ -2813,6 +2920,8 @@ impl CudaKernelProvider {
             stats: SemanticHypergraphExecutionStats::default(),
             device_controlled: false,
             poisoned: false,
+            cold_work,
+            cold_work_custody,
         };
         let command = graph.command_for(OP_INITIALIZE);
         let receipt = graph.run(command, ArenaAccess::ReadWrite)?;
@@ -3652,6 +3761,7 @@ impl SemanticHypergraph {
                 owner: self.owner,
                 capacities: self.capacities,
                 arena_words: self.arena_words,
+                cold_work: self.cold_work.as_ref(),
             },
             SemanticKernelLaunchIo {
                 arena: &mut self.arena,
@@ -3686,6 +3796,7 @@ impl SemanticHypergraph {
                 owner: self.owner,
                 capacities: self.capacities,
                 arena_words: self.arena_words,
+                cold_work: self.cold_work.as_ref(),
             },
             SemanticKernelLaunchIo {
                 arena: &mut self.arena,
@@ -4131,6 +4242,10 @@ fn enqueue_device_command(
         }
     }
     recorder.write(receipts);
+    let cold_work = spec.cold_work.map_or(0, |work| {
+        recorder.read_write(work);
+        *work.device_ptr()
+    });
     let mut descriptor = DeviceLaunchDescriptor {
         expected_owner: spec.owner,
         root_capacity: u64::from(spec.capacities.roots),
@@ -4257,7 +4372,7 @@ fn enqueue_device_command(
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (arena, descriptor),
+                (arena, descriptor, cold_work),
             )
         })
     } {
@@ -4885,7 +5000,7 @@ pub(crate) mod tests {
                             block_dim: (1, 1, 1),
                             shared_mem_bytes: 0,
                         },
-                        (graph.arena.device_ptr_value(), descriptor),
+                        (graph.arena.device_ptr_value(), descriptor, 0u64),
                     )
                 })
             }
@@ -6879,7 +6994,7 @@ pub(crate) mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (graph.arena.device_ptr_value(), descriptor),
+                    (graph.arena.device_ptr_value(), descriptor, 0u64),
                 )
             })
         }

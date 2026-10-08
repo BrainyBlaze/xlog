@@ -2,14 +2,7 @@
   "consumer": "neutral-external-consumer",
   "features": [
     "adaptive_reoptimization",
-    "common_subexpression_elimination",
-    "production_path_reuse"
-  ],
-  "source_required_substrings": [
-    "stable_link(A, B)",
-    "signal_edge(B, C)",
-    "not noisy_sensor(B)",
-    "stable_count(A, count(B))"
+    "common_subexpression_elimination"
   ],
   "checks": {
     "run": {

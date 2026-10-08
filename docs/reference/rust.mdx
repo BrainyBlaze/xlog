@@ -5,7 +5,7 @@ description: "Generated rustdoc entry points for the xlog workspace, plus docs.r
 
 This page links to the generated Rust API documentation for every crate in the xlog workspace, plus hosted fallbacks for the crates published to crates.io. "rustdoc" is Rust's standard tool for turning source comments into browsable HTML API reference.
 
-The docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree while still publishing the generated API with the site. The CI docs build uses a rustdoc-only CUDA artifact mode: it documents the Rust API surface without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit).
+The explicitly dispatched manual docs build generates rustdoc for the full workspace in a temporary build directory, then attaches it to the exported site at `/generated/rust/` after the Mintlify export step. This keeps the generated Rustdoc HTML out of the Mintlify source tree. Its rustdoc-only CUDA artifact mode documents the Rust API without compiling PTX or cubin files (the two compiled GPU-code formats that a release build would normally emit). Ordinary source CI does not run this full documentation build, and neither source CI nor manual Actions build GPU artifacts.
 
 <CardGroup cols={2}>
   <Card title="Workspace rustdoc" href="https://xlog.md/generated/rust/index.html">
@@ -132,6 +132,11 @@ arbitrary-width decimal training seed, and mask-policy identity. Native binding
 validates and retains this domain before actions. `None` explicitly denotes no
 prospective arena; training admission cannot invent a domain afterwards.
 `task_training_domain()` reads the same retained owner without a device transfer.
+`task_actor_eligible()` reads the original ex-ante actor decision from the bound
+task as `Option<bool>` (`None` only when no task is bound). This decision is sealed
+into task identity and restored from the original checkpoint, without deriving
+new eligibility from current rights or completed actions. Reading it performs no
+device transfer and grants no training use.
 The task and checkpoint scoring identities seal the entire domain. Initial and
 restored arena admission check the real rows against its manifest/seed/mask and
 packed geometry, separate episode/anchor record bounds, and each group's actual
