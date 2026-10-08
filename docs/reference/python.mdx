@@ -1035,8 +1035,10 @@ An original private segment cancelled before submission uses the distinct cause
 admits this recovery; an exception or Python history alone does not. Native saves
 the actual full private Q while retaining the original parent, model and aliases.
 The refused private TaskUse gains no ordinary execution or public retirement
-rights. Its original cold owner remains available only inside the authenticated
-terminal callback region.
+rights. Native Session deallocation also requires completed destruction of every
+previous executable, even after its replay handle has left the Session; an empty
+executable slot does not prove graph retirement. Its original cold owner remains
+available only inside the authenticated terminal callback region.
 
 After verified full Q, `release_cancelled_phase_execution()` releases the original
 failed frame and permitted producer/autograd aliases, but retains the segment,

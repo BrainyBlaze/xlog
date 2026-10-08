@@ -1093,8 +1093,12 @@ fn conditional_driver_call(
 pub(crate) struct CudaGraphRetirement(Arc<AtomicBool>);
 
 impl CudaGraphRetirement {
+    pub(crate) fn is_completed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
     pub(crate) fn require_completed(&self) -> Result<()> {
-        if !self.0.load(Ordering::Acquire) {
+        if !self.is_completed() {
             return Err(XlogError::Kernel(
                 "original CUDA graph destruction is not known complete".into(),
             ));
@@ -1834,6 +1838,10 @@ pub struct CapturedCudaGraph {
 }
 
 impl CapturedCudaGraph {
+    pub(crate) fn retirement(&self) -> CudaGraphRetirement {
+        self.retirement.clone()
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn captured_launch_bindings(&self) -> Vec<CapturedCudaLaunchBinding> {
         self.modules

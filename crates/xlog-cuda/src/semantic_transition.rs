@@ -14359,6 +14359,10 @@ impl PinnedObservation {
 pub struct SemanticTransitionSession {
     // Drop waits before destroying the exec, then retires its device storage.
     captured: Option<CapturedCudaGraph>,
+    // Replaced executables can remain in the canonical retirement queue. Keep
+    // their actual destruction acknowledgements after the replay handle leaves
+    // this Session; an empty captured slot alone cannot authorize deallocation.
+    graph_retirements: Vec<crate::cuda_graph::CudaGraphRetirement>,
     domain: ResidentExecutionDomain,
     stream: Arc<CudaStream>,
     graph: std::mem::ManuallyDrop<SemanticHypergraph>,
@@ -15471,6 +15475,21 @@ impl Drop for SemanticTransitionSession {
 }
 
 impl SemanticTransitionSession {
+    fn retain_graph_retirement(&mut self, graph: &CapturedCudaGraph) {
+        self.graph_retirements
+            .retain(|retirement| !retirement.is_completed());
+        self.graph_retirements.push(graph.retirement());
+    }
+
+    fn require_completed_graph_retirements(&self) -> Result<(), SemanticTransitionError> {
+        for retirement in &self.graph_retirements {
+            retirement
+                .require_completed()
+                .map_err(|error| runtime_error("original executable retirement", error))?;
+        }
+        Ok(())
+    }
+
     /// Retain the actual allocation owner and serial stream for a private successor.
     /// Source and successor allocations remain charged to this same provider's
     /// resource stack; constructing a successor does not grant a fresh budget
@@ -21667,12 +21686,12 @@ impl SemanticTransitionSession {
             .map_err(|error| runtime_error("prepared graph cold upload", error))?;
         // Failure leaves the actual graph in the caller's owner. No graph
         // destructor or driver completion can run under its Session mutex.
-        self.captured = Some(
-            executable
-                .take()
-                .expect("checked authentic executable")
-                .graph,
-        );
+        let graph = executable
+            .take()
+            .expect("checked authentic executable")
+            .graph;
+        self.retain_graph_retirement(&graph);
+        self.captured = Some(graph);
         Ok(())
     }
 
@@ -24051,6 +24070,7 @@ impl SemanticTransitionSession {
         if self.is_poisoned() {
             return Err(SemanticTransitionError::Poisoned);
         }
+        self.require_completed_graph_retirements()?;
         if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
             || lease.active
             || !self.readers.is_empty()
@@ -27085,6 +27105,7 @@ impl SemanticTransitionSession {
             .ok_or_else(|| runtime_error("stream resolution", "owned stream is unavailable"))?;
         let mut session = Self {
             captured: None,
+            graph_retirements: Vec::new(),
             provider,
             domain: domain.clone(),
             stream: stream.clone(),
@@ -27177,6 +27198,7 @@ impl SemanticTransitionSession {
                 "cold release requires the observed, unpublished fresh task",
             ));
         }
+        self.require_completed_graph_retirements()?;
         let result = self
             .stream
             .context()
@@ -30694,6 +30716,7 @@ impl SemanticTransitionSession {
                 })
             })
             .map_err(|error| runtime_error("capture", error))?;
+        self.retain_graph_retirement(&captured);
         self.captured = Some(captured);
         self.poisoned = false;
         Ok(())
