@@ -943,11 +943,48 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
+        // A cold fold has a genuine private writer, not a second persistent
+        // model bank. Preserve all bytes (including alias padding) before the
+        // unchanged compute/scatter/all-view-check law and sole assignment.
+        let scratch = storage
+            .model_memory
+            .allocation_bytes
+            .iter()
+            .map(|&bytes| allocate_publication::<u8>(&self.provider, bytes as usize))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recorder = self.domain.new_strict_recorder();
+        for (index, destination) in scratch.iter().enumerate() {
+            recorder.read(storage.allocations[storage.model_slots[index][0]].slice());
+            recorder.write(destination);
+        }
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            for (index, destination) in scratch.iter().enumerate() {
+                if destination.is_empty() {
+                    continue;
+                }
+                // SAFETY: full source/scratch allocations are disjoint, retained
+                // and recorded; no descriptor names this cold fold's writer.
+                unsafe {
+                    sys::cuMemcpyDtoDAsync_v2(
+                        destination.device_ptr_value(),
+                        storage.allocations[storage.model_slots[index][0]].device_ptr_value(),
+                        destination.len(),
+                        enqueue.stream().cu_stream(),
+                    )
+                }
+                .result()
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
+            Ok::<(), XlogError>(())
+        })?;
         let pointer = |key: (u64, u64), bank: usize| {
             let (allocation, offset) = storage.model_memory.location(key.0, key.1)?;
-            storage.allocations[storage.model_slots[allocation][bank]]
-                .device_ptr_value()
-                .checked_add(offset as u64)
+            let base = if bank == 0 {
+                storage.allocations[storage.model_slots[allocation][0]].device_ptr_value()
+            } else {
+                scratch[allocation].device_ptr_value()
+            };
+            base.checked_add(offset as u64)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         };
         let mut outputs = Vec::new();
@@ -1048,6 +1085,9 @@ impl SemanticTransitionSession {
             .ok_or_else(|| runtime_error("kernel lookup", "learning absorption unavailable"))?;
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
+        for allocation in &scratch {
+            recorder.read_write(allocation);
+        }
         recorder.read_write(&status);
         for output in outputs.iter().flatten() {
             recorder.read_write(output);
@@ -1096,8 +1136,12 @@ impl SemanticTransitionSession {
         }
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
+        for (index, allocation) in scratch.iter().enumerate() {
+            recorder.read(allocation);
+            recorder.write(storage.allocations[storage.model_slots[index][0]].slice());
+        }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            for slots in &storage.model_slots {
+            for (index, slots) in storage.model_slots.iter().enumerate() {
                 let destination = &storage.allocations[slots[0]];
                 if destination.is_empty() {
                     continue;
@@ -1107,7 +1151,7 @@ impl SemanticTransitionSession {
                 unsafe {
                     sys::cuMemcpyDtoDAsync_v2(
                         destination.device_ptr_value(),
-                        storage.allocations[slots[1]].device_ptr_value(),
+                        scratch[index].device_ptr_value(),
                         destination.len(),
                         enqueue.stream().cu_stream(),
                     )

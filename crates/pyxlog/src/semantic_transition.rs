@@ -9693,7 +9693,7 @@ pub(crate) struct PySemanticGradientDelivery {
     handles: Mutex<Option<Vec<Py<PyAny>>>>,
     deferred_hooks: Mutex<Option<Vec<GradientHookEntry>>>,
     activated_once: AtomicBool,
-    restore_on_finish: bool,
+    shared_reset: bool,
     restores: Mutex<Vec<GradientSlotRestore>>,
     hook_cleanup: Mutex<GradientHookCleanup>,
 }
@@ -9739,7 +9739,7 @@ impl PySemanticGradientDelivery {
     /// the existing slots so subsequent node deliveries add in place.
     fn record_reset(&self, py: Python<'_>) -> PyResult<()> {
         self.require_active_hooks()?;
-        if self.restore_on_finish {
+        if self.shared_reset {
             return Err(invalid(
                 "group delivery shares the target bank's single gradient reset",
             ));
@@ -9761,10 +9761,10 @@ impl PySemanticGradientDelivery {
         Ok(())
     }
 
-    /// Remove cold node hooks after their operations have been captured. The
-    /// captured device graph retains the recorded reset/add/presence work.
+    /// Attach authenticated pending destinations immediately before recording
+    /// this bank's original reset and combined backward.
     fn activate(&self, py: Python<'_>) -> PyResult<()> {
-        self.activate_group(py)
+        self.activate_pending(py)
     }
 
     fn finish_recording(&self, py: Python<'_>) -> PyResult<()> {
@@ -9773,11 +9773,12 @@ impl PySemanticGradientDelivery {
 }
 
 impl PySemanticGradientDelivery {
-    /// Attach a cold-verified historical model's nodes only for this bank's
-    /// capture. Another bank may already be staged, but cannot be active.
-    fn activate_group(&self, py: Python<'_>) -> PyResult<()> {
-        if !self.restore_on_finish {
-            return Err(invalid("ordinary gradient delivery is already active"));
+    /// Temporarily route original physical nodes to their authenticated pending
+    /// destinations for this bank's single backward, then restore source slots.
+    fn activate_pending(&self, py: Python<'_>) -> PyResult<()> {
+        self.require_active_hooks()?;
+        if self.activated_once.load(Ordering::Acquire) {
+            return Err(invalid("gradient delivery was already activated"));
         }
         let entries = self
             .deferred_hooks
@@ -9798,16 +9799,18 @@ impl PySemanticGradientDelivery {
                         "original physical AccumulateGrad edge changed before capture",
                     ));
                 }
-                swap_group_leaf_gradient(
-                    effective,
-                    entry.original_grad.bind(py),
-                    entry.gradient.bind(py),
-                )?;
+                // Retain the original restoration intent before a Python
+                // setter can fail after mutating the physical leaf.
                 attached.push(GradientSlotRestore {
                     effective: entry.effective.clone_ref(py),
                     gradient: entry.gradient.clone_ref(py),
                     original_grad: entry.original_grad.clone_ref(py),
                 });
+                swap_group_leaf_gradient(
+                    effective,
+                    entry.original_grad.bind(py),
+                    entry.gradient.bind(py),
+                )?;
                 handles.push(
                     node.call_method1("register_hook", (entry.callback.clone_ref(py),))?
                         .unbind(),
@@ -9815,19 +9818,6 @@ impl PySemanticGradientDelivery {
             }
             Ok(())
         })();
-        if let Err(error) = installed {
-            for handle in handles.drain(..).rev() {
-                let _ = handle.bind(py).call_method0("remove");
-            }
-            for restore in attached.into_iter().rev() {
-                let _ = swap_group_leaf_gradient(
-                    restore.effective.bind(py),
-                    restore.gradient.bind(py),
-                    restore.original_grad.bind(py),
-                );
-            }
-            return Err(error);
-        }
         *self
             .restores
             .lock()
@@ -9839,14 +9829,37 @@ impl PySemanticGradientDelivery {
             .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))? =
             Some(handles);
         self.activated_once.store(true, Ordering::Release);
+        if let Err(error) = installed {
+            // Cleanup attempts each original operation once. If a setter or
+            // hook has an unknown outcome, retain every owner and that cause;
+            // later cancellation must not silently retry it.
+            return finish_with_cleanup(py, Err(error), self.remove_hooks(py, true));
+        }
         Ok(())
     }
 
     fn remove_hooks(&self, py: Python<'_>, already_removed_ok: bool) -> PyResult<()> {
-        if self.restore_on_finish && !self.activated_once.load(Ordering::Acquire) {
-            return Err(invalid(
-                "historical gradient delivery was never activated in its Update bank",
-            ));
+        if !self.activated_once.load(Ordering::Acquire) {
+            if !already_removed_ok {
+                return Err(invalid(
+                    "gradient delivery was never activated in its Update bank",
+                ));
+            }
+            // Construction may stop before this bank's callback. No Python
+            // mutation or hook occurred, so known cancellation can discard
+            // its unactivated roster without inventing a captured backward.
+            let deferred = self
+                .deferred_hooks
+                .lock()
+                .map_err(|_| invalid("deferred gradient hook custody is poisoned"))?
+                .take();
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))? =
+                GradientHookCleanup::Complete;
+            drop(deferred);
+            return Ok(());
         }
         {
             let mut cleanup = self
@@ -10351,6 +10364,41 @@ impl PySemanticPreparedStep {
             .unbind())
     }
 
+    /// Full native U8 backing of this Update's unpublished numerical generation.
+    /// Both alternative banks share it; another Update and every selected source
+    /// have different owners. Do not read before full captured initialization.
+    /// Its provenance is the complete allocation, with byte_offset zero.
+    #[pyo3(signature = (role, index, bank, *, consumer_stream))]
+    fn update_tensor_allocation(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+        bank: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let role = SemanticStateRole::from_code(ColdValue::read(role, &mut 128, 0)?.unsigned()?)
+            .ok_or_else(|| invalid("unknown native publication tensor role"))?;
+        let index = ColdValue::read(index, &mut 128, 0)?.unsigned()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared tensor bank exceeds native address space"))?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.content_binding_with_owner(py, &owner)?;
+        let (provenance, tensor) = owner
+            .prepared_update_tensor_allocation(&self.inner, role, index, bank, stream)
+            .map_err(xlog_err)?;
+        let tensor = retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+        Ok((
+            Py::new(py, PyNativeTensorAllocation { provenance })?,
+            crate::dlpack_capsule_from_tensor(py, tensor)?,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
     /// Fixed device outputs of this Update step's native replay selection.
     /// The first U64 tensor is the selection/status record. It is followed by the
     /// complete roster metadata, frozen objective, reduction groups, group member
@@ -10611,7 +10659,6 @@ impl PySemanticPreparedStep {
             effective: Py<PyAny>,
             gradient: Py<PyAny>,
             presence: Py<PyAny>,
-            restore_none: bool,
             original_grad: Py<PyAny>,
         }
         let mut hook_leaves = Vec::new();
@@ -10652,18 +10699,12 @@ impl PySemanticPreparedStep {
                 ));
             }
             let current = effective.getattr("grad")?;
-            if group_member.is_none() && !current.is_none() && !current.is(gradient.bind(py)) {
-                return Err(invalid(
-                    "the physical leaf already owns a different gradient allocation",
-                ));
-            }
             edges.push(edge.clone_ref(py));
             hook_leaves.push(HookLeaf {
                 node: node.unbind(),
                 effective: effective.clone().unbind(),
                 gradient,
                 presence,
-                restore_none: current.is_none(),
                 original_grad: current.unbind(),
             });
         }
@@ -10681,7 +10722,7 @@ impl PySemanticPreparedStep {
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let deferred_hooks = group_member.as_ref().map(|_| {
+        let deferred_hooks = Some({
             hook_leaves
                 .iter()
                 .zip(&callbacks)
@@ -10704,10 +10745,10 @@ impl PySemanticPreparedStep {
                 _producers: parsed.producers,
                 _edges: edges,
                 _callbacks: callbacks.iter().map(|item| item.clone_ref(py)).collect(),
-                handles: Mutex::new(group_member.is_none().then(Vec::new)),
+                handles: Mutex::new(None),
                 deferred_hooks: Mutex::new(deferred_hooks),
-                activated_once: AtomicBool::new(group_member.is_none()),
-                restore_on_finish: group_member.is_some(),
+                activated_once: AtomicBool::new(false),
+                shared_reset: group_member.is_some(),
                 restores: Mutex::new(Vec::new()),
                 hook_cleanup: Mutex::new(GradientHookCleanup::Ready),
             },
@@ -10749,43 +10790,6 @@ impl PySemanticPreparedStep {
             }
             return Ok(delivery);
         }
-        let mut handles = Vec::new();
-        let mut attached = Vec::new();
-        let installed = (|| -> PyResult<()> {
-            for (leaf, callback) in hook_leaves.iter().zip(&callbacks) {
-                let effective = leaf.effective.bind(py);
-                // Native registration, not the numerical producer, attaches
-                // canonical role-24 storage to this real AccumulateGrad node.
-                effective.setattr("grad", leaf.gradient.bind(py))?;
-                attached.push((
-                    leaf.effective.clone_ref(py),
-                    leaf.gradient.clone_ref(py),
-                    leaf.restore_none,
-                ));
-                let handle = leaf
-                    .node
-                    .bind(py)
-                    .call_method1("register_hook", (callback.clone_ref(py),))?;
-                handles.push(handle.unbind());
-            }
-            Ok(())
-        })();
-        if let Err(error) = installed {
-            for handle in handles.drain(..).rev() {
-                let _ = handle.bind(py).call_method0("remove");
-            }
-            for (effective, _, restore_none) in attached.into_iter().rev() {
-                if restore_none {
-                    let _ = effective.bind(py).setattr("grad", py.None());
-                }
-            }
-            return Err(error);
-        }
-        *delivery
-            .borrow(py)
-            .handles
-            .lock()
-            .expect("unexposed gradient-delivery owner cannot be poisoned") = Some(handles);
         owners[bank] = Some(delivery.clone_ref(py));
         Ok(delivery)
     }

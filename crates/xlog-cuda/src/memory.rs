@@ -2532,6 +2532,18 @@ impl<T: cudarc::driver::DeviceRepr> DeviceSlice<T> for TrackedCudaSlice<T> {
 }
 
 impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
+    /// Retain the exact tracked range and its single allocation/budget owner.
+    /// This performs no allocation or access; operation admission still governs
+    /// every read and write to the shared physical range.
+    pub(crate) fn retain(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            ptr: self.ptr,
+            len: self.len,
+            element: std::marker::PhantomData,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
