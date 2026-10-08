@@ -34,6 +34,7 @@ pub(super) struct PrivateExecutionGroup {
     build_scope: Option<Arc<()>>,
     native_steps: Vec<SemanticPreparedStep>,
     non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
+    non_submission_confirmed: bool,
     selected_parent: Option<Py<PySemanticPublishedParent>>,
     native_retired: bool,
     retirement_work: Option<Py<PySemanticColdModelWork>>,
@@ -124,9 +125,95 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
     ) -> PyResult<Option<super::phase_evaluation::SegmentTerminalInput>> {
         let retained = self.private_group()?;
-        let Some(group) = retained.as_ref().filter(|group| group.budget_exceeded) else {
+        let Some(group) = retained
+            .as_ref()
+            .filter(|group| group.budget_exceeded || group.non_submission_confirmed)
+        else {
             return Ok(None);
         };
+        if group.non_submission_confirmed {
+            Self::require_private_group_entries(py, group)?;
+            let proof = group
+                .non_submission
+                .as_ref()
+                .filter(|proof| proof.matches(&group.native_steps))
+                .ok_or_else(|| {
+                    invalid("cancelled group lost its genuine native whole-roster proof")
+                })?;
+            let scope = group
+                .build_scope
+                .as_ref()
+                .ok_or_else(|| invalid("cancelled group lost its original construction scope"))?;
+            let restored = group.restored.borrow(py);
+            let task = restored.task_use.borrow(py);
+            if group.native_retired
+                || group.callback_error.is_none()
+                || group.callback_pending
+                || group.callback_result.is_some()
+                || group.observer_finish_entered
+                || group.record_entered.is_some()
+                || group.records_completed != 0
+                || group.records_released
+                || group.preparation_report.is_none()
+                || group.selected_parent.is_some()
+                || !matches!(&task.state()?.phase,
+                    TaskUsePhase::ArenaPreparing(original) if matches!(original.as_ref(),
+                        TaskUsePhase::CancelledPrivate { scope: original, .. } if Arc::ptr_eq(original, scope)))
+            {
+                return Err(invalid("cancelled terminal requires the unchanged unsubmitted group, failed callback and private task"));
+            }
+            let preparation = group
+                .preparation_reports
+                .iter()
+                .copied()
+                .chain(group.preparation_report)
+                .try_fold([0u64; 2], |[work, calls], report| -> PyResult<_> {
+                    Ok([
+                        report
+                            .model_work
+                            .checked_add(report.native_work)
+                            .and_then(|value| work.checked_add(value))
+                            .ok_or_else(|| invalid("cancelled preparation work overflowed"))?,
+                        calls
+                            .checked_add(report.model_calls)
+                            .ok_or_else(|| invalid("cancelled preparation calls overflowed"))?,
+                    ])
+                })?;
+            let parent = restored.parent.borrow(py);
+            let identity = parent
+                .session
+                .borrow(py)
+                .owner()?
+                .published_identity(&*parent.lease()?)
+                .map_err(xlog_err)?;
+            let count = u64::try_from(group.kinds.len())
+                .map_err(|_| invalid("cancelled original roster extent overflowed"))?;
+            return Ok(Some(super::phase_evaluation::SegmentTerminalInput {
+                owners: super::phase_evaluation::EvaluationOwners {
+                    controller: restored.controller.clone_ref(py),
+                    task: restored.task_use.clone_ref(py),
+                    parent: restored.parent.clone_ref(py),
+                    model: restored.model.clone_ref(py),
+                },
+                branch: group.branch,
+                instruction: group.instruction.clone(),
+                group: super::phase_evaluation::SegmentTerminalGroup {
+                    group_ordinal: group.ordinal,
+                    count,
+                    parent: identity,
+                },
+                cancellation: Some(super::phase_evaluation::CancelledSegmentTerminal {
+                    group: super::phase_evaluation::SegmentTerminalGroup {
+                        group_ordinal: group.ordinal,
+                        count,
+                        parent: identity,
+                    },
+                    proof: proof.clone(),
+                    scope: Arc::clone(scope),
+                    preparation,
+                }),
+            }));
+        }
         if !group.native_retired
             || group.kinds.is_empty()
             || group.preparation_report.is_none()
@@ -179,13 +266,192 @@ impl PySemanticLearningPhaseTransition {
             },
             branch: group.branch,
             instruction: group.instruction.clone(),
-            completed: super::phase_evaluation::CompletedSegmentTerminal {
+            group: super::phase_evaluation::SegmentTerminalGroup {
                 group_ordinal: group.ordinal,
                 count: u64::try_from(group.kinds.len())
                     .map_err(|_| invalid("terminal original group extent overflowed"))?,
                 parent: identity,
             },
+            cancellation: None,
         }))
+    }
+
+    pub(super) fn retire_original_cancelled_group(
+        &self,
+        py: Python<'_>,
+        branch: &'static str,
+        ordinal: u64,
+        count: u64,
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+        scope: &Arc<()>,
+    ) -> PyResult<()> {
+        let (restored, steps) = {
+            let mut retained = self.private_group()?;
+            let group = retained
+                .as_mut()
+                .ok_or_else(|| invalid("cancelled retirement lost its original group"))?;
+            if group.branch != branch
+                || group.ordinal != ordinal
+                || group.kinds.len() as u64 != count
+                || !group.non_submission_confirmed
+                || !proof.matches(&group.native_steps)
+                || group
+                    .build_scope
+                    .as_ref()
+                    .is_none_or(|original| !Arc::ptr_eq(original, scope))
+                || group.records_completed != 0
+                || group.records_released
+                || group.observer_finish_entered
+                || group.selected_parent.is_some()
+            {
+                return Err(invalid(
+                    "cancelled retirement changed its original unsubmitted roster",
+                ));
+            }
+            if group.native_retired {
+                return Ok(());
+            }
+            if group.retirement_entered {
+                return Err(invalid(
+                    "unknown cancelled native retirement retains its original owners without retry",
+                ));
+            }
+            group.retirement_entered = true;
+            (group.restored.clone_ref(py), group.native_steps.clone())
+        };
+        let restored = restored.borrow(py);
+        let session = restored.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.swap(true, Ordering::AcqRel)
+        {
+            return Err(invalid(
+                "cancelled native retirement overlaps another original operation",
+            ));
+        }
+        let _retirement = PreparedRetirementGuard(&session.retiring);
+        let graph = session
+            .owner()?
+            .take_cancelled_prepared_executable_for_retirement(proof)
+            .map_err(xlog_err)?;
+        drop(graph);
+        session
+            .owner()?
+            .require_cancelled_prepared_graph_retirement(proof)
+            .map_err(xlog_err)?;
+        let python_owners = {
+            let retained = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?;
+            let segment = retained.as_ref().ok_or_else(|| {
+                invalid("cancelled retirement lost its original Python segment custody")
+            })?;
+            if segment.task_use.as_ptr() != restored.task_use.as_ptr()
+                || !Arc::ptr_eq(&segment.scope, scope)
+                || segment.steps.len() != steps.len()
+                || !proof.matches(
+                    &segment
+                        .steps
+                        .iter()
+                        .map(|step| step.borrow(py).inner.clone())
+                        .collect::<Vec<_>>(),
+                )
+            {
+                return Err(invalid(
+                    "cancelled Python segment differs from its original native proof",
+                ));
+            }
+            (
+                segment
+                    .steps
+                    .iter()
+                    .map(|step| step.clone_ref(py))
+                    .collect::<Vec<_>>(),
+                Arc::clone(&segment.resources),
+            )
+        };
+        {
+            let (steps, resources) = &python_owners;
+            let prepared = resources
+                .producers
+                .lock()
+                .map_err(|_| invalid("cancelled producer custody is poisoned"))?
+                .get(1)
+                .map(|owner| owner.clone_ref(py))
+                .ok_or_else(|| invalid("cancelled retirement lost its original prepared owner"))?;
+            {
+                let task = restored.task_use.borrow(py);
+                let snapshot = task.state()?.snapshot.canonical.clone();
+                let check = || -> PyResult<()> {
+                    let state = task.state()?;
+                    if state.snapshot.canonical != snapshot
+                        || !matches!(&state.phase, TaskUsePhase::ArenaPreparing(original)
+                            if matches!(original.as_ref(), TaskUsePhase::CancelledPrivate { scope: original, .. }
+                                if Arc::ptr_eq(original, scope)))
+                    {
+                        return Err(invalid("cancelled producer retirement changed its original private task or authority"));
+                    }
+                    Ok(())
+                };
+                let finish =
+                    recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
+                if !recording_callback(check, || finish.call0())?.is_none() {
+                    return Err(invalid(
+                        "cancelled finish_segment requires its original known None return",
+                    ));
+                }
+                session
+                    .prepared_segment
+                    .lock()
+                    .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?
+                    .as_mut()
+                    .ok_or_else(|| {
+                        invalid("cancelled prepared owner disappeared during finish_segment")
+                    })?
+                    .producers_retired = true;
+            }
+            for step in steps {
+                step.borrow(py).release_recorded_producer_aliases(py)?;
+            }
+            let producers = std::mem::take(
+                &mut *resources
+                    .producers
+                    .lock()
+                    .map_err(|_| invalid("cancelled producer custody is poisoned"))?,
+            );
+            drop(producers);
+        }
+        drain_export_owners();
+        let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
+        let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
+        for step in &steps {
+            session
+                .owner()?
+                .release_cancelled_prepared_step(step, proof, &streams)
+                .map_err(xlog_err)?;
+        }
+        let resources = session
+            .owner()?
+            .take_cancelled_prepared_resources_for_retirement(proof)
+            .map_err(xlog_err)?;
+        drop(resources);
+        drain_export_owners();
+        // Unknown retirement retains the original Python custody slot. Remove
+        // it only after all native storage and consumer joins are known closed.
+        let python_segment = session
+            .prepared_segment
+            .lock()
+            .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?
+            .take();
+        drop(python_segment);
+        drop(python_owners);
+        self.private_group()?
+            .as_mut()
+            .expect("retained cancelled group")
+            .native_retired = true;
+        Ok(())
     }
 
     pub(super) fn drop_completed_private_execution_owners(
@@ -196,11 +462,21 @@ impl PySemanticLearningPhaseTransition {
             let mut retained = self.private_group()?;
             let mut cursor = retained.as_ref();
             while let Some(group) = cursor {
+                let cancelled = group.non_submission_confirmed
+                    && self.cancelled_segment_terminal_matches(
+                        branch,
+                        group.ordinal,
+                        group.kinds.len() as u64,
+                    )?;
                 if group.branch != branch
                     || !group.native_retired
-                    || group.records_completed != group.kinds.len()
-                    || !group.records_released
-                    || group.callback_error.is_some()
+                    || if cancelled {
+                        group.records_completed != 0 || group.records_released
+                    } else {
+                        group.records_completed != group.kinds.len()
+                            || !group.records_released
+                            || group.callback_error.is_some()
+                    }
                     || group.budget_exceeded
                         && !self.completed_segment_terminal_matches(
                             branch,
@@ -791,7 +1067,12 @@ impl PySemanticLearningPhaseTransition {
             .map_err(xlog_err)?;
         self.preparation_inputs
             .resource_observer
-            .cancel_step_captures(py, ordinal, &steps, stream.cu_stream() as u64, &proof)
+            .cancel_step_captures(py, ordinal, &steps, stream.cu_stream() as u64, &proof)?;
+        self.private_group()?
+            .as_mut()
+            .expect("original cancelled group")
+            .non_submission_confirmed = true;
+        Ok(())
     }
 
     pub(in crate::semantic_transition) fn begin_private_segment_retirement(
@@ -1025,7 +1306,7 @@ impl PySemanticLearningPhaseTransition {
             Ok(()) => Ok(()),
             Err(original) => {
                 if self.private_segment_terminal_input(py)?.is_some() {
-                    self.finish_segment_budget_refusal(py, original)
+                    self.finish_segment_terminal_refusal(py, original)
                 } else {
                     Err(original)
                 }
@@ -1205,6 +1486,7 @@ impl PySemanticLearningPhaseTransition {
                 build_scope: None,
                 native_steps: Vec::new(),
                 non_submission: None,
+                non_submission_confirmed: false,
                 selected_parent: None,
                 native_retired: false,
                 adoption_work: None,

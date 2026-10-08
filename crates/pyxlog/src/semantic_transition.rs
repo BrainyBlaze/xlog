@@ -2786,6 +2786,7 @@ struct PreparedBuildGuard<'a> {
     committed: bool,
     native_completion: Option<(Arc<()>, String)>,
     native_non_submission: bool,
+    cancelled_checkpoint: Option<(Arc<()>, CheckpointTaskPhase)>,
 }
 
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
@@ -2815,7 +2816,13 @@ impl Drop for PreparedBuildGuard<'_> {
                 }
             } else {
                 if let Ok(mut state) = self.task_use.state() {
-                    state.phase = TaskUsePhase::Refused;
+                    state.phase = match &self.cancelled_checkpoint {
+                        Some((scope, phase)) => TaskUsePhase::CancelledPrivate {
+                            scope: Arc::clone(scope),
+                            checkpoint: phase.clone(),
+                        },
+                        None => TaskUsePhase::Refused,
+                    };
                 }
                 if !self.native_non_submission {
                     if let Some(owner) = self
@@ -6908,6 +6915,12 @@ enum TaskUsePhase {
         scope: Arc<()>,
         operation: String,
     },
+    // A native-cancelled private construction retains its original checkpoint
+    // phase without restoring any public task operation or build authority.
+    CancelledPrivate {
+        scope: Arc<()>,
+        checkpoint: CheckpointTaskPhase,
+    },
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
     Evaluating(Box<TaskUsePhase>),
@@ -7007,15 +7020,18 @@ enum CheckpointTaskPhase {
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
     let mut phase = &state.phase;
+    let mut private = false;
     while let TaskUsePhase::ArenaPreparing(original)
     | TaskUsePhase::CheckpointReading { original, .. } = phase
     {
+        private |= matches!(phase, TaskUsePhase::ArenaPreparing(_));
         phase = original.as_ref();
     }
     match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
         TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
+        TaskUsePhase::CancelledPrivate { checkpoint, .. } if private => Ok(checkpoint.clone()),
         _ => Err(invalid(
             "checkpoint requires an imported or admitted stable task phase",
         )),
@@ -9776,6 +9792,80 @@ impl PySemanticGradientDelivery {
 }
 
 impl PySemanticPreparedStep {
+    /// Drop original tensor imports only after graph destruction and the
+    /// prepared producer's retirement callback. Hook removal must already be
+    /// known; clearing the roster never substitutes for executing it.
+    fn release_recorded_producer_aliases(&self, py: Python<'_>) -> PyResult<()> {
+        let deliveries = {
+            let ordinary = self
+                .gradient_deliveries
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
+            let mut deliveries = ordinary
+                .iter()
+                .flatten()
+                .map(|owner| owner.clone_ref(py))
+                .collect::<Vec<_>>();
+            #[cfg(feature = "semantic-policy")]
+            {
+                let groups = self.group_gradient_deliveries.lock().map_err(|_| {
+                    PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+                })?;
+                deliveries.extend(groups.iter().flatten().map(|owner| owner.clone_ref(py)));
+            }
+            deliveries
+        };
+        for delivery in &deliveries {
+            let delivery = delivery.borrow(py);
+            if delivery
+                .handles
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
+                .is_some()
+                || !delivery
+                    .restores
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "prepared alias retirement requires known original hook removal",
+                ));
+            }
+        }
+        let continuation = std::mem::take(
+            &mut *self
+                .continuation_producers
+                .lock()
+                .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
+        );
+        let policy = std::mem::take(
+            &mut *self
+                .policy_inputs
+                .lock()
+                .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?,
+        );
+        let ordinary = std::mem::take(
+            &mut *self
+                .gradient_deliveries
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?,
+        );
+        #[cfg(feature = "semantic-policy")]
+        let groups =
+            std::mem::take(&mut *self.group_gradient_deliveries.lock().map_err(|_| {
+                PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+            })?);
+        // Python finalizers never run while a roster or Session lock is held.
+        drop(continuation);
+        drop(policy);
+        drop(ordinary);
+        #[cfg(feature = "semantic-policy")]
+        drop(groups);
+        drop(deliveries);
+        Ok(())
+    }
+
     fn finish_gradient_delivery_recording(&self, py: Python<'_>) -> PyResult<()> {
         let deliveries = self
             .gradient_deliveries
@@ -13926,8 +14016,9 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_non_submission: false,
+            cancelled_checkpoint: None,
         };
-        let (scope, snapshot, handles, stream) = {
+        let (scope, snapshot, handles, stream, checkpoint_phase) = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
             if session
@@ -13939,7 +14030,8 @@ impl PySemanticTransitionController {
                 return Err(invalid("previous prepared segment has not been retired"));
             }
             let mut state = issued.state()?;
-            if let CheckpointTaskPhase::Segment(operation) = checkpoint_task_phase(&state)? {
+            let checkpoint_phase = checkpoint_task_phase(&state)?;
+            if let CheckpointTaskPhase::Segment(operation) = &checkpoint_phase {
                 issued.require_learning_operation(&owner, &operation)?;
             }
             let scope = state.begin_build()?;
@@ -13958,7 +14050,13 @@ impl PySemanticTransitionController {
                 .prepare_segment_steps(transitions, cold_capacity)
                 .map_err(xlog_err)?;
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
-            (scope, state.snapshot.canonical.clone(), handles, stream)
+            (
+                scope,
+                state.snapshot.canonical.clone(),
+                handles,
+                stream,
+                checkpoint_phase,
+            )
         };
         #[cfg(feature = "semantic-policy")]
         if let Some(private) = &private {
@@ -14299,7 +14397,10 @@ impl PySemanticTransitionController {
                     guard.native_non_submission = true;
                     private
                         .borrow(py)
-                        .retain_private_non_submission(py, &session, &issued, &scope, proof)
+                        .retain_private_non_submission(py, &session, &issued, &scope, proof)?;
+                    guard.cancelled_checkpoint =
+                        Some((Arc::clone(&scope), checkpoint_phase.clone()));
+                    Ok(())
                 })();
                 // Preserve the original producer failure and any failed
                 // cancellation cause. No callback or interval is repeated.
@@ -14386,6 +14487,7 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_non_submission: false,
+            cancelled_checkpoint: None,
         };
         let expected = {
             let mut owner = session.owner()?;
@@ -14778,6 +14880,10 @@ impl PySemanticTransitionController {
                 .map_err(xlog_err)?
         };
         drop(graph);
+        session
+            .owner()?
+            .require_completed_prepared_graph_retirement()
+            .map_err(xlog_err)?;
         let prepared = {
             let retained = resources
                 .producers
@@ -14816,20 +14922,7 @@ impl PySemanticTransitionController {
         }
         for step in &steps {
             let step = step.borrow(py);
-            let continuation = std::mem::take(
-                &mut *step
-                    .continuation_producers
-                    .lock()
-                    .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
-            );
-            let policy = std::mem::take(
-                &mut *step
-                    .policy_inputs
-                    .lock()
-                    .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?,
-            );
-            drop(policy);
-            drop(continuation);
+            step.release_recorded_producer_aliases(py)?;
         }
         drain_export_owners();
         for step in &steps {
@@ -16017,6 +16110,15 @@ impl PySemanticTransitionController {
                 .borrow(py)
                 .require_private_checkpoint_save(py, self, task_use, parent)?;
         }
+        #[cfg(feature = "semantic-policy")]
+        let cancellation = private_execution_owner(py, &self.session.borrow(py))?
+            .map(|private| {
+                private
+                    .borrow(py)
+                    .cancelled_private_checkpoint_proof(py, task_use, parent)
+            })
+            .transpose()?
+            .flatten();
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
                 "checkpoint save requires one trusted model-state serializer",
@@ -16051,6 +16153,17 @@ impl PySemanticTransitionController {
             let prior_snapshot = state.snapshot.canonical.clone();
             drop(state);
             let lease = parent.lease()?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(proof) = &cancellation {
+                owner
+                    .quiesce_cancelled_prepared_checkpoint(&lease, proof, &streams)
+                    .map_err(xlog_err)?;
+            } else {
+                owner
+                    .quiesce_published_reader(&lease, &streams)
+                    .map_err(xlog_err)?;
+            }
+            #[cfg(not(feature = "semantic-policy"))]
             owner
                 .quiesce_published_reader(&lease, &streams)
                 .map_err(xlog_err)?;

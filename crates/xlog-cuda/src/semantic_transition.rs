@@ -9869,6 +9869,7 @@ struct PreparedSegmentState {
     completed: bool,
     cancelled: Arc<AtomicBool>,
     construction: Arc<Mutex<()>>,
+    graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
 }
 
 impl PreparedSegmentState {
@@ -9909,6 +9910,7 @@ impl PreparedSegmentState {
             completed: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             construction: Arc::new(Mutex::new(())),
+            graph_retirement: None,
         })
     }
 
@@ -10045,6 +10047,25 @@ impl PreparedSegmentState {
         {
             return Err(publication_input_error(
                 "non-submission requires the complete original unused prepared roster",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_non_submission(
+        &self,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.submitted
+            || self.completed
+            || !self.cancelled.load(Ordering::Acquire)
+            || proof.steps.len() != self.tokens.len()
+            || proof.steps.iter().zip(&self.tokens).any(|(step, token)| {
+                step.token != *token || self.check_retained(step, &self.issuer).is_err()
+            })
+        {
+            return Err(publication_input_error(
+                "cancelled custody requires its genuine whole-roster non-submission proof",
             ));
         }
         Ok(())
@@ -19638,10 +19659,9 @@ impl SemanticTransitionSession {
         let scope = Arc::clone(&build.scope);
         let cancelled = Arc::clone(&build.cancelled);
         let construction = Arc::clone(&build.construction);
-        self.prepared_segment
-            .as_mut()
-            .expect("checked build")
-            .capturing = true;
+        let build = self.prepared_segment.as_mut().expect("checked build");
+        build.graph_retirement = Some(builder.retirement());
+        build.capturing = true;
         self.graph.enter_transition();
         Ok((
             SemanticPreparedSegmentCapture {
@@ -21674,17 +21694,109 @@ impl SemanticTransitionSession {
         Ok(self.captured.take())
     }
 
+    /// The cancelled graph was never submitted. Its authentic preparation join
+    /// does not complete a step or release a device reader. Destroy it unlocked.
+    pub fn take_cancelled_prepared_executable_for_retirement(
+        &mut self,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<Option<CapturedCudaGraph>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .require_non_submission(proof)?;
+        Ok(self.captured.take())
+    }
+
+    /// Require actual destruction of the original parent graph, including an
+    /// unfinished builder graph. Deferred or quarantined destruction retains
+    /// preparation owners and cannot authorize their Python retirement.
+    pub fn require_cancelled_prepared_graph_retirement(
+        &self,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        build.require_non_submission(proof)?;
+        self.require_original_prepared_graph_retirement()
+    }
+
+    /// Confirm destruction before releasing a completed segment's producer
+    /// workspace. Actual device completion alone does not destroy its graph.
+    pub fn require_completed_prepared_graph_retirement(
+        &self,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        if !self
+            .prepared_segment
+            .as_ref()
+            .is_some_and(|build| build.completed)
+        {
+            return Err(publication_input_error(
+                "prepared graph retirement requires actual completion",
+            ));
+        }
+        self.require_original_prepared_graph_retirement()
+    }
+
+    fn require_original_prepared_graph_retirement(&self) -> Result<(), SemanticTransitionError> {
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if self.captured.is_some() {
+            return Err(publication_input_error(
+                "original prepared executable remains live",
+            ));
+        }
+        if let Some(retirement) = &build.graph_retirement {
+            retirement
+                .require_completed()
+                .map_err(|error| runtime_error("prepared graph destruction confirmation", error))?;
+        } else if build.capturing {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
+    }
+
     /// Return the original pool/model owners only after all joined step owners
     /// and their imported aliases are gone. Drop the returned owners unlocked.
     pub fn take_prepared_resources_for_retirement(
         &mut self,
     ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
+        self.take_prepared_resources_after_retirement(None)
+    }
+
+    pub fn take_cancelled_prepared_resources_for_retirement(
+        &mut self,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
+        self.take_prepared_resources_after_retirement(Some(proof))
+    }
+
+    fn take_prepared_resources_after_retirement(
+        &mut self,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+    ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
         let build = self
             .prepared_segment
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        if !build.completed
-            || self.captured.is_some()
+        if let Some(proof) = cancellation {
+            build.require_non_submission(proof)?;
+            self.require_cancelled_prepared_graph_retirement(proof)?;
+        } else if !build.completed {
+            return Err(publication_input_error(
+                "prepared resource retirement lacks actual completion",
+            ));
+        } else {
+            self.require_completed_prepared_graph_retirement()?;
+        }
+        if self.captured.is_some()
             || build
                 .tokens
                 .iter()
@@ -26473,6 +26585,40 @@ impl SemanticTransitionSession {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared step retirement stream admission", error))?;
         self.quiesce_prepared_step(step, consumer_streams)?;
+        self.release_prepared_step_storage(step)
+    }
+
+    /// Drop only the original unused preparation storage, after real consumer
+    /// joins. No execution result or publication-reader decrement is fabricated.
+    pub fn release_cancelled_prepared_step(
+        &mut self,
+        step: &SemanticPreparedStep,
+        proof: &SemanticPreparedSegmentNonSubmission,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_prepared_step(step, false)?;
+        self.prepared_segment
+            .as_ref()
+            .expect("checked prepared scope")
+            .require_non_submission(proof)?;
+        #[cfg(feature = "semantic-policy")]
+        if self
+            .policy_tapes
+            .iter()
+            .any(|tape| tape.policy.text_binding._witness.reader_token == step.token)
+        {
+            return Err(SemanticTransitionError::UnconsumedPolicyTape);
+        }
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("cancelled preparation retirement admission", error))?;
+        self.complete_step_consumers_by_token(step.token, consumer_streams)?;
+        self.release_prepared_step_storage(step)
+    }
+
+    fn release_prepared_step_storage(
+        &mut self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
         let owner = self
             .steps
             .get_mut(&step.token)
@@ -26502,6 +26648,26 @@ impl SemanticTransitionSession {
         }
         self.steps.remove(&step.token);
         Ok(())
+    }
+
+    /// A full private snapshot precedes alias retirement. Authenticate native
+    /// non-submission and join the original parent consumers without discarding
+    /// its content, witnesses, aliases, or acquired publication reader.
+    pub fn quiesce_cancelled_prepared_checkpoint(
+        &mut self,
+        parent: &SemanticPublishedLease,
+        proof: &SemanticPreparedSegmentNonSubmission,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .require_non_submission(proof)?;
+        self.checked_reader(parent)?;
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("cancelled checkpoint stream admission", error))?;
+        self.complete_step_consumers(parent, consumer_streams)
     }
 
     /// Establish final device use without discarding the producer owners. This

@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 pub(super) const SOURCE_EVALUATION_CANCELLED: &str = "source-evaluation-cancelled";
 pub(super) const PRIVATE_EVALUATION_CANCELLED: &str = "private-evaluation-cancelled";
 pub(super) const PRIVATE_SEGMENT_BUDGET_REFUSED: &str = "private-segment-budget-refused";
+pub(super) const PRIVATE_SEGMENT_CANCELLED: &str = "private-segment-cancelled";
 
 pub(super) fn cancelled_evaluation_reason(
     proof: &xlog_cuda::SemanticCancelledModelEvaluation,
@@ -300,6 +301,7 @@ pub(super) fn require_segment_terminal_history(
     start: u64,
     count: u64,
     branch: &str,
+    cause: &str,
     usage: [u64; 3],
 ) -> PyResult<()> {
     let mut prefix = json(prefix)?;
@@ -311,17 +313,27 @@ pub(super) fn require_segment_terminal_history(
     let records = prefix["records"]
         .as_array()
         .ok_or_else(|| invalid("segment terminal closure lost its complete original history"))?;
+    let extent = u64::try_from(records.len()).ok();
+    let original_extent = match cause {
+        PRIVATE_SEGMENT_BUDGET_REFUSED => start.checked_add(count),
+        PRIVATE_SEGMENT_CANCELLED => Some(start),
+        _ => {
+            return Err(invalid(
+                "segment terminal closure has another native disposition",
+            ))
+        }
+    };
     if !prefix["terminal_cleanup"].is_null()
         || count == 0
-        || start.checked_add(count) != u64::try_from(records.len()).ok()
+        || original_extent != extent
         || !matches!(branch, "real" | "control")
     {
         return Err(invalid(
-            "segment terminal closure changed its original completed group extent",
+            "segment terminal closure changed its original history extent",
         ));
     }
     prefix["terminal_cleanup"] = serde_json::json!({
-        "operation_ordinal": ordinal, "cause": PRIVATE_SEGMENT_BUDGET_REFUSED,
+        "operation_ordinal": ordinal, "cause": cause,
         "group_start": start, "group_count": count, "branch": branch,
         "resource_usage": usage,
     });
@@ -555,9 +567,11 @@ impl VerifiedClosure {
             SOURCE_EVALUATION_CANCELLED
                 | PRIVATE_EVALUATION_CANCELLED
                 | PRIVATE_SEGMENT_BUDGET_REFUSED
+                | PRIVATE_SEGMENT_CANCELLED
         ) {
             let source_only = cause == SOURCE_EVALUATION_CANCELLED;
-            let segment = cause == PRIVATE_SEGMENT_BUDGET_REFUSED;
+            let cancelled_segment = cause == PRIVATE_SEGMENT_CANCELLED;
+            let segment = cancelled_segment || cause == PRIVATE_SEGMENT_BUDGET_REFUSED;
             if lifecycle.preparation.is_some()
                 || source_only != private.is_empty()
                 || !result_bytes.is_empty()
@@ -713,9 +727,20 @@ impl VerifiedClosure {
                 let count = reason_fields[3].unsigned()?;
                 let group_count = usize::try_from(count)
                     .map_err(|_| invalid("terminal segment group count overflowed"))?;
+                let group_stop = group_start
+                    .checked_add(group_count)
+                    .filter(|stop| *stop < schedule.len())
+                    .ok_or_else(|| {
+                        invalid("terminal segment exceeds its original frozen schedule")
+                    })?;
                 if group_start == 0
                     || group_count == 0
-                    || group_start.checked_add(group_count) != Some(prefix_count)
+                    || prefix_count
+                        != if cancelled_segment {
+                            group_start
+                        } else {
+                            group_stop
+                        }
                     || schedule[0]["operation"] != "prepare"
                     || schedule[0]["branch"] != "source"
                     || entry["step_ordinal"].as_u64() != Some(0)
@@ -723,7 +748,7 @@ impl VerifiedClosure {
                     || entry_fields[0].text()? != "terminal-cleanup"
                     || host(&entry_fields[4])? != program["terminal_cleanup"]["budget"]
                     || entry_fields[5] != ColdValue::None
-                    || schedule[group_start..prefix_count].iter().enumerate().any(
+                    || schedule[group_start..group_stop].iter().enumerate().any(
                         |(index, operation)| {
                             operation["branch"] != branch
                                 || !matches!(
@@ -736,15 +761,15 @@ impl VerifiedClosure {
                         },
                     )
                     || matches!(
-                        schedule[prefix_count]["operation"].as_str(),
+                        schedule[group_stop]["operation"].as_str(),
                         Some("proposal" | "update" | "recompute")
-                    ) && schedule[prefix_count]["step_ordinal"].as_u64() != Some(0)
+                    ) && schedule[group_stop]["step_ordinal"].as_u64() != Some(0)
                 {
                     return Err(invalid("segment terminal closure changed its complete original roster or frozen reserve"));
                 }
-                // The native-signed group is complete, but at least one actual
-                // original operation exceeded its own budget. No limit moves
-                // into this separate cold-only interval.
+                // A cancelled roster contributes no invented numerical rows.
+                // Only completed-group budget refusal requires actual rows and
+                // exceedance; its cleanup uses a separate cold-only interval.
                 let mut exceeded = false;
                 for (index, (operation, record)) in schedule.iter().zip(records).enumerate() {
                     require_operation_observation(operation, record, index, index >= group_start)?;
@@ -761,7 +786,7 @@ impl VerifiedClosure {
                         });
                     }
                 }
-                if !exceeded {
+                if !cancelled_segment && !exceeded {
                     return Err(invalid("segment terminal budget refusal requires an actual original budget exceedance"));
                 }
                 require_segment_terminal_history(
@@ -771,6 +796,7 @@ impl VerifiedClosure {
                     group_start as u64,
                     count,
                     branch,
+                    cause,
                     usage_words,
                 )?;
             } else {
@@ -1520,6 +1546,7 @@ impl VerifiedClosure {
                         SOURCE_EVALUATION_CANCELLED
                             | PRIVATE_EVALUATION_CANCELLED
                             | PRIVATE_SEGMENT_BUDGET_REFUSED
+                            | PRIVATE_SEGMENT_CANCELLED
                     ) {
                         py.None()
                     } else {
