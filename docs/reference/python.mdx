@@ -855,8 +855,8 @@ Scientific callbacks carry `memory_unit="owned-gpu-backing-peak-bytes"`,
 `memory_admission="whole-device-total-physical-bytes"` and `device_certificate`
 separately from `(work, backing_peak_bytes, model_calls)`. Native checks the
 original certificate in every returned observation before signing the full
-history and preserves the eleven-argument acceptance call. Only the new explicitly
-frozen program format can use this interpretation; old physical-peak histories
+history and preserves the eleven-argument acceptance call. Only the explicitly
+frozen `dlm-new.scientific-learning/2` program can use this interpretation; old physical-peak histories
 cannot be re-labelled. Trace completion alone does not prove the baseline,
 whole-operation work or ZERO TRANSFER. Unknown coverage/completion retains the
 original owners without a numerical observation, release or subsequent execution.
@@ -1087,10 +1087,11 @@ original interval and is not handled by this later interval.
 
 The scientific owner provides exactly
 `record_terminal_cleanup(*, operation_ordinal, cause, group_start, group_count,
-branch, resource_usage)`. History always has the four fields `format`,
+branch, resource_usage, memory_unit, memory_admission, device_certificate)`.
+History always has the four fields `format`,
 `program_sha256`, `records`, and `terminal_cleanup`. The last field is `None` on
 ordinary, evaluation-cancellation and Delivery paths; after this cleanup it
-contains exactly the callback's six actual fields. No scientific record is added,
+contains exactly the callback's nine actual fields. No scientific record is added,
 removed or rewritten. The signed reason binds the cause, actual private
 publication, original group start/count and branch. The same canonical live/fresh
 loader checks full Q, the unchanged executed prefix and an actual original budget
