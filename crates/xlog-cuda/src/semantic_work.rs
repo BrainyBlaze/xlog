@@ -261,6 +261,16 @@ impl ModelWorkRecording {
         if self.frozen || self.events.is_empty() || self.bound == 0 {
             return Err("model work requires one nonempty original recording and a single freeze");
         }
+        self.freeze_cold()
+    }
+
+    /// Cold callbacks may genuinely perform no model work. Their separately
+    /// checked recorder lifecycle, not a fabricated event, certifies emptiness.
+    #[cfg(any(test, feature = "semantic-policy"))]
+    pub(crate) fn freeze_cold(&mut self) -> Result<u64, &'static str> {
+        if self.frozen {
+            return Err("original cold model work is already frozen");
+        }
         self.frozen = true;
         Ok(self.bound)
     }

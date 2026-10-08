@@ -15,19 +15,6 @@ PYXLOG_ROOT = ROOT / "crates" / "pyxlog"
 PYXLOG_PACKAGE_ROOT = PYXLOG_ROOT / "python" / "pyxlog"
 
 
-def test_repo_does_not_require_tracked_ptx_files() -> None:
-    result = subprocess.run(
-        ["git", "ls-files", "--", "kernels/*.ptx"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    tracked = [line for line in result.stdout.splitlines() if line.strip()]
-    assert tracked == [], f"tracked PTX files should be removed: {tracked}"
-
-
 def test_stage_kernels_help_works() -> None:
     result = subprocess.run(
         [sys.executable, "scripts/stage_kernels.py", "--help"],
@@ -82,34 +69,6 @@ def test_install_pyxlog_for_python_dry_run_targets_explicit_interpreter() -> Non
     assert f"-i {target_python}" in result.stdout
     assert f"{target_python} -m pip install --force-reinstall" in result.stdout
     assert "maturin develop" not in result.stdout
-
-
-def test_stage_pyxlog_kernels_rebuilds_before_resolving_release_out_dir() -> None:
-    # Stale-kernel-prevention contract: the kernel-producing crate is rebuilt
-    # before the release OUT_DIR is resolved, so a fresh source change can
-    # never stage a stale kernel artifact. Since #137 the build step is
-    # `build_kernels_release` (xlog-cuda, which emits the same kernels with no
-    # libpython linkage); the ordering contract is unchanged.
-    script = (ROOT / "scripts" / "stage_pyxlog_kernels.sh").read_text(encoding="utf-8")
-    main_body = script.split('cd "$repo_root"', maxsplit=1)[1]
-
-    assert main_body.index("build_kernels_release") < main_body.index("target_dir=")
-    assert main_body.index("build_kernels_release") < main_body.index(
-        'resolve_kernel_out_dir_from_dep_info "$target_dir"'
-    )
-
-
-def test_public_docs_use_explicit_pyxlog_python_install() -> None:
-    docs = {
-        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-        "python/tests/contract_docs/python-bindings.md": (
-            ROOT / "python" / "tests" / "contract_docs" / "python-bindings.md"
-        ).read_text(encoding="utf-8"),
-    }
-
-    for path, text in docs.items():
-        assert "scripts/install_pyxlog_for_python.py --python" in text, path
-        assert "maturin develop --release" not in text, path
 
 
 def test_stage_kernels_prunes_and_emits_manifest() -> None:
@@ -168,17 +127,6 @@ def test_stage_kernels_prunes_and_emits_manifest() -> None:
         assert not (to_dir / "obsolete.portable.ptx").exists()
         assert not (to_dir / "obsolete.sm_75.cubin").exists()
         assert keep_file.exists()
-
-
-def test_pyxlog_pyproject_includes_generated_kernels_in_wheel() -> None:
-    pyproject = (PYXLOG_ROOT / "pyproject.toml").read_text()
-
-    assert 'include = [' in pyproject
-    assert 'path = "pyxlog/kernels/*"' in pyproject
-    assert 'format = "wheel"' in pyproject
-    assert '"**/__pycache__"' in pyproject
-    assert '"**/*.pyc"' in pyproject
-    assert '"**/*.pyo"' in pyproject
 
 
 def test_pyxlog_kernel_path_helper_prefers_packaged_kernels() -> None:

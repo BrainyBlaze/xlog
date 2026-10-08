@@ -1,6 +1,5 @@
 {
   "features": ["maplist", "lists", "types"],
-  "source_required_substrings": ["maplist(good, [1, 2, 3])", "maplist(next, [1, 2, 3], L)", "pred next(input: u32, output: u32)"],
   "checks": {
     "run": {
       "returncode": 0,

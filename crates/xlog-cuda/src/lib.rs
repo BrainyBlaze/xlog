@@ -87,13 +87,13 @@ pub use semantic_transition::{
     SemanticLearningPhaseTransition, SemanticModelContext, SemanticModelContractLayout,
     SemanticModelForwardWitness, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
     SemanticObservedSource, SemanticOutputIntent, SemanticParentBinding, SemanticPolicyFieldLayout,
-    SemanticPolicyLayout, SemanticPreparedStep, SemanticPreparedStepOutcome,
-    SemanticPublicationInputProjection, SemanticPublicationTensorProjection,
-    SemanticPublishedIdentity, SemanticPublishedLease, SemanticReplayMaterial,
-    SemanticResidentModelMemory, SemanticRngBinding, SemanticSegmentColdCapacity,
-    SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
-    SemanticStructuralCostDescriptor, SemanticTaskContentIdentity, SemanticTaskEvaluation,
-    SemanticTaskEvaluationSpec, SemanticTaskFacts, SemanticTaskGoalWitness,
+    SemanticPolicyLayout, SemanticPreparedSegmentNonSubmission, SemanticPreparedStep,
+    SemanticPreparedStepOutcome, SemanticPublicationInputProjection,
+    SemanticPublicationTensorProjection, SemanticPublishedIdentity, SemanticPublishedLease,
+    SemanticReplayMaterial, SemanticReplayModelBackings, SemanticResidentModelMemory,
+    SemanticRngBinding, SemanticSegmentColdCapacity, SemanticSourceMapping, SemanticStateRecord,
+    SemanticStateRole, SemanticStructuralCostDescriptor, SemanticTaskContentIdentity,
+    SemanticTaskEvaluation, SemanticTaskEvaluationSpec, SemanticTaskFacts, SemanticTaskGoalWitness,
     SemanticTaskObjectiveLaw, SemanticTaskObservation, SemanticTaskObservationRoots,
     SemanticTaskPriorityGoal, SemanticTaskPriorityLevel, SemanticTaskProgram, SemanticTaskRefusal,
     SemanticTaskScoring, SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout,
@@ -106,6 +106,16 @@ pub use semantic_transition::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
+    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
+    SemanticModelEvaluation, SemanticModelEvaluationResult,
+};
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::{
+    SemanticColdModelWork, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
+    SemanticColdNativeWork,
+};
+#[cfg(feature = "semantic-policy")]
+pub use semantic_transition::{
     SemanticCompletedActionComponentMaterial, SemanticCompletedActionLaneMaterial,
     SemanticCompletedActionProjectionMaterial, SemanticCompletedEditSolutionMaterial,
     SemanticCompletedExecutionObservation, SemanticCompletedLaneOutcomeMaterial,
@@ -114,11 +124,6 @@ pub use semantic_transition::{
     SemanticCompletedTaskGroundMaterial, SemanticCompletedTheoryDeltaMaterial,
     SemanticPolicyGradients, SemanticSelectedPolicyGradients, SemanticUpdateCanaryMeasurement,
     SemanticUpdateForwardReceipt, SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
-};
-#[cfg(feature = "semantic-policy")]
-pub use semantic_transition::{
-    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
-    SemanticModelEvaluationResult,
 };
 pub use semantic_work::ModelWorkKind;
 

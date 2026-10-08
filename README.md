@@ -348,11 +348,19 @@ xlog/
 
 ## Development
 
+Automatic CI runs source checks only. GPU builds are manual and LOCAL; full tests,
+benchmarks, and certification are explicit manual procedures under the
+[engineering policy](ENGINEERING.md#source-ci-and-manual-validation).
+
 ```bash
-# Full test suite (release mode recommended for GPU tests)
+# Fast source compilation: no CUDA dependency or test execution
+cargo check --locked --lib \
+  -p xlog-core -p xlog-ir -p xlog-stats -p xlog-logic -p xlog-neural
+
+# Manual full suite on an authorized execution host, never automatic CI
 cargo test --workspace --all-targets --exclude pyxlog --release
 
-# CUDA certification suite only
+# Manual CUDA certification; does not replace complete runtime/release acceptance
 cargo test -p xlog-cuda-tests --test certification_suite --release
 
 # Canonical manual GPU release validation
@@ -368,8 +376,8 @@ cargo run -p xlog-cli --release -- run examples/xlog/00-basics/01_tc_reachabilit
 
 Contributions are welcome. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
 [architecture overview](https://xlog.md/architecture/overview) first for the crate layout and
-layering rules, and run `cargo fmt` plus `cargo clippy --all-targets -- -D warnings` before
-submitting.
+layering rules and bounded source checks before submitting. GPU compilation and
+hardware acceptance are separate manual steps, not pull-request CI work.
 
 ---
 

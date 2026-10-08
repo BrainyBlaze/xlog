@@ -2,7 +2,8 @@
 
 use super::*;
 use xlog_cuda::{
-    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
+    SemanticModelEvaluation, SemanticModelEvaluationResult,
 };
 
 pyo3::create_exception!(
@@ -62,6 +63,29 @@ impl PySemanticCompletedModelEvaluation {
     }
 }
 
+impl PySemanticCompletedModelEvaluation {
+    pub(super) fn require_phase_observation(
+        &self,
+        py: Python<'_>,
+        parent: &PySemanticPublishedParent,
+        cohort: &PySemanticEvaluationCohort,
+    ) -> PyResult<SemanticModelEvaluationResult> {
+        let session = parent.session.borrow(py);
+        let owner = session.owner()?;
+        if !self.inner.belongs_to(&owner)
+            || !self.inner.belongs_to_cohort(&cohort.inner)
+            || self.inner.parent()
+                != owner
+                    .published_identity(&*parent.lease()?)
+                    .map_err(xlog_err)?
+            || self.binding != parent.content_binding_with_owner(py, &owner)?
+        {
+            return Err(invalid("phase evaluation changed its original completed native observation, parent or cohort"));
+        }
+        Ok(self.inner.result())
+    }
+}
+
 /// Retains only the original selected device roster and its native seals.
 /// It does not retain a source Runtime, grant or mutable model generation.
 #[pyclass(name = "SemanticEvaluationCohort", module = "pyxlog._native", frozen)]
@@ -79,9 +103,27 @@ pub(crate) struct PySemanticModelEvaluation {
     closed: AtomicBool,
     output: Mutex<Option<Py<PySemanticTensorContentWitness>>>,
     completed: Mutex<Option<Py<PySemanticCompletedModelEvaluation>>>,
+    cancelled: Mutex<Option<SemanticCancelledModelEvaluation>>,
+    cancel_entered: AtomicBool,
 }
 
 impl PySemanticModelEvaluation {
+    fn phase_cold_boundary(
+        &self,
+        py: Python<'_>,
+        from: learning_phase::phase_evaluation::EvaluationColdStage,
+        to: learning_phase::phase_evaluation::EvaluationColdStage,
+    ) -> PyResult<()> {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        if let Some(original) = private_execution_owner(py, &session)? {
+            original
+                .borrow(py)
+                .evaluation_cold_boundary(py, self, from, to)?;
+        }
+        Ok(())
+    }
+
     fn completion_error(&self, py: Python<'_>, original: PyErr) -> PyErr {
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
@@ -145,6 +187,21 @@ impl PySemanticModelEvaluation {
     }
 
     fn restore_phase(&self, py: Python<'_>) -> PyResult<()> {
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        // Only a retained genuine completed receipt admits cleanup. Cancellation
+        // restores the ordinary phase but cannot synthesize that receipt.
+        if self
+            .completed
+            .lock()
+            .map_err(|_| invalid("evaluation completed observation owner is poisoned"))?
+            .is_some()
+        {
+            self.phase_cold_boundary(
+                py,
+                EvaluationColdStage::AwaitingCompletion,
+                EvaluationColdStage::Cleanup,
+            )?;
+        }
         let parent = self.parent.borrow(py);
         let issued = parent.task_use.borrow(py);
         let mut state = issued.state()?;
@@ -261,6 +318,12 @@ impl PySemanticModelEvaluation {
     }
 
     fn begin(&self, py: Python<'_>) -> PyResult<()> {
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        self.phase_cold_boundary(
+            py,
+            EvaluationColdStage::Preparation,
+            EvaluationColdStage::OutputProjection,
+        )?;
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
         let mut owner = session.owner()?;
@@ -350,6 +413,12 @@ impl PySemanticModelEvaluation {
         }
         *retained = Some(output_witness.clone_ref(py));
         drop(retained);
+        use learning_phase::phase_evaluation::EvaluationColdStage;
+        self.phase_cold_boundary(
+            py,
+            EvaluationColdStage::OutputProjection,
+            EvaluationColdStage::AwaitingCompletion,
+        )?;
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
         let result = owner
@@ -421,10 +490,29 @@ impl PySemanticModelEvaluation {
                 "submitted evaluation must resolve its original result, not cancel",
             ));
         }
-        owner
+        self.cancel_entered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                invalid("unknown evaluation cancellation cannot repeat its original invocation")
+            })?;
+        let cancelled = owner
             .cancel_model_evaluation(&*parent.lease()?, &self.inner, &streams)
             .map_err(xlog_err)?;
+        *self
+            .cancelled
+            .lock()
+            .map_err(|_| invalid("evaluation cancellation custody is poisoned"))? =
+            Some(cancelled.clone());
         drop(owner);
+        if let Some(original) = private_execution_owner(py, &session)? {
+            original.borrow(py).cancel_phase_evaluation(
+                py,
+                self,
+                &cancelled,
+                &self.inner,
+                &parent,
+            )?;
+        }
         self.restore_phase(py)
     }
 }
@@ -451,7 +539,36 @@ impl PySemanticTransitionController {
         let session = self.session.borrow(py);
         session.require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_issued(&issued)?;
+        self.require_read_issued(&issued)?;
+        let public_use = issued.state()?.require_public_use();
+        if let Err(public_error) = public_use {
+            #[cfg(not(feature = "semantic-policy"))]
+            return Err(public_error);
+            #[cfg(feature = "semantic-policy")]
+            {
+                let pending = session
+                    .learning_transition
+                    .lock()
+                    .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+                    .as_ref()
+                    .map(|pending| pending.clone_ref(py));
+                let pending = pending.ok_or(public_error)?;
+                pending
+                    .borrow(py)
+                    .require_phase_evaluation(py, self, &issued, &acquired)?;
+            }
+        } else if session.learning_preparing.load(Ordering::Acquire) {
+            #[cfg(feature = "semantic-policy")]
+            {
+                let pending = private_execution_owner(py, &session)?
+                    .ok_or_else(|| invalid("private evaluation lost its original phase owner"))?;
+                pending
+                    .borrow(py)
+                    .require_phase_evaluation(py, self, &issued, &acquired)?;
+            }
+            #[cfg(not(feature = "semantic-policy"))]
+            return Err(invalid("private evaluation requires semantic-policy"));
+        }
         if acquired.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid("evaluation parent belongs to another Session"));
         }
@@ -509,7 +626,7 @@ impl PySemanticTransitionController {
             }
         };
         drop(owner);
-        Py::new(
+        let original = Py::new(
             py,
             PySemanticModelEvaluation {
                 parent: parent.clone_ref(py),
@@ -519,7 +636,13 @@ impl PySemanticTransitionController {
                 closed: AtomicBool::new(false),
                 output: Mutex::new(None),
                 completed: Mutex::new(None),
+                cancelled: Mutex::new(None),
+                cancel_entered: AtomicBool::new(false),
             },
-        )
+        )?;
+        if let Some(pending) = private_execution_owner(py, &session)? {
+            pending.borrow(py).bind_phase_evaluation(py, &original)?;
+        }
+        Ok(original)
     }
 }

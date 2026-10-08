@@ -108,6 +108,67 @@ observer again and must reproduce the same identities and truths; a mismatch
 refuses the native session. Cold content observation does not run the model or
 prefill its cache.
 
+An original private Update can issue a one-shot historical child with
+`controller.prepare_private_replay_child(task_use, step_index=..., replay_ordinal=...)`.
+`step_index` is the zero-based position in that private group's unchanged roster,
+not a replacement schedule or an execution result. The native owner requires an
+original Update and an episode row in its frozen actor/edit membership; the same
+row in another Update has separate custody. Pass the returned
+`SemanticPrivateReplayChild` unchanged as `private_replay_child=` to the same
+`SemanticTransitionColdTask` constructor before construction begins. Ordinary
+fresh-task callers omit this keyword.
+
+The child uses the original provider, allocation budget, serial stream and cold
+native-work owner. The phase retains its actual Session before the observer runs,
+then the original Controller, import callbacks, issued task, acquired reader,
+retained member and each target-bound gradient delivery. A construction/import
+exception does not turn an unfinished child into an ordinary aborted Session or
+authorize a retry. Saved child aliases grant native access only in their
+original phase callback; public abort and observed-only close cannot discard them.
+
+Canonical completed-Proposal export registers its genuine immutable numerical
+allocation owners after authenticating the full acquired checkpoint. The
+historical importer read-leases these same owners even on its first import;
+its weak native lookup does not allocate or extend numerical lifetimes. If no
+live original owner survives, the unchanged complete cold restoration creates
+and seals one allocation for that original private group. Readers share an
+actual owner only when the original instance,
+storage coordinate, generation, complete seal, typed layouts and storage/view
+alias partition agree. Equal hashes or a shared CUDA provider do not establish
+sharing. Both child publication directories refer to this same read-only model
+owner; no second writable model bank or per-step model snapshot copy is created.
+Native input and replay guards retain and verify that owner. All other checkpoint
+state remains independently owned, and cold export still includes every model
+and optimizer byte with the full alias geometry.
+
+Historical model leases cannot prepare Updates. Backward must use the original
+target-bound gradient delivery, which temporarily routes its real AccumulateGrad
+nodes into the receiving Update's gradient/presence/accumulation destinations and
+restores the historical gradient reference after the single GraphTask. It must
+not accumulate into the historical allocation. Unknown restoration or final use
+retains the original owner; the registry itself cannot release live readers.
+
+Gradient delivery authenticates the complete original parameter-leaf roster
+from the retained model schema, including frozen Parameters with no gradient
+allocation. This is distinct from the full model-content witness, which also
+retains buffers. Buffers do not gain fabricated gradient, presence or phase-mask
+leaves; all genuine parameter destinations must still be present exactly once.
+
+After genuine whole-target cancellation and confirmed original graph destruction,
+the same prepared producer may call
+`member.finish_cancelled_private_segment()` in the original private-retirement
+region. This finishes the source's actual retained policy invocation and canonical
+import cleanup/full successor verification once, without a VJP, publication or
+fabricated target completion. Original gradient hooks/restorations must already
+be removed. The producer then retires its remaining Runtime aliases before
+returning from its original `finish_segment()`. Native joins/releases the retained
+child Sessions in that same cold region and shared accounting owner before target
+storage retirement. Normal completed segments still use the ordinary member
+final-use path after target-step retirement; their child Sessions release before
+the same retirement report closes and before model adoption begins.
+Unknown child import, final use or graph destruction retains its
+own original custody; target non-submission does not prove that child's outcome.
+
 The semantic controller's `task_observation_roots` and `import_task` methods
 share five explicit keyword arguments in addition to their admission and
 authority inputs. `import_task` also requires `task_priority_levels`:
@@ -325,6 +386,85 @@ must return its reconstructed semantic runtime. The frozen
 `SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
+
+Phase custody uses this same loader with all four original cold proof
+keywords together: `learning_phase_issuer` is the independently pinned 32-byte
+issuer; `learning_phase_records` is the exact ordered tuple of Admission,
+preparation outcome and Delivery bytes for positive completion; `learning_phase_record_limits` is the
+original `(record_bytes, total_bytes, count)`; `learning_phase_fence` is
+`(phase_id, source_checkpoint_sha256, delivered_checkpoint_sha256, destination,
+source_phase, target_phase)`, with phase and checkpoint identities as 32-byte values.
+Missing, over-budget or altered positive history cannot authorize the accepted checkpoint.
+Native authenticates the complete signatures, hash chain, limits, original
+scientific result, full ordered history and accepted checkpoint before allocation.
+Fresh authority must also be newer than the signed completion snapshot. The
+original checkpoint-source resolver and its separately registered limits remain
+unchanged; phase-record bounds do not replace or enlarge them.
+
+For known terminal refusal, the exact ordered records are Admission/refusal or
+Admission/positive preparation outcome/refusal, with signed kinds `0,3` or
+`0,1,3`. Native authenticates the complete chain before selecting Source recovery.
+The same fence has `target_digest=None` after terminal finalization. A retained
+pending target digest is also allowed for `0,1,3`, only when it matches the
+original signed private Q and preparation outcome. The consumer must not erase
+that digest to repair a crash window. Neither digest means private Q is accepted.
+The canonical loader restores the full original Source Q, or an independently
+sealed Source descendant, preserving Source model and phase. Before allocation
+or the actual factory it installs the cumulative Proposal expense authenticated
+by the signed private Q; the earlier Source snapshot cannot refund it.
+Source-only cancellation described below instead proves no private entry and
+retains the original Source cumulative expense without manufacturing private Q.
+The complete terminal history and separately measured tail usage remain unchanged.
+The application checks original Source ordinal/request/envelope against its
+trusted fence before Native admission; that check alone never authorizes Source
+execution or retry of the refused target request.
+The byte-for-byte Source Q is not rewritten with a terminal marker. Its trusted
+consumer must therefore retain the original fence and complete proof mapping on
+every restore; bare Source bytes cannot establish which later attempt was refused.
+
+The read-only returned `learning_phase_closure` is
+`(phase_id, original_program_bytes, full_history_bytes, original_acceptance_bytes)`.
+Restore the original scientific owner from that program and full history, without
+freezing another program, repeating comparisons or rewriting original publication
+identities for the fresh instance. The acceptance retains its completed-prefix
+history; the restored full history additionally contains actual Delivery.
+This property is `None` for terminal Source recovery. Its readonly
+`learning_phase_refusal` is instead
+`(cause, original_result_bytes, full_terminal_history_bytes, signed_terminal_record)`.
+For known Source-evaluation cancellation before private restoration and acceptance,
+the result element is `None`: no scientific comparison was entered. The readonly
+`learning_phase_program` supplies the original frozen program bytes from the same
+verified closure, including this terminal case. Restore that program with its
+actual terminal history; do not call `next_operation` to authorize a refused schedule.
+No scientific comparison or refused attempt is repeated.
+
+After known Delivery, terminal Source resumption or known full restoration, that actual Session owns one
+private checkpoint signing key. `session.learning_phase_checkpoint_issuer`
+returns its 32-byte public key; `session.learning_phase_checkpoint_origin`
+returns `(phase_id, completion_record_sha256, actual_origin_checkpoint_sha256)`.
+The completion record is Delivery or terminal refusal, never a substitute for
+its signed disposition. A new terminal origin receives one new issuer, including
+at a live Source; repeated readback/getters never issue another key or rewrite
+an older immutable pin.
+The trusted consumer must independently pin these exact values with create-only
+durable readback before subsequent requests. Failed pin/readback retains the same
+known handoff, Session, issuer, lock and recovery fence; only original local
+readback can continue, not another restore, factory or key generation. Keep older
+pins usable until their durable checkpoints have been superseded. Private or
+unknown phase owners cannot issue a pin. No private key enters Python or a Q.
+
+Subsequent canonical checkpoint saves retain a compact native signature over the
+complete state and its original phase, signed completion and known origin. The same loader
+accepts these later states only with the additional
+`learning_phase_checkpoint_issuer` read from their independent trusted pin.
+This fifth field cannot stand alone. Only the byte-for-byte original Delivery Q
+or, for authenticated refusal, original Source Q
+may omit it; recovery never rolls a descendant back to that older checkpoint.
+`inspect_checkpoint_learning_phase_issuer(checkpoint)` returns an **untrusted
+selector** for locating the retained pin, not a verified key or permission to
+restore. Copying an Admission or stripping the seal cannot bypass the complete
+proof requirement. A known in-process arena handoff moves the same custody to
+its actual successor, preserving history without reissuing the key.
 The same controlled-reader owner encloses the factory and the existing cold
 arena/learning-phase model callbacks. It permits authentic native tensor/content
 reads, not segment execution or public activation of a private candidate. After
@@ -393,6 +533,16 @@ uniform physical numerical certificate. Task capsules now use version 3;
 version 2 capsules and older task/scoring identities cannot restore under the
 new binding. Restore and late arena admission require exact original-domain
 equality; changed manifests, caps or loader fields cannot enlarge it.
+
+`task_use.task_actor_eligible()` reads the original ex-ante actor decision from
+that retained native task, before the first Proposal (and its initial checkpoint)
+or after checkpoint restore. The decision is sealed into task identity; restore
+reconstructs it from the original task capsule, not today's grants or completed
+actions. A restored consumer must preserve this decision rather than reclassify
+existing records. Missing, stale or unusable task bindings raise an error instead
+of returning `False`. The getter performs no device read and grants no training
+rights: fresh actor admission still requires authorized observation, total return
+and full episode storage before any draw, and later training must recheck rights.
 
 `task_use.policy_numerical_domains(parent, bank, consumer_stream)` returns three
 owner-bearing FP64 DLPack capsules in parameter, full-MASK text, and baseline
@@ -488,11 +638,12 @@ Full backing allocations, padding, strides, and shared storage are retained;
 conflicting effects on aliases refuse the entire private candidate.
 
 `controller.prepare_learning_phase_transition(task_use, *, parent, recipe, source_checkpoint,
-consumer_streams, snapshot, scientific_owner, source_model, execute_phase_instruction,
-resource_observer, feedback_interventions, learning_grant_ref,
+consumer_streams, snapshot, scientific_owner, scientific_refusal_type, source_model, execute_phase_instruction,
+release_cancelled_phase_execution, resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, retire_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits,
-frozen_program_bytes)` takes the exact builtin full
+snapshot_restored_model, retire_restored_model, cancelled_retirement_context, retire_source_model,
+refresh_snapshot, phase_record_owner, phase_record_limits,
+frozen_program_bytes, cold_model_work_capacity)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
 quiesces the successful recompute parent and verifies the supplied native state,
 task capsule, original Proposal expense, Session configuration, initial prefill
@@ -505,7 +656,8 @@ grant covering the complete dependency closure; fast-adaptation permission alone
 cannot authorize this durable full checkpoint. Fresh publication, data-use,
 retention and revocation checks remain independent of scientific acceptance.
 The pending owner retains the exact original `source_model`, callable
-`execute_phase_instruction`, named `xlog.resource_observer.v1` capsule and
+`execute_phase_instruction`, callable `release_cancelled_phase_execution`,
+named `xlog.resource_observer.v2` capsule and
 `feedback_interventions` tuple before entering the original issuer/store callbacks.
 The tuple contains exactly two builtin bytes objects in real/control order, each
 `b"xlog.learning-feedback-intervention.v1\0"` followed by one byte: `0` for
@@ -523,17 +675,229 @@ return is retained before validation; the interval ends once after actual source
 joins, before cold trace delivery. Explicit `continue_preparation()` may read
 that same finished interval without repeating the serializer, joins or finish.
 
-`physical_peak_bytes` is usable only with `PHYSICAL_PEAK_VALID` and
-`ALLOCATOR_COMPLETED`, complete requested/enabled physical coverage without an
-unsupported gap, valid original boundaries/nonce/ordinal and no process
-loss/error/overflow. It is the absolute simultaneously occupied physical GPU
-peak of the entire original process, including the initial occupied baseline,
-driver backing and physical managed residency, not a reservation or delta.
-Trace completion alone does not establish physical memory. Unknown physical
-completion retains the original pending, capsule, interval, model and returned
-source bytes, without release, a numeric observation or subsequent execution.
-The header and consumer do not supply a physical producer, whole-operation work
-accounting or the complete private-trajectory executor.
+After its joined preparation is recorded, native executes every original source
+evaluation group through the retained `execute_phase_instruction` callback, with
+the exact source controller, task, parent, model and scheduled tuple. The callback
+owns the canonical numerical decoder. A callback-scoped, single-use read-only
+admission permits the evaluation while the source remains private; it grants no
+general segment, model-update or publication rights. Each group retains its own
+native work report and whole-process backing interval, including pending work.
+Only `SemanticModelEvaluationPending` permits entering the original suspended
+frame again; a completed return or another exception cannot repeat execution.
+Native authenticates the returned observation against its actual Session, parent
+and original cohort before recording its measured preparation/evaluation history.
+The actual model-content witness exposes `learning_feedback_intervention` as a
+cold projection. Ordinary model bindings and the original held source return
+`None`; source reads remain limited to the actual serialization/evaluation
+callback. A transient capture is not a model binding, and a private child without
+its original intervention owner cannot be interpreted as an ordinary model.
+The first private control trajectory also consumes the original lifecycle
+decoder: it restores the full source checkpoint with `None` copy/reset, not the
+phase's top-level recipe. Its original tally is attached before the canonical
+child graph initializer/admission. The same allocation/report reader survives
+the actual child model factory; inside that callback, the child's TaskUse
+exposes its original cold registrar. The model-content witness projects the
+original control material with `False` for the existing tensor zeroing path.
+The model factory must record its real work and relinquish scratch aliases;
+child completion joins the actual consumers before the original report closes.
+The measured trajectory-start is retained before another schedule projection.
+Native then executes each complete original control numerical group through
+that same five-owner callback and canonical prepared-segment path. Its private
+task remains private; only the retained callback may use its actual inner phase.
+Each original prefix, model preparation, successor preparation, final-use and
+adoption callback receives its own cold registrar from
+`task_use.active_cold_model_work()`. Preparation expenditure belongs to the first
+original step, final-use/retirement and adoption to the last; a single step owns
+both. Original nine-field step reports and native measurements are not rewritten.
+The complete resource tuple adds checked, nonoverlapping cold reports to the
+issued step receipt. Unknown native completion resumes only the retained frame;
+unknown recording, adoption or release cannot repeat its original call.
+
+The subsequent original control evaluation entries use the same read-only
+evaluation executor as the source observations, now with the actual selected
+parent/model from the consumed numerical group. Admission requires those exact
+controller/task/model owners and the original frozen entry; only the original
+pending evaluation frame may resume. The scientific callback supplies the held
+source cohort, and native authenticates its issued observation against that same
+cohort and acquired private parent. Control feedback still uses the original
+positive-zero tensor path. Joined native/model reports and backing memory are
+recorded for each original evaluation without another model restore or forward.
+
+The same evaluation owns one continuous cold work report with three one-shot
+registration regions. `task_use.active_cold_model_work()` projects the current
+region: preparation after native admission, output projection after the existing
+numerical recorder, then cleanup after known native finish or resolution.
+Each region exports the original scratch before its own `begin()` and closes
+with `end()`; all events append to the same capacity without resetting slots or
+reopening the report. Native numerical begin requires closed preparation, and
+finish requires closed output projection. Finish and resolution stay outside
+the cold recorder. Pending retains the original report and closed regions and
+does not permit another preparation, projection or forward.
+
+Known native cancellation joins the same consumers and measures the original
+partial work roster before releasing evaluation storage. Its internal expense
+proof, not a successful observation, admits cleanup once. Only regions proved
+not entered by that cancellation may be skipped; failed or unknown registration
+is never reopened or declared complete. After known cancellation and cleanup,
+native retains the original error and actual expenditure, completes the same
+backing interval, and does not issue a scientific evaluation observation or
+advance the schedule. A complete terminal scientific refusal remains a separate
+required part of the full phase executor.
+
+The control checkpoint consumes its original singleton lifecycle entry and the
+same selected controller, task, parent and model. It calls the canonical
+`save_checkpoint` once with the original model serializer, inside the native
+checkpoint read scope and original cold work registration. The returned complete
+checkpoint bytes are retained before resource completion or history callbacks;
+there is no reconstructed snapshot or second model serialization on continuation.
+Native joins the actual consumers, records measured native/model work and physical
+memory against the original checkpoint budget, then releases that interval once.
+The scientific checkpoint record names that exact parent/model and hashes those
+complete bytes. An unknown save or history append keeps its original custody and
+cannot replay its callback; exceeding the original budget cannot advance the
+schedule. Retained private owners cannot invoke public checkpoint save outside
+this original one-shot operation.
+
+The following original control retirement uses the same held model and full
+checkpoint, not a replacement task or an inferred abort. Its original model
+retirement callback runs once under the checkpoint read scope and cold registrar.
+The Runtime must close that registrar after releasing the actual parent and all
+delivered control model references, preserving the original consumer streams and
+single-attempt quarantine. Native requires genuine full publication retirement
+before joining and destroying the private Session, invalidates its original task
+aliases, drains actual pending deallocations and drops completed control frames
+outside their locks. The original shared source allocations remain held; their
+nonzero baseline is not private retirement failure. These releases belong to one
+continuous backing interval, whose measured native/model work and peak are
+recorded against the original retirement budget before the next branch. Unknown
+model or Session release cannot replay its original callback or destructor.
+
+Only that known, recorded and released control retirement admits the original
+real trajectory's next source restore. Both arms consume the same canonical
+constructor and their actual frozen lifecycle decoder, without a top-level
+copy/reset substituted for the source entry. The real model factory receives
+the original identity-feedback intervention; the control model factory keeps
+its positive-zero intervention. Each source restore retains its own entry,
+native/model owners, work report and backing interval before calling the model
+factory. The phase's entered marker is never reset to manufacture another
+admission. Unknown factory or resource completion retains the same original
+branch and cannot repeat the factory or replace its child Session.
+
+The real arm's numerical groups use the same original Worker
+callback, prepared execution and native receipt authentication as the control
+arm. Its retained group binds the original real branch, selected model and full
+frozen roster; its actual feedback uses the original identity intervention,
+not the control zero-path. Real step history retains that same intervention and
+the issued measurements without changing step reports or relocating budgets.
+Unknown completion resumes only its original group. After a group's complete
+original receipts, history, budget check and physical release, another original
+numerical group consumes its exact selected parent/model through the same native
+issuer and Worker. The predecessor's actual owners remain held until the next
+group's backing preparation interval and shared native tally cover their
+destruction outside phase mutexes. No partial roster, original step ordinal,
+instruction or budget is reset. Intermediate restore instructions still require
+their canonical lifecycle executor.
+
+After the sequence's known accounting and release, real evaluations use the same
+original read-only observation and three cold regions as control evaluations.
+Each observation retains its frozen comparison case, actual selected parent and
+model, native receipt and original expenditure. The real arm then saves its full
+checkpoint through the same canonical controller and one-shot model serializer.
+The evaluation sequence is complete only when the original next entry is its
+contiguous branch checkpoint; another numerical or restore group cannot be
+treated as completion. Unknown callbacks or resource readback retain their actual
+owners and never replay evaluation or serialization. Final candidate handoff,
+late scientific acceptance, delivery and fresh recovery remain required.
+
+The final private candidate retains those exact selected real owners and the
+unchanged saved full checkpoint, only after known checkpoint accounting, physical
+release and the original sole delivery entry. The native checkpoint issuer is
+shared with canonical restoration; it verifies the real Session, controller,
+task issuance and publication without repeating a model factory or exposing a
+Python constructor. Final recompute state, task capsule, Session configuration
+and initial prefill must still match the full checkpoint before retention.
+The initial restored publication is not substituted for the learned successor.
+This handoff alone does not measure the subsequent model verification callbacks
+or implement the budgeted delivery tail.
+
+ABI version 3 retains `bind_step_capture` and `read_step_interval` on the same
+original observer and adds device capacity and native backing-root callbacks.
+Registration passes the actual capture stream immediately
+after enqueueing the admission or release kernel, inside its original capture.
+The collector must retain the precise graph/node identity and correlate its
+actual GPU activity, including conditional releases, skipped steps and graph
+clones. CPU callback timestamps and callback order are not execution boundaries.
+After the original whole-interval finish, sealed step views partition that same
+continuous backing-root observation: first start precedes group allocations, interior
+boundaries are actual next-step GPU admissions, and last end follows the complete
+tail. Every step includes already-held allocations and the whole-process baseline;
+neither copying nor distributing the group's peak proves those individual peaks.
+Original views and events remain held until the complete group is consumed.
+
+For a failed private build with known capture/pool cleanup, native can instead
+prove that the complete original group never entered submission and join its
+actual preparation consumers. That disposition permanently closes the original
+construction; it is not a completed/skipped result or permission to retry.
+`bind_step_capture` site `XLOG_RESOURCE_CAPTURE_CANCEL_GROUP` receives this
+once-only whole-roster cancellation on the same open interval: the group start,
+planned count and original stream. Every attempted start/end binding must have a
+known result; an unregistered suffix is not an unknown binding. Cancellation
+preserves the registered prefix and withdraws only execution-subinterval
+obligations. Whole-process backing validity, allocator completion, loss/error
+checks and original finish/read/release still apply. An unknown handoff retains
+the original owners without retry. This disposition handoff does not implement
+the remaining full private checkpoint/Source terminal recovery or grant resume.
+
+The first control and real numerical groups, control evaluations/checkpoint/
+retirement and real source restore do not implement the remaining private
+control/real schedule, post-comparison delivery or fresh-process recovery. They
+cannot issue a prepared or accepted outcome before that complete original schedule.
+
+`register_process_resource_observer(original_capsule)` pins the ABI3 collector
+before the first native GPU allocation. The exact same table is idempotent; an
+old ABI, late attachment or replacement cannot reset custody. Actual XLOG cold
+storage owners use direct allocation/free, query their containing extent with
+`cuMemGetAddressRange` outside activity callbacks, and report the original UUID,
+context, address and never-reused generation into that same collector. Release
+requires original use fences and successful physical free. A failed confirmation
+retains unknown custody and cannot authorize a duplicate free.
+
+`resource_observer_device_certificate(device_ordinal)` returns that producer's
+immutable `xlog.device-capacity/1` projection, bound to the actual CUDA UUID and
+process, without creating native GPU storage. Its fields are `observer_identity`
+(64 lowercase hexadecimal characters), `device_uuid` (32),
+`total_physical_bytes`, `process_id`, `driver_version`, `source="nvml-memory-v2"`
+and `whole_device=True`. This is verified whole physical capacity U, not free,
+used, arena, MIG or observed peak bytes. The initial application must compare U
+to every original operation and terminal-cleanup ceiling before model allocation.
+Phase admission and canonical signed checkpoint restore repeat that check over
+the unchanged full program; U greater than any ceiling means no admission proof,
+not a measured exceedance. Fresh recovery uses a new original process certificate
+without altering the past certificate or signed expenditure.
+
+`backing_peak_bytes` requires `BACKING_PEAK_VALID`, `BASELINE_COMPLETE` and
+`ALLOCATOR_COMPLETED`, complete requested/enabled owned-backing coverage without
+an unsupported gap, valid original boundaries/nonce/ordinal and no process
+loss/error/overflow. It is the high-water sum of simultaneously retained
+application-owned GPU backing roots, including the entire initial baseline,
+allocator caches and unfinished asynchronous uses. Aliases, slab suballocations
+and private-pool views do not count their containing root again. The collector
+uses original allocation/completed-free timestamps, not late callback arrival.
+Unattributable driver/profiler memory is not falsely labelled application backing;
+the separate whole-device capacity conservatively bounds it. Trace
+`certificate_identity` is exactly the original certificate's 32-byte
+`observer_identity`, which identifies one immutable certificate, not a Python
+dictionary hash.
+
+Scientific callbacks carry `memory_unit="owned-gpu-backing-peak-bytes"`,
+`memory_admission="whole-device-total-physical-bytes"` and `device_certificate`
+separately from `(work, backing_peak_bytes, model_calls)`. Native checks the
+original certificate in every returned observation before signing the full
+history and preserves the eleven-argument acceptance call. Only the explicitly
+frozen `dlm-new.scientific-learning/2` program can use this interpretation; old physical-peak histories
+cannot be re-labelled. Trace completion alone does not prove the baseline,
+whole-operation work or ZERO TRANSFER. Unknown coverage/completion retains the
+original owners without a numerical observation, release or subsequent execution.
 The private candidate uses the actual source Session's allocation provider and
 unchanged `memory_bytes` limit. Its graph and native state allocations share the
 source's live resource stack and serial stream; a clone does not receive a second
@@ -567,9 +931,10 @@ material now uses format 3; format 2 is not reinterpreted as admission-bearing
 material. The signed preparation outcome holds three length-prefixed materials:
 the unchanged full final checkpoint, its original scientific history, and the
 acceptance bytes. Acceptance stays outside the checkpoint whose bytes it binds.
-This boundary migration does not implement the still-required native schedule,
-whole-operation work/call measurements, private feedback binding or cold-process
-recovery; refusal of an incomplete prefix is not completion of that executor.
+Cold recovery consumes these same original records in the canonical loader
+described above. A preparation outcome is not a complete signed Delivery;
+refusing an incomplete prefix does not complete the scientific executor or
+establish its whole-operation work, backing memory or GPU transfer evidence.
 
 Destination acceptance must be derived from the original durable-training
 permission's resolved scope, never merely from the caller's destination string,
@@ -596,6 +961,53 @@ against the supplied checkpoint; it does not create a replacement source.
 These callbacks execute cold, on the creator thread, outside native/task locks.
 Both model snapshots and native banks are checked again before any handoff.
 
+`retire_source_model(source_model, final_handoff) -> None` is mandatory and
+captured with the original model callbacks before admission. Native calls it once
+with the exact source model and actual final selected private owners, after exact
+durable readback of the accepted checkpoint. The original Runtime must join and
+release its source reader and use its application-owned cleanup hook to drop all
+source model references held by the Runtime, Worker, store and preparation
+closures. The hook cannot adopt the private candidate, replace the original
+pending or discard its recovery fence. Native then verifies actual source
+retirement, drops completed model-bearing frames and callbacks outside their
+mutexes, and releases the full original native Session. An uncertain callback,
+region end or native release retains the same pending without retry or source
+continuation.
+
+The sole original delivery interval begins before the first late native check
+following the complete real checkpoint. Its final candidate reader holds one
+report, shared native tally, eight original model-verification regions and one
+source-cleanup region. The same ordinal and whole-operation work, memory and
+call limits cover pre-acceptance verification, preparation-outcome verification,
+commit verification, activation verification and actual source retirement. No
+continuation resets that report or repeats an entered model callback. Native
+finishes the whole report and original backing observer only after known cleanup
+and the last candidate native verification. It records actual delivery history
+and obtains exact signed delivery readback before releasing the observer or
+making the candidate runnable. Budget excess preserves actual measured history
+and the already known checkpoint without activating the candidate.
+
+Each original intermediate `restore` uses the captured lifecycle decoder's
+`("restore", "current", recipe_or_none)` projection. Native saves the actual
+selected full checkpoint through the same controller, retires that private
+model and Session, and restores the saved checkpoint through the same canonical
+constructor and captured factory. The original coordinating owner and Worker
+remain; the retired private Runtime is never resumed. A supplied immutable
+`SemanticLearningPhaseRecipe` receives the original signed Admission; `None`
+preserves the current state and grants no inferred fold or reset.
+
+One original resource interval and shared native tally cover both full snapshots,
+old-model retirement, native deallocation and the next actual construction.
+Four ordered, single-attempt model regions cover the current snapshot,
+retirement, factory and restored snapshot. The original `record_restore` receives
+both full checkpoints, actual old/new publication identities and measured usage.
+Only known report, history, budget and observer release allow the next original
+numerical group to consume that new private handoff. The decoder, serializer,
+retirement callback and factory cannot be replayed after an unknown outcome.
+Initial, consecutive and later intermediate restores retain the same branch and
+original ordinals; real feedback and control positive-zero remain distinct.
+Subsequent full Recompute and fresh evaluations are still required.
+
 `retire_restored_model(returned_model) -> None` is the original model/runtime
 owner's mandatory retirement callback, retained before the factory is entered.
 Abandonment calls it once with the exact factory model while source use is still
@@ -604,13 +1016,210 @@ then releases the original held residency and its native/model ownership.
 Native then positively verifies the original lease has
 no reader, retained step, unfinished evaluation or captured executable; `abort`,
 reader-only release and a failed identity lookup do not establish retirement.
-Only after known retirement does native drop its candidate owners and resume the
-unchanged source, without refunding expense. The full candidate checkpoint remains
-available as cold material. A callback failure or uncertain native release retains
-the same pending and candidate with `unknown` status; neither the callback nor a
-factory is repeated. If retirement is known but later source authority validation
-fails, resolution may finish that source validation without repeating retirement
-or the durable resolver. This is not fresh-process or frozen-program recovery.
+Native moves the same original late report, device tally and finite region states
+to the already attached Source reader before this full private release. It does
+not allocate or reset a replacement report. Private deallocation, finalizers and
+the final unchanged Source verification precede the original observer completion.
+Only exact signed terminal readback and fresh original authority allow Source to
+resume; expense is not refunded. The complete private checkpoint remains cold
+material. Unknown model release or native deallocation retains the same pending
+with `refusal-pending` status and cannot repeat the callback or factory.
+
+`scientific_refusal_type` is the exact exception class from the canonical original
+scientific owner, supplied by the trusted integration before admission, never by
+a request. Native recognizes that exact type only at the sole acceptance call.
+Its original `result_bytes` must bind the complete frozen program/prefix and
+nonempty actual comparisons; contract exceptions or other errors remain unknown.
+The frozen program must declare `final_phase` before execution. The complete
+original recipe proves the first transition; the last actual native transition
+must reach this separate declared phase, including an explicit consolidation
+exit when the program declares fast. Missing `final_phase` has no default.
+
+The terminal observation occupies the original final Delivery instruction and
+operation ordinal with branch `real`, actual measured usage and the original
+refusal reason. It is not successful Delivery or another scheduled step. Native
+keeps the original scientific result bytes unchanged, and separately signs the
+full history containing this terminal observation. For deliberate private
+abandonment or known publication absence, the original positive comparison is
+retained unchanged; the terminal cause identifies the distinct native decision.
+Neither an unknown publication nor known accepted Q permits Source continuation.
+
+Terminal record kind 3 uses signed-chain slot 1 before a positive outcome, or
+slot 2 after it, under the same original issuer, hash chain and byte/count bounds.
+Its payload is `xlog.learning-phase.refusal.v1`, a zero byte, then ten U64LE
+length-prefixed fields: terminal cause, full original Source Q, full selected
+private Q, original prefix history, original comparison result, full terminal
+history, original terminal operation entry material, canonical reason, verified
+Source authority snapshot, and three U64LE actual resource-usage words. Signed-chain
+slots are distinct from frozen operation ordinals. Kind 3 never authorizes the
+selection of private Q or acceptance of its scientific phase. Known Source
+resumption instead retains distinct Source-continuation checkpoint custody.
+
+Known native cancellation of a Source evaluation before the first private restore
+uses that same kind 3 and canonical loader, with cause
+`source-evaluation-cancelled`. The private-checkpoint and comparison-result fields
+have zero length to bind their proven absence, not a copied Source masquerading
+as private Q or an empty scientific result. The entry material and one terminal
+history record identify the actual original Source evaluation ordinal and branch,
+not Delivery. The reason retains its original native parent and actual cancelled
+work/calls. After known evaluation cleanup, Native calls the original captured
+`release_cancelled_phase_execution() -> None` once to release the failed execution
+frames retained by the Runtime and store. It opens region 3 of the same original
+report through the actual Source TaskUse cold callback scope. The callback must
+close that region with its actual work; it must not retire the Source model or
+receipt, execute another instruction, restore a model, or repeat cancellation.
+Unknown callback completion or region closure retains the original frame without
+another call. Native then drops its own numerical frames and verifies and
+serializes Source in region 4 of that report, before its sole observer finish.
+Ordinary Source evaluation leaves these two terminal-only regions unentered and
+cancels them before closing its original report. The retained history stops there;
+no later operation, model factory or acceptance is entered.
+The cumulative Proposal expense remains the genuine Source expense, separately
+from the measured cancelled evaluation.
+
+Known native cancellation of an original private evaluation before acceptance
+uses cause `private-evaluation-cancelled`, with the actual `control` or `real`
+evaluation ordinal and the same genuine native cancellation proof. The full
+selected private Q is mandatory in the signed payload: the canonical Controller
+saves the actual private parent/model before retirement. Its native lineage proves
+only the executed prefix; the frozen `final_phase` remains the program's intended
+end, not an assertion about the phase reached by this Q. The comparison-result
+field is empty because acceptance never entered, not because a comparison failed.
+
+The original private report has seven regions: its existing preparation,
+projection and evaluation cleanup occupy 0/1/2; full private save is region 3,
+the captured zero-argument failed-execution cleanup is region 4 on the actual
+private TaskUse, full private model retirement is region 5, and unchanged Source
+verification/serialization is region 6. Native drops its model-bearing numerical
+frames and releases the retired private Session before Source verification and
+the sole observer finish. Ordinary private evaluation cancels these four unused
+terminal regions before closing the same report. Unknown save, cleanup or
+retirement cannot repeat its original callback or release Source. Later
+evaluations, checkpoint operations, Delivery, model factories and acceptance do
+not execute after this terminal observation.
+
+Live Source custody and fresh canonical recovery preserve the full private Q's
+original cumulative Proposal expense floor, including earlier control work,
+without refunding it or substituting the evaluation's measured work. The same
+signed 0/3 chain, original bounds, six-field fence and issuer pin/readback apply;
+private Q is neither delivered nor exposed as an accepted result. Numerical
+segment cancellation does not acquire evaluation-cancellation authority.
+
+An original completed private segment whose step budgets are exceeded after
+known backing finish, full/per-step peak readout, complete history append and
+release uses cause `private-segment-budget-refused`. Its original selected model,
+publication and entire native-issued roster must already be held after genuine
+adoption. Unknown submission, completion, adoption, peak, append or release does
+not enter this path or obtain a replacement interval.
+
+The phase then opens its predeclared terminal cleanup interval, before any full
+private save or cleanup. Its four actual cold regions contain canonical full
+private Q save, the original failed-frame release, private model/Session
+retirement, and unchanged Source verification/serialization, in that order.
+Already-live frames, models and readers remain inside the absolute backing
+measurement. The original group's expenditure and budget exceedance stay in all
+its original records; terminal usage is separate, with its own sole finish and
+known release. Work/calls are not refunded or charged twice; peaks are maxima,
+not sums. Failure before original finish still requires recovery inside that
+original interval and is not handled by this later interval.
+
+The scientific owner provides exactly
+`record_terminal_cleanup(*, operation_ordinal, cause, group_start, group_count,
+branch, resource_usage, memory_unit, memory_admission, device_certificate)`.
+History always has the four fields `format`,
+`program_sha256`, `records`, and `terminal_cleanup`. The last field is `None` on
+ordinary, evaluation-cancellation and Delivery paths; after this cleanup it
+contains exactly the callback's nine actual fields. No scientific record is added,
+removed or rewritten. The signed reason binds the cause, actual private
+publication, original group start/count and branch. The same canonical live/fresh
+loader checks full Q, the unchanged executed prefix and an actual original budget
+exceedance; it does not claim the future final phase was reached. The comparison
+result is absent because acceptance never entered. Source continuation still
+requires exact signed 0/3 readback, full private retirement and known release.
+
+An original private segment cancelled before submission uses the distinct cause
+`private-segment-cancelled`. Only the native proof for the entire unchanged roster
+admits this recovery; an exception or Python history alone does not. Native saves
+the actual full private Q while retaining the original parent, model and aliases.
+The refused private TaskUse gains no ordinary execution or public retirement
+rights. Native Session deallocation also requires completed destruction of every
+previous executable, even after its replay handle has left the Session; an empty
+executable slot does not prove graph retirement. Its original cold owner remains
+available only inside the authenticated terminal callback region.
+
+After verified full Q, `release_cancelled_phase_execution()` releases the original
+failed frame and permitted producer/autograd aliases, but retains the segment,
+slab, pool, storage and workspace lease. Native then requires confirmed destruction
+of its original builder/executable graph, not merely a dropped Rust handle. Deferred
+or unknown destruction cannot enter the original prepared owner's `finish_segment()`.
+That callback runs once in the private-retirement region before remaining native
+step/resource retirement. The original private model retirement then releases its
+workspace and storage before establishing quiescence and retiring its Session.
+Before fallible preparation, the producer's `prepared_segment_owner() -> owner`
+returns its already-created original segment. Native retains it before calling
+`prepare_segment(task_use, *, steps, consumer_stream)`, which must return that
+same object. Partial lifetimes remain owned even if preparation does not return;
+the producer must never construct a replacement owner after failure.
+
+Private preparation retains the exact restored parent's acquired reader. Its
+sole decrement is recorded in the native graph before the first admission, not
+performed after build on the host. Cold submission joins the original parent
+consumers and requires aliases to be relinquished without releasing that reader.
+All genuinely unsubmitted paths retain it for the full private checkpoint.
+Whole-roster completion observes its device decrement and reconciles that same
+lease; original cold retirement then releases its remaining step/storage owner.
+An unknown launch or completion retains custody, never issues another decrement,
+and grants no cancellation or reader reissuance. No transfer or Python callback
+is added between graph submission and completion.
+
+`cancelled_retirement_context(restored_model) -> manager` supplies the original
+private Runtime's model-work context manager. Native retains and enters it inside
+the same private-retirement registrar, before graph destruction, and holds it
+through `finish_segment()`, child/step/resource retirement and
+`retire_restored_model(restored_model) -> None`. These callbacks must not enter
+another recorder. After successful enter, native attempts `__exit__` exactly once
+before removing registrar visibility, including failures between callbacks. It
+passes the original exception type, value and traceback; suppression or exit
+failure cannot become success. Python must unwind its modes, context variables,
+device and stream in `finally`, separately from retained unknown native owners.
+An unsuccessful enter is neither exited nor repeated. The consumer records known
+retirement only after the entire native body and common context exit succeed,
+not merely after the model callback returns. No completion flag or numerical
+result is fabricated.
+
+This recovery does not open a new backing interval or spend the terminal cleanup
+reserve. Its sole original finish measures preparation, full Q, failed-frame
+cleanup, graph/private retirement and unchanged Source verification/serialization.
+`resource_usage` records their actual work/calls and absolute backing peak once.
+The terminal record still uses the predeclared `operation_ordinal=len(schedule)`;
+`group_start` identifies the original interval and `group_count` the full planned
+roster. Live and fresh verification require `len(records)==group_start`, preserve
+the prefix exactly, and add only the existing six-field `terminal_cleanup` object.
+There are no completed, refused or skipped step rows for the cancelled group.
+Its usage is not compared with a separate cleanup reserve or pooled step limits
+to assert budget passage. Established exceedances and cumulative Proposal expense
+remain unchanged. Unknown save, cleanup, retirement, Source verification, history,
+finish/read or release retains custody without repeating callbacks or intervals.
+
+`pending.refusal_outcome` is `None` until exact terminal readback, then the readonly
+tuple `(cause, original_result_bytes, full_history_bytes, signed_terminal_record)`.
+The two proven evaluation-cancellation cases and the completed-segment budget
+refusal and pre-submission segment cancellation above have `original_result=None`;
+all complete-prefix causes retain their exact original comparison bytes.
+`resolve_checkpoint()` or `continue_preparation()` continues that same retained
+refusal without another scientific comparison, model call, retirement or write.
+`refused` means known evaluation cleanup with no private entry, or full known private
+release, followed by terminal readback and Source resumption.
+Only then `pending.refusal_checkpoint_custody` returns readonly
+`(issuer_bytes32, origin_tuple3)` from that same actual Source Session; before it
+returns `None`. The origin is `(phase_id, kind3_record_sha256, source_Q_sha256)`.
+Reading this getter creates no owner, accepted handoff or key. Unknown pin
+readback must retain this same pending, Source Runtime/model, issuer, store,
+recovery fence and lock before any application request can use Source.
+The consumer must retain this outcome and its original records/fence, including
+after process loss. The canonical terminal recovery path is described above;
+actual fresh-process recovery and measured GPU execution remain verification
+requirements, not conclusions from live-owner or source checks.
 
 The source retains the native pending owner **before** its first serializer,
 scientific callback or restoration operation. During preparation its status is
@@ -634,8 +1243,10 @@ the explicit tuple `phase_record_limits=(max_record_bytes, max_total_record_byte
 max_records)` from its original run document. There are no default limits. Native
 requires `0 < max_record_bytes <= max_total_record_bytes <= sys.maxsize` and
 `0 < max_records <= sys.maxsize`, checks the complete initial record before copying
-its payload, and reserves a complete bounded preparation-outcome slot before
-admission. These storage bounds are not checkpoint-source limits, learning rights,
+its payload, and reserves two complete bounded outcome slots before admission:
+preparation and delivery. The original count must be at least three, and the total
+must hold the initial admission plus twice `max_record_bytes`. Native never
+enlarges these original limits. These storage bounds are not checkpoint-source limits, learning rights,
 or whole-execution resource accounting.
 
 Native binds the original complete source checkpoint, `frozen_program_bytes`, full
@@ -645,6 +1256,14 @@ deterministic 32-byte `pending.phase_id`. The same inputs identify the same atte
 `frozen_program_bytes` must exactly match the scientific owner's `program_bytes`
 before the signed admission is issued;
 native neither synthesizes a program nor interprets a shorter program as equivalent.
+The original request and frozen program must declare
+`terminal_cleanup={"operation_ordinal": len(schedule), "budget":
+[device_work, absolute_peak_bytes, model_calls]}` before Admission. These are exact
+unsigned limits, with a nonzero absolute memory limit, allocated inside the
+original authorized total budget. This mandatory target is outside the scientific
+schedule, not a future instruction or additional grant. It has no default and
+cannot be added or enlarged on an already-started attempt. Native reads it from
+the same signed `frozen_program_bytes`, never a post-failure argument.
 `pending.issuer_anchor` exposes only its independently generated Ed25519 public key;
 the private key remains in native memory and is never exported in a phase record.
 `pending.phase_record_limits` returns the exact original tuple.
@@ -667,7 +1286,15 @@ The native owner captures these original callables once, before model or prepara
 callbacks. Before entering preparation it requires the independent issuer readback
 and exact readback of ordinal 0, the full signed admission. Ordinal 1 is the signed
 preparation outcome containing the actual complete candidate checkpoint and the
-scientific owner's full `history_bytes`. Each record binds its phase ID, issuer,
+scientific owner's completed-prefix `history_bytes`. Ordinal 2, kind 2, is the
+signed delivery in the same `xlog.learning-phase.record.v1` chain. Its payload
+starts with `xlog.learning-phase.delivery.v1` followed by a zero byte and six
+U64-little-endian-length-prefixed fields in order: unchanged full checkpoint,
+full history including actual delivery, original canonical delivery entry,
+canonical final published-parent identity, verified fresh authority snapshot,
+and three U64-little-endian resource values `(work, backing_peak, model_calls)`.
+The acceptance's prefix and checkpoint are not rewritten to include this later
+observation. Each record binds its phase ID, issuer,
 ordinal, predecessor digest, cumulative serialized bytes and immutable limits.
 The signature covers the complete versioned record, not merely its payload digest.
 Exact readback is verified against the original native key before progress advances.
@@ -683,6 +1310,13 @@ or resume the source. Only exact readback of the retained full preparation outco
 can restore `prepared`; `None` remains unknown and early `False` never proves
 nonexecution. The public pending owner has no separate phase-record resolver.
 The store's `resolve_phase_record` callback is unchanged.
+Once exact checkpoint readback is known, resolution proceeds directly to the
+original delivery report and any original signed delivery write. It does not
+re-resolve or undo checkpoint publication, repeat source serializers or cleanup,
+resubmit a signed write, or repeat backing finish or release. A signed delivery
+record is not a fresh-process recovery loader or proof of full GPU execution;
+terminal refusal and whole-path runtime qualification
+remain separate required capabilities.
 
 For the same live pending, `pending.continue_preparation()` is a separate deliberate
 action, not part of resolution. Native permits it only after exact readback of the
@@ -710,7 +1344,8 @@ The canonical resolver returns these distinct result/status pairs:
 | --- | --- | --- |
 | `None` | `unknown` | Keep the same pending, store, source, private owners and recovery fence; neither owner is runnable. |
 | `None` | `prepared` | The preparation outcome is known, but no model handoff or final publication occurred. Keep all owners and the fence. Repeated resolution returns the same pair without callbacks, commit or abandonment. |
-| `None` | `abandoned` | Native has revalidated and resumed the source after the retained final resolver proved absence before any exact durable checkpoint readback. Cleanup is permitted; expense is not refunded. |
+| `None` | `refusal-pending` | Keep the same pending, store, Source, remaining private owners and fence. Only the original retained terminal continuation/readback is allowed. |
+| `None` | `refused` | Native has completely released private owners, verified unchanged Source and durably confirmed the signed terminal history before resuming Source. Retain the terminal outcome and original records; expense is not refunded. |
 | `SemanticTransitionRestoredCheckpoint` | `committed` | The exact original controller/task/parent/model successor is durably published and activated. Retain this handoff before fallible application cleanup. |
 
 `prepared` permits a separate deliberate initial `commit_checkpoint` with the
@@ -731,6 +1366,62 @@ executor/GPU fencing, all-branch storage capacity or whole-execution resource us
 The supported scientific acceptance callback takes exactly eleven arguments.
 Checking its complete scientific prefix does not implement the private executor
 or establish full GPU execution or cold recovery.
+
+Preparation also requires `cold_model_work_capacity`, an exact positive integer
+from the original preparation instruction. Its bounded allocation arithmetic is
+checked, and both the capacity and unchanged program bytes enter the signed
+Admission. The original decoder returns the preparation tuple
+`("prepare", None, None, cold_model_work_capacity)`; native code compares the
+capacity without introducing another instruction decoder.
+
+Inside the original source serializer, before preparation returns,
+`task_use.active_cold_model_work()` or
+`controller.active_cold_model_work()` returns the same native-issued
+`SemanticColdModelWork`. Obtain its `consumer_stream` and
+`model_work_buffer(consumer_stream=...)`, an original CUDA UInt64
+`[capacity, 3]` buffer, before calling `begin()`. The existing model-work recorder
+uses `record_model_work`, `record_model_device_work` and
+`record_model_invocation`, then calls `end()` on normal exit or `fail()` on an
+exception. Registration begins once; overflow cannot grow the buffer or restart
+the operation. Drop temporary tensor aliases before returning the serializer.
+`end()` only closes registration: the enclosing native operation joins actual
+consumers and completes its report before ending the original backing interval.
+An explicitly attached, completed CPU/meta-only recorder may have no model events;
+an absent recorder, overflow or unknown completion is not a zero result.
+This owner grants no evaluation, backward-tape or content-admission rights.
+Lookup uses the actual callback's Session and exact TaskUse; it does not borrow
+the source phase's first registrar for a different Session. Callback return or
+exception clears only this temporary visibility, not the original native
+completion owner. A later native-issued invocation receives a distinct registrar
+and scratch allocation only after the prior native report completes and all of
+its scratch aliases are gone. Its Admission and original event capacity cannot
+change, and completed recording is never reopened. Outstanding scratch aliases
+also prevent state-changing work and release.
+
+The connected Python path still issues this scope only for the first source
+preparation serializer. Mandatory later source/candidate serializers require
+their own original checkpoint or delivery operation, registrar and continuous
+whole-operation backing interval; Session-scoped lookup alone does not implement
+that executor or attest its expense.
+
+The same original owner also retains one private native tally. Actually reached
+snapshot commands, the original serializer's tensor-content and retained
+ModelContract guards, and published-content guards use the existing native unit
+registry: events are charged only where their producer actually visits a
+table/chain, hashes a block or writes canonical bytes. The guards retain that same
+allocation through their strict read/write ordering, including the full
+selected-model descriptor and ModelContract hash checks. The original GPU
+content-view and model-identity producers charge their canonical prefix and
+identity-input byte writes in that same tally, before their hashes. This is
+logical native work, not a charge for CPU codecs or host/device copies, and it
+does not change the event tariffs or model-call count. Report submission
+closes these cold producers; continuation only reads the original result.
+These are new cold occurrences,
+not charges copied from an old resident receipt. The original completion report
+joins them with model work and checks their sum against the unchanged operation
+budget; overflow or unknown completion retains the original allocation without
+resetting or replaying commands. Other cold producers and the backing peak are
+still required before this can be the full operation expense.
 
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes
@@ -777,7 +1468,8 @@ the complete checkpoint. The owner must check a retrieved
 source with `verify_checkpoint_referent(record, checkpoint)`; `restore_checkpoint`
 accepts `referent=record` and performs that same exact check before allocating a
 new owner.
-The complete checkpoint uses version 3 and the compact referent remains version 2;
+The complete checkpoint uses version 4 with a separate phase-seal section, and
+the compact referent remains version 2;
 the embedded task capsule uses version 5 to retain the original training domain,
 whole-task nominal Proposal expense and checkpoint-source registration.
 Older complete checkpoints, task capsules and version 1 referent sources are not
@@ -1158,10 +1850,21 @@ integrity failure after a completed CUDA stream remains unknown and cannot use
 this resolver. These retained in-process results are not durable admission,
 private-program recovery, scientific acceptance, or process-restart evidence.
 
+If native reconciliation succeeds but construction of the Python result roster
+fails, the original task also remains pending rather than aborting the completed
+native graph. The original outcomes and preparation owners stay retained; a
+missing Python roster still cannot enter `resolve_completed_segment`, receive
+its pending-result exception, or authorize reconstruction, resubmission or
+Source recovery. A phase independently refused or changed is not repaired by
+that cleanup. The owning learning-phase Runtime must retain its original failed
+handoff for the terminal segment owner. A failed launch or incomplete native
+reconciliation retains the existing unknown/abort boundary instead.
+
 Use the same step's `record(44, 0, consumer_stream=...)`, `tensor(...)` and
 `tensor_allocation(...)` exports to serialize the original model contract and
-complete model backings. Their private storage is preallocated before capture
-and populated by that step's recorded acquisition. The observation does not
+complete model backings. Numerical ranges retain the original immutable
+generation through native allocation leases; each step's other private state is
+preallocated before capture and populated by its recorded acquisition. The observation does not
 acquire an old publication bank or allocate another history of model states.
 Treat every export as read-only, retain it until final
 use, and include every original consumer stream in the binding call. Recheck the
@@ -1173,6 +1876,34 @@ outside capture and the measured resident loop, before `retire_segment`. It does
 not finish policy use or retire the step. Its returned identities are not live
 readers, complete predecessor/successor replay materials, or authorization for a
 new model invocation.
+
+### Releasing readers while retaining model tensors
+
+Use `parent.release_reader(consumer_streams=original_streams)` when the original
+bank consumers have finished but late policy, content, or gradient work still
+needs the original step. No further publication reads are allowed through that
+parent. Finish that original step's late uses before calling
+`parent.release(consumer_streams=original_streams)`. Preserve your existing
+Controller retirement and captured-executable disposal sequence; independently
+prepared future inputs retain their own allocations. Keep every real consumer
+stream in the original release calls. An outstanding active output alias or
+content witness still prevents final release.
+
+A read-only numerical model tensor has separate ownership of its exact GPU
+allocation. It does not keep the whole publication catalogue or an active output
+guard alive. Keep that tensor and its original consumer owner alive through its
+last CUDA use, including every future execution of a captured graph. Its DLPack
+managed release joins the negotiated final consumer stream; an earlier reader or
+segment completion is not that final-use fence.
+
+Acquired readers, prepared future inputs, pending model updates, historical replay
+snapshots, and the selected Session model each retain the generations they still
+need. Reader release and completed-segment retirement remove only obsolete Session
+ownership. An old allocation can be freed only after its last independent owner
+and actual final CUDA use have ended. No additional model-cleanup API or Python
+garbage-collection step is required after you relinquish your model references.
+Unknown completion retains the original owners instead of declaring them freed
+or retrying their use.
 
 ### Completed-step action projection
 
@@ -1216,10 +1947,16 @@ if materials is not None:
 The tuple has the same format as `Controller.export_replay_materials` for held
 adjacent readers. These identities and bytes belong to this exact step, not the
 first parent or final successor of the segment. Native custody copies the full
-semantic arena and the selected model backings before reuse. It retains the
-successor's original records inside its publisher before publication. The full
-allocation roster is reserved before capture and its byte copies are charged as
-native work. An unpublished refusal returns `None`; unknown completion does not
+semantic arena and, for writable model banks, the selected model backings before reuse.
+Ordinary prepared and historical immutable numerical generations are retained by
+native leases instead of being copied, without omitting their bytes from the complete
+cold material. Planning preserves this classification even after an old catalogue
+entry loses its owner; allocating a real snapshot still requires the exact live
+generation owner. The publisher retains the successor's original records before
+publication. The full allocation roster is reserved before capture and its byte
+copies are charged as
+native work; immutable model leases add no model allocation or copy work.
+An unpublished refusal returns `None`; unknown completion does not
 return material. A scheduled Proposal that actually publishes another transition
 must be handled using its observed transition, not exported as a Proposal.
 
@@ -1261,8 +1998,8 @@ inspection neither proves past publication nor enables an actor. Initial-prefill
 evidence remains separate and must not be discarded or fabricated.
 
 After known completion, the existing `tensor` and `tensor_allocation` getters
-read that step's private acquired model backings, not the reused publication
-banks. They preserve the original allocation-sharing partition, complete backing
+read-lease that step's acquired numerical generation, independently of the
+publication bank. They preserve the original allocation-sharing partition, complete backing
 capacity, typed layout, and byte offsets. The supplied bank must be the branch
 that actually executed. Prefix and cache aliases use the same custody in cold
 exports and input guards. During original construction these getters still
@@ -1274,9 +2011,41 @@ own retained bytes. No new baseline is sealed during cold observation.
 
 Original input custody belongs to every prepared Proposal, Recompute, and Update,
 not just exported Proposals. Later transitions cannot replace an earlier step's
-completed binding or Update measurement basis. Admission reserves all of these
-step owners before capture, including their full backing and semantic arena
-copies; actual device copies count as native work.
+completed binding or Update measurement basis. Admission reserves all native
+owners before capture, including distinct pending generations and per-step
+nonnumerical state and semantic arena copies. Retaining a numerical generation
+does not copy it; actual device copies still count as native work.
+
+During original construction, an Update's
+`update_tensor_allocation(role, index, bank, consumer_stream=...)` exports its
+genuine unpublished native backing as `(NativeTensorAllocation, DLPack capsule)`.
+The role and index select a view in the original complete model geometry; the
+export and provenance name the full `U8[allocation_bytes]` allocation, with
+`byte_offset=0` and `view_bytes=allocation_bytes`. Both alternative publication
+banks of one Update use the same pending generation; another Update has a
+distinct generation, and no pending backing aliases its selected source. The
+export does not initialize any bytes or grant permission to mutate source.
+
+The original captured producer must initialize every pending allocation from
+its acquired source after the original read guards and before any candidate
+read, gradient reset or backward. Register gradient, presence and accumulation
+destinations on that exact pending owner before capturing edges. Both ordinary
+and historical gradient deliveries require `activate()` immediately before the
+single combined backward and `finish_recording()` after recording. Activation
+temporarily attaches the authenticated destination to the original physical
+`AccumulateGrad` node; finishing restores the original `.grad` slot. Historical
+members share the ordinary delivery's single reset. AdamW and candidate canaries
+consume the initialized pending state, without a second source copy after
+backward. Native acceptance binds this exact owner and publishes it by the sole
+descriptor switch, without copying a producer model into another bank.
+
+Refusal leaves the complete source authoritative; unknown completion retains
+the original owners and cannot retry mutation or cleanup. Numerical leases do
+not merge complete step snapshots by weight generation or hash: prefix, cache,
+optimizer, gradient, schedule, random state and restoration materials retain
+their exact original identities and alias geometry. All genuinely distinct live
+generations count toward pre-draw memory admission. These ownership rules alone
+do not prove a memory capacity or measured zero-transfer runtime boundary.
 
 For a successfully published Proposal, call
 `completed_action_projection(consumer_streams=[...])` before consuming the
@@ -2746,6 +3515,13 @@ promotion.rule_inventory  # RuleInventory | None
 These helpers package the ILP audit surface for downstream applications ("external
 consumers") as reusable pyxlog utilities:
 
+`CudaExecutionAudit` observes selected Python/Torch calls and explicitly recorded
+events. It does not measure native CUDA transfers; a caller's
+`device_resident=True` assertion is not residency evidence. The numerical
+`compute_transfer_diagnostics` helper reports prediction metrics across domains,
+not host/device transfer counts. Neither utility certifies native ZERO TRANSFER
+or replaces a complete measured GPU run.
+
 ```python
 from pyxlog.ilp.neurosymbolic import (
     NeuroSymbolicTrainingConfig,
@@ -3174,6 +3950,12 @@ and the existing numerical/work registrar on the evaluation's `consumer_stream`.
 geometry rules, scratch layout, and device work consumer as prepared execution.
 Saved-autograd-copy recording is intentionally unavailable: this invocation is
 forward/objective-only.
+
+An acquired parent may issue a distinct next evaluation only after the previous
+invocation completed and all aliases of its model-work scratch were released.
+The previous allocation remains retained until the new allocation succeeds.
+An unknown or incomplete report never permits replacement; reusing the parent
+does not reopen the previous recording or change its separately retained cohort.
 
 Retain `evaluation.cohort` separately for later observations. Passing that native
 object as `cohort=` reuses the exact original seventeen ports and their private

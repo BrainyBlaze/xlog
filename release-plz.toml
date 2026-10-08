@@ -6,8 +6,8 @@ changelog_path = "CHANGELOG.md"
 max_analyze_commits = 5000
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
-# Release worthiness is enforced as ONE workspace-level gate in
-# .github/workflows/release-plz.yml, not per package: a per-package
+# Manual release worthiness is enforced by scripts/release_worthiness.py
+# once for the workspace, not per package: a per-package
 # `release_commits` filter over a shared [workspace.package].version
 # produces a partial release set, and a minor bump then breaks the
 # excluded crates' `^x.y.z` workspace-dependency requirements inside

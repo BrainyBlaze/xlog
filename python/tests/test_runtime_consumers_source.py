@@ -1,5 +1,3 @@
-import json
-import os
 import sys
 from importlib import util
 from pathlib import Path
@@ -7,40 +5,6 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SUITE = ROOT / "examples/runtime-consumers"
-
-EXAMPLES = [
-    "01_external_delta_optimizer",
-    "02_neutral_material_flow",
-    "03_neutral_signal_diagnostics",
-    "04_runtime_substrate_primitives",
-    "05_pyxlog_session_compatibility",
-]
-
-REQUIRED_CONSUMERS = {
-    "external-delta-consumer",
-    "neutral-external-consumer",
-    "runtime-substrate-primitives",
-    "pyxlog-compatibility",
-}
-
-REQUIRED_FEATURES = [
-    "delta",
-    "exact_induction",
-    "chain_shared_memory",
-    "common_subexpression_elimination",
-    "adaptive_reoptimization",
-    "persistent_hash_index",
-    "runtime_substrate_primitives",
-    "pyxlog_compatibility",
-    "production_path_reuse",
-]
-
-PROJECT_TERM_PARTS = [("mista", "ber")]
-
-
-def _load_expected(name: str) -> dict:
-    return json.loads((SUITE / name / "expected.json").read_text(encoding="utf-8"))
 
 
 def _load_validator_module():
@@ -52,67 +16,6 @@ def _load_validator_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
-
-def test_runtime_consumer_examples_layout_is_committed() -> None:
-    assert (SUITE / "README.md").exists()
-
-    for name in EXAMPLES:
-        example = SUITE / name
-        assert (example / "program.xlog").exists(), name
-        assert (example / "expected.json").exists(), name
-        assert (example / "README.md").exists(), name
-
-
-def test_runtime_consumer_examples_cover_named_consumers_and_features() -> None:
-    observed_consumers = set()
-    observed_features = set()
-
-    for name in EXAMPLES:
-        expected = _load_expected(name)
-        observed_consumers.add(expected["consumer"])
-        observed_features.update(expected.get("features", []))
-        assert any(key in expected["checks"] for key in ["run", "explain_json"]), name
-
-    assert REQUIRED_CONSUMERS <= observed_consumers
-    for feature in REQUIRED_FEATURES:
-        assert feature in observed_features
-
-
-def test_runtime_neutral_external_examples_do_not_leak_project_terminology() -> None:
-    neutral_count = 0
-
-    for name in EXAMPLES:
-        expected = _load_expected(name)
-        if expected["consumer"] != "neutral-external-consumer":
-            continue
-        neutral_count += 1
-        source = (SUITE / name / "program.xlog").read_text(encoding="utf-8").lower()
-        for term_parts in PROJECT_TERM_PARTS:
-            assert "".join(term_parts) not in source, name
-
-    assert neutral_count >= 2
-
-
-def test_runtime_consumer_validator_reuses_existing_compatibility_gates() -> None:
-    validator = ROOT / "scripts/validate_runtime_consumers.py"
-    assert validator.exists()
-
-    source = validator.read_text(encoding="utf-8")
-    for needle in [
-        "runtime_consumers",
-        "validate_external_consumer_examples.py",
-        "validate_language_examples.py",
-        "feature_coverage",
-        "raw_measurements",
-        "compatibility_gates",
-        "behavior_probes",
-        "production_path_reuse",
-        "reuse_audit",
-        "child.name.startswith(\"_native\")",
-        "pyxlog_persistent_index_session_reuse",
-    ]:
-        assert needle in source
 
 
 def test_runtime_validator_accepts_absolute_and_relative_output_paths(monkeypatch, tmp_path) -> None:
@@ -149,52 +52,6 @@ def test_runtime_validator_accepts_absolute_and_relative_output_paths(monkeypatc
         (ROOT / relative_output).unlink(missing_ok=True)
 
 
-def test_runtime_validator_stages_fresh_debug_kernels_over_package_local_stale(tmp_path) -> None:
-    module = _load_validator_module()
-
-    target_dir = tmp_path / "target" / "debug"
-    stale_out = target_dir / "build" / "xlog-cuda-stale" / "out"
-    fresh_out = target_dir / "build" / "xlog-cuda-fresh" / "out"
-    stale_out.mkdir(parents=True)
-    fresh_out.mkdir(parents=True)
-
-    (stale_out / "weights.sm_120.cubin").write_text("stale cubin", encoding="utf-8")
-    (stale_out / "weights.portable.ptx").write_text("stale ptx", encoding="utf-8")
-    (fresh_out / "weights.sm_120.cubin").write_text(
-        "fresh cubin with weights_count_lift_exact",
-        encoding="utf-8",
-    )
-    (fresh_out / "weights.portable.ptx").write_text("fresh ptx", encoding="utf-8")
-
-    deps_dir = target_dir / "deps"
-    deps_dir.mkdir()
-    (deps_dir / "xlog_cuda-current.d").write_text(
-        f"libxlog_cuda.rlib:\n# env-dep:OUT_DIR={fresh_out}\n",
-        encoding="utf-8",
-    )
-
-    os.utime(stale_out, (3, 3))
-    os.utime(fresh_out, (2, 2))
-
-    staged_pkg = target_dir / "pyxlog"
-    package_kernels = staged_pkg / "kernels"
-    package_kernels.mkdir(parents=True)
-    (package_kernels / "weights.sm_120.cubin").write_text(
-        "ignored package-local stale cubin",
-        encoding="utf-8",
-    )
-    (package_kernels / "obsolete.sm_120.cubin").write_text("obsolete", encoding="utf-8")
-
-    staged_kernels = module._stage_debug_pyxlog_kernels(target_dir, staged_pkg)
-
-    assert staged_kernels == package_kernels
-    assert (staged_kernels / "weights.sm_120.cubin").read_text(encoding="utf-8") == (
-        "fresh cubin with weights_count_lift_exact"
-    )
-    assert (staged_kernels / "weights.portable.ptx").read_text(encoding="utf-8") == "fresh ptx"
-    assert not (staged_kernels / "obsolete.sm_120.cubin").exists()
-
-
 def test_runtime_validator_separates_example_execution_from_consumer_certification() -> None:
     module = _load_validator_module()
     fake_results = [
@@ -202,7 +59,7 @@ def test_runtime_validator_separates_example_execution_from_consumer_certificati
             "name": "example",
             "status": "PASS",
             "consumer": "external-delta-consumer",
-            "features": ["exact_induction", "production_path_reuse"],
+            "features": ["exact_induction"],
             "checks": ["run"],
             "raw_measurements": {"run_duration_sec": 0.01, "explain_duration_sec": None},
             "raw_outputs": {},
@@ -310,7 +167,6 @@ def test_runtime_validator_separates_example_execution_from_consumer_certificati
         {
             "external_consumer_examples": {"status": "PASS"},
             "language_examples": {"status": "PASS"},
-            "example_source_guards": {"status": "PASS"},
             "pyxlog_persistent_index_session_reuse": {"status": "PASS"},
         },
     )

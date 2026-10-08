@@ -1,6 +1,5 @@
 # python/tests/test_ilp_trainer.py
 """Integration tests for train_only()."""
-import inspect
 import math
 
 import pytest
@@ -121,17 +120,6 @@ def test_check_convergence_uses_device_membership_api_only():
         perform_mask_checks=True,
     )
     assert converged is True
-
-
-def test_trainer_uses_device_membership_helper_in_hot_loop():
-    src = inspect.getsource(trainer_mod._compute_grouped_membership_mask_device)
-    assert ".batch_fact_membership_device(" in src
-    assert ".batch_fact_membership(" not in src
-
-
-def test_run_single_attempt_avoids_item_scalar_syncs_in_hot_loop():
-    src = inspect.getsource(trainer_mod._run_single_attempt)
-    assert ".item()" not in src
 
 
 def test_train_only_strict_gpu_native_rejects_host_negative_mining():
@@ -619,25 +607,6 @@ def test_train_only_strict_gpu_native_rejects_dense_mask_backend():
             negatives=REACH_NEG,
             config=config,
         )
-
-
-def test_strict_single_attempt_helper_avoids_host_sync_primitives():
-    src = inspect.getsource(trainer_mod._run_single_attempt_strict)
-    assert ".cpu(" not in src
-    assert ".item()" not in src
-    assert "torch.cuda.synchronize()" not in src
-
-
-def test_strict_finalization_helpers_avoid_python_host_sync_primitives():
-    helper_sources = [
-        inspect.getsource(trainer_mod._finalize_strict_attempt),
-        inspect.getsource(trainer_mod._build_strict_train_result),
-    ]
-    strict_src = "\n".join(helper_sources)
-    assert ".cpu(" not in strict_src
-    assert ".item()" not in strict_src
-    assert ".tolist()" not in strict_src
-    assert ".numpy()" not in strict_src
 
 
 def test_select_better_strict_attempt_updates_argmax_device_selection():

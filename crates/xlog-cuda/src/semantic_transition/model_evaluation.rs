@@ -76,8 +76,41 @@ impl SemanticCompletedModelEvaluation {
     }
 }
 
+/// Actual expenditure of the original known-cancelled invocation, not a model
+/// observation or a successful evaluation receipt. No objective is synthesized.
+#[derive(Clone)]
+pub struct SemanticCancelledModelEvaluation {
+    issuer: Arc<()>,
+    invocation: Arc<()>,
+    parent: SemanticPublishedIdentity,
+    work: u64,
+    calls: u64,
+}
+
+impl SemanticCancelledModelEvaluation {
+    pub fn belongs_to(
+        &self,
+        session: &SemanticTransitionSession,
+        original: &SemanticModelEvaluation,
+    ) -> bool {
+        Arc::ptr_eq(&self.issuer, &session.publication_issuer)
+            && Arc::ptr_eq(&self.invocation, &original.invocation)
+    }
+
+    pub fn parent(&self) -> SemanticPublishedIdentity {
+        self.parent
+    }
+    pub fn model_work(&self) -> u64 {
+        self.work
+    }
+    pub fn model_calls(&self) -> u64 {
+        self.calls
+    }
+}
+
 pub(super) struct EvaluationStorage {
     invocation: Arc<()>,
+    work_aliases: Arc<()>,
     cohort: Arc<SemanticEvaluationCohort>,
     work: PreparedModelWork,
     report: TrackedCudaSlice<u64>,
@@ -99,9 +132,19 @@ impl SemanticTransitionSession {
         event_capacity: usize,
     ) -> Result<SemanticModelEvaluation, SemanticTransitionError> {
         self.checked_reader(lease)?;
-        if self.steps[&lease.token].evaluation.is_some() || self.prepared_segment.is_some() {
+        if self.steps[&lease.token]
+            .evaluation
+            .as_ref()
+            .is_some_and(|original| {
+                original
+                    .result
+                    .is_none_or(|result| !matches!(result.status, 0 | 1))
+                    || Arc::strong_count(&original.work_aliases) != 1
+            })
+            || self.prepared_segment.is_some()
+        {
             return Err(publication_input_error(
-                "evaluation requires an unused acquired parent outside a prepared segment",
+                "evaluation requires known completion and release of the previous invocation's scratch aliases outside a prepared segment",
             ));
         }
         let arena = self
@@ -181,7 +224,16 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     runtime_error("kernel lookup", "tensor content witness unavailable")
                 })?;
-            content.enqueue(&self.domain, &mut self.poisoned, &seal, false)?;
+            let cold_work = self.cold_native_work(lease.token)?;
+            content.enqueue_with_custody(
+                &self.domain,
+                &mut self.poisoned,
+                &seal,
+                false,
+                None,
+                false,
+                cold_work.as_ref(),
+            )?;
             Arc::new(SemanticEvaluationCohort {
                 issuance: Arc::new(()),
                 selected,
@@ -216,6 +268,7 @@ impl SemanticTransitionSession {
             .expect("checked acquired step")
             .evaluation = Some(EvaluationStorage {
             invocation: Arc::clone(&handle.invocation),
+            work_aliases: Arc::new(()),
             cohort,
             work,
             report,
@@ -264,6 +317,7 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
     ) -> Result<(), SemanticTransitionError> {
         let cohort = Arc::clone(&self.evaluation(handle)?.cohort);
+        let cold_work = self.cold_native_work(handle.token)?;
         let seal = self
             .provider
             .device()
@@ -273,9 +327,15 @@ impl SemanticTransitionSession {
                 "semantic_tensor_content_witness",
             )
             .ok_or_else(|| runtime_error("kernel lookup", "tensor content witness unavailable"))?;
-        cohort
-            .content
-            .enqueue(&self.domain, &mut self.poisoned, &seal, true)
+        cohort.content.enqueue_with_custody(
+            &self.domain,
+            &mut self.poisoned,
+            &seal,
+            true,
+            None,
+            false,
+            cold_work.as_ref(),
+        )
     }
 
     pub fn evaluation_stream(
@@ -321,7 +381,7 @@ impl SemanticTransitionSession {
         self.checked_evaluation_parent(lease, handle)?;
         let evaluation = self.evaluation(handle)?;
         if stream != evaluation.stream
-            || evaluation.work.evaluation_recording
+            || evaluation.work.uncaptured_recording
             || evaluation.submitted
         {
             return Err(publication_input_error(
@@ -332,7 +392,17 @@ impl SemanticTransitionSession {
         let view = unsafe { evaluation.work.actual.view().cast::<u8>() }
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let capacity = (evaluation.work.actual.len() / 3) as i64;
-        self.export_step_view(lease, view, vec![capacity, 3], vec![3, 1], (1, 64), stream)
+        let scratch = Arc::clone(&evaluation.work_aliases);
+        let reader = Arc::clone(&self.checked_step(lease)?.aliases);
+        self.export_owned_view(
+            view,
+            vec![capacity, 3],
+            vec![3, 1],
+            (1, 64),
+            reader,
+            stream,
+            Some(scratch),
+        )
     }
 
     pub fn begin_model_evaluation(
@@ -343,7 +413,7 @@ impl SemanticTransitionSession {
         self.checked_evaluation_parent(lease, handle)?;
         let evaluation = self.evaluation(handle)?;
         if evaluation.submitted
-            || evaluation.work.evaluation_recording
+            || evaluation.work.uncaptured_recording
             || evaluation.work.recording.frozen_bound().is_some()
         {
             return Err(publication_input_error(
@@ -358,7 +428,7 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("checked evaluation")
             .work
-            .evaluation_recording = true;
+            .uncaptured_recording = true;
         Ok(())
     }
 
@@ -378,23 +448,13 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("checked evaluation");
         let work = &mut evaluation.work;
-        let slot = work.next_slot().map_err(publication_input_error)?;
-        let event = if device_produced {
-            let actual = work
-                .actual
-                .device_ptr_value()
-                .checked_add((slot * 3 * size_of::<u64>()) as u64)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            ModelWorkEvent::device_operation(kind, dimensions, actual)
-        } else {
-            ModelWorkEvent::operation(kind, dimensions)
-        }
-        .map_err(publication_input_error)?;
-        work.record_event(event).map_err(publication_input_error)?;
-        if device_produced {
-            work.reset_slots(&self.domain, &mut self.poisoned, slot, 1)?;
-        }
-        Ok(slot)
+        work.record_operation(
+            kind,
+            dimensions,
+            device_produced,
+            &self.domain,
+            &mut self.poisoned,
+        )
     }
 
     /// Same original work registrar and stream as the actual read-only model.
@@ -472,6 +532,9 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::NotBound)?
             .allocations
         {
+            let Some(allocation) = allocation.live_slice() else {
+                continue;
+            };
             if step_input_overlap(
                 slab.data,
                 slab_bytes,
@@ -515,7 +578,7 @@ impl SemanticTransitionSession {
             .evaluation
             .as_mut()
             .expect("checked evaluation");
-        if !evaluation.work.evaluation_recording || evaluation.submitted {
+        if !evaluation.work.uncaptured_recording || evaluation.submitted {
             return Err(publication_input_error(
                 "evaluation result requires its original open recording",
             ));
@@ -530,7 +593,7 @@ impl SemanticTransitionSession {
             .recording
             .freeze()
             .map_err(publication_input_error)?;
-        evaluation.work.evaluation_recording = false;
+        evaluation.work.uncaptured_recording = false;
         let work = &evaluation.work;
         let mut destination = work.device.view().slice(..work.recording.events().len());
         self.provider
@@ -691,9 +754,110 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticModelEvaluation,
         streams: &[u64],
-    ) -> Result<(), SemanticTransitionError> {
+    ) -> Result<SemanticCancelledModelEvaluation, SemanticTransitionError> {
         self.checked_evaluation_parent(lease, handle)?;
-        self.complete_step_consumers(lease, streams)?;
+        let parent = self.published_identity(lease)?;
+        let streams = self
+            .step_consumer_streams(lease.token, streams)?
+            .into_iter()
+            .collect::<Vec<_>>();
+        // Join the actual producers before freezing and reading their partial
+        // work certificate. Cancellation cannot infer another stream's finish
+        // from the original evaluation stream's callback return.
+        self.complete_step_consumers(lease, &streams)?;
+        let kernel = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                "xlog_semantic_transition",
+                "semantic_model_cancellation_work_result",
+            )
+            .ok_or_else(|| {
+                runtime_error(
+                    "kernel lookup",
+                    "model cancellation expenditure unavailable",
+                )
+            })?;
+        let evaluation = self
+            .steps
+            .get_mut(&handle.token)
+            .expect("checked invocation")
+            .evaluation
+            .as_mut()
+            .expect("checked evaluation");
+        if evaluation.submitted || evaluation.work.recording.frozen_bound().is_some() {
+            return Err(publication_input_error(
+                "cancellation cannot repeat or replace an entered evaluation report",
+            ));
+        }
+        evaluation
+            .work
+            .recording
+            .freeze_cold()
+            .map_err(publication_input_error)?;
+        evaluation.work.uncaptured_recording = false;
+        let work = &evaluation.work;
+        let input = if work.recording.events().is_empty() {
+            ModelWorkInput::default()
+        } else {
+            let mut destination = work.device.view().slice(..work.recording.events().len());
+            self.provider
+                .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
+                .map_err(|error| {
+                    runtime_error("cancelled evaluation work metadata upload", error)
+                })?;
+            work.descriptor()
+        };
+        let mut recorder = self.domain.new_strict_recorder();
+        work.record_reads(&mut recorder);
+        recorder.write(&evaluation.report);
+        evaluation.submitted = true;
+        evaluation.consumer_streams = Some(streams.clone());
+        let arguments = (
+            input.events,
+            input.count,
+            input.bound,
+            evaluation.report.device_ptr_value(),
+        );
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            // SAFETY: the original invocation retains its event roster and actual
+            // occurrence slots. The kernel writes five words of its own report.
+            unsafe {
+                kernel.clone().launch_in(
+                    enqueue,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    arguments,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        })?;
+        self.complete_step_consumers(lease, &streams)?;
+        let report = self.evaluation(handle)?.report.view().slice(..5);
+        let words = self.publication_read(report)?;
+        let evaluation = self.evaluation(handle)?;
+        let expected_calls = evaluation
+            .work
+            .recording
+            .events()
+            .iter()
+            .filter(|event| event.kind == ModelWorkKind::ModelInvocation as u64)
+            .count() as u64;
+        if words.len() != 5
+            || words[0] != 0
+            || words[2] != evaluation.work.recording.events().len() as u64
+            || Some(words[3]) != evaluation.work.recording.frozen_bound()
+            || words[1] > words[3]
+            || words[4] != expected_calls
+        {
+            return Err(publication_input_error(
+                "cancelled evaluation expenditure is incomplete; retain its original invocation",
+            ));
+        }
         self.guard_evaluation_cohort(handle)?;
         let material =
             Identity256::from_bytes(Sha256::digest(self.published_state_material(lease)?).into());
@@ -707,7 +871,13 @@ impl SemanticTransitionSession {
             .get_mut(&handle.token)
             .expect("completed invocation")
             .evaluation = None;
-        Ok(())
+        Ok(SemanticCancelledModelEvaluation {
+            issuer: Arc::clone(&handle.issuer),
+            invocation: Arc::clone(&handle.invocation),
+            parent,
+            work: words[1],
+            calls: words[4],
+        })
     }
 
     pub(super) fn require_closed_evaluations(&self) -> Result<(), SemanticTransitionError> {
@@ -721,6 +891,32 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "state-changing work or release cannot interrupt an original read-only evaluation",
             ));
+        }
+        self.require_completed_cold_model_work()
+    }
+
+    /// A later cold operation may release only the original completed temporary
+    /// evaluation storage after its actual scratch aliases are gone. Immutable
+    /// receipts and the held cohort remain independently owned by the phase.
+    pub(super) fn retire_completed_evaluation_storage(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        if let Some(evaluation) = self.steps[&lease.token].evaluation.as_ref() {
+            if evaluation
+                .result
+                .is_none_or(|result| !matches!(result.status, 0 | 1))
+                || Arc::strong_count(&evaluation.work_aliases) != 1
+            {
+                return Err(publication_input_error(
+                    "later cold work cannot retire an unknown evaluation or its live scratch aliases",
+                ));
+            }
+            self.steps
+                .get_mut(&lease.token)
+                .expect("checked original reader")
+                .evaluation = None;
         }
         Ok(())
     }

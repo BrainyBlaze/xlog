@@ -1,6 +1,6 @@
 //! Default-device-stream allocation through the shared raw storage owner.
 //!
-//! Allocation/free use the same explicit mode selected from context capability.
+//! Allocation/free use one direct backing root with confirmed cold lifetime.
 //! Failed initialization retains actual storage; reclamation proves physical
 //! release before refunding bytes. Caller stream IDs are block metadata, not
 //! proof of arbitrary pool routing. Sanitizer qualification remains separate.
