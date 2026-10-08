@@ -265,7 +265,7 @@ impl PySemanticLearningPhaseTransition {
             return self.require_intermediate_snapshot_save(py, controller, task, parent);
         }
         if self.phase_evaluation_active.load(Ordering::Acquire) {
-            return self.require_cancelled_evaluation_checkpoint(py, controller, task, parent);
+            return self.require_terminal_private_checkpoint(py, controller, task, parent);
         }
         if !self.private_checkpoint_active.load(Ordering::Acquire) {
             return Err(invalid(

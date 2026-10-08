@@ -18,7 +18,7 @@ use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
 #[cfg(feature = "semantic-policy")]
 pub(super) mod phase_evaluation;
 #[cfg(feature = "semantic-policy")]
-use phase_evaluation::PhaseEvaluation;
+use phase_evaluation::PhaseEvaluationAndTerminal;
 #[cfg(feature = "semantic-policy")]
 mod private_restore;
 #[cfg(feature = "semantic-policy")]
@@ -261,11 +261,65 @@ struct PreparationInputs {
     prior_snapshot: AuthoritySnapshot,
     grant: ColdValue,
     frozen_program: Vec<u8>,
+    terminal_cleanup: TerminalCleanupTarget,
     final_phase: SemanticLearningPhase,
     cold_model_work_capacity: usize,
     resolve_checkpoint: Option<Py<PyAny>>,
     max_checkpoint_bytes: Option<ColdValue>,
     max_total_checkpoint_bytes: Option<ColdValue>,
+}
+
+/// A terminal-only reserve frozen before Admission, never a scientific step.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TerminalCleanupTarget {
+    ordinal: u64,
+    budget: [u64; 3],
+}
+
+impl TerminalCleanupTarget {
+    fn read(program: &[u8]) -> PyResult<Self> {
+        let program = cold_restore::json(program)?;
+        let target = program["terminal_cleanup"]
+            .as_object()
+            .filter(|target| {
+                target.len() == 2
+                    && target.contains_key("operation_ordinal")
+                    && target.contains_key("budget")
+            })
+            .ok_or_else(|| {
+                invalid("phase program requires its original terminal cleanup reserve")
+            })?;
+        let ordinal = target["operation_ordinal"]
+            .as_u64()
+            .ok_or_else(|| invalid("terminal cleanup requires its original unsigned identity"))?;
+        let count = program["schedule"]
+            .as_array()
+            .and_then(|schedule| u64::try_from(schedule.len()).ok())
+            .ok_or_else(|| invalid("terminal cleanup lost its original complete schedule"))?;
+        if ordinal != count {
+            return Err(invalid(
+                "terminal cleanup must not name an unexecuted scientific instruction",
+            ));
+        }
+        let limits = target["budget"]
+            .as_array()
+            .filter(|limits| limits.len() == 3)
+            .ok_or_else(|| {
+                invalid("terminal cleanup requires its original three resource limits")
+            })?;
+        let mut budget = [0; 3];
+        for (limit, value) in budget.iter_mut().zip(limits) {
+            *limit = value.as_u64().ok_or_else(|| {
+                invalid("terminal cleanup resource limits must be exact unsigned integers")
+            })?;
+        }
+        if budget[1] == 0 {
+            return Err(invalid(
+                "terminal cleanup requires a nonzero absolute physical memory limit",
+            ));
+        }
+        Ok(Self { ordinal, budget })
+    }
 }
 
 struct PhaseModelOwners {
@@ -415,7 +469,7 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     preparation_entered: AtomicBool,
     source_preparation: Mutex<Option<SourcePreparation>>,
     #[cfg(feature = "semantic-policy")]
-    phase_evaluations: Mutex<Vec<PhaseEvaluation>>,
+    phase_evaluations: Mutex<Vec<PhaseEvaluationAndTerminal>>,
     #[cfg(feature = "semantic-policy")]
     phase_evaluation_active: AtomicBool,
     #[cfg(feature = "semantic-policy")]
@@ -1074,20 +1128,23 @@ impl PySemanticLearningPhaseTransition {
         {
             self.record_source_preparation(py, peak)?;
             self.execute_source_evaluations(py)?;
-            if self.cancelled_evaluation_refusal_retained()? {
+            if self.readonly_terminal_refusal_retained()? {
                 return Ok(());
             }
         }
         #[cfg(feature = "semantic-policy")]
         {
             self.execute_control_branch(py, pending)?;
-            if self.cancelled_evaluation_refusal_retained()? {
+            if self.readonly_terminal_refusal_retained()? {
                 return Ok(());
             }
             self.prepare_private_trajectory(py, pending, "real")?;
             self.execute_private_numerical_sequence(py, pending, "real")?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
             self.execute_private_evaluations(py, "real")?;
-            if self.cancelled_evaluation_refusal_retained()? {
+            if self.readonly_terminal_refusal_retained()? {
                 return Ok(());
             }
             self.execute_private_checkpoint(py, "real")?;
@@ -2238,13 +2295,16 @@ impl PySemanticLearningPhaseTransition {
             {
                 (|| {
                     pending.execute_control_branch(py, &slf)?;
-                    if pending.cancelled_evaluation_refusal_retained()? {
+                    if pending.readonly_terminal_refusal_retained()? {
                         return Ok(());
                     }
                     pending.prepare_private_trajectory(py, &slf, "real")?;
                     pending.execute_private_numerical_sequence(py, &slf, "real")?;
+                    if pending.readonly_terminal_refusal_retained()? {
+                        return Ok(());
+                    }
                     pending.execute_private_evaluations(py, "real")?;
-                    if pending.cancelled_evaluation_refusal_retained()? {
+                    if pending.readonly_terminal_refusal_retained()? {
                         return Ok(());
                     }
                     pending.execute_private_checkpoint(py, "real")?;
@@ -2371,6 +2431,8 @@ impl PySemanticTransitionController {
             ));
         }
         let record_limits = RecordLimits::read(phase_record_limits)?;
+        let terminal_cleanup =
+            TerminalCleanupTarget::read(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?;
         let cold_capacity_material = ColdValue::read(cold_model_work_capacity, &mut 128, 0)?;
         let cold_model_work_capacity = usize::try_from(cold_capacity_material.unsigned()?)
             .ok().filter(|capacity| *capacity > 0)
@@ -2486,6 +2548,7 @@ impl PySemanticTransitionController {
             prior_snapshot,
             grant: grant_value,
             frozen_program: frozen_program_bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            terminal_cleanup,
             final_phase,
             cold_model_work_capacity,
             resolve_checkpoint: resolve_checkpoint.map(|callback| callback.clone().unbind()),
