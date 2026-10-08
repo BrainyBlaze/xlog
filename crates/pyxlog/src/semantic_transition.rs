@@ -2802,6 +2802,8 @@ struct PreparedPythonSegment {
     task_use: Py<PySemanticTransitionTaskUse>,
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
+    #[cfg(feature = "semantic-policy")]
+    checkpoint_phase: CheckpointTaskPhase,
     producers_retired: bool,
     // Retain the entire native roster before entering any post-completion
     // Python callback. Neither a lost return nor callback failure resubmits it.
@@ -14386,6 +14388,7 @@ impl PySemanticTransitionController {
                 task_use: task_use.clone_ref(py),
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
+                checkpoint_phase: checkpoint_phase.clone(),
                 producers_retired: false,
                 #[cfg(feature = "semantic-policy")]
                 outcomes: None,
@@ -14765,7 +14768,7 @@ impl PySemanticTransitionController {
             .text()?
             .to_owned();
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
-        let (scope, steps) = {
+        let (scope, steps, checkpoint_phase) = {
             let stored = session
                 .prepared_segment
                 .lock()
@@ -14783,6 +14786,7 @@ impl PySemanticTransitionController {
                     .iter()
                     .map(|step| step.clone_ref(py))
                     .collect::<Vec<_>>(),
+                stored.checkpoint_phase.clone(),
             )
         };
         let private = private_execution_owner(py, &session)?;
@@ -14794,28 +14798,6 @@ impl PySemanticTransitionController {
                     .private_group_parent(py, &session, &issued)
             })
             .transpose()?;
-        let checkpoint_phase = {
-            let state = issued.state()?;
-            let TaskUsePhase::Prepared {
-                scope: original,
-                operation: original_operation,
-            } = &state.phase
-            else {
-                return Err(invalid(
-                    "submission requires its original prepared task phase",
-                ));
-            };
-            if !Arc::ptr_eq(original, &scope) {
-                return Err(invalid(
-                    "submission changed its original prepared task scope",
-                ));
-            }
-            original_operation
-                .as_ref()
-                .map_or(CheckpointTaskPhase::Imported, |operation| {
-                    CheckpointTaskPhase::Segment(operation.clone())
-                })
-        };
         let mut guard = PreparedBuildGuard {
             session: &session,
             task_use: &issued,
