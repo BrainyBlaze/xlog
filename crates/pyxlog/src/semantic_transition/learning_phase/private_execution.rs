@@ -1327,7 +1327,8 @@ impl PySemanticLearningPhaseTransition {
         self.require_private_group_owner(py, session, task)?;
         let retained = self.private_group()?;
         let group = retained.as_ref().expect("original private group");
-        Ok(group.restored.borrow(py).parent.clone_ref(py))
+        let parent = group.restored.borrow(py).parent.clone_ref(py);
+        Ok(parent)
     }
 
     pub(in crate::semantic_transition) fn quiesce_private_group_parent(
