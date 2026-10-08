@@ -229,6 +229,15 @@ class SemanticModelEvaluation:
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
 
+    def task_actor_eligible(self) -> bool:
+        """Original native ex-ante actor decision, including after restore.
+
+        Available before the first Proposal, without a device read. Reading
+        the decision grants no training rights and does not reclassify records.
+        Missing or stale task bindings raise rather than returning False.
+        """
+        ...
+
     @property
     def proposal_expense(self) -> tuple[int, int]:
         """Original whole-task capacity and irreversible nominal places spent.

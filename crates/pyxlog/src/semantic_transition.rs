@@ -14017,6 +14017,19 @@ impl PySemanticTransitionTaskUse {
             .unbind())
     }
 
+    /// Read the original ex-ante actor decision from the retained native task.
+    /// Available before the first Proposal and after checkpoint restore. This
+    /// does not reclassify episodes, refresh rights or authorize training use.
+    fn task_actor_eligible(&self, py: Python<'_>) -> PyResult<bool> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        owner
+            .task_actor_eligible()
+            .ok_or_else(|| invalid("native task actor decision is absent"))
+    }
+
     /// Return original pre-draw actor/full domains as three owner-bearing
     /// DLPack capsules: parameters [2,P,4], text [2,32,V,4], baselines
     /// [2,1,136,4], FP64 (M,O,U,I). These are not selected backward outputs

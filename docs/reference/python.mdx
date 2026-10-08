@@ -506,6 +506,16 @@ version 2 capsules and older task/scoring identities cannot restore under the
 new binding. Restore and late arena admission require exact original-domain
 equality; changed manifests, caps or loader fields cannot enlarge it.
 
+`task_use.task_actor_eligible()` reads the original ex-ante actor decision from
+that retained native task, before the first Proposal (and its initial checkpoint)
+or after checkpoint restore. The decision is sealed into task identity; restore
+reconstructs it from the original task capsule, not today's grants or completed
+actions. A restored consumer must preserve this decision rather than reclassify
+existing records. Missing, stale or unusable task bindings raise an error instead
+of returning `False`. The getter performs no device read and grants no training
+rights: fresh actor admission still requires authorized observation, total return
+and full episode storage before any draw, and later training must recheck rights.
+
 `task_use.policy_numerical_domains(parent, bank, consumer_stream)` returns three
 owner-bearing FP64 DLPack capsules in parameter, full-MASK text, and baseline
 order, with shapes `[2,P,4]`, `[2,32,V,4]`, and `[2,1,136,4]`. Region zero is the
