@@ -30,7 +30,7 @@ pub use model_evaluation::{
 pub use prepared_replay::SemanticCompletedReplayMaterials;
 use prepared_replay::{PreparedReplayCustody, PreparedReplayDescriptor};
 pub use replay_model_backing::SemanticReplayModelBackings;
-use replay_model_backing::{PublicationAllocation, ReplayModelBacking};
+use replay_model_backing::{ModelGenerationOwner, PublicationAllocation, ReplayModelBacking};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8182,6 +8182,8 @@ impl PublicationMaterial {
     }
 }
 
+type ModelGenerationOwners = BTreeMap<usize, Arc<ModelGenerationOwner>>;
+
 struct PublicationStorage {
     control: TrackedCudaSlice<PublicationControl>,
     banks: [TrackedCudaSlice<PublicationBank>; 2],
@@ -8305,7 +8307,9 @@ impl PublicationStorage {
         account_tracked_allocation(&mut allocations, &self.continuation)?;
         account_tracked_allocation(&mut allocations, &self.continuation_directory)?;
         for allocation in &self.allocations {
-            account_tracked_allocation(&mut allocations, allocation.slice())?;
+            if let Some(owner) = allocation.live_slice() {
+                account_tracked_allocation(&mut allocations, &owner)?;
+            }
         }
         accounted_tracked_bytes(allocations)
     }
@@ -8337,7 +8341,9 @@ impl PublicationStorage {
             recorder.read(directory);
         }
         for allocation in &self.allocations {
-            recorder.read(allocation.slice());
+            if let Some(owner) = allocation.live_slice() {
+                recorder.read(&owner);
+            }
         }
         if let Some(work) = cold_work {
             recorder.read_write(work);
@@ -8383,8 +8389,16 @@ impl PublicationStorage {
         terminal_tokens: &[u64],
         instance: Identity256,
         immutable_models: Option<&[Arc<ReplayModelBacking>]>,
-    ) -> Result<(Self, Vec<(usize, PublicationPayload)>), SemanticTransitionError> {
+    ) -> Result<
+        (
+            Self,
+            Vec<(usize, PublicationPayload)>,
+            ModelGenerationOwners,
+        ),
+        SemanticTransitionError,
+    > {
         let mut allocations = Vec::new();
+        let mut model_owners = BTreeMap::new();
         let mut bank_templates = [Vec::new(), Vec::new()];
         let mut uploads = Vec::new();
         model_memory.validate(&layouts)?;
@@ -8429,7 +8443,8 @@ impl PublicationStorage {
         {
             let slots = if let Some(owners) = immutable_models {
                 let slot = allocations.len();
-                let allocation = PublicationAllocation::Immutable(Arc::clone(&owners[index]));
+                let owner = ModelGenerationOwner::historical(Arc::clone(&owners[index]));
+                let allocation = PublicationAllocation::model(&owner);
                 if allocation.len() as u64 != bytes {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
@@ -8437,12 +8452,16 @@ impl PublicationStorage {
                     uploads.push((slot, payload.clone()));
                 }
                 allocations.push(allocation);
+                model_owners.insert(slot, owner);
                 [slot; 2]
             } else {
                 let slot = allocations.len();
-                allocations.push(PublicationAllocation::Generation(Arc::new(
-                    allocate_publication::<u8>(provider, bytes as usize)?,
-                )));
+                let owner = ModelGenerationOwner::numerical(allocate_publication::<u8>(
+                    provider,
+                    bytes as usize,
+                )?);
+                allocations.push(PublicationAllocation::model(&owner));
+                model_owners.insert(slot, owner);
                 uploads.push((slot, payload.clone()));
                 [slot; 2]
             };
@@ -8582,6 +8601,7 @@ impl PublicationStorage {
                 instance,
             },
             uploads,
+            model_owners,
         ))
     }
 
@@ -8600,10 +8620,12 @@ impl PublicationStorage {
         recorder.read_write(&self.continuation);
         recorder.read_write(&self.continuation_directory);
         for allocation in &self.allocations {
-            if allocation.immutable() {
-                recorder.read(allocation.slice());
-            } else {
-                recorder.read_write(allocation.slice());
+            if let Some(owner) = allocation.live_slice() {
+                if allocation.immutable() {
+                    recorder.read(&owner);
+                } else {
+                    recorder.read_write(&owner);
+                }
             }
         }
     }
@@ -8643,7 +8665,7 @@ impl PublicationStorage {
         &self,
         count: usize,
         reservation: &mut GpuMemoryReservation,
-    ) -> Result<(Self, Vec<Vec<usize>>), SemanticTransitionError> {
+    ) -> Result<(Self, Vec<Vec<usize>>, ModelGenerationOwners), SemanticTransitionError> {
         let mut allocations = self
             .allocations
             .iter()
@@ -8651,6 +8673,7 @@ impl PublicationStorage {
             .collect::<Vec<_>>();
         let mut model_generations = self.model_generations.clone();
         let mut pending = Vec::with_capacity(count);
+        let mut model_owners = BTreeMap::new();
         for _ in 0..count {
             let mut slots = Vec::with_capacity(self.model_memory.allocation_bytes.len());
             for (index, &bytes) in self.model_memory.allocation_bytes.iter().enumerate() {
@@ -8661,7 +8684,9 @@ impl PublicationStorage {
                             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                     )
                     .map_err(|error| runtime_error("pending model generation allocation", error))?;
-                allocations.push(PublicationAllocation::Generation(Arc::new(owner)));
+                let owner = ModelGenerationOwner::numerical(owner);
+                allocations.push(PublicationAllocation::model(&owner));
+                model_owners.insert(slot, owner);
                 model_generations[index].push(slot);
                 slots.push(slot);
             }
@@ -8694,6 +8719,7 @@ impl PublicationStorage {
                 instance: self.instance,
             },
             pending,
+            model_owners,
         ))
     }
 
@@ -8703,11 +8729,11 @@ impl PublicationStorage {
         }
         self.model_slots
             .iter()
-            .map(|slots| match &self.allocations[slots[0]] {
-                PublicationAllocation::Immutable(owner) if slots[0] == slots[1] => {
-                    Some(Arc::clone(owner))
+            .map(|slots| {
+                if slots[0] != slots[1] {
+                    return None;
                 }
-                _ => None,
+                self.allocations[slots[0]].model_owner()?.replay.clone()
             })
             .collect()
     }
@@ -8840,7 +8866,8 @@ impl PreparedContinuation {
                         .checked_add(source_offset)
                         .ok_or(SemanticTransitionError::ObservationMismatch)?;
                     let destination = destination
-                        .device_ptr_value()
+                        .entry()
+                        .pointer
                         .checked_add(destination_offset)
                         .ok_or(SemanticTransitionError::ObservationMismatch)?;
                     copies.push((source, destination, bytes));
@@ -8932,6 +8959,7 @@ struct PublishedReader {
     device: TrackedCudaSlice<PublicationLease>,
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
+    model_owners: Vec<Arc<ModelGenerationOwner>>,
 }
 
 #[repr(C)]
@@ -9160,6 +9188,7 @@ fn plan_step_inputs(
 /// Fixed inputs are prepared without a host choice of publication bank. The
 /// producer resolves the actual device lease and preserves its original seals.
 struct PreparedStepInputs {
+    _model_owners: Vec<Arc<ModelGenerationOwner>>,
     storage: Arc<PublicationStorage>,
     reader: DeviceMemoryView<PublicationLease>,
     header: TrackedCudaSlice<PublicationHeader>,
@@ -9301,6 +9330,7 @@ impl PreparedStepInputs {
                 for bank in 0..2 {
                     let plan = &input.banks[bank];
                     let view = storage.allocations[plan.storage_slot]
+                        .slice()?
                         .view()
                         .slice(plan.span.clone());
                     let backing = if matches!(input.role, 18..=25) {
@@ -9349,6 +9379,18 @@ impl PreparedStepInputs {
             }
         }
         let owner = Self {
+            _model_owners: model_slots
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|slot| {
+                    storage.allocations[slot]
+                        .model_owner()
+                        .ok_or(SemanticTransitionError::ObservationMismatch)
+                })
+                .collect::<Result<_, _>>()?,
             header: reservation
                 .alloc(1)
                 .map_err(|error| runtime_error("step header allocation", error))?,
@@ -9414,7 +9456,10 @@ impl PreparedStepInputs {
             .storage
             .allocations
             .iter()
-            .map(|allocation| (allocation.device_ptr_value(), allocation.len()))
+            .map(|allocation| {
+                let entry = allocation.entry();
+                (entry.pointer, entry.bytes as usize)
+            })
             .collect::<Vec<_>>();
         original.extend(
             self.storage
@@ -9501,7 +9546,9 @@ impl PreparedStepInputs {
             recorder.read(directory);
         }
         for allocation in &self.storage.allocations {
-            recorder.read(allocation.slice());
+            if let Some(owner) = allocation.live_slice() {
+                recorder.read(&owner);
+            }
         }
         for bindings in &self.bindings {
             recorder.read(bindings);
@@ -10418,6 +10465,7 @@ struct PreparedBranchStorage {
 
 struct PreparedModelUpdate {
     pending_slots: Vec<usize>,
+    _model_owners: Vec<Arc<ModelGenerationOwner>>,
     bindings: TrackedCudaSlice<ModelUpdateBinding>,
     evidence: Arc<TrackedCudaSlice<ModelUpdateEvidenceSource>>,
     evidence_owners: Arc<Vec<ModelUpdateEvidenceOwner>>,
@@ -11840,6 +11888,7 @@ fn validate_content_coordinates_after(
 /// An actual device-acquired reader. Only its originating Session can inspect,
 /// export or release it; it is neither cloneable nor externally constructible.
 pub struct SemanticPublishedLease {
+    _model_owners: Vec<Arc<ModelGenerationOwner>>,
     issuer: Arc<()>,
     token: u64,
     identity: SemanticPublishedIdentity,
@@ -12298,7 +12347,9 @@ impl FeedbackBuffers {
             recorder.read(directory);
         }
         for allocation in &storage.allocations {
-            recorder.read(allocation.slice());
+            if let Some(owner) = allocation.live_slice() {
+                recorder.read(&owner);
+            }
         }
         recorder.write(&self.features);
         recorder.write(&self.validity);
@@ -12390,7 +12441,7 @@ fn export_owned_allocation(
     dtype: (u8, u8),
     device_id: i32,
     alias_guard: Arc<()>,
-    publication: Arc<PublicationStorage>,
+    publication: Option<Arc<PublicationStorage>>,
     continuation: Option<Arc<TextBindingStorage>>,
     retained_owner: Option<Arc<dyn Send + Sync>>,
 ) -> DlpackManagedTensor {
@@ -12440,7 +12491,7 @@ struct PublishedTensorExport {
     strides: Vec<i64>,
     _view: DeviceMemoryView<u8>,
     _alias_guard: Arc<()>,
-    _publication: Arc<PublicationStorage>,
+    _publication: Option<Arc<PublicationStorage>>,
     _continuation: Option<Arc<TextBindingStorage>>,
     _retained_owner: Option<Arc<dyn Send + Sync>>,
 }
@@ -12454,6 +12505,55 @@ unsafe extern "C" fn delete_published_tensor(managed: *mut crate::dlpack::DLMana
     let owner = unsafe { (*managed).manager_ctx.cast::<PublishedTensorExport>() };
     if !owner.is_null() {
         drop(unsafe { Box::from_raw(owner) });
+    }
+}
+
+/// Passive numerical aliases own only their generation. Their final managed
+/// deleter fences later consumer use, independently of a reader's earlier release.
+struct ModelExportUse {
+    _generation: Arc<ModelGenerationOwner>,
+    _view: DeviceMemoryView<u8>,
+    event: cudarc::driver::CudaEvent,
+    stream: Arc<CudaStream>,
+    consumer_stream: u64,
+    _retained_owner: Option<Arc<dyn Send + Sync>>,
+}
+
+struct ModelExportOwner(Option<ModelExportUse>);
+
+impl Drop for ModelExportOwner {
+    fn drop(&mut self) {
+        let Some(owner) = self.0.take() else {
+            return;
+        };
+        crate::cuda_graph::retire_resources_after_completion(
+            owner,
+            |_| Ok::<_, SemanticTransitionError>(()),
+            |owner| {
+                owner
+                    .stream
+                    .context()
+                    .bind_to_thread()
+                    .map_err(|error| runtime_error("model consumer retirement context", error))?;
+                // SAFETY: the managed owner was returned after the consumer's
+                // last use. This exact event is recorded once; ambiguous driver
+                // failure retains the genuine owner without resubmission.
+                unsafe {
+                    cudarc::driver::result::event::record(
+                        owner.event.cu_event(),
+                        dlpack_consumer_stream(owner.consumer_stream)?,
+                    )
+                }
+                .map_err(|error| runtime_error("model consumer retirement event", error))
+            },
+            |owner| {
+                owner
+                    .event
+                    .synchronize()
+                    .map_err(|error| runtime_error("model consumer retirement completion", error))
+            },
+            |_, error| eprintln!("model numerical owner retained: {error}"),
+        );
     }
 }
 
@@ -13230,7 +13330,7 @@ impl SemanticPreparedGroupCritic {
             (2, 32),
             self.provider.device().ordinal() as i32,
             self.step_aliases,
-            self.publication,
+            Some(self.publication),
             None,
             None,
         ))
@@ -13341,7 +13441,7 @@ fn export_policy_gradients(
                 (2, (layout.element_bytes * 8) as u8),
                 device,
                 Arc::clone(&step_aliases),
-                Arc::clone(&publication),
+                Some(Arc::clone(&publication)),
                 Some(Arc::clone(&continuation)),
                 Some(Arc::clone(&owner)),
             )
@@ -13512,7 +13612,7 @@ fn export_policy_uniform_domains(
                 (2, 64),
                 device,
                 Arc::clone(&aliases),
-                Arc::clone(&publication),
+                Some(Arc::clone(&publication)),
                 None,
                 Some(Arc::clone(&owner)),
             ))
@@ -14603,6 +14703,7 @@ pub struct SemanticTransitionSession {
     // raw banks immutable until the joint publisher consumes this pending tuple.
     task_observed: bool,
     publication: Option<Arc<PublicationStorage>>,
+    model_owners: ModelGenerationOwners,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
     publication_issuer: Arc<()>,
@@ -15050,7 +15151,10 @@ impl SemanticTransitionSession {
             let PublicationPayload::Metadata(bytes) = &self.publication_uploads[0].1 else {
                 unreachable!("owned authority metadata")
             };
-            let mut destination = storage.allocations[slot].view().slice(..bytes.len());
+            let mut destination = storage.allocations[slot]
+                .slice()?
+                .view()
+                .slice(..bytes.len());
             self.provider
                 .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
                 .map_err(|error| runtime_error("prepared fresh authority upload", error))?;
@@ -15671,6 +15775,7 @@ mod prepared_completion_tests {
 struct UnreleasedPublicationOwners {
     _graph: SemanticHypergraph,
     _publication: Arc<PublicationStorage>,
+    _model_owners: ModelGenerationOwners,
     _training_views: Option<Arc<SemanticTrainingViewArena>>,
     _training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     _readers: BTreeMap<u64, PublishedReader>,
@@ -15715,6 +15820,7 @@ impl Drop for SemanticTransitionSession {
                 let owners = UnreleasedPublicationOwners {
                     _graph: graph,
                     _publication: publication,
+                    _model_owners: std::mem::take(&mut self.model_owners),
                     _training_views: self.training_views.take(),
                     _training_origins: self.training_origins.take(),
                     _readers: std::mem::take(&mut self.readers),
@@ -15971,14 +16077,23 @@ impl SemanticTransitionSession {
         &mut self,
         original: &PublicationStorage,
         expanded: &PublicationStorage,
+        retired_model_slots: &BTreeSet<usize>,
     ) -> Result<(), SemanticTransitionError> {
         let values = expanded
             .allocations
             .iter()
-            .map(|allocation| PublicationStorageEntry {
-                pointer: allocation.device_ptr_value(),
-                bytes: allocation.len() as u64,
-                generation: 1,
+            .enumerate()
+            .map(|(slot, allocation)| {
+                let entry = allocation.entry();
+                if retired_model_slots.contains(&slot) {
+                    PublicationStorageEntry {
+                        pointer: 0,
+                        bytes: 0,
+                        ..entry
+                    }
+                } else {
+                    entry
+                }
             })
             .collect::<Vec<_>>();
         upload_publication(&self.provider, &values, &expanded.storage)?;
@@ -15988,7 +16103,7 @@ impl SemanticTransitionSession {
             .inner()
             .get_func(
                 "xlog_semantic_transition",
-                "semantic_publication_extend_model_storage",
+                "semantic_publication_replace_model_storage",
             )
             .ok_or_else(|| {
                 runtime_error(
@@ -16000,6 +16115,13 @@ impl SemanticTransitionSession {
         recorder.read_write(&expanded.control);
         recorder.read(&original.storage);
         recorder.read(&expanded.storage);
+        recorder.read(&expanded.contract);
+        for bank in &expanded.banks {
+            recorder.read(bank);
+        }
+        for directory in &expanded.directories {
+            recorder.read(directory);
+        }
         let args = (
             expanded.control.device_ptr_value(),
             original.storage.device_ptr_value(),
@@ -16010,8 +16132,8 @@ impl SemanticTransitionSession {
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
             // SAFETY: both catalogues and the sole idle publication control
             // retain their genuine native owners before this launch. The
-            // kernel proves byte-identical old entries and changes no word,
-            // descriptor, source allocation or selected generation.
+            // kernel preserves every live entry and rejects clearing any
+            // selected range. It changes no word or numerical generation.
             unsafe {
                 kernel.launch_in(
                     stream,
@@ -16101,6 +16223,20 @@ impl SemanticTransitionSession {
             .into_iter()
             .map(|slots| slots[0])
             .collect::<Vec<_>>();
+        // No native reader or executable can still resolve older model slots.
+        // Passive aliases and historical snapshots retain their physical owners
+        // independently, without advertising obsolete spans in this catalogue.
+        let retired_model_slots = storage
+            .allocations
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, allocation)| {
+                (matches!(allocation, PublicationAllocation::Model { .. })
+                    && !source_model_slots.contains(&slot))
+                .then_some(slot)
+            })
+            .collect::<BTreeSet<_>>();
+        let replace_catalogue = update_count != 0 || !retired_model_slots.is_empty();
         let replay_bytes = PreparedReplayCustody::allocation_bytes(
             &storage,
             self.graph.transition_arena_view().len(),
@@ -16199,7 +16335,7 @@ impl SemanticTransitionSession {
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .and_then(|bytes| bytes.checked_add(replay_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let generation_bytes = if update_count == 0 {
+        let generation_bytes = if !replace_catalogue {
             0
         } else {
             let numerical = storage
@@ -16294,15 +16430,18 @@ impl SemanticTransitionSession {
             .memory()
             .reserve_bytes(bytes)
             .map_err(|error| runtime_error("prepared segment reservation", error))?;
-        let (storage, pending_generations) = if update_count == 0 {
+        let (storage, pending_generations) = if !replace_catalogue {
             (storage, Vec::new())
         } else {
-            let (expanded, pending) =
+            let (expanded, pending, model_owners) =
                 storage.allocate_model_generations(update_count, &mut reservation)?;
             let expanded = Arc::new(expanded);
             // Install actual owners before the first may-enqueue boundary.
             self.publication = Some(Arc::clone(&expanded));
-            if let Err(error) = self.install_model_generation_catalogue(&storage, &expanded) {
+            self.model_owners.extend(model_owners);
+            if let Err(error) =
+                self.install_model_generation_catalogue(&storage, &expanded, &retired_model_slots)
+            {
                 self.poisoned = true;
                 return Err(error);
             }
@@ -16477,6 +16616,14 @@ impl SemanticTransitionSession {
                     )?;
                     Ok(Some(PreparedModelUpdate {
                         pending_slots: pending_generations[update_ordinal].clone(),
+                        _model_owners: pending_generations[update_ordinal]
+                            .iter()
+                            .map(|slot| {
+                                storage.allocations[*slot]
+                                    .model_owner()
+                                    .ok_or(SemanticTransitionError::ObservationMismatch)
+                            })
+                            .collect::<Result<_, _>>()?,
                         bindings,
                         evidence: Arc::clone(
                             update_evidence
@@ -17211,6 +17358,7 @@ impl SemanticTransitionSession {
                 .checked_add(original.length_bytes as usize)
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
             storage.allocations[original.storage_slot as usize]
+                .slice()?
                 .view()
                 .slice(begin..end)
         };
@@ -17369,7 +17517,7 @@ impl SemanticTransitionSession {
             .get(&(role, index))
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let (allocation, offset) = storage.model_memory.location(role, index)?;
-        let backing = &storage.allocations[update.pending_slots[allocation]];
+        let backing = storage.allocations[update.pending_slots[allocation]].slice()?;
         let end = offset
             .checked_add(tensor_layout_bytes(&layout)?)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -17405,7 +17553,7 @@ impl SemanticTransitionSession {
             let Some(&slot) = update.pending_slots.get(index) else {
                 return Ok(false);
             };
-            let view = storage.allocations[slot].view();
+            let view = storage.allocations[slot].slice()?.view();
             let layout = SemanticTensorLayout {
                 role: 0,
                 index: tensor.layout.index,
@@ -21516,7 +21664,7 @@ impl SemanticTransitionSession {
             .model_slots
             .clone();
         for (index, allocation) in allocations.iter().enumerate() {
-            let expected = storage.allocations[pending_slots[index]].view();
+            let expected = storage.allocations[pending_slots[index]].slice()?.view();
             if allocation.data != *expected.device_ptr()
                 || tensor_layout_bytes(&allocation.layout)? != expected.len()
                 || !self.owns_pending_model_tensor(step, allocation)?
@@ -21545,8 +21693,8 @@ impl SemanticTransitionSession {
                 if step_input_overlap(
                     allocation.data,
                     bytes,
-                    owned.device_ptr_value(),
-                    owned.len(),
+                    owned.entry().pointer,
+                    owned.entry().bytes as usize,
                 )? {
                     return Err(publication_input_error(
                         "model update output aliases native publication storage",
@@ -21572,13 +21720,13 @@ impl SemanticTransitionSession {
             if step_input_overlap(
                 baseline_logits.data,
                 logits_bytes,
-                owned.device_ptr_value(),
-                owned.len(),
+                owned.entry().pointer,
+                owned.entry().bytes as usize,
             )? || step_input_overlap(
                 candidate_logits.data,
                 logits_bytes,
-                owned.device_ptr_value(),
-                owned.len(),
+                owned.entry().pointer,
+                owned.entry().bytes as usize,
             )? {
                 return Err(publication_input_error(
                     "model update canary logits alias native publication storage",
@@ -22521,6 +22669,7 @@ impl SemanticTransitionSession {
                 "original prepared resources still own an executable or retained step",
             ));
         }
+        self.reclaim_model_generations()?;
         let resources = std::mem::take(&mut self.prepared_resources);
         self.prepared_segment = None;
         Ok(resources)
@@ -23597,7 +23746,7 @@ impl SemanticTransitionSession {
             .into_iter()
             .map(PublicationPayload::Tensor)
             .collect::<Vec<_>>();
-        let (storage, uploads) = PublicationStorage::allocate(
+        let (storage, uploads, model_owners) = PublicationStorage::allocate(
             &self.provider,
             &plans,
             layouts,
@@ -23612,6 +23761,7 @@ impl SemanticTransitionSession {
         // that may enqueue. A partial copy failure keeps these owners in Session.
         self.publication = Some(Arc::new(storage));
         self.publication_uploads = uploads;
+        self.model_owners = model_owners;
         self.captured = None;
         let extents = self.base_snapshot.extents();
         let header = PublicationHeader {
@@ -23867,7 +24017,7 @@ impl SemanticTransitionSession {
                 .into_iter()
                 .map(PublicationPayload::Metadata)
                 .collect::<Vec<_>>();
-            let (storage, uploads) = PublicationStorage::allocate(
+            let (storage, uploads, model_owners) = PublicationStorage::allocate(
                 &self.provider,
                 &plans,
                 material.layouts,
@@ -23893,6 +24043,7 @@ impl SemanticTransitionSession {
             // fresh native hashes against the saved logical/state expectations.
             self.publication = Some(Arc::new(storage));
             self.publication_uploads = uploads;
+            self.model_owners = model_owners;
             let restored = self.initialize_publication(
                 material.bank,
                 &material.terminals,
@@ -24119,7 +24270,7 @@ impl SemanticTransitionSession {
                     "training arena requires a fresh instance",
                 ));
             }
-            let (storage, uploads) = PublicationStorage::allocate(
+            let (storage, uploads, model_owners) = PublicationStorage::allocate(
                 &self.provider,
                 &plans,
                 material.layouts,
@@ -24144,6 +24295,7 @@ impl SemanticTransitionSession {
             bank.header.authority_generation = next_epoch;
             self.publication = Some(Arc::new(storage));
             self.publication_uploads = uploads;
+            self.model_owners = model_owners;
             self.task_epoch = next_epoch;
             let published = self.initialize_publication(
                 bank,
@@ -24349,7 +24501,7 @@ impl SemanticTransitionSession {
         storage.record(&mut recorder);
         for allocation in &storage.allocations {
             if allocation.immutable() && allocation.initializing() {
-                recorder.write(allocation.slice());
+                recorder.write(&allocation.slice()?);
             }
         }
         for (_, payload) in &self.publication_uploads {
@@ -24370,7 +24522,7 @@ impl SemanticTransitionSession {
                 // first may-enqueue boundary; zero bytes do not mark a bank valid.
                 unsafe {
                     sys::cuMemsetD8Async(
-                        allocation.device_ptr_value(),
+                        allocation.entry().pointer,
                         0,
                         allocation.len(),
                         enqueue.stream().cu_stream(),
@@ -24394,7 +24546,7 @@ impl SemanticTransitionSession {
                         {
                             unsafe {
                                 sys::cuMemcpyDtoDAsync_v2(
-                                    destination.device_ptr_value() + destination_offset,
+                                    destination.entry().pointer + destination_offset,
                                     *source.device_ptr() + source_offset,
                                     bytes,
                                     enqueue.stream().cu_stream(),
@@ -24418,7 +24570,10 @@ impl SemanticTransitionSession {
         for (slot, payload) in &self.publication_uploads {
             if let PublicationPayload::Metadata(bytes) = payload {
                 if !bytes.is_empty() {
-                    let mut destination = storage.allocations[*slot].view().slice(..bytes.len());
+                    let mut destination = storage.allocations[*slot]
+                        .slice()?
+                        .view()
+                        .slice(..bytes.len());
                     self.provider
                         .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
                         .map_err(|error| runtime_error("cold publication record upload", error))?;
@@ -24440,11 +24595,7 @@ impl SemanticTransitionSession {
         let entries: Vec<_> = storage
             .allocations
             .iter()
-            .map(|allocation| PublicationStorageEntry {
-                pointer: allocation.device_ptr_value(),
-                bytes: allocation.len() as u64,
-                generation: 1,
-            })
+            .map(PublicationAllocation::entry)
             .collect();
         upload_publication(&self.provider, &entries, &storage.storage)?;
         upload_publication(&self.provider, &[storage.contract_value], &storage.contract)?;
@@ -24659,6 +24810,7 @@ impl SemanticTransitionSession {
                 device,
                 aliases: Arc::new(()),
                 consumer_streams: BTreeSet::new(),
+                model_owners: Vec::new(),
             },
         );
         // Lease storage is retained before upload or Acquire can enqueue.
@@ -24724,11 +24876,25 @@ impl SemanticTransitionSession {
             logical_digest: header.logical_digest,
             state_digest: header.state_digest,
         };
+        let model_owners = storage
+            .model_slots_for_directory(&directory)?
+            .iter()
+            .map(|slots| {
+                storage.allocations[slots[0]]
+                    .model_owner()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.readers
+            .get_mut(&token)
+            .expect("installed acquisition reader")
+            .model_owners = model_owners.clone();
         self.steps
             .get_mut(&token)
             .expect("installed acquisition step")
             .identity = Some(identity);
         Ok(SemanticPublishedLease {
+            _model_owners: model_owners,
             issuer: Arc::clone(&self.publication_issuer),
             token,
             identity,
@@ -25318,7 +25484,7 @@ impl SemanticTransitionSession {
                 &self.domain,
                 &mut self.poisoned,
                 &storage.directories[(lease.identity.word & 1) as usize],
-                storage.allocations[plan.contract_storage_slot].slice(),
+                &storage.allocations[plan.contract_storage_slot].slice()?,
                 &plan,
             )?;
         }
@@ -25720,7 +25886,7 @@ impl SemanticTransitionSession {
             if allocation.len() as u64 != bytes {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            let view = allocation.view();
+            let view = allocation.slice()?.view();
             let provenance = view.allocation_provenance().ok_or_else(|| {
                 publication_input_error("resident model backing has no native allocation owner")
             })?;
@@ -25865,7 +26031,7 @@ impl SemanticTransitionSession {
             .and_then(|length| begin.checked_add(length))
             .filter(|&end| end <= allocation.len())
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let bytes = self.publication_read(allocation.view().slice(begin..end))?;
+        let bytes = self.publication_read(allocation.slice()?.view().slice(begin..end))?;
         let material = PublicationMaterialRange {
             range,
             capacity: allocation.len() - begin,
@@ -26069,6 +26235,7 @@ impl SemanticTransitionSession {
         // the acquired sealed directory's actual native queue owner.
         let header_view = unsafe {
             owner
+                .slice()?
                 .view()
                 .slice(..size_of::<IntentQueueHeader>())
                 .cast::<IntentQueueHeader>()
@@ -26202,6 +26369,7 @@ impl SemanticTransitionSession {
             .checked_add(length)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let selected = allocation
+            .slice()?
             .view()
             .try_slice(begin..end)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -26446,7 +26614,7 @@ impl SemanticTransitionSession {
             model_allocations.push(if allocation.is_empty() {
                 Vec::new()
             } else {
-                self.publication_read(allocation.view())?
+                self.publication_read(allocation.slice()?.view())?
             });
         }
         for range in &lease.directory {
@@ -26718,7 +26886,7 @@ impl SemanticTransitionSession {
         let bytes = if begin == end {
             Vec::new()
         } else {
-            self.publication_read(owner.view().slice(begin..end))?
+            self.publication_read(owner.slice()?.view().slice(begin..end))?
         };
         Ok(PublicationMaterialRange {
             range: *range,
@@ -26921,9 +27089,11 @@ impl SemanticTransitionSession {
                 .allocations
                 .get(range.storage_slot as usize)
                 .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            allocation
-                .view()
-                .slice(publication_export_span(&range, &layout, allocation.len())?)
+            allocation.slice()?.view().slice(publication_export_span(
+                &range,
+                &layout,
+                allocation.len(),
+            )?)
         };
         Ok(view)
     }
@@ -27079,6 +27249,37 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(error);
         }
+        // Compare genuine retained allocation owners, never pointer identity.
+        let provenance = view.allocation_provenance();
+        let generation = storage
+            .allocations
+            .iter()
+            .filter_map(PublicationAllocation::model_owner)
+            .find(|owner| {
+                provenance.as_ref().is_some_and(|provenance| {
+                    owner
+                        .allocation
+                        .view()
+                        .allocation_provenance()
+                        .is_some_and(|other| provenance.same_allocation(&other))
+                })
+            });
+        let (guard, publication, retained_owner) = if let Some(generation) = generation {
+            let event = self.stream.context().new_event(None).map_err(|error| {
+                runtime_error("model consumer retirement event allocation", error)
+            })?;
+            let owner: Arc<dyn Send + Sync> = Arc::new(ModelExportOwner(Some(ModelExportUse {
+                _generation: generation,
+                _view: view.clone(),
+                event,
+                stream: Arc::clone(&self.stream),
+                consumer_stream,
+                _retained_owner: retained_owner,
+            })));
+            (Arc::new(()), None, Some(owner))
+        } else {
+            (guard, Some(storage), retained_owner)
+        };
         Ok(export_owned_allocation(
             view,
             shape,
@@ -27086,7 +27287,7 @@ impl SemanticTransitionSession {
             dtype,
             self.provider.device().ordinal() as i32,
             guard,
-            storage,
+            publication,
             None,
             retained_owner,
         ))
@@ -27322,9 +27523,10 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// All aliases must have returned their managed owners. Completion events
-    /// are recorded after final consumer use, joined, and completed before the
-    /// sole native reader decrement, unless that reader has already retired.
+    /// Active output aliases must have returned their managed owners. Passive
+    /// model aliases independently retain their immutable numerical generation.
+    /// Completion events join reader use before the sole native decrement;
+    /// passive model owners additionally fence their own final managed use.
     /// Failure retains the original step and every unfinished owner.
     pub fn release(
         &mut self,
@@ -27339,6 +27541,7 @@ impl SemanticTransitionSession {
         if lease.active {
             self.retire_published_reader(lease)?;
         }
+        self.reclaim_model_generations()?;
         self.steps.remove(&lease.token);
         self.release_events.clear();
         Ok(())
@@ -27416,7 +27619,47 @@ impl SemanticTransitionSession {
                 "output aliases still retain this prepared step",
             ));
         }
+        self.reclaim_model_generations()?;
         self.steps.remove(&step.token);
+        Ok(())
+    }
+
+    fn reclaim_model_generations(&mut self) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let control = self.publication_read(storage.control.view())?[0];
+        if control.abi != 1 || control.instance != storage.instance || control.reader_gate != 0 {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let directory =
+            self.publication_read(storage.directories[(control.word & 1) as usize].view())?;
+        let selected = storage
+            .model_slots_for_directory(&directory)?
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        // Prepared future Sources, pending Updates, actual readers, historical
+        // snapshots and passive exports already own their exact generations.
+        // Unknown retirement never reaches this removal. Final physical release
+        // still follows the allocator's original CUDA dependencies.
+        let model_owners = selected
+            .into_iter()
+            .map(|slot| {
+                let owner = storage.allocations[slot]
+                    .model_owner()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                Ok((slot, owner))
+            })
+            .collect::<Result<BTreeMap<_, _>, SemanticTransitionError>>()?;
+        // A pending generation can become selected after early parent handoff.
+        // Promote its actual owner before the completed step relinquishes it.
+        self.model_owners = model_owners;
         Ok(())
     }
 
@@ -27706,8 +27949,10 @@ impl SemanticTransitionSession {
             for (slot, payload) in &self.publication_uploads {
                 if let PublicationPayload::Metadata(bytes) = payload {
                     if !bytes.is_empty() {
-                        let mut destination =
-                            storage.allocations[*slot].view().slice(..bytes.len());
+                        let mut destination = storage.allocations[*slot]
+                            .slice()?
+                            .view()
+                            .slice(..bytes.len());
                         self.provider
                             .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
                             .map_err(|error| {
@@ -27875,6 +28120,7 @@ impl SemanticTransitionSession {
             task_epoch: 0,
             task_observed: false,
             publication: None,
+            model_owners: BTreeMap::new(),
             learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
             publication_issuer: Arc::new(()),
@@ -33220,7 +33466,7 @@ mod tests {
                 ),
                 provider.device().ordinal() as i32,
                 Arc::new(()),
-                Arc::clone(&publication),
+                Some(Arc::clone(&publication)),
                 None,
                 None,
             )
@@ -35977,7 +36223,9 @@ mod text_parent_tests {
         let identity_tensor = unsafe { &(*context.prefix.0.as_ptr()).dl_tensor };
         assert_eq!(
             identity_tensor.data as usize as u64 + identity_tensor.byte_offset,
-            storage.allocations[prefix_range.storage_slot as usize].device_ptr_value()
+            storage.allocations[prefix_range.storage_slot as usize]
+                .entry()
+                .pointer
                 + prefix_range.offset_bytes
         );
         assert_eq!(
@@ -38164,8 +38412,8 @@ mod text_parent_tests {
         assert!(!storage
             .allocations
             .iter()
-            .any(|allocation| cache_address >= allocation.device_ptr_value()
-                && cache_address < allocation.device_ptr_value() + allocation.len() as u64));
+            .any(|allocation| cache_address >= allocation.entry().pointer
+                && cache_address < allocation.entry().pointer + allocation.entry().bytes));
         let again = session.published_source(&lease, 1).unwrap();
         assert_eq!(
             unsafe { (*again.as_ptr()).dl_tensor.data as u64 },
@@ -38266,6 +38514,7 @@ mod text_parent_tests {
     fn model_context_joins_exact_acquired_header_prefix_and_ring() {
         let identity = |byte| Identity256::from_bytes([byte; 32]);
         let mut lease = SemanticPublishedLease {
+            _model_owners: Vec::new(),
             issuer: Arc::new(()),
             token: 7,
             active: true,

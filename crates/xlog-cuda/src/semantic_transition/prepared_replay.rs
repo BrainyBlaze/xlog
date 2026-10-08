@@ -58,6 +58,7 @@ struct ReplaySnapshot {
     bank: TrackedCudaSlice<PublicationBank>,
     directory: TrackedCudaSlice<PublicationRange>,
     backings: Vec<PublicationAllocation>,
+    _model_owners: Vec<Arc<ModelGenerationOwner>>,
     arena: Option<TrackedCudaSlice<u64>>,
     actual: TrackedCudaSlice<u64>,
 }
@@ -235,7 +236,7 @@ impl PreparedReplayCustody {
                     0,
                 )
             };
-            let backing = parent.backings[row].view();
+            let backing = parent.backings[row].slice()?.view();
             let end = offset
                 .checked_add(binding.capacity_bytes as usize)
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -488,19 +489,19 @@ struct RetainedPublication {
 
 #[cfg(feature = "semantic-policy")]
 impl RetainedSnapshot {
-    fn new(snapshot: &ReplaySnapshot) -> Self {
-        Self {
+    fn new(snapshot: &ReplaySnapshot) -> Result<Self, SemanticTransitionError> {
+        Ok(Self {
             bank: snapshot.bank.view(),
             directory: snapshot.directory.view(),
             backings: snapshot
                 .backings
                 .iter()
-                .map(|allocation| allocation.view())
-                .collect(),
+                .map(|allocation| Ok(allocation.slice()?.view()))
+                .collect::<Result<_, SemanticTransitionError>>()?,
             arena: snapshot.arena.as_ref().map(TrackedCudaSlice::view),
             actual: snapshot.actual.view(),
             plan: snapshot.plan.clone(),
-        }
+        })
     }
 
     fn read(
@@ -742,8 +743,8 @@ impl SemanticTransitionSession {
             .replay_custody
             .as_ref()
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let parent = RetainedSnapshot::new(&custody.parent);
-        let successor = RetainedSnapshot::new(&custody.successor);
+        let parent = RetainedSnapshot::new(&custody.parent)?;
+        let successor = RetainedSnapshot::new(&custody.successor)?;
         let history = custody.learning_phases.clone();
         let result_view = prepared.result.view();
         let reader_view = prepared.reader.view();
@@ -981,12 +982,18 @@ impl ReplaySnapshot {
         reservation: &mut GpuMemoryReservation,
     ) -> Result<Self, SemanticTransitionError> {
         let mut backings = Vec::with_capacity(plan.len());
+        let mut model_owners = Vec::new();
         for row in &mut plan {
             let backing = if row.model == 2 {
                 let original = &storage.allocations[row.slots[0] as usize];
                 if !original.immutable() || row.slots[0] != row.slots[1] {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
+                model_owners.push(
+                    original
+                        .model_owner()
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                );
                 original.retain()
             } else {
                 PublicationAllocation::Writable(
@@ -998,7 +1005,7 @@ impl ReplaySnapshot {
                         .map_err(|error| runtime_error("replay backing reservation", error))?,
                 )
             };
-            row.destination = backing.device_ptr_value();
+            row.destination = backing.slice()?.device_ptr_value();
             backings.push(backing);
         }
         let rows = reservation
@@ -1030,6 +1037,7 @@ impl ReplaySnapshot {
             bank,
             directory,
             backings,
+            _model_owners: model_owners,
             arena,
             actual,
         })
@@ -1057,10 +1065,13 @@ impl ReplaySnapshot {
         recorder.read_write(&self.directory);
         recorder.read_write(&self.actual);
         for backing in &self.backings {
+            let owner = backing
+                .live_slice()
+                .expect("snapshot retains its exact model owners");
             if backing.immutable() {
-                recorder.read(backing.slice());
+                recorder.read(&owner);
             } else {
-                recorder.read_write(backing.slice());
+                recorder.read_write(&owner);
             }
         }
         if let Some(arena) = &self.arena {

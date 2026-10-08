@@ -292,63 +292,142 @@ impl SemanticReplayModelBackings {
     }
 }
 
+/// One actual numerical generation. Catalogue membership is weak; selected
+/// state, readers, prepared operations and managed exports own independent leases.
+pub(super) struct ModelGenerationOwner {
+    pub(super) allocation: Arc<TrackedCudaSlice<u8>>,
+    pub(super) replay: Option<Arc<ReplayModelBacking>>,
+}
+
+impl ModelGenerationOwner {
+    pub(super) fn numerical(allocation: TrackedCudaSlice<u8>) -> Arc<Self> {
+        Arc::new(Self {
+            allocation: Arc::new(allocation),
+            replay: None,
+        })
+    }
+
+    pub(super) fn historical(replay: Arc<ReplayModelBacking>) -> Arc<Self> {
+        Arc::new(Self {
+            allocation: Arc::clone(&replay.allocation),
+            replay: Some(replay),
+        })
+    }
+}
+
 pub(super) enum PublicationAllocation {
     Writable(TrackedCudaSlice<u8>),
-    Generation(Arc<TrackedCudaSlice<u8>>),
-    Immutable(Arc<ReplayModelBacking>),
+    Model {
+        owner: Weak<ModelGenerationOwner>,
+        entry: PublicationStorageEntry,
+    },
 }
 
 impl PublicationAllocation {
-    #[cfg(feature = "semantic-policy")]
-    pub(super) fn model_generation_owner(&self) -> Option<Arc<TrackedCudaSlice<u8>>> {
-        match self {
-            Self::Generation(owner) => Some(Arc::clone(owner)),
-            Self::Immutable(owner) if owner.sealed.load(Ordering::Acquire) => {
-                Some(Arc::clone(&owner.allocation))
-            }
-            _ => None,
+    pub(super) fn model(owner: &Arc<ModelGenerationOwner>) -> Self {
+        Self::Model {
+            owner: Arc::downgrade(owner),
+            entry: PublicationStorageEntry {
+                pointer: owner.allocation.device_ptr_value(),
+                bytes: owner.allocation.len() as u64,
+                generation: 1,
+            },
         }
     }
 
-    pub(super) fn slice(&self) -> &TrackedCudaSlice<u8> {
+    pub(super) fn model_owner(&self) -> Option<Arc<ModelGenerationOwner>> {
         match self {
-            Self::Writable(allocation) => allocation,
-            Self::Generation(allocation) => allocation,
-            Self::Immutable(owner) => &owner.allocation,
+            Self::Model { owner, .. } => owner.upgrade(),
+            Self::Writable(_) => None,
+        }
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn model_generation_owner(&self) -> Option<Arc<TrackedCudaSlice<u8>>> {
+        let owner = self.model_owner()?;
+        if owner
+            .replay
+            .as_ref()
+            .is_some_and(|replay| !replay.sealed.load(Ordering::Acquire))
+        {
+            return None;
+        }
+        Some(Arc::clone(&owner.allocation))
+    }
+
+    pub(super) fn live_slice(&self) -> Option<TrackedCudaSlice<u8>> {
+        match self {
+            Self::Writable(allocation) => Some(allocation.retain()),
+            Self::Model { owner, .. } => owner.upgrade().map(|owner| owner.allocation.retain()),
+        }
+    }
+
+    pub(super) fn slice(&self) -> Result<TrackedCudaSlice<u8>, SemanticTransitionError> {
+        self.live_slice()
+            .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    pub(super) fn len(&self) -> usize {
+        match self {
+            Self::Writable(allocation) => allocation.len(),
+            Self::Model { entry, .. } => entry.bytes as usize,
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(super) fn entry(&self) -> PublicationStorageEntry {
+        match self {
+            Self::Writable(allocation) => PublicationStorageEntry {
+                pointer: allocation.device_ptr_value(),
+                bytes: allocation.len() as u64,
+                generation: 1,
+            },
+            Self::Model { owner, entry } if owner.strong_count() != 0 => *entry,
+            // A retired slot retains its index and generation, never a stale
+            // address that the CUDA allocator can reuse for another owner.
+            Self::Model { entry, .. } => PublicationStorageEntry {
+                pointer: 0,
+                bytes: 0,
+                generation: entry.generation,
+            },
         }
     }
 
     pub(super) fn immutable(&self) -> bool {
-        matches!(self, Self::Generation(_) | Self::Immutable(_))
+        self.model_owner()
+            .is_some_and(|owner| owner.replay.is_some())
     }
 
     pub(super) fn initializing(&self) -> bool {
         match self {
             Self::Writable(_) => true,
-            Self::Generation(_) => true,
-            Self::Immutable(owner) => !owner.sealed.load(Ordering::Acquire),
+            Self::Model { owner, .. } => owner.upgrade().is_some_and(|owner| {
+                owner
+                    .replay
+                    .as_ref()
+                    .is_none_or(|replay| !replay.sealed.load(Ordering::Acquire))
+            }),
         }
     }
 
     pub(super) fn seal_restoration(&self) {
-        if let Self::Immutable(owner) = self {
-            owner.sealed.store(true, Ordering::Release);
+        if let Some(owner) = self.model_owner() {
+            if let Some(replay) = &owner.replay {
+                replay.sealed.store(true, Ordering::Release);
+            }
         }
     }
 
     pub(super) fn retain(&self) -> Self {
         match self {
             Self::Writable(allocation) => Self::Writable(allocation.retain()),
-            Self::Generation(owner) => Self::Generation(Arc::clone(owner)),
-            Self::Immutable(owner) => Self::Immutable(Arc::clone(owner)),
+            Self::Model { owner, entry } => Self::Model {
+                owner: Weak::clone(owner),
+                entry: *entry,
+            },
         }
-    }
-}
-
-impl std::ops::Deref for PublicationAllocation {
-    type Target = TrackedCudaSlice<u8>;
-
-    fn deref(&self) -> &Self::Target {
-        self.slice()
     }
 }
