@@ -15861,6 +15861,22 @@ impl PySemanticTransitionController {
                     .map_err(xlog_err)?;
             }
             if let Some(material) = &selected_material {
+                #[cfg(feature = "semantic-policy")]
+                let child = session.private_replay_custody()?;
+                #[cfg(feature = "semantic-policy")]
+                if let Some(child) = child {
+                    owner
+                        .restore_read_only_replay_material(
+                            &material.material,
+                            child.model_backings(py)?,
+                        )
+                        .map_err(xlog_err)?;
+                } else {
+                    owner
+                        .restore_replay_material(&material.material)
+                        .map_err(xlog_err)?;
+                }
+                #[cfg(not(feature = "semantic-policy"))]
                 owner
                     .restore_replay_material(&material.material)
                     .map_err(xlog_err)?;

@@ -57,7 +57,7 @@ struct ReplaySnapshot {
     plan: Vec<ReplayCopyRow>,
     bank: TrackedCudaSlice<PublicationBank>,
     directory: TrackedCudaSlice<PublicationRange>,
-    backings: Vec<TrackedCudaSlice<u8>>,
+    backings: Vec<PublicationAllocation>,
     arena: Option<TrackedCudaSlice<u64>>,
     actual: TrackedCudaSlice<u64>,
 }
@@ -86,7 +86,11 @@ fn replay_plan(
         for (index, slots) in storage.model_slots.iter().enumerate() {
             rows.push(ReplayCopyRow {
                 index: index as u64,
-                model: 1,
+                model: if storage.allocations[slots[0]].immutable() && slots[0] == slots[1] {
+                    2
+                } else {
+                    1
+                },
                 slots: slots.map(|slot| slot as u64),
                 bytes: slots.map(|slot| storage.allocations[slot].len() as u64),
                 ..ReplayCopyRow::default()
@@ -148,7 +152,7 @@ fn snapshot_allocation_bytes(
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
     rows.iter().try_fold(metadata as u64, |bytes, row| {
         bytes
-            .checked_add(row.capacity)
+            .checked_add(if row.model == 2 { 0 } else { row.capacity })
             .ok_or(SemanticTransitionError::GenerationExhausted)
     })
 }
@@ -191,6 +195,7 @@ impl PreparedReplayCustody {
         let _ = learning_phases;
         let parent = ReplaySnapshot::allocate(
             provider,
+            storage,
             replay_plan(storage, true)?,
             storage.bank_templates[0].len(),
             arena_words,
@@ -248,6 +253,7 @@ impl PreparedReplayCustody {
             original_inputs: Arc::clone(inputs),
             successor: ReplaySnapshot::allocate(
                 provider,
+                storage,
                 replay_plan(storage, false)?,
                 storage.bank_templates[0].len(),
                 0,
@@ -326,7 +332,7 @@ impl PreparedReplayCustody {
                 .iter()
                 .try_fold(metadata as u64, |bytes, row| {
                     bytes
-                        .checked_add(row.capacity)
+                        .checked_add(if row.model == 2 { 0 } else { row.capacity })
                         .ok_or(SemanticTransitionError::GenerationExhausted)
                 })
         };
@@ -476,7 +482,7 @@ impl RetainedSnapshot {
             backings: snapshot
                 .backings
                 .iter()
-                .map(TrackedCudaSlice::view)
+                .map(|allocation| allocation.view())
                 .collect(),
             arena: snapshot.arena.as_ref().map(TrackedCudaSlice::view),
             actual: snapshot.actual.view(),
@@ -507,7 +513,7 @@ impl RetainedSnapshot {
             let mut selected = None;
             let mut original = None;
             for range in &directory {
-                let matches = if row.model == 1 {
+                let matches = if row.model != 0 {
                     matches!(range.role, 18..=25) && row.slots.contains(&range.storage_slot)
                 } else {
                     (range.role, range.index) == (row.role, row.index)
@@ -518,7 +524,7 @@ impl RetainedSnapshot {
                 let bank = (0..2)
                     .find(|&bank| {
                         range.storage_slot == row.slots[bank]
-                            && (row.model == 1 || range.offset_bytes == row.offsets[bank])
+                            && (row.model != 0 || range.offset_bytes == row.offsets[bank])
                     })
                     .ok_or(SemanticTransitionError::ObservationMismatch)?;
                 if selected
@@ -529,7 +535,7 @@ impl RetainedSnapshot {
                 }
                 original = Some(*range);
             }
-            let selected = if row.model == 1 {
+            let selected = if row.model != 0 {
                 selected.unwrap_or((bank.header.publication_word & 1) as usize)
             } else {
                 selected.ok_or(SemanticTransitionError::ObservationMismatch)?
@@ -537,7 +543,7 @@ impl RetainedSnapshot {
             let capacity = usize::try_from(row.bytes[selected])
                 .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
             copied = copied
-                .checked_add(capacity)
+                .checked_add(if row.model == 2 { 0 } else { capacity })
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
             let bytes = if capacity == 0 {
                 Vec::new()
@@ -548,7 +554,7 @@ impl RetainedSnapshot {
                         .ok_or(SemanticTransitionError::ObservationMismatch)?,
                 )?
             };
-            if row.model == 1 {
+            if row.model != 0 {
                 models.push(bytes);
             } else {
                 let range = original.ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -930,6 +936,7 @@ impl SemanticTransitionSession {
 impl ReplaySnapshot {
     fn allocate(
         provider: &CudaKernelProvider,
+        storage: &PublicationStorage,
         mut plan: Vec<ReplayCopyRow>,
         count: usize,
         arena_words: usize,
@@ -937,12 +944,26 @@ impl ReplaySnapshot {
     ) -> Result<Self, SemanticTransitionError> {
         let mut backings = Vec::with_capacity(plan.len());
         for row in &mut plan {
-            let backing = reservation
-                .alloc::<u8>(
-                    usize::try_from(row.capacity)
-                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            let backing = if row.model == 2 {
+                let PublicationAllocation::Immutable(owner) =
+                    &storage.allocations[row.slots[0] as usize]
+                else {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                };
+                if row.slots[0] != row.slots[1] {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                PublicationAllocation::Immutable(Arc::clone(owner))
+            } else {
+                PublicationAllocation::Writable(
+                    reservation
+                        .alloc::<u8>(
+                            usize::try_from(row.capacity)
+                                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                        )
+                        .map_err(|error| runtime_error("replay backing reservation", error))?,
                 )
-                .map_err(|error| runtime_error("replay backing reservation", error))?;
+            };
             row.destination = backing.device_ptr_value();
             backings.push(backing);
         }
@@ -1002,7 +1023,11 @@ impl ReplaySnapshot {
         recorder.read_write(&self.directory);
         recorder.read_write(&self.actual);
         for backing in &self.backings {
-            recorder.read_write(backing);
+            if backing.immutable() {
+                recorder.read(backing.slice());
+            } else {
+                recorder.read_write(backing.slice());
+            }
         }
         if let Some(arena) = &self.arena {
             recorder.read_write(arena);

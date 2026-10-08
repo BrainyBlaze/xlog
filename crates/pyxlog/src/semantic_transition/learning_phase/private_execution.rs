@@ -34,6 +34,7 @@ pub(super) struct PrivateExecutionGroup {
     build_scope: Option<Arc<()>>,
     native_steps: Vec<SemanticPreparedStep>,
     replay_children: Vec<Arc<PrivateReplayChildCustody>>,
+    replay_model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
     non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
     non_submission_confirmed: bool,
     selected_parent: Option<Py<PySemanticPublishedParent>>,
@@ -67,6 +68,7 @@ pub(crate) struct PrivateReplayChildCustody {
     group_ordinal: u64,
     step_index: usize,
     replay_ordinal: u64,
+    model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
     state: Mutex<PrivateReplayChildState>,
     failed: AtomicBool,
 }
@@ -94,6 +96,14 @@ pub(crate) struct PySemanticPrivateReplayChild {
 }
 
 impl PrivateReplayChildCustody {
+    pub(in crate::semantic_transition) fn model_backings(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<&xlog_cuda::SemanticReplayModelBackings> {
+        self.require_preparation(py)?;
+        Ok(&self.model_backings)
+    }
+
     pub(in crate::semantic_transition) fn require_access(&self, py: Python<'_>) -> PyResult<()> {
         let phase = self.phase(py)?;
         let phase = phase.borrow(py);
@@ -734,6 +744,7 @@ impl PySemanticLearningPhaseTransition {
             group_ordinal: group.ordinal,
             step_index,
             replay_ordinal,
+            model_backings: Arc::clone(&group.replay_model_backings),
             state: Mutex::new(PrivateReplayChildState::default()),
             failed: AtomicBool::new(false),
         });
@@ -2167,6 +2178,7 @@ impl PySemanticLearningPhaseTransition {
                 build_scope: None,
                 native_steps: Vec::new(),
                 replay_children: Vec::new(),
+                replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
                 non_submission: None,
                 non_submission_confirmed: false,
                 selected_parent: None,

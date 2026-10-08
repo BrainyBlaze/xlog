@@ -11,6 +11,7 @@ mod learning_phase;
 #[cfg(feature = "semantic-policy")]
 mod model_evaluation;
 mod prepared_replay;
+mod replay_model_backing;
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
     SemanticColdModelWork, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
@@ -28,6 +29,8 @@ pub use model_evaluation::{
 #[cfg(feature = "semantic-policy")]
 pub use prepared_replay::SemanticCompletedReplayMaterials;
 use prepared_replay::{PreparedReplayCustody, PreparedReplayDescriptor};
+pub use replay_model_backing::SemanticReplayModelBackings;
+use replay_model_backing::{PublicationAllocation, ReplayModelBacking};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8115,7 +8118,7 @@ struct PublicationStorage {
     terminals: TrackedCudaSlice<u64>,
     continuation: TrackedCudaSlice<PendingContinuation>,
     continuation_directory: TrackedCudaSlice<PublicationRange>,
-    allocations: Vec<TrackedCudaSlice<u8>>,
+    allocations: Vec<PublicationAllocation>,
     model_memory: ModelMemoryGeometry,
     physical_parameter_roster: Option<Vec<String>>,
     model_slots: Vec<[usize; 2]>,
@@ -8226,7 +8229,7 @@ impl PublicationStorage {
         account_tracked_allocation(&mut allocations, &self.continuation)?;
         account_tracked_allocation(&mut allocations, &self.continuation_directory)?;
         for allocation in &self.allocations {
-            account_tracked_allocation(&mut allocations, allocation)?;
+            account_tracked_allocation(&mut allocations, allocation.slice())?;
         }
         accounted_tracked_bytes(allocations)
     }
@@ -8258,7 +8261,7 @@ impl PublicationStorage {
             recorder.read(directory);
         }
         for allocation in &self.allocations {
-            recorder.read(allocation);
+            recorder.read(allocation.slice());
         }
         if let Some(work) = cold_work {
             recorder.read_write(work);
@@ -8303,6 +8306,7 @@ impl PublicationStorage {
         mut contract: PublicationContract,
         terminal_tokens: &[u64],
         instance: Identity256,
+        immutable_models: Option<&[Arc<ReplayModelBacking>]>,
     ) -> Result<(Self, Vec<(usize, PublicationPayload)>), SemanticTransitionError> {
         let mut allocations = Vec::new();
         let mut bank_templates = [Vec::new(), Vec::new()];
@@ -8311,6 +8315,11 @@ impl PublicationStorage {
         if model_payloads.len() != model_memory.allocation_bytes.len() {
             return Err(publication_input_error(
                 "model backing upload roster differs from its complete memory map",
+            ));
+        }
+        if immutable_models.is_some_and(|owners| owners.len() != model_payloads.len()) {
+            return Err(publication_input_error(
+                "historical model leases differ from the complete allocation roster",
             ));
         }
         let physical_parameter_roster = plans
@@ -8324,12 +8333,33 @@ impl PublicationStorage {
             .transpose()?
             .flatten();
         let mut model_slots = Vec::new();
-        for (&bytes, payload) in model_memory.allocation_bytes.iter().zip(model_payloads) {
+        for (index, (&bytes, payload)) in model_memory
+            .allocation_bytes
+            .iter()
+            .zip(model_payloads)
+            .enumerate()
+        {
             let mut slots = [0; 2];
-            for slot in &mut slots {
-                *slot = allocations.len();
-                allocations.push(allocate_publication::<u8>(provider, bytes as usize)?);
-                uploads.push((*slot, payload.clone()));
+            if let Some(owners) = immutable_models {
+                let slot = allocations.len();
+                let allocation = PublicationAllocation::Immutable(Arc::clone(&owners[index]));
+                if allocation.len() as u64 != bytes {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                if allocation.initializing() {
+                    uploads.push((slot, payload.clone()));
+                }
+                allocations.push(allocation);
+                slots = [slot; 2];
+            } else {
+                for slot in &mut slots {
+                    *slot = allocations.len();
+                    allocations.push(PublicationAllocation::Writable(allocate_publication::<u8>(
+                        provider,
+                        bytes as usize,
+                    )?));
+                    uploads.push((*slot, payload.clone()));
+                }
             }
             model_slots.push(slots);
         }
@@ -8364,7 +8394,10 @@ impl PublicationStorage {
                     }
                 } else if bank == 0 || publication_mutable_role(plan.role) {
                     slot = allocations.len();
-                    allocations.push(allocate_publication::<u8>(provider, plan.capacity)?);
+                    allocations.push(PublicationAllocation::Writable(allocate_publication::<u8>(
+                        provider,
+                        plan.capacity,
+                    )?));
                     uploads.push((slot, plan.payload.clone()));
                 }
                 directory.push(PublicationRange {
@@ -8406,7 +8439,9 @@ impl PublicationStorage {
                 ));
             }
             let slot = allocations.len();
-            allocations.push(allocate_publication::<u8>(provider, capacity)?);
+            allocations.push(PublicationAllocation::Writable(allocate_publication::<u8>(
+                provider, capacity,
+            )?));
             let length = if plan.role == 55 {
                 uploads.push((slot, PublicationPayload::Metadata(pending_table.clone())));
                 pending_table.len()
@@ -8478,8 +8513,27 @@ impl PublicationStorage {
         recorder.read_write(&self.continuation);
         recorder.read_write(&self.continuation_directory);
         for allocation in &self.allocations {
-            recorder.read_write(allocation);
+            if allocation.immutable() {
+                recorder.read(allocation.slice());
+            } else {
+                recorder.read_write(allocation.slice());
+            }
         }
+    }
+
+    fn immutable_model_owners(&self) -> Option<Vec<Arc<ReplayModelBacking>>> {
+        if self.model_slots.is_empty() {
+            return None;
+        }
+        self.model_slots
+            .iter()
+            .map(|slots| match &self.allocations[slots[0]] {
+                PublicationAllocation::Immutable(owner) if slots[0] == slots[1] => {
+                    Some(Arc::clone(owner))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -9248,7 +9302,7 @@ impl PreparedStepInputs {
             recorder.read(directory);
         }
         for allocation in &self.storage.allocations {
-            recorder.read(allocation);
+            recorder.read(allocation.slice());
         }
         for bindings in &self.bindings {
             recorder.read(bindings);
@@ -12085,7 +12139,7 @@ impl FeedbackBuffers {
             recorder.read(directory);
         }
         for allocation in &storage.allocations {
-            recorder.read(allocation);
+            recorder.read(allocation.slice());
         }
         recorder.write(&self.features);
         recorder.write(&self.validity);
@@ -15799,6 +15853,11 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
         let transition_bound = transitions.len();
+        if update_count != 0 && storage.immutable_model_owners().is_some() {
+            return Err(publication_input_error(
+                "historical replay model leases grant reads, not pending Update ownership",
+            ));
+        }
         let replay_bytes = PreparedReplayCustody::allocation_bytes(
             &storage,
             self.graph.transition_arena_view().len(),
@@ -23079,6 +23138,7 @@ impl SemanticTransitionSession {
             contract,
             &parent.terminal_tokens,
             instance,
+            None,
         )?;
         // Install all destinations and producer owners before the first command
         // that may enqueue. A partial copy failure keeps these owners in Session.
@@ -23184,7 +23244,7 @@ impl SemanticTransitionSession {
         &mut self,
         bytes: &[u8],
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
-        self.restore_state_material_inner(bytes, None)
+        self.restore_state_material_inner(bytes, None, None)
     }
 
     /// Cold-create a private successor from an authentic complete checkpoint.
@@ -23196,13 +23256,14 @@ impl SemanticTransitionSession {
         bytes: &[u8],
         transition: &SemanticLearningPhaseTransition,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
-        self.restore_state_material_inner(bytes, Some(transition))
+        self.restore_state_material_inner(bytes, Some(transition), None)
     }
 
     fn restore_state_material_inner(
         &mut self,
         bytes: &[u8],
         transition: Option<&SemanticLearningPhaseTransition>,
+        immutable_models: Option<&[Arc<ReplayModelBacking>]>,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.captured.is_some() || self.task.is_none() {
@@ -23347,6 +23408,7 @@ impl SemanticTransitionSession {
                 contract,
                 &material.terminals,
                 instance,
+                immutable_models,
             )?;
             material.bank.header.abi = 0;
             material.bank.header.instance = instance;
@@ -23382,6 +23444,14 @@ impl SemanticTransitionSession {
                     || restored.state_digest != header.state_digest)
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            for allocation in &self
+                .publication
+                .as_ref()
+                .expect("restored publication owner")
+                .allocations
+            {
+                allocation.seal_restoration();
             }
             Ok(restored)
         })();
@@ -23436,6 +23506,17 @@ impl SemanticTransitionSession {
             material.require_successful_recompute()?;
             let original = material.bank.header;
             let restored = self.read_publication_header(0)?;
+            let original_storage = self
+                .publication
+                .as_ref()
+                .expect("private restored publication");
+            let immutable_models = original_storage.immutable_model_owners();
+            if immutable_models.is_some() && original_storage.model_memory != material.model_memory
+            {
+                return Err(publication_input_error(
+                    "training arena transfer changed the immutable model alias geometry",
+                ));
+            }
             if restored.recovered_instance != original.instance
                 || restored.instance == original.instance
                 || restored.publication_word != 0
@@ -23579,6 +23660,7 @@ impl SemanticTransitionSession {
                 material.contract,
                 &material.terminals,
                 instance,
+                immutable_models.as_deref(),
             )?;
             let mut bank = material.bank;
             bank.header.abi = 0;
@@ -23797,6 +23879,11 @@ impl SemanticTransitionSession {
         );
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
+        for allocation in &storage.allocations {
+            if allocation.immutable() && allocation.initializing() {
+                recorder.write(allocation.slice());
+            }
+        }
         for (_, payload) in &self.publication_uploads {
             if let PublicationPayload::Tensor(tensor) = payload {
                 if let Some(source) = &tensor.source {
@@ -23808,7 +23895,7 @@ impl SemanticTransitionSession {
             for allocation in &storage.allocations {
                 // A genuine empty model buffer retains an owner and layout,
                 // but has no device pointer on which to submit a memory write.
-                if allocation.is_empty() {
+                if allocation.is_empty() || !allocation.initializing() {
                     continue;
                 }
                 // SAFETY: all actual fixed allocations were recorded before this
@@ -24763,7 +24850,7 @@ impl SemanticTransitionSession {
                 &self.domain,
                 &mut self.poisoned,
                 &storage.directories[(lease.identity.word & 1) as usize],
-                &storage.allocations[plan.contract_storage_slot],
+                storage.allocations[plan.contract_storage_slot].slice(),
                 &plan,
             )?;
         }
@@ -25990,6 +26077,24 @@ impl SemanticTransitionSession {
         material: &SemanticReplayMaterial,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.restore_state_material(&material.predecessor.encode()?)
+    }
+
+    /// Restore an original historical Proposal with shared immutable numerical
+    /// allocations. Only authenticated private replay importers supply this
+    /// scoped owner; ordinary fresh restoration remains a writable successor.
+    /// All non-model state and the complete checkpoint codec remain unchanged.
+    pub fn restore_read_only_replay_material(
+        &mut self,
+        material: &SemanticReplayMaterial,
+        backings: &SemanticReplayModelBackings,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        if material.kind != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "immutable replay model leases require an original Proposal",
+            ));
+        }
+        let owners = backings.lease(&self.provider, &material.predecessor)?;
+        self.restore_state_material_inner(&material.predecessor.encode()?, None, Some(&owners))
     }
 
     /// Compare a genuine rerun with the expected complete logical/state hashes

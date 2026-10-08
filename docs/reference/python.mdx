@@ -126,6 +126,24 @@ exception does not turn an unfinished child into an ordinary aborted Session or
 authorize a retry. Saved child aliases grant native access only in their
 original phase callback; public abort and observed-only close cannot discard them.
 
+Within that original private group, canonical historical restoration owns one
+immutable native allocation for each original numerical backing generation.
+Later readers share that actual allocation only when the original instance,
+storage coordinate, generation, complete seal, typed layouts and storage/view
+alias partition agree. Equal hashes or a shared CUDA provider do not establish
+sharing. Both child publication directories refer to this same read-only model
+owner; no second writable model bank or per-step model snapshot copy is created.
+Native input and replay guards retain and verify that owner. All other checkpoint
+state remains independently owned, and cold export still includes every model
+and optimizer byte with the full alias geometry.
+
+Historical model leases cannot prepare Updates. Backward must use the original
+target-bound gradient delivery, which temporarily routes its real AccumulateGrad
+nodes into the receiving Update's gradient/presence/accumulation destinations and
+restores the historical gradient reference after the single GraphTask. It must
+not accumulate into the historical allocation. Unknown restoration or final use
+retains the original owner; the registry itself cannot release live readers.
+
 After genuine whole-target cancellation and confirmed original graph destruction,
 the same prepared producer may call
 `member.finish_cancelled_private_segment()` in the original private-retirement
@@ -1890,10 +1908,13 @@ if materials is not None:
 The tuple has the same format as `Controller.export_replay_materials` for held
 adjacent readers. These identities and bytes belong to this exact step, not the
 first parent or final successor of the segment. Native custody copies the full
-semantic arena and the selected model backings before reuse. It retains the
+semantic arena and, for writable model banks, the selected model backings before reuse.
+An immutable historical model owner is retained by a native lease instead of
+being copied, without omitting its bytes from the complete cold material. It retains the
 successor's original records inside its publisher before publication. The full
 allocation roster is reserved before capture and its byte copies are charged as
-native work. An unpublished refusal returns `None`; unknown completion does not
+native work; immutable model leases add no model allocation or copy work.
+An unpublished refusal returns `None`; unknown completion does not
 return material. A scheduled Proposal that actually publishes another transition
 must be handled using its observed transition, not exported as a Proposal.
 
