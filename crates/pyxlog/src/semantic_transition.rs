@@ -157,6 +157,8 @@ pub(crate) struct PySemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     active_cold_model_work:
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
+    #[cfg(feature = "semantic-policy")]
+    private_replay_child: Mutex<Option<Arc<learning_phase::PrivateReplayChildCustody>>>,
     issuance: Arc<AtomicU64>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
@@ -184,12 +186,40 @@ impl std::ops::DerefMut for SemanticSessionGuard<'_> {
 }
 
 impl PySemanticTransitionSession {
+    #[cfg(feature = "semantic-policy")]
+    fn private_replay_custody(
+        &self,
+    ) -> PyResult<Option<Arc<learning_phase::PrivateReplayChildCustody>>> {
+        self.private_replay_child
+            .lock()
+            .map(|child| child.as_ref().map(Arc::clone))
+            .map_err(|_| invalid("original private replay Session custody is poisoned"))
+    }
+
+    fn refuse_failed_import(&self, owner: &mut SemanticTransitionSession) {
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = self
+            .private_replay_child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            child.fail();
+            return;
+        }
+        owner.abort();
+    }
+
     fn require_creator(&self) -> PyResult<()> {
         require_creator_thread(self.owner_thread)
     }
 
     fn owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
         self.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = self.private_replay_custody()? {
+            Python::attach(|py| child.require_access(py))?;
+        }
         if !self.recording.load(Ordering::Acquire) {
             drain_export_owners();
         }
@@ -210,6 +240,12 @@ impl PySemanticTransitionSession {
 
     fn release_observed_cold(&self) -> PyResult<()> {
         self.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if self.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "private replay Session release belongs to its original native phase",
+            ));
+        }
         if self.importing.load(Ordering::Acquire)
             || self.recording.load(Ordering::Acquire)
             || self.retiring.load(Ordering::Acquire)
@@ -379,6 +415,8 @@ impl PySemanticTransitionSession {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            private_replay_child: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense,
             checkpoint_sources,
@@ -2786,6 +2824,7 @@ struct PreparedBuildGuard<'a> {
     committed: bool,
     native_completion: Option<(Arc<()>, String)>,
     native_non_submission: bool,
+    cancelled_checkpoint: Option<(Arc<()>, CheckpointTaskPhase)>,
 }
 
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
@@ -2815,7 +2854,13 @@ impl Drop for PreparedBuildGuard<'_> {
                 }
             } else {
                 if let Ok(mut state) = self.task_use.state() {
-                    state.phase = TaskUsePhase::Refused;
+                    state.phase = match &self.cancelled_checkpoint {
+                        Some((scope, phase)) => TaskUsePhase::CancelledPrivate {
+                            scope: Arc::clone(scope),
+                            checkpoint: phase.clone(),
+                        },
+                        None => TaskUsePhase::Refused,
+                    };
                 }
                 if !self.native_non_submission {
                     if let Some(owner) = self
@@ -6908,6 +6953,12 @@ enum TaskUsePhase {
         scope: Arc<()>,
         operation: String,
     },
+    // A native-cancelled private construction retains its original checkpoint
+    // phase without restoring any public task operation or build authority.
+    CancelledPrivate {
+        scope: Arc<()>,
+        checkpoint: CheckpointTaskPhase,
+    },
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
     Evaluating(Box<TaskUsePhase>),
@@ -7007,15 +7058,18 @@ enum CheckpointTaskPhase {
 
 fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> {
     let mut phase = &state.phase;
+    let mut private = false;
     while let TaskUsePhase::ArenaPreparing(original)
     | TaskUsePhase::CheckpointReading { original, .. } = phase
     {
+        private |= matches!(phase, TaskUsePhase::ArenaPreparing(_));
         phase = original.as_ref();
     }
     match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
         TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
+        TaskUsePhase::CancelledPrivate { checkpoint, .. } if private => Ok(checkpoint.clone()),
         _ => Err(invalid(
             "checkpoint requires an imported or admitted stable task phase",
         )),
@@ -8116,13 +8170,17 @@ impl<'a> ColdImportGuard<'a> {
                 "learning-phase preparation retains the original Session until durable resolution",
             ));
         }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            Python::attach(|py| child.begin_import(py))?;
+        }
         let mut owner = session.owner()?;
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
             || owner.is_poisoned()
         {
-            owner.abort();
+            session.refuse_failed_import(&mut owner);
             return Err(invalid(
                 "native session cannot enter a nested or aborted import",
             ));
@@ -8130,7 +8188,7 @@ impl<'a> ColdImportGuard<'a> {
         let issuance = match TaskIssuance::issue(Arc::clone(&session.issuance)) {
             Ok(issuance) => issuance,
             Err(error) => {
-                owner.abort();
+                session.refuse_failed_import(&mut owner);
                 return Err(error);
             }
         };
@@ -8147,6 +8205,21 @@ impl<'a> ColdImportGuard<'a> {
 
 impl Drop for ColdImportGuard<'_> {
     fn drop(&mut self) {
+        #[cfg(feature = "semantic-policy")]
+        if !self.committed {
+            let child = self
+                .session
+                .private_replay_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(child) = child.as_ref() {
+                // Preserve the actual partial Session, reader and callbacks in
+                // the original phase. Target cancellation cannot heal this
+                // child's unknown import or authorize ordinary abort/retry.
+                child.fail();
+                return;
+            }
+        }
         let mut owner = self
             .session
             .inner
@@ -9088,6 +9161,7 @@ impl PySemanticCompletedTaskGround {
                 .unbind(),
         )
     }
+
     #[getter]
     fn task_identity(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.task_identity.as_bytes()).unbind()
@@ -9587,6 +9661,14 @@ pub(crate) struct PySemanticGradientDelivery {
     activated_once: AtomicBool,
     restore_on_finish: bool,
     restores: Mutex<Vec<GradientSlotRestore>>,
+    hook_cleanup: Mutex<GradientHookCleanup>,
+}
+
+enum GradientHookCleanup {
+    Ready,
+    Entered,
+    Complete,
+    Unknown(PyErr),
 }
 
 struct GradientSlotRestore {
@@ -9622,6 +9704,7 @@ impl PySemanticGradientDelivery {
     /// A zero accumulation counter clears role 24/25; a nonzero counter keeps
     /// the existing slots so subsequent node deliveries add in place.
     fn record_reset(&self, py: Python<'_>) -> PyResult<()> {
+        self.require_active_hooks()?;
         if self.restore_on_finish {
             return Err(invalid(
                 "group delivery shares the target bank's single gradient reset",
@@ -9731,51 +9814,201 @@ impl PySemanticGradientDelivery {
                 "historical gradient delivery was never activated in its Update bank",
             ));
         }
-        let handles = self
-            .handles
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
-            .take();
-        let Some(handles) = handles else {
-            return if already_removed_ok {
-                Ok(())
-            } else {
-                Err(invalid("gradient delivery has already finished recording"))
-            };
-        };
-        let mut failure = None;
-        for handle in handles {
-            if let Err(error) = handle.bind(py).call_method0("remove") {
-                if failure.is_none() {
-                    failure = Some(error);
+        {
+            let mut cleanup = self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?;
+            match &*cleanup {
+                GradientHookCleanup::Ready => *cleanup = GradientHookCleanup::Entered,
+                GradientHookCleanup::Complete if already_removed_ok => return Ok(()),
+                GradientHookCleanup::Complete => {
+                    return Err(invalid("gradient delivery has already finished recording"));
                 }
+                GradientHookCleanup::Entered => {
+                    return Err(invalid("original gradient hook cleanup cannot reenter"));
+                }
+                GradientHookCleanup::Unknown(error) => return Err(error.clone_ref(py)),
             }
         }
-        if self.restore_on_finish {
-            let mut restores = self
+        // Keep the complete original roster in this delivery across every
+        // fallible Python callback. Reentry cannot retry any remove or swap.
+        let result = (|| -> PyResult<()> {
+            let handles = self
+                .handles
+                .lock()
+                .map_err(|_| invalid("gradient-delivery owner is poisoned"))?
+                .as_ref()
+                .ok_or_else(|| invalid("original gradient hook handles are absent"))?
+                .iter()
+                .map(|handle| handle.clone_ref(py))
+                .collect::<Vec<_>>();
+            let restores = self
                 .restores
                 .lock()
-                .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?;
-            for restore in restores.drain(..) {
+                .map_err(|_| invalid("group gradient restoration is poisoned"))?
+                .iter()
+                .map(|restore| {
+                    (
+                        restore.effective.clone_ref(py),
+                        restore.gradient.clone_ref(py),
+                        restore.original_grad.clone_ref(py),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut failure = None;
+            for handle in &handles {
+                if let Err(error) = handle.bind(py).call_method0("remove") {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+            for (effective, gradient, original_grad) in &restores {
                 if let Err(error) = swap_group_leaf_gradient(
-                    restore.effective.bind(py),
-                    restore.gradient.bind(py),
-                    restore.original_grad.bind(py),
+                    effective.bind(py),
+                    gradient.bind(py),
+                    original_grad.bind(py),
                 ) {
                     if failure.is_none() {
                         failure = Some(error);
                     }
                 }
             }
-        }
-        if let Some(error) = failure {
+            failure.map_or(Ok(()), Err)
+        })();
+        if let Err(error) = result {
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))? =
+                GradientHookCleanup::Unknown(error.clone_ref(py));
             return Err(error);
+        }
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| invalid("gradient-delivery owner is poisoned"))?;
+        let mut restores = self
+            .restores
+            .lock()
+            .map_err(|_| invalid("group gradient restoration is poisoned"))?;
+        let mut cleanup = self
+            .hook_cleanup
+            .lock()
+            .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?;
+        let original = (handles.take(), std::mem::take(&mut *restores));
+        *cleanup = GradientHookCleanup::Complete;
+        drop((cleanup, restores, handles));
+        drop(original);
+        Ok(())
+    }
+
+    fn require_active_hooks(&self) -> PyResult<()> {
+        if !matches!(
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?,
+            GradientHookCleanup::Ready
+        ) {
+            return Err(invalid("gradient hooks are no longer open for recording"));
+        }
+        Ok(())
+    }
+
+    fn require_removed_hooks(&self) -> PyResult<()> {
+        if !matches!(
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?,
+            GradientHookCleanup::Complete
+        ) {
+            return Err(invalid(
+                "original gradient hook cleanup is not known complete",
+            ));
         }
         Ok(())
     }
 }
 
 impl PySemanticPreparedStep {
+    /// Drop original tensor imports only after graph destruction and the
+    /// prepared producer's retirement callback. Hook removal must already be
+    /// known; clearing the roster never substitutes for executing it.
+    fn release_recorded_producer_aliases(&self, py: Python<'_>) -> PyResult<()> {
+        let deliveries = {
+            let ordinary = self
+                .gradient_deliveries
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
+            let mut deliveries = ordinary
+                .iter()
+                .flatten()
+                .map(|owner| owner.clone_ref(py))
+                .collect::<Vec<_>>();
+            #[cfg(feature = "semantic-policy")]
+            {
+                let groups = self.group_gradient_deliveries.lock().map_err(|_| {
+                    PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+                })?;
+                deliveries.extend(groups.iter().flatten().map(|owner| owner.clone_ref(py)));
+            }
+            deliveries
+        };
+        for delivery in &deliveries {
+            let delivery = delivery.borrow(py);
+            delivery.require_removed_hooks()?;
+            if delivery
+                .handles
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
+                .is_some()
+                || !delivery
+                    .restores
+                    .lock()
+                    .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "prepared alias retirement requires known original hook removal",
+                ));
+            }
+        }
+        let continuation = std::mem::take(
+            &mut *self
+                .continuation_producers
+                .lock()
+                .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
+        );
+        let policy = std::mem::take(
+            &mut *self
+                .policy_inputs
+                .lock()
+                .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?,
+        );
+        let ordinary = std::mem::take(
+            &mut *self
+                .gradient_deliveries
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?,
+        );
+        #[cfg(feature = "semantic-policy")]
+        let groups =
+            std::mem::take(&mut *self.group_gradient_deliveries.lock().map_err(|_| {
+                PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+            })?);
+        // Python finalizers never run while a roster or Session lock is held.
+        drop(continuation);
+        drop(policy);
+        drop(ordinary);
+        #[cfg(feature = "semantic-policy")]
+        drop(groups);
+        drop(deliveries);
+        Ok(())
+    }
+
     fn finish_gradient_delivery_recording(&self, py: Python<'_>) -> PyResult<()> {
         let deliveries = self
             .gradient_deliveries
@@ -10152,6 +10385,9 @@ impl PySemanticPreparedStep {
             let member = member.borrow(py);
             let source = member.session.borrow(py);
             source.require_creator()?;
+            if let Some(child) = source.private_replay_custody()? {
+                child.require_target(py, self)?;
+            }
             if member.completed.load(Ordering::Acquire)
                 || !source.importing.load(Ordering::Acquire)
                 || self.session.as_ptr() == member.session.as_ptr()
@@ -10439,6 +10675,7 @@ impl PySemanticPreparedStep {
                 activated_once: AtomicBool::new(group_member.is_none()),
                 restore_on_finish: group_member.is_some(),
                 restores: Mutex::new(Vec::new()),
+                hook_cleanup: Mutex::new(GradientHookCleanup::Ready),
             },
         )?;
         let mut owners = self
@@ -11680,6 +11917,16 @@ impl Drop for PySemanticRetainedReplayMember {
         }
         let _ = Python::try_attach(|py| {
             let session = self.session.borrow(py);
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = session
+                .private_replay_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                child.fail();
+                return;
+            }
             if let Some(owner) = session
                 .inner
                 .lock()
@@ -11732,6 +11979,9 @@ impl PySemanticRetainedReplayMember {
         let target_session = update.session.borrow(py);
         target_session.require_creator()?;
         update.require_task(py, &update.task_use.borrow(py))?;
+        if let Some(child) = source_session.private_replay_custody()? {
+            child.require_target(py, &update)?;
+        }
         let mut use_state = self
             .group_use
             .lock()
@@ -11740,6 +11990,7 @@ impl PySemanticRetainedReplayMember {
             .as_ref()
             .ok_or_else(|| invalid("original group gradient delivery is absent"))?
             .borrow(py);
+        delivery.require_active_hooks()?;
         if !delivery.activated_once.load(Ordering::Acquire)
             || delivery
                 .handles
@@ -11834,6 +12085,65 @@ impl PySemanticRetainedReplayMember {
         update_step: Py<PySemanticPreparedStep>,
     ) -> PyResult<()> {
         self.finish_retained_import(py, Some(update_step))
+    }
+
+    /// Finish this original replay after genuine whole-target cancellation.
+    /// The native phase authenticates its original Update and actual graph
+    /// destruction; no VJP or target completion is inferred or fabricated.
+    fn finish_cancelled_private_segment(&self, py: Python<'_>) -> PyResult<()> {
+        if self.completed.load(Ordering::Acquire) {
+            return Err(invalid("retained replay member has already finished"));
+        }
+        let session = self.session.borrow(py);
+        let child = session.private_replay_custody()?.ok_or_else(|| {
+            invalid("cancelled replay requires its original early native custody")
+        })?;
+        child.require_cancelled_final_use(py, self)?;
+        let deliveries = {
+            let state = self
+                .group_use
+                .lock()
+                .map_err(|_| invalid("retained replay group use is poisoned"))?;
+            if state.completion.is_some() {
+                return Err(invalid(
+                    "cancelled replay cannot replace actual target completion",
+                ));
+            }
+            state
+                .deliveries
+                .iter()
+                .flatten()
+                .map(|delivery| delivery.clone_ref(py))
+                .collect::<Vec<_>>()
+        };
+        for delivery in &deliveries {
+            let delivery = delivery.borrow(py);
+            delivery.require_removed_hooks()?;
+            if delivery
+                .handles
+                .lock()
+                .map_err(|_| invalid("cancelled gradient hook custody is poisoned"))?
+                .is_some()
+                || !delivery
+                    .restores
+                    .lock()
+                    .map_err(|_| invalid("cancelled gradient restoration custody is poisoned"))?
+                    .is_empty()
+            {
+                return Err(invalid(
+                    "cancelled replay still owns active original gradient delivery",
+                ));
+            }
+        }
+        let retained = {
+            let mut state = self
+                .group_use
+                .lock()
+                .map_err(|_| invalid("retained replay group use is poisoned"))?;
+            std::mem::replace(&mut state.deliveries, std::array::from_fn(|_| None))
+        };
+        drop((retained, deliveries));
+        self.finish_original_import(py)
     }
 }
 
@@ -11970,11 +12280,20 @@ impl PySemanticRetainedReplayMember {
                 .require_retired_prepared_step(&update.inner)
                 .map_err(xlog_err)?;
         }
+        self.finish_original_import(py)
+    }
+
+    fn finish_original_import(&self, py: Python<'_>) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         if !session.importing.load(Ordering::Acquire) {
             return Err(invalid("retained original import was already closed"));
         }
+        // Claim the invocation's original one-shot final use before any
+        // Python cleanup or authority refresh. A rejected reentry must not
+        // reach the finalizer that also handles first-entry native failures.
+        let invocation = self.invocation.borrow(py);
+        invocation.start_final_use()?;
         let issued = self.task_use.borrow(py);
         let acquired = self.parent.borrow(py);
         let controller = PySemanticTransitionController {
@@ -11998,8 +12317,6 @@ impl PySemanticRetainedReplayMember {
                 ));
             }
             drop(state);
-            let invocation = self.invocation.borrow(py);
-            invocation.start_final_use()?;
             owner
                 .finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
                 .map_err(xlog_err)
@@ -13846,6 +14163,43 @@ impl PySemanticTransitionController {
         )
     }
 
+    /// Retain one original historical replay before its ColdTask allocates.
+    /// step_index addresses the unchanged private group's frozen roster.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, step_index, replay_ordinal))]
+    fn prepare_private_replay_child(
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        step_index: &Bound<'_, PyAny>,
+        replay_ordinal: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<learning_phase::PySemanticPrivateReplayChild>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        self.require_issued(&task_use.borrow(py))?;
+        if self.session.as_ptr() != task_use.borrow(py).session.as_ptr() {
+            return Err(invalid("private replay task belongs to another Session"));
+        }
+        let phase = private_execution_owner(py, &session)?.ok_or_else(|| {
+            invalid("private replay construction requires its original native phase")
+        })?;
+        let step_index = usize::try_from(ColdValue::read(step_index, &mut 128, 0)?.unsigned()?)
+            .map_err(|_| invalid("private replay step index exceeds native address space"))?;
+        let replay_ordinal = ColdValue::read(replay_ordinal, &mut 128, 0)?.unsigned()?;
+        let child = phase.borrow(py).prepare_original_replay_child(
+            py,
+            &phase,
+            &self.session,
+            &task_use,
+            step_index,
+            replay_ordinal,
+        )?;
+        Py::new(
+            py,
+            learning_phase::PySemanticPrivateReplayChild { inner: child },
+        )
+    }
+
     /// Record one fixed bounded segment without submitting it. The original
     /// producer prepares cold storage on consumer_stream and returns an owner
     /// with memory_scope, prepare_unpublished_successors(),
@@ -13926,8 +14280,9 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_non_submission: false,
+            cancelled_checkpoint: None,
         };
-        let (scope, snapshot, handles, stream) = {
+        let (scope, snapshot, handles, stream, checkpoint_phase) = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
             if session
@@ -13939,7 +14294,8 @@ impl PySemanticTransitionController {
                 return Err(invalid("previous prepared segment has not been retired"));
             }
             let mut state = issued.state()?;
-            if let CheckpointTaskPhase::Segment(operation) = checkpoint_task_phase(&state)? {
+            let checkpoint_phase = checkpoint_task_phase(&state)?;
+            if let CheckpointTaskPhase::Segment(operation) = &checkpoint_phase {
                 issued.require_learning_operation(&owner, &operation)?;
             }
             let scope = state.begin_build()?;
@@ -13958,7 +14314,13 @@ impl PySemanticTransitionController {
                 .prepare_segment_steps(transitions, cold_capacity)
                 .map_err(xlog_err)?;
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
-            (scope, state.snapshot.canonical.clone(), handles, stream)
+            (
+                scope,
+                state.snapshot.canonical.clone(),
+                handles,
+                stream,
+                checkpoint_phase,
+            )
         };
         #[cfg(feature = "semantic-policy")]
         if let Some(private) = &private {
@@ -14299,7 +14661,10 @@ impl PySemanticTransitionController {
                     guard.native_non_submission = true;
                     private
                         .borrow(py)
-                        .retain_private_non_submission(py, &session, &issued, &scope, proof)
+                        .retain_private_non_submission(py, &session, &issued, &scope, proof)?;
+                    guard.cancelled_checkpoint =
+                        Some((Arc::clone(&scope), checkpoint_phase.clone()));
+                    Ok(())
                 })();
                 // Preserve the original producer failure and any failed
                 // cancellation cause. No callback or interval is repeated.
@@ -14386,6 +14751,7 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_non_submission: false,
+            cancelled_checkpoint: None,
         };
         let expected = {
             let mut owner = session.owner()?;
@@ -14778,6 +15144,10 @@ impl PySemanticTransitionController {
                 .map_err(xlog_err)?
         };
         drop(graph);
+        session
+            .owner()?
+            .require_completed_prepared_graph_retirement()
+            .map_err(xlog_err)?;
         let prepared = {
             let retained = resources
                 .producers
@@ -14816,20 +15186,7 @@ impl PySemanticTransitionController {
         }
         for step in &steps {
             let step = step.borrow(py);
-            let continuation = std::mem::take(
-                &mut *step
-                    .continuation_producers
-                    .lock()
-                    .map_err(|_| invalid("continuation producer ownership mutex is poisoned"))?,
-            );
-            let policy = std::mem::take(
-                &mut *step
-                    .policy_inputs
-                    .lock()
-                    .map_err(|_| invalid("prepared policy inputs mutex is poisoned"))?,
-            );
-            drop(policy);
-            drop(continuation);
+            step.release_recorded_producer_aliases(py)?;
         }
         drain_export_owners();
         for step in &steps {
@@ -14891,6 +15248,12 @@ impl PySemanticTransitionController {
     fn abort(&self, py: Python<'_>) -> PyResult<()> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if session.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "original private replay custody prohibits ordinary abort",
+            ));
+        }
         if session.learning_preparing.load(Ordering::Acquire) {
             return Err(invalid("resolve or abandon the retained learning-phase transition before aborting its Session"));
         }
@@ -15196,7 +15559,20 @@ impl PySemanticTransitionController {
     ) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.require_controller(&self.identity)?;
+        }
         let mut import = ColdImportGuard::begin(&session, None)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.retain_callbacks(vec![
+                restore_invocation.clone().unbind(),
+                pack_policy.clone().unbind(),
+                finish_invocation.clone().unbind(),
+                refresh_snapshot.clone().unbind(),
+            ])?;
+        }
         let mut budget = 16 * 1024 * 1024;
         let proposal_capacity = ColdValue::read(proposal_capacity, &mut 128, 0)?.unsigned()?;
         session
@@ -15291,6 +15667,15 @@ impl PySemanticTransitionController {
         let replay_selection = ColdValue::read(replay_selection, &mut budget, 0)?;
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &replay_selection)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            if !retain_policy {
+                return Err(invalid(
+                    "private replay must retain its original policy invocation",
+                ));
+            }
+            child.require_projection(py, selection, &training_objective_value, &values[3])?;
+        }
         let observations = session
             .owner()?
             .task_observation_roots(
@@ -15406,6 +15791,10 @@ impl PySemanticTransitionController {
             },
         )?;
         let mut retained = None;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = session.private_replay_custody()? {
+            child.retain_import_task(py, &task_use)?;
+        }
         if let (Some(ordinal), Some(material), Some(kind)) =
             (selection, selected_material, transition)
         {
@@ -15433,6 +15822,10 @@ impl PySemanticTransitionController {
             }
         }
         if let Some(member) = retained {
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = session.private_replay_custody()? {
+                child.retain_member(py, &member)?;
+            }
             let result = (task_use, member).into_pyobject(py)?.unbind().into_any();
             import.committed = true;
             import.deferred = true;
@@ -16017,6 +16410,15 @@ impl PySemanticTransitionController {
                 .borrow(py)
                 .require_private_checkpoint_save(py, self, task_use, parent)?;
         }
+        #[cfg(feature = "semantic-policy")]
+        let cancellation = private_execution_owner(py, &self.session.borrow(py))?
+            .map(|private| {
+                private
+                    .borrow(py)
+                    .cancelled_private_checkpoint_proof(py, task_use, parent)
+            })
+            .transpose()?
+            .flatten();
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
                 "checkpoint save requires one trusted model-state serializer",
@@ -16051,6 +16453,17 @@ impl PySemanticTransitionController {
             let prior_snapshot = state.snapshot.canonical.clone();
             drop(state);
             let lease = parent.lease()?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(proof) = &cancellation {
+                owner
+                    .quiesce_cancelled_prepared_checkpoint(&lease, proof, &streams)
+                    .map_err(xlog_err)?;
+            } else {
+                owner
+                    .quiesce_published_reader(&lease, &streams)
+                    .map_err(xlog_err)?;
+            }
+            #[cfg(not(feature = "semantic-policy"))]
             owner
                 .quiesce_published_reader(&lease, &streams)
                 .map_err(xlog_err)?;
@@ -17639,6 +18052,10 @@ impl PySemanticTransitionController {
             },
         )?;
         let acquired = parent.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = import.session.private_replay_custody()? {
+            child.retain_parent(py, &parent)?;
+        }
         let expected = {
             let owner = import.session.owner()?;
             let state = self.execution_state(py, &issued, &acquired, &owner, Some(import))?;
@@ -18769,6 +19186,8 @@ mod tests {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            private_replay_child: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense: Arc::new(Mutex::new(super::ProposalExpense {
                 capacity: None,

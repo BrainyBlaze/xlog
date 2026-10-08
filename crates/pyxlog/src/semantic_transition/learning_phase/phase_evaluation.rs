@@ -17,17 +17,25 @@ pub(super) struct EvaluationOwners {
     pub(super) model: Py<PyAny>,
 }
 
-pub(super) struct CompletedSegmentTerminal {
+pub(super) struct SegmentTerminalGroup {
     pub(super) group_ordinal: u64,
     pub(super) count: u64,
     pub(super) parent: xlog_cuda::SemanticPublishedIdentity,
+}
+
+pub(super) struct CancelledSegmentTerminal {
+    pub(super) group: SegmentTerminalGroup,
+    pub(super) proof: xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    pub(super) scope: Arc<()>,
+    pub(super) preparation: [u64; 2],
 }
 
 pub(super) struct SegmentTerminalInput {
     pub(super) owners: EvaluationOwners,
     pub(super) branch: &'static str,
     pub(super) instruction: Vec<u8>,
-    pub(super) completed: CompletedSegmentTerminal,
+    pub(super) group: SegmentTerminalGroup,
+    pub(super) cancellation: Option<CancelledSegmentTerminal>,
 }
 
 pub(super) struct PhaseEvaluationAndTerminal {
@@ -51,7 +59,8 @@ pub(super) struct PhaseEvaluationAndTerminal {
     cold_stage: EvaluationColdStage,
     native_evaluation: Option<Py<PySemanticModelEvaluation>>,
     cancelled: Option<SemanticCancelledModelEvaluation>,
-    completed_segment: Option<CompletedSegmentTerminal>,
+    completed_segment: Option<SegmentTerminalGroup>,
+    cancelled_segment: Option<CancelledSegmentTerminal>,
     terminal_expense: Option<(u64, u64, u64)>,
     custody: Option<SemanticColdNativeWork>,
     work_closed: bool,
@@ -102,12 +111,17 @@ pub(in crate::semantic_transition) enum EvaluationColdStage {
 
 impl PhaseEvaluationAndTerminal {
     fn terminal_known(&self) -> bool {
-        self.cancelled.is_some() || self.completed_segment.is_some()
+        self.cancelled.is_some()
+            || self.completed_segment.is_some()
+            || self.cancelled_segment.is_some()
     }
 
     fn terminal_parent(&self) -> PyResult<xlog_cuda::SemanticPublishedIdentity> {
         if let Some(cancelled) = &self.cancelled {
             return Ok(cancelled.parent());
+        }
+        if let Some(cancelled) = &self.cancelled_segment {
+            return Ok(cancelled.group.parent);
         }
         self.completed_segment
             .as_ref()
@@ -116,7 +130,7 @@ impl PhaseEvaluationAndTerminal {
     }
 
     fn private_snapshot_region(&self) -> usize {
-        if self.completed_segment.is_some() {
+        if self.completed_segment.is_some() || self.cancelled_segment.is_some() {
             0
         } else {
             3
@@ -124,7 +138,7 @@ impl PhaseEvaluationAndTerminal {
     }
 
     fn execution_cleanup_region(&self) -> usize {
-        if self.completed_segment.is_some() {
+        if self.completed_segment.is_some() || self.cancelled_segment.is_some() {
             1
         } else if self.branch == "source" {
             3
@@ -134,7 +148,7 @@ impl PhaseEvaluationAndTerminal {
     }
 
     fn private_retirement_region(&self) -> usize {
-        if self.completed_segment.is_some() {
+        if self.completed_segment.is_some() || self.cancelled_segment.is_some() {
             2
         } else {
             5
@@ -193,6 +207,21 @@ impl Drop for EvaluationColdVisibility<'_> {
 }
 
 impl PySemanticLearningPhaseTransition {
+    pub(super) fn cancelled_segment_terminal_matches(
+        &self,
+        branch: &str,
+        ordinal: u64,
+        count: u64,
+    ) -> PyResult<bool> {
+        Ok(self.phase_evaluations()?.last().is_some_and(|current| {
+            current.branch == branch
+                && current.refusal.is_some()
+                && current.cancelled_segment.as_ref().is_some_and(|segment| {
+                    segment.group.group_ordinal == ordinal && segment.group.count == count
+                })
+        }))
+    }
+
     pub(super) fn completed_segment_terminal_matches(
         &self,
         branch: &str,
@@ -208,7 +237,7 @@ impl PySemanticLearningPhaseTransition {
         }))
     }
 
-    pub(super) fn finish_segment_budget_refusal(
+    pub(super) fn finish_segment_terminal_refusal(
         &self,
         py: Python<'_>,
         original: PyErr,
@@ -231,8 +260,19 @@ impl PySemanticLearningPhaseTransition {
         self.preparation_inputs
             .require_program(py, &self.scientific_owner)?;
         let input = self.private_segment_terminal_input(py)?.ok_or_else(|| {
-            invalid("segment terminal closure lacks a known complete budget refusal")
+            invalid("segment terminal closure lacks its original known native disposition")
         })?;
+        let cancelled = input.cancellation.is_some();
+        let cause = if cancelled {
+            cold_restore::PRIVATE_SEGMENT_CANCELLED
+        } else {
+            cold_restore::PRIVATE_SEGMENT_BUDGET_REFUSED
+        };
+        let interval_ordinal = if cancelled {
+            input.group.group_ordinal
+        } else {
+            self.preparation_inputs.terminal_cleanup.ordinal
+        };
         let target = self.preparation_inputs.terminal_cleanup;
         if target != TerminalCleanupTarget::read(&self.preparation_inputs.frozen_program)? {
             return Err(invalid(
@@ -249,10 +289,10 @@ impl PySemanticLearningPhaseTransition {
         let parent = input.owners.parent.borrow(py).identity(py)?;
         let parent = ColdValue::read(parent.bind(py), &mut 1024, 0)?;
         let reason = ColdValue::Sequence(vec![
-            ColdValue::Text(cold_restore::PRIVATE_SEGMENT_BUDGET_REFUSED.to_owned()),
+            ColdValue::Text(cause.to_owned()),
             parent,
-            ColdValue::Integer(input.completed.group_ordinal.to_string()),
-            ColdValue::Integer(input.completed.count.to_string()),
+            ColdValue::Integer(input.group.group_ordinal.to_string()),
+            ColdValue::Integer(input.group.count.to_string()),
             ColdValue::Text(input.branch.to_owned()),
         ]);
         let material = ColdValue::Sequence(vec![
@@ -303,7 +343,8 @@ impl PySemanticLearningPhaseTransition {
                 cold_stage: EvaluationColdStage::TerminalPrivateCheckpoint,
                 native_evaluation: None,
                 cancelled: None,
-                completed_segment: Some(input.completed),
+                completed_segment: (!cancelled).then_some(input.group),
+                cancelled_segment: input.cancellation,
                 terminal_expense: None,
                 custody: None,
                 work_closed: false,
@@ -315,7 +356,7 @@ impl PySemanticLearningPhaseTransition {
                 released: false,
                 budget_exceeded: false,
                 refusal: Some(ReadOnlyTerminalRefusal {
-                    cause: cold_restore::PRIVATE_SEGMENT_BUDGET_REFUSED,
+                    cause,
                     prefix,
                     reason,
                     private_save_entered: false,
@@ -340,16 +381,18 @@ impl PySemanticLearningPhaseTransition {
         }
         // Begin before the first allocation/save/cleanup on this frozen target,
         // after the original group has released its known physical interval.
-        self.preparation_inputs
-            .resource_observer
-            .begin(py, target.ordinal)?;
+        if !cancelled {
+            self.preparation_inputs
+                .resource_observer
+                .begin(py, interval_ordinal)?;
+        }
         let source = self.source.borrow(py);
         let work = source
             .owner()?
             .prepare_cold_model_work(
                 &*self.parent.borrow(py).lease()?,
                 self.preparation_inputs.cold_model_work_capacity,
-                target.ordinal,
+                interval_ordinal,
                 self.records()?.confirmed_admission()?,
             )
             .map_err(xlog_err)?;
@@ -589,7 +632,7 @@ impl PySemanticLearningPhaseTransition {
         if !verified {
             self.verify_terminal_source(py)?;
         }
-        let (numerical, expense) = {
+        let (numerical, preparation, expense) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained cancellation");
             (
@@ -597,6 +640,10 @@ impl PySemanticLearningPhaseTransition {
                     .cancelled
                     .as_ref()
                     .map(|cancelled| (cancelled.model_work(), cancelled.model_calls())),
+                current
+                    .cancelled_segment
+                    .as_ref()
+                    .map(|segment| segment.preparation),
                 current.terminal_expense,
             )
         };
@@ -616,6 +663,14 @@ impl PySemanticLearningPhaseTransition {
                 calls = calls
                     .checked_add(native_calls)
                     .ok_or_else(|| invalid("terminal calls overflowed"))?;
+            }
+            if let Some([preparation_work, preparation_calls]) = preparation {
+                work = work
+                    .checked_add(preparation_work)
+                    .ok_or_else(|| invalid("cancelled whole-interval work overflowed"))?;
+                calls = calls
+                    .checked_add(preparation_calls)
+                    .ok_or_else(|| invalid("cancelled whole-interval calls overflowed"))?;
             }
             self.phase_evaluations()?
                 .last_mut()
@@ -663,6 +718,41 @@ impl PySemanticLearningPhaseTransition {
         }
         refusal.private_save_admitted = true;
         Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn cancelled_private_checkpoint_proof(
+        &self,
+        py: Python<'_>,
+        task: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>> {
+        let retained = self.phase_evaluations()?;
+        let Some(current) = retained
+            .last()
+            .filter(|current| current.cancelled_segment.is_some())
+        else {
+            return Ok(None);
+        };
+        let cancelled = current
+            .cancelled_segment
+            .as_ref()
+            .expect("original native cancellation");
+        let refusal = current.refusal.as_ref().expect("original terminal custody");
+        if !self.phase_evaluation_active.load(Ordering::Acquire)
+            || current.cold_stage != EvaluationColdStage::TerminalPrivateCheckpoint
+            || !refusal.private_save_entered
+            || !refusal.private_save_admitted
+            || refusal.private_save_verified
+            || refusal.private_checkpoint.is_some()
+            || !std::ptr::eq(task, &*current.owners()?.task.borrow(py))
+            || !std::ptr::eq(parent, &*current.owners()?.parent.borrow(py))
+            || !matches!(&task.state()?.phase, TaskUsePhase::ArenaPreparing(original)
+                if matches!(original.as_ref(), TaskUsePhase::CancelledPrivate { scope, .. }
+                    if Arc::ptr_eq(scope, &cancelled.scope)))
+        {
+            return Err(invalid("cancelled snapshot requires its original admitted full private save and native scope"));
+        }
+        Ok(Some(cancelled.proof.clone()))
     }
 
     fn save_terminal_private_checkpoint(&self, py: Python<'_>) -> PyResult<()> {
@@ -819,6 +909,31 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    fn retire_cancelled_private_segment(&self, py: Python<'_>) -> PyResult<()> {
+        let input = {
+            let retained = self.phase_evaluations()?;
+            let current = retained.last().expect("retained terminal custody");
+            let Some(cancelled) = &current.cancelled_segment else {
+                return Ok(());
+            };
+            let refusal = current
+                .refusal
+                .as_ref()
+                .expect("original cancelled refusal");
+            if !refusal.private_save_verified || !refusal.cleanup_completed {
+                return Err(invalid("cancelled native retirement precedes full private Q and original failed-frame release"));
+            }
+            (
+                current.branch,
+                cancelled.group.group_ordinal,
+                cancelled.group.count,
+                cancelled.proof.clone(),
+                Arc::clone(&cancelled.scope),
+            )
+        };
+        self.retire_original_cancelled_group(py, input.0, input.1, input.2, &input.3, &input.4)
+    }
+
     fn retire_terminal_private_owners(&self, py: Python<'_>) -> PyResult<()> {
         let (parent, task, session, region, returned, entered, dropped) = {
             let mut retained = self.phase_evaluations()?;
@@ -879,9 +994,13 @@ impl PySemanticLearningPhaseTransition {
                 let session = session.borrow(py);
                 let original_parent = parent.borrow(py);
                 let issued = task.borrow(py);
-                let _reads = ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
                 let work = region.borrow(py);
                 let _scope = ColdCallbackScope::enter(py, &session, &work, region.clone_ref(py))?;
+                // Native graph/step retirement requires import exclusion and
+                // the original private task, not a checkpoint-read wrapper.
+                // Both operations remain inside the same measured cold region.
+                self.retire_cancelled_private_segment(py)?;
+                let _reads = ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
                 if !callback.bind(py).call1((model,))?.is_none() {
                     return Err(invalid(
                         "cancelled private retirement requires its original known None completion",
@@ -1243,7 +1362,13 @@ impl PySemanticLearningPhaseTransition {
                 current
                     .completed_segment
                     .as_ref()
-                    .map(|segment| (segment.group_ordinal, segment.count)),
+                    .or_else(|| {
+                        current
+                            .cancelled_segment
+                            .as_ref()
+                            .map(|segment| &segment.group)
+                    })
+                    .map(|segment| (segment.group_ordinal, segment.count, refusal.cause)),
             )
         };
         if !recorded {
@@ -1256,8 +1381,8 @@ impl PySemanticLearningPhaseTransition {
             arguments.set_item("operation_ordinal", ordinal)?;
             arguments.set_item("branch", branch)?;
             arguments.set_item("resource_usage", (usage[0], usage[1], usage[2]))?;
-            let callback = if let Some((start, count)) = segment {
-                arguments.set_item("cause", cold_restore::PRIVATE_SEGMENT_BUDGET_REFUSED)?;
+            let callback = if let Some((start, count, cause)) = segment {
+                arguments.set_item("cause", cause)?;
                 arguments.set_item("group_start", start)?;
                 arguments.set_item("group_count", count)?;
                 self.scientific_owner
@@ -1276,10 +1401,11 @@ impl PySemanticLearningPhaseTransition {
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained cancellation");
             current.recorded = true;
-            current.budget_exceeded = usage
-                .into_iter()
-                .zip(current.budget)
-                .any(|(actual, limit)| actual > limit);
+            current.budget_exceeded = current.cancelled_segment.is_none()
+                && usage
+                    .into_iter()
+                    .zip(current.budget)
+                    .any(|(actual, limit)| actual > limit);
         }
         let history = self
             .phase_evaluations()?
@@ -1299,9 +1425,9 @@ impl PySemanticLearningPhaseTransition {
                 ));
             }
             let history: Arc<[u8]> = Arc::from(value.cast::<PyBytes>()?.as_bytes());
-            if let Some((start, count)) = segment {
+            if let Some((start, count, cause)) = segment {
                 cold_restore::require_segment_terminal_history(
-                    &prefix, &history, ordinal, start, count, branch, usage,
+                    &prefix, &history, ordinal, start, count, branch, cause, usage,
                 )?;
             } else {
                 cold_restore::require_terminal_history(
@@ -1866,7 +1992,7 @@ impl PySemanticLearningPhaseTransition {
         Self::require_evaluation_entry(py, current)?;
         if !current.ready
             || !(current.evaluation_admitted
-                || current.completed_segment.is_some()
+                || (current.completed_segment.is_some() || current.cancelled_segment.is_some())
                     && current.refusal.is_some()
                     && matches!(
                         current.cold_stage,
@@ -2020,6 +2146,7 @@ impl PySemanticLearningPhaseTransition {
                 native_evaluation: None,
                 cancelled: None,
                 completed_segment: None,
+                cancelled_segment: None,
                 terminal_expense: None,
                 custody: None,
                 work_closed: false,
@@ -2132,6 +2259,7 @@ impl PySemanticLearningPhaseTransition {
             .last_mut()
             .ok_or_else(|| invalid("source evaluation lost its original scheduled invocation"))?;
         if current.completed_segment.is_some()
+            || current.cancelled_segment.is_some()
             || !std::ptr::eq(controller, &*current.owners()?.controller.borrow(py))
             || !std::ptr::eq(task, &*current.owners()?.task.borrow(py))
             || !std::ptr::eq(parent, &*current.owners()?.parent.borrow(py))
@@ -2161,7 +2289,7 @@ impl PySemanticLearningPhaseTransition {
         py: Python<'_>,
         current: &PhaseEvaluationAndTerminal,
     ) -> PyResult<()> {
-        if current.completed_segment.is_some() {
+        if current.completed_segment.is_some() || current.cancelled_segment.is_some() {
             return if current.entries.is_none() && current.refusal.is_some() {
                 Ok(())
             } else {
@@ -2331,6 +2459,7 @@ impl PySemanticLearningPhaseTransition {
                     native_evaluation: None,
                     cancelled: None,
                     completed_segment: None,
+                    cancelled_segment: None,
                     terminal_expense: None,
                     custody: None,
                     work_closed: false,

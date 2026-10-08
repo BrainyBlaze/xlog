@@ -108,6 +108,39 @@ observer again and must reproduce the same identities and truths; a mismatch
 refuses the native session. Cold content observation does not run the model or
 prefill its cache.
 
+An original private Update can issue a one-shot historical child with
+`controller.prepare_private_replay_child(task_use, step_index=..., replay_ordinal=...)`.
+`step_index` is the zero-based position in that private group's unchanged roster,
+not a replacement schedule or an execution result. The native owner requires an
+original Update and an episode row in its frozen actor/edit membership; the same
+row in another Update has separate custody. Pass the returned
+`SemanticPrivateReplayChild` unchanged as `private_replay_child=` to the same
+`SemanticTransitionColdTask` constructor before construction begins. Ordinary
+fresh-task callers omit this keyword.
+
+The child uses the original provider, allocation budget, serial stream and cold
+native-work owner. The phase retains its actual Session before the observer runs,
+then the original Controller, import callbacks, issued task, acquired reader,
+retained member and each target-bound gradient delivery. A construction/import
+exception does not turn an unfinished child into an ordinary aborted Session or
+authorize a retry. Saved child aliases grant native access only in their
+original phase callback; public abort and observed-only close cannot discard them.
+
+After genuine whole-target cancellation and confirmed original graph destruction,
+the same prepared producer may call
+`member.finish_cancelled_private_segment()` in the original private-retirement
+region. This finishes the source's actual retained policy invocation and canonical
+import cleanup/full successor verification once, without a VJP, publication or
+fabricated target completion. Original gradient hooks/restorations must already
+be removed. The producer then retires its remaining Runtime aliases before
+returning from its original `finish_segment()`. Native joins/releases the retained
+child Sessions in that same cold region and shared accounting owner before target
+storage retirement. Normal completed segments still use the ordinary member
+final-use path after target-step retirement; their child Sessions release before
+the same retirement report closes and before model adoption begins.
+Unknown child import, final use or graph destruction retains its
+own original custody; target non-submission does not prove that child's outcome.
+
 The semantic controller's `task_observation_roots` and `import_task` methods
 share five explicit keyword arguments in addition to their admission and
 authority inputs. `import_task` also requires `task_priority_levels`:
@@ -1030,10 +1063,46 @@ exceedance; it does not claim the future final phase was reached. The comparison
 result is absent because acceptance never entered. Source continuation still
 requires exact signed 0/3 readback, full private retirement and known release.
 
+An original private segment cancelled before submission uses the distinct cause
+`private-segment-cancelled`. Only the native proof for the entire unchanged roster
+admits this recovery; an exception or Python history alone does not. Native saves
+the actual full private Q while retaining the original parent, model and aliases.
+The refused private TaskUse gains no ordinary execution or public retirement
+rights. Native Session deallocation also requires completed destruction of every
+previous executable, even after its replay handle has left the Session; an empty
+executable slot does not prove graph retirement. Its original cold owner remains
+available only inside the authenticated terminal callback region.
+
+After verified full Q, `release_cancelled_phase_execution()` releases the original
+failed frame and permitted producer/autograd aliases, but retains the segment,
+slab, pool, storage and workspace lease. Native then requires confirmed destruction
+of its original builder/executable graph, not merely a dropped Rust handle. Deferred
+or unknown destruction cannot enter the original prepared owner's `finish_segment()`.
+That callback runs once in the private-retirement region before remaining native
+step/resource retirement. The original private model retirement then releases its
+workspace and storage before establishing quiescence and retiring its Session.
+This native cancellation boundary follows a returned prepared owner; losing that
+original owner blocks retirement instead of skipping its callback. No completion
+flag or numerical result is fabricated.
+
+This recovery does not open a new physical interval or spend the terminal cleanup
+reserve. Its sole original finish measures preparation, full Q, failed-frame
+cleanup, graph/private retirement and unchanged Source verification/serialization.
+`resource_usage` records their actual work/calls and absolute physical peak once.
+The terminal record still uses the predeclared `operation_ordinal=len(schedule)`;
+`group_start` identifies the original interval and `group_count` the full planned
+roster. Live and fresh verification require `len(records)==group_start`, preserve
+the prefix exactly, and add only the existing six-field `terminal_cleanup` object.
+There are no completed, refused or skipped step rows for the cancelled group.
+Its usage is not compared with a separate cleanup reserve or pooled step limits
+to assert budget passage. Established exceedances and cumulative Proposal expense
+remain unchanged. Unknown save, cleanup, retirement, Source verification, history,
+finish/read or release retains custody without repeating callbacks or intervals.
+
 `pending.refusal_outcome` is `None` until exact terminal readback, then the readonly
 tuple `(cause, original_result_bytes, full_history_bytes, signed_terminal_record)`.
 The two proven evaluation-cancellation cases and the completed-segment budget
-refusal above have `original_result=None`;
+refusal and pre-submission segment cancellation above have `original_result=None`;
 all complete-prefix causes retain their exact original comparison bytes.
 `resolve_checkpoint()` or `continue_preparation()` continues that same retained
 refusal without another scientific comparison, model call, retirement or write.
