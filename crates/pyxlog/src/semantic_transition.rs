@@ -2802,6 +2802,8 @@ struct PreparedPythonSegment {
     task_use: Py<PySemanticTransitionTaskUse>,
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
+    #[cfg(feature = "semantic-policy")]
+    checkpoint_phase: CheckpointTaskPhase,
     producers_retired: bool,
     // Retain the entire native roster before entering any post-completion
     // Python callback. Neither a lost return nor callback failure resubmits it.
@@ -2828,6 +2830,32 @@ struct PreparedBuildGuard<'a> {
 }
 
 struct PreparedRetirementGuard<'a>(&'a AtomicBool);
+
+#[cfg(feature = "semantic-policy")]
+impl PreparedBuildGuard<'_> {
+    fn retain_private_cancellation(
+        &mut self,
+        py: Python<'_>,
+        private: &learning_phase::PySemanticLearningPhaseTransition,
+        scope: &Arc<()>,
+        steps: &[Py<PySemanticPreparedStep>],
+        checkpoint: &CheckpointTaskPhase,
+    ) -> PyResult<()> {
+        let steps = steps
+            .iter()
+            .map(|step| step.borrow(py).inner.clone())
+            .collect::<Vec<_>>();
+        let proof = self
+            .session
+            .owner()?
+            .cancel_prepared_segment_before_submission(&steps)
+            .map_err(xlog_err)?;
+        self.native_non_submission = true;
+        private.retain_private_non_submission(py, self.session, self.task_use, scope, proof)?;
+        self.cancelled_checkpoint = Some((Arc::clone(scope), checkpoint.clone()));
+        Ok(())
+    }
+}
 
 impl Drop for PreparedRetirementGuard<'_> {
     fn drop(&mut self) {
@@ -14201,7 +14229,9 @@ impl PySemanticTransitionController {
     }
 
     /// Record one fixed bounded segment without submitting it. The original
-    /// producer prepares cold storage on consumer_stream and returns an owner
+    /// producer exposes its original prepared_segment_owner() before fallible
+    /// preparation. prepare_segment prepares cold storage on consumer_stream
+    /// and returns that same owner
     /// with memory_scope, prepare_unpublished_successors(),
     /// enqueue_step(step, bank), and finish_segment() methods.
     /// memory_scope spans allocation/recording through EndCapture/instantiate;
@@ -14358,6 +14388,7 @@ impl PySemanticTransitionController {
                 task_use: task_use.clone_ref(py),
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
+                checkpoint_phase: checkpoint_phase.clone(),
                 producers_retired: false,
                 #[cfg(feature = "semantic-policy")]
                 outcomes: None,
@@ -14365,27 +14396,54 @@ impl PySemanticTransitionController {
                 completion: None,
             });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
+        let prepared_owner = recording_callback(check, || {
+            producer.bind(py).getattr("prepared_segment_owner")
+        })?;
+        let original_prepared = recording_callback(check, || prepared_owner.call0())?;
+        resources
+            .producers
+            .lock()
+            .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
+            .push(original_prepared.clone().unbind());
         let kwargs = PyDict::new(py);
         kwargs.set_item(
             "steps",
             PyTuple::new(py, steps.iter().map(|step| step.clone_ref(py)))?,
         )?;
         kwargs.set_item("consumer_stream", stream.cu_stream() as u64)?;
-        let prepare = recording_callback(check, || producer.bind(py).getattr("prepare_segment"))?;
-        #[cfg(feature = "semantic-policy")]
-        if let Some(private) = &private {
-            private
-                .borrow(py)
-                .begin_private_model_preparation(py, &session, &issued, false)?;
+        let preparation = (|| {
+            let prepare =
+                recording_callback(check, || producer.bind(py).getattr("prepare_segment"))?;
+            if let Some(private) = &private {
+                private
+                    .borrow(py)
+                    .begin_private_model_preparation(py, &session, &issued, false)?;
+            }
+            recording_callback(check, || {
+                prepare.call((task_use.clone_ref(py),), Some(&kwargs))
+            })
+        })();
+        let prepared = match preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(private) = &private {
+                    let cancellation = guard.retain_private_cancellation(
+                        py,
+                        &private.borrow(py),
+                        &scope,
+                        &steps,
+                        &checkpoint_phase,
+                    );
+                    return finish_with_cleanup(py, Err(error), cancellation);
+                }
+                return Err(error);
+            }
+        };
+        if prepared.as_ptr() != original_prepared.as_ptr() {
+            return Err(invalid(
+                "preparation must return its original retained prepared owner",
+            ));
         }
-        let prepared = recording_callback(check, || {
-            prepare.call((task_use.clone_ref(py),), Some(&kwargs))
-        })?;
-        resources
-            .producers
-            .lock()
-            .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
-            .push(prepared.clone().unbind());
         let memory = recording_callback(check, || prepared.getattr("memory_scope"))?;
         resources
             .producers
@@ -14649,23 +14707,13 @@ impl PySemanticTransitionController {
                 // Capture and pool exit have returned with known cleanup. The
                 // native whole roster, not a Python entered/pending flag, must
                 // exclude submission and join every actual preparation stream.
-                let native_steps = steps
-                    .iter()
-                    .map(|step| step.borrow(py).inner.clone())
-                    .collect::<Vec<_>>();
-                let cancellation = (|| {
-                    let proof = session
-                        .owner()?
-                        .cancel_prepared_segment_before_submission(&native_steps)
-                        .map_err(xlog_err)?;
-                    guard.native_non_submission = true;
-                    private
-                        .borrow(py)
-                        .retain_private_non_submission(py, &session, &issued, &scope, proof)?;
-                    guard.cancelled_checkpoint =
-                        Some((Arc::clone(&scope), checkpoint_phase.clone()));
-                    Ok(())
-                })();
+                let cancellation = guard.retain_private_cancellation(
+                    py,
+                    &private.borrow(py),
+                    &scope,
+                    &steps,
+                    &checkpoint_phase,
+                );
                 // Preserve the original producer failure and any failed
                 // cancellation cause. No callback or interval is repeated.
                 return finish_with_cleanup(py, recorded, cancellation);
@@ -14720,7 +14768,7 @@ impl PySemanticTransitionController {
             .text()?
             .to_owned();
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
-        let (scope, steps) = {
+        let (scope, steps, checkpoint_phase) = {
             let stored = session
                 .prepared_segment
                 .lock()
@@ -14738,13 +14786,18 @@ impl PySemanticTransitionController {
                     .iter()
                     .map(|step| step.clone_ref(py))
                     .collect::<Vec<_>>(),
+                stored.checkpoint_phase.clone(),
             )
         };
-        if let Some(private) = private_execution_owner(py, &session)? {
-            private
-                .borrow(py)
-                .finish_private_group_preparation(py, &session, &issued, &scope)?;
-        }
+        let private = private_execution_owner(py, &session)?;
+        let private_parent = private
+            .as_ref()
+            .map(|private| {
+                private
+                    .borrow(py)
+                    .private_group_parent(py, &session, &issued)
+            })
+            .transpose()?;
         let mut guard = PreparedBuildGuard {
             session: &session,
             task_use: &issued,
@@ -14753,7 +14806,21 @@ impl PySemanticTransitionController {
             native_non_submission: false,
             cancelled_checkpoint: None,
         };
-        let expected = {
+        let submission = (|| {
+            if let Some(private) = &private {
+                private
+                    .borrow(py)
+                    .finish_private_group_preparation(py, &session, &issued, &scope)?;
+                private.borrow(py).quiesce_private_group_parent(
+                    py,
+                    &session,
+                    &issued,
+                    &private_parent
+                        .as_ref()
+                        .expect("original private parent")
+                        .borrow(py),
+                )?;
+            }
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
             issued.require_learning_operation(&owner, &operation)?;
@@ -14763,7 +14830,23 @@ impl PySemanticTransitionController {
             owner
                 .launch_prepared_segment(state.snapshot.canonical.clone())
                 .map_err(xlog_err)?;
-            expected
+            Ok(expected)
+        })();
+        let expected = match submission {
+            Ok(expected) => expected,
+            Err(error) => {
+                if let Some(private) = &private {
+                    let cancellation = guard.retain_private_cancellation(
+                        py,
+                        &private.borrow(py),
+                        &scope,
+                        &steps,
+                        &checkpoint_phase,
+                    );
+                    return finish_with_cleanup(py, Err(error), cancellation);
+                }
+                return Err(error);
+            }
         };
         let shared = &*session;
         let outcomes = py.detach(|| {
@@ -14774,6 +14857,12 @@ impl PySemanticTransitionController {
         // It retains completion even if the following Python handoff fails;
         // failed launch/readback and incomplete native outcomes never set it.
         guard.native_completion = Some((Arc::clone(&scope), operation.clone()));
+        if let Some(parent) = &private_parent {
+            session
+                .owner()?
+                .finish_prepared_segment_parent(&mut *parent.borrow(py).lease()?)
+                .map_err(xlog_err)?;
+        }
         {
             let mut retained = session
                 .prepared_segment

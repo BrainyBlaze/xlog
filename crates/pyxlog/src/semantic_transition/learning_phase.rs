@@ -330,6 +330,7 @@ struct PhaseModelOwners {
     release_cancelled_execution: Py<PyAny>,
     restore: Py<PyAny>,
     retire_private: Py<PyAny>,
+    cancelled_retirement_context: Py<PyAny>,
     serialize_source: Py<PyAny>,
     serialize_candidate: Py<PyAny>,
     retire_source: Py<PyAny>,
@@ -342,6 +343,7 @@ enum PhaseModelOwner {
     ReleaseCancelledExecution,
     Restore,
     RetirePrivate,
+    CancelledRetirementContext,
     SerializeSource,
     SerializeCandidate,
     RetireSource,
@@ -649,6 +651,7 @@ impl PySemanticLearningPhaseTransition {
             PhaseModelOwner::ReleaseCancelledExecution => &owners.release_cancelled_execution,
             PhaseModelOwner::Restore => &owners.restore,
             PhaseModelOwner::RetirePrivate => &owners.retire_private,
+            PhaseModelOwner::CancelledRetirementContext => &owners.cancelled_retirement_context,
             PhaseModelOwner::SerializeSource => &owners.serialize_source,
             PhaseModelOwner::SerializeCandidate => &owners.serialize_candidate,
             PhaseModelOwner::RetireSource => &owners.retire_source,
@@ -2366,7 +2369,7 @@ impl PySemanticTransitionController {
     #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner, scientific_refusal_type,
         source_model, execute_phase_instruction, release_cancelled_phase_execution, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, retire_restored_model, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
+        snapshot_restored_model, retire_restored_model, cancelled_retirement_context, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
@@ -2394,6 +2397,7 @@ impl PySemanticTransitionController {
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
         retire_restored_model: &Bound<'_, PyAny>,
+        cancelled_retirement_context: &Bound<'_, PyAny>,
         retire_source_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         phase_record_owner: Py<PyAny>,
@@ -2466,6 +2470,7 @@ impl PySemanticTransitionController {
             || !restore_model.is_callable()
             || !snapshot_restored_model.is_callable()
             || !retire_restored_model.is_callable()
+            || !cancelled_retirement_context.is_callable()
             || !retire_source_model.is_callable()
             || !refresh_snapshot.is_callable()
         {
@@ -2582,6 +2587,7 @@ impl PySemanticTransitionController {
                     release_cancelled_execution: release_cancelled_phase_execution.clone().unbind(),
                     restore: restore_model.clone().unbind(),
                     retire_private: retire_restored_model.clone().unbind(),
+                    cancelled_retirement_context: cancelled_retirement_context.clone().unbind(),
                     serialize_source: snapshot_model_state.clone().unbind(),
                     serialize_candidate: snapshot_restored_model.clone().unbind(),
                     retire_source: retire_source_model.clone().unbind(),

@@ -603,7 +603,7 @@ conflicting effects on aliases refuse the entire private candidate.
 consumer_streams, snapshot, scientific_owner, scientific_refusal_type, source_model, execute_phase_instruction,
 release_cancelled_phase_execution, resource_observer, feedback_interventions, learning_grant_ref,
 checkpoint_destination, snapshot_model_state, restore_model,
-snapshot_restored_model, retire_restored_model, retire_source_model,
+snapshot_restored_model, retire_restored_model, cancelled_retirement_context, retire_source_model,
 refresh_snapshot, phase_record_owner, phase_record_limits,
 frozen_program_bytes, cold_model_work_capacity)` takes the exact builtin full
 `source_checkpoint` bytes already used by the original scientific owner. It
@@ -1081,9 +1081,37 @@ or unknown destruction cannot enter the original prepared owner's `finish_segmen
 That callback runs once in the private-retirement region before remaining native
 step/resource retirement. The original private model retirement then releases its
 workspace and storage before establishing quiescence and retiring its Session.
-This native cancellation boundary follows a returned prepared owner; losing that
-original owner blocks retirement instead of skipping its callback. No completion
-flag or numerical result is fabricated.
+Before fallible preparation, the producer's `prepared_segment_owner() -> owner`
+returns its already-created original segment. Native retains it before calling
+`prepare_segment(task_use, *, steps, consumer_stream)`, which must return that
+same object. Partial lifetimes remain owned even if preparation does not return;
+the producer must never construct a replacement owner after failure.
+
+Private preparation retains the exact restored parent's acquired reader. Its
+sole decrement is recorded in the native graph before the first admission, not
+performed after build on the host. Cold submission joins the original parent
+consumers and requires aliases to be relinquished without releasing that reader.
+All genuinely unsubmitted paths retain it for the full private checkpoint.
+Whole-roster completion observes its device decrement and reconciles that same
+lease; original cold retirement then releases its remaining step/storage owner.
+An unknown launch or completion retains custody, never issues another decrement,
+and grants no cancellation or reader reissuance. No transfer or Python callback
+is added between graph submission and completion.
+
+`cancelled_retirement_context(restored_model) -> manager` supplies the original
+private Runtime's model-work context manager. Native retains and enters it inside
+the same private-retirement registrar, before graph destruction, and holds it
+through `finish_segment()`, child/step/resource retirement and
+`retire_restored_model(restored_model) -> None`. These callbacks must not enter
+another recorder. After successful enter, native attempts `__exit__` exactly once
+before removing registrar visibility, including failures between callbacks. It
+passes the original exception type, value and traceback; suppression or exit
+failure cannot become success. Python must unwind its modes, context variables,
+device and stream in `finally`, separately from retained unknown native owners.
+An unsuccessful enter is neither exited nor repeated. The consumer records known
+retirement only after the entire native body and common context exit succeed,
+not merely after the model callback returns. No completion flag or numerical
+result is fabricated.
 
 This recovery does not open a new physical interval or spend the terminal cleanup
 reserve. Its sole original finish measures preparation, full Q, failed-frame

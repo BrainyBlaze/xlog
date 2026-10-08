@@ -1309,7 +1309,41 @@ impl PySemanticLearningPhaseTransition {
         }
         group.build_scope = Some(Arc::clone(scope));
         group.native_steps = steps.to_vec();
+        let parent = group.restored.borrow(py).parent.clone_ref(py);
+        drop(retained);
+        session
+            .owner()?
+            .bind_prepared_segment_parent(&*parent.borrow(py).lease()?)
+            .map_err(xlog_err)?;
         Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn private_group_parent(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task: &PySemanticTransitionTaskUse,
+    ) -> PyResult<Py<PySemanticPublishedParent>> {
+        self.require_private_group_owner(py, session, task)?;
+        let retained = self.private_group()?;
+        let group = retained.as_ref().expect("original private group");
+        Ok(group.restored.borrow(py).parent.clone_ref(py))
+    }
+
+    pub(in crate::semantic_transition) fn quiesce_private_group_parent(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<()> {
+        self.require_private_group_owner(py, session, task)?;
+        let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
+        let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
+        session
+            .owner()?
+            .quiesce_prepared_segment_parent(&*parent.lease()?, &streams)
+            .map_err(xlog_err)
     }
 
     fn finish_private_cold_report(
