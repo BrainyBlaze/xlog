@@ -9661,6 +9661,14 @@ pub(crate) struct PySemanticGradientDelivery {
     activated_once: AtomicBool,
     restore_on_finish: bool,
     restores: Mutex<Vec<GradientSlotRestore>>,
+    hook_cleanup: Mutex<GradientHookCleanup>,
+}
+
+enum GradientHookCleanup {
+    Ready,
+    Entered,
+    Complete,
+    Unknown(PyErr),
 }
 
 struct GradientSlotRestore {
@@ -9696,6 +9704,7 @@ impl PySemanticGradientDelivery {
     /// A zero accumulation counter clears role 24/25; a nonzero counter keeps
     /// the existing slots so subsequent node deliveries add in place.
     fn record_reset(&self, py: Python<'_>) -> PyResult<()> {
+        self.require_active_hooks()?;
         if self.restore_on_finish {
             return Err(invalid(
                 "group delivery shares the target bank's single gradient reset",
@@ -9805,45 +9814,120 @@ impl PySemanticGradientDelivery {
                 "historical gradient delivery was never activated in its Update bank",
             ));
         }
-        let handles = self
-            .handles
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("gradient-delivery owner is poisoned"))?
-            .take();
-        let Some(handles) = handles else {
-            return if already_removed_ok {
-                Ok(())
-            } else {
-                Err(invalid("gradient delivery has already finished recording"))
-            };
-        };
-        let mut failure = None;
-        for handle in handles {
-            if let Err(error) = handle.bind(py).call_method0("remove") {
-                if failure.is_none() {
-                    failure = Some(error);
+        {
+            let mut cleanup = self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?;
+            match &*cleanup {
+                GradientHookCleanup::Ready => *cleanup = GradientHookCleanup::Entered,
+                GradientHookCleanup::Complete if already_removed_ok => return Ok(()),
+                GradientHookCleanup::Complete => {
+                    return Err(invalid("gradient delivery has already finished recording"));
                 }
+                GradientHookCleanup::Entered => {
+                    return Err(invalid("original gradient hook cleanup cannot reenter"));
+                }
+                GradientHookCleanup::Unknown(error) => return Err(error.clone_ref(py)),
             }
         }
-        if self.restore_on_finish {
-            let mut restores = self
+        // Keep the complete original roster in this delivery across every
+        // fallible Python callback. Reentry cannot retry any remove or swap.
+        let result = (|| -> PyResult<()> {
+            let handles = self
+                .handles
+                .lock()
+                .map_err(|_| invalid("gradient-delivery owner is poisoned"))?
+                .as_ref()
+                .ok_or_else(|| invalid("original gradient hook handles are absent"))?
+                .iter()
+                .map(|handle| handle.clone_ref(py))
+                .collect::<Vec<_>>();
+            let restores = self
                 .restores
                 .lock()
-                .map_err(|_| PyRuntimeError::new_err("group gradient restoration is poisoned"))?;
-            for restore in restores.drain(..) {
+                .map_err(|_| invalid("group gradient restoration is poisoned"))?
+                .iter()
+                .map(|restore| {
+                    (
+                        restore.effective.clone_ref(py),
+                        restore.gradient.clone_ref(py),
+                        restore.original_grad.clone_ref(py),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut failure = None;
+            for handle in &handles {
+                if let Err(error) = handle.bind(py).call_method0("remove") {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+            for (effective, gradient, original_grad) in &restores {
                 if let Err(error) = swap_group_leaf_gradient(
-                    restore.effective.bind(py),
-                    restore.gradient.bind(py),
-                    restore.original_grad.bind(py),
+                    effective.bind(py),
+                    gradient.bind(py),
+                    original_grad.bind(py),
                 ) {
                     if failure.is_none() {
                         failure = Some(error);
                     }
                 }
             }
-        }
-        if let Some(error) = failure {
+            failure.map_or(Ok(()), Err)
+        })();
+        if let Err(error) = result {
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))? =
+                GradientHookCleanup::Unknown(error.clone_ref(py));
             return Err(error);
+        }
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| invalid("gradient-delivery owner is poisoned"))?;
+        let mut restores = self
+            .restores
+            .lock()
+            .map_err(|_| invalid("group gradient restoration is poisoned"))?;
+        let mut cleanup = self
+            .hook_cleanup
+            .lock()
+            .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?;
+        let original = (handles.take(), std::mem::take(&mut *restores));
+        *cleanup = GradientHookCleanup::Complete;
+        drop((cleanup, restores, handles));
+        drop(original);
+        Ok(())
+    }
+
+    fn require_active_hooks(&self) -> PyResult<()> {
+        if !matches!(
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?,
+            GradientHookCleanup::Ready
+        ) {
+            return Err(invalid("gradient hooks are no longer open for recording"));
+        }
+        Ok(())
+    }
+
+    fn require_removed_hooks(&self) -> PyResult<()> {
+        if !matches!(
+            *self
+                .hook_cleanup
+                .lock()
+                .map_err(|_| invalid("gradient hook cleanup custody is poisoned"))?,
+            GradientHookCleanup::Complete
+        ) {
+            return Err(invalid(
+                "original gradient hook cleanup is not known complete",
+            ));
         }
         Ok(())
     }
@@ -9875,6 +9959,7 @@ impl PySemanticPreparedStep {
         };
         for delivery in &deliveries {
             let delivery = delivery.borrow(py);
+            delivery.require_removed_hooks()?;
             if delivery
                 .handles
                 .lock()
@@ -10590,6 +10675,7 @@ impl PySemanticPreparedStep {
                 activated_once: AtomicBool::new(group_member.is_none()),
                 restore_on_finish: group_member.is_some(),
                 restores: Mutex::new(Vec::new()),
+                hook_cleanup: Mutex::new(GradientHookCleanup::Ready),
             },
         )?;
         let mut owners = self
@@ -11904,6 +11990,7 @@ impl PySemanticRetainedReplayMember {
             .as_ref()
             .ok_or_else(|| invalid("original group gradient delivery is absent"))?
             .borrow(py);
+        delivery.require_active_hooks()?;
         if !delivery.activated_once.load(Ordering::Acquire)
             || delivery
                 .handles
@@ -12031,6 +12118,7 @@ impl PySemanticRetainedReplayMember {
         };
         for delivery in &deliveries {
             let delivery = delivery.borrow(py);
+            delivery.require_removed_hooks()?;
             if delivery
                 .handles
                 .lock()
