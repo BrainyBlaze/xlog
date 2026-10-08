@@ -12289,6 +12289,11 @@ impl PySemanticRetainedReplayMember {
         if !session.importing.load(Ordering::Acquire) {
             return Err(invalid("retained original import was already closed"));
         }
+        // Claim the invocation's original one-shot final use before any
+        // Python cleanup or authority refresh. A rejected reentry must not
+        // reach the finalizer that also handles first-entry native failures.
+        let invocation = self.invocation.borrow(py);
+        invocation.start_final_use()?;
         let issued = self.task_use.borrow(py);
         let acquired = self.parent.borrow(py);
         let controller = PySemanticTransitionController {
@@ -12312,8 +12317,6 @@ impl PySemanticRetainedReplayMember {
                 ));
             }
             drop(state);
-            let invocation = self.invocation.borrow(py);
-            invocation.start_final_use()?;
             owner
                 .finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
                 .map_err(xlog_err)
