@@ -3461,8 +3461,10 @@ fn model_physical_parameter_coordinates(
             .ok_or_else(|| {
                 publication_input_error("parameter leaf has no original effective view")
             })?;
+        // The view name is the physical leaf's name. Its serialized tensor
+        // owner may be another alias and does not classify parameter/buffer.
         let name = view
-            .get("owner")
+            .get("name")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
                 publication_input_error("parameter effective view lacks its physical owner")
