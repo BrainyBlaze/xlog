@@ -84,6 +84,7 @@ struct ReadOnlyTerminalRefusal {
     private_checkpoint: Option<Arc<[u8]>>,
     retirement_entered: bool,
     retirement_returned: bool,
+    retirement_context: Option<Py<PyAny>>,
     private_owners_dropped: bool,
     session_release_entered: bool,
     private_released: bool,
@@ -365,6 +366,7 @@ impl PySemanticLearningPhaseTransition {
                     private_checkpoint: None,
                     retirement_entered: false,
                     retirement_returned: false,
+                    retirement_context: None,
                     private_owners_dropped: false,
                     session_release_entered: false,
                     private_released: false,
@@ -551,6 +553,7 @@ impl PySemanticLearningPhaseTransition {
             private_checkpoint: None,
             retirement_entered: false,
             retirement_returned: false,
+            retirement_context: None,
             private_owners_dropped: false,
             session_release_entered: false,
             private_released: branch == "source",
@@ -996,15 +999,70 @@ impl PySemanticLearningPhaseTransition {
                 let issued = task.borrow(py);
                 let work = region.borrow(py);
                 let _scope = ColdCallbackScope::enter(py, &session, &work, region.clone_ref(py))?;
-                // Native graph/step retirement requires import exclusion and
-                // the original private task, not a checkpoint-read wrapper.
-                // Both operations remain inside the same measured cold region.
-                self.retire_cancelled_private_segment(py)?;
-                let _reads = ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
-                if !callback.bind(py).call1((model,))?.is_none() {
-                    return Err(invalid(
-                        "cancelled private retirement requires its original known None completion",
-                    ));
+                let cancelled_segment = self
+                    .phase_evaluations()?
+                    .last()
+                    .expect("retained cancellation")
+                    .cancelled_segment
+                    .is_some();
+                let retire = || -> PyResult<()> {
+                    // Native retirement requires import exclusion. Only the
+                    // model callback gets checkpoint reads, inside the same
+                    // original registrar and Python recorder lifetime.
+                    self.retire_cancelled_private_segment(py)?;
+                    let _reads =
+                        ImportReadScope::checkpoint(&session, &issued, &original_parent, py)?;
+                    if !callback.bind(py).call1((model.clone_ref(py),))?.is_none() {
+                        return Err(invalid(
+                            "cancelled private retirement requires its original known None completion",
+                        ));
+                    }
+                    session
+                        .owner()?
+                        .require_retired_publication(&*original_parent.lease()?)
+                        .map_err(xlog_err)
+                };
+                if cancelled_segment {
+                    let result = (|| -> PyResult<()> {
+                        let factory =
+                            self.model_owner(py, PhaseModelOwner::CancelledRetirementContext)?;
+                        let manager = factory.bind(py).call1((model.clone_ref(py),))?;
+                        self.phase_evaluations()?
+                            .last_mut()
+                            .expect("retained cancellation")
+                            .refusal
+                            .as_mut()
+                            .expect("original cancellation")
+                            .retirement_context = Some(manager.clone().unbind());
+                        let mut recorder = PreparedMemoryScope::new(py, &manager, &|| Ok(()))?;
+                        let enter = manager.getattr("__enter__")?;
+                        enter.call0()?;
+                        recorder.entered = true;
+                        let result = retire();
+                        // Consume the one exit attempt before calling Python.
+                        // In particular, no Drop can retry a failed __exit__.
+                        let exit = recorder.finish(result.as_ref().err());
+                        if let Err(error) = exit {
+                            if let Err(original) = result {
+                                error.set_cause(py, Some(original));
+                            }
+                            return Err(error);
+                        }
+                        result
+                    })();
+                    if result.is_err() {
+                        // Keep uncertain work/storage owners, not an entered
+                        // Python context. Visibility is still active here.
+                        work.reader
+                            .borrow(py)
+                            .session
+                            .borrow(py)
+                            .owner()?
+                            .fail_cold_model_work(&work.inner);
+                    }
+                    result?;
+                } else {
+                    retire()?;
                 }
             }
             self.phase_evaluations()?

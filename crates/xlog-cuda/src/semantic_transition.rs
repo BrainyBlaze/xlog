@@ -9870,6 +9870,8 @@ struct PreparedSegmentState {
     cancelled: Arc<AtomicBool>,
     construction: Arc<Mutex<()>>,
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
+    parent_reader: Option<u64>,
+    parent_quiescent: bool,
 }
 
 impl PreparedSegmentState {
@@ -9911,6 +9913,8 @@ impl PreparedSegmentState {
             cancelled: Arc::new(AtomicBool::new(false)),
             construction: Arc::new(Mutex::new(())),
             graph_retirement: None,
+            parent_reader: None,
+            parent_quiescent: false,
         })
     }
 
@@ -14743,6 +14747,19 @@ impl SemanticTransitionSession {
             .prepared_segment
             .as_ref()
             .ok_or(SemanticTransitionError::NotCaptured)?;
+        if let Some(token) = build.parent_reader {
+            if !build.parent_quiescent
+                || self.readers.len() != 1
+                || self
+                    .readers
+                    .get(&token)
+                    .is_none_or(|reader| Arc::strong_count(&reader.aliases) != 1)
+            {
+                return Err(publication_input_error(
+                    "prepared submission requires its original quiescent parent reader",
+                ));
+            }
+        }
         if !build.finished
             || build.submitted
             || build.cancelled.load(Ordering::Acquire)
@@ -14909,6 +14926,25 @@ impl SemanticTransitionSession {
             "prepared graph terminal wait",
             CudaStream::synchronize,
         )?;
+        if let Some(token) = self
+            .prepared_segment
+            .as_ref()
+            .expect("submitted segment")
+            .parent_reader
+        {
+            let identity = self.steps[&token]
+                .identity
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let reader = self.publication_read(self.readers[&token].device.view())?[0];
+            if reader.abi != 1
+                || reader.status != 0
+                || reader.active != 0
+                || reader.instance != identity.instance
+                || reader.word != identity.word
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+        }
         let handles = self
             .prepared_segment
             .as_ref()
@@ -19693,6 +19729,85 @@ impl SemanticTransitionSession {
         ))
     }
 
+    /// Keep the same acquired parent through every unsubmitted construction.
+    /// Its sole decrement is recorded before the graph's first admission.
+    pub fn bind_prepared_segment_parent(
+        &mut self,
+        parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        let build = self
+            .prepared_segment
+            .as_mut()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if build.parent_reader.is_some()
+            || build.capturing
+            || build.finished
+            || build.cancelled.load(Ordering::Acquire)
+            || build.tokens.contains(&parent.token)
+        {
+            return Err(publication_input_error(
+                "prepared parent must be its original acquired reader before capture",
+            ));
+        }
+        build.parent_reader = Some(parent.token);
+        Ok(())
+    }
+
+    /// Join cold aliases without releasing or replacing the original reader.
+    /// Failure still permits only genuine native non-submission or unknown use.
+    pub fn quiesce_prepared_segment_parent(
+        &mut self,
+        parent: &SemanticPublishedLease,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if build.parent_reader != Some(parent.token)
+            || !build.finished
+            || build.submitted
+            || build.cancelled.load(Ordering::Acquire)
+        {
+            return Err(publication_input_error(
+                "parent quiescence requires its original unused completed construction",
+            ));
+        }
+        let mut streams = self.steps[&parent.token].consumer_streams.clone();
+        streams.extend(&self.readers[&parent.token].consumer_streams);
+        streams.extend(consumer_streams);
+        self.quiesce_published_reader(parent, &streams.into_iter().collect::<Vec<_>>())?;
+        self.prepared_segment
+            .as_mut()
+            .expect("original completed construction")
+            .parent_quiescent = true;
+        Ok(())
+    }
+
+    /// Reconcile the same lease only after the whole graph and its recorded
+    /// parent decrement have been observed. No second device command is issued.
+    #[cfg(feature = "semantic-policy")]
+    pub fn finish_prepared_segment_parent(
+        &mut self,
+        parent: &mut SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if !build.completed || build.parent_reader != Some(parent.token) {
+            return Err(publication_input_error(
+                "parent handoff requires its original whole-roster completion",
+            ));
+        }
+        parent.active = false;
+        self.readers.remove(&parent.token);
+        Ok(())
+    }
+
     fn check_prepared_content_stream(
         &self,
         step: &SemanticPreparedStep,
@@ -21102,7 +21217,38 @@ impl SemanticTransitionSession {
             conditional_handle,
             previous.map_or(0, TrackedCudaSlice::device_ptr_value),
         );
+        let original_reader = if build.next == 0 {
+            build
+                .parent_reader
+                .map(|token| &self.readers[&token].device)
+        } else {
+            None
+        };
+        if let Some(reader) = original_reader {
+            recorder.read_write(reader);
+        }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            if let Some(reader) = original_reader {
+                // SAFETY: this is the same Session's acquired parent, retained
+                // through completion/cancellation. The canonical release kernel
+                // runs in the graph before the first conditional admission;
+                // recording it neither submits nor decrements the live reader.
+                unsafe {
+                    prepared.release.clone().launch_in(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            storage.control.device_ptr_value(),
+                            reader.device_ptr_value(),
+                        ),
+                    )
+                }
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
             // SAFETY: actual parent control and unique lease are fixed owners;
             // the graph issues this IF handle and the kernel writes every replay.
             unsafe {
