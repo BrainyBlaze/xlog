@@ -21,294 +21,76 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint-workflows:
-    runs-on: ubuntu-latest
+  production-build:
+    name: production-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TARGET_DIR: target/source-checks
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
-      - name: Install actionlint and shellcheck
+      - name: Identify runner Rust toolchain
+        id: rust
+        run: |
+          rust_version=$(rustc --version | cut -d ' ' -f 2)
+          printf 'version=%s\n' "$rust_version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/source-checks
+          key: source-checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            source-checks-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+
+      - name: Install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-          actionlint_archive=$(mktemp)
+          actionlint_dir=$(mktemp -d)
+          actionlint_archive="$actionlint_dir/actionlint.tar.gz"
           curl --fail --show-error --location \
             --retry 3 \
             --retry-all-errors \
             --output "$actionlint_archive" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          tar -tzf "$actionlint_archive" actionlint >/dev/null
-          tar -xzf "$actionlint_archive" actionlint
-          install actionlint /usr/local/bin/actionlint
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$actionlint_archive" | sha256sum --check
+          tar -xzf "$actionlint_archive" -C "$actionlint_dir" actionlint
+          printf '%s\n' "$actionlint_dir" >> "$GITHUB_PATH"
 
-      - name: Run actionlint
-        run: actionlint -color
-
-  lint-shell:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-
-      - name: Run shellcheck
-        shell: bash
+      - name: Check source formatting, workflows and shell scripts
         run: |
           set -euo pipefail
-          mapfile -t files < <(rg --files scripts .github -g '*.sh')
-          if ((${#files[@]} == 0)); then
-            echo "No shell scripts found."
-            exit 0
+          cargo fmt --all --check
+          actionlint -color
+          mapfile -d '' -t files < <(git ls-files -z -- 'scripts/*.sh' '.github/*.sh')
+          if ((${#files[@]})); then
+            shellcheck "${files[@]}"
           fi
-          printf '%s\n' "${files[@]}"
-          shellcheck "${files[@]}"
-
-  git-hygiene:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Validate tracked files are not ignored
-        shell: bash
-        run: |
-          set -euo pipefail
-          files=$(git ls-files -ci --exclude-standard)
-          if [[ -n "$files" ]]; then
-            echo "Tracked files must not match .gitignore rules:"
-            printf '%s\n' "$files"
+          ignored=$(git ls-files -ci --exclude-standard)
+          if [[ -n "$ignored" ]]; then
+            printf 'Tracked files match ignore rules:\n%s\n' "$ignored" >&2
             exit 1
           fi
-          echo "No tracked files match .gitignore rules."
 
-  python-contract:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.11"
-
-      - name: Install Python contract test dependencies
-        run: python -m pip install --upgrade pip pytest PyYAML
-
-      - name: Validate Python and CI contracts
-        run: >-
-          python -m pytest -q
-          python/tests/test_relation_provenance_contract.py
-          python/tests/test_ci_workflow_contract.py
-          python/tests/test_source_test_hygiene.py
-          python/tests/test_triangle_benchmark_runner.py
-
-  # The CAVIAR and maritime example suites on CPU (review follow-up:
-  # previously no workflow ran any of them; the maritime suites were
-  # added after repeating that exact gap one PR later). CPU torch makes
-  # the audit/census/corpus suites run for real instead of
-  # module-skipping; the dataset-gated tests inside them self-skip (no
-  # corpus data ships in the repo), the maritime suites run entirely on
-  # synthetic in-memory archives, and the GPU-only suites stay local per
-  # the hardware table in docs/experiments/caviar/README.md.
-  caviar-examples:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.11"
-
-      - name: Install pytest and CPU torch
-        run: |
-          python -m pip install --upgrade pip pytest
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Run CAVIAR and maritime example suites
-        env:
-          PYTHONPATH: crates/pyxlog/python
-        run: >-
-          python -m pytest -q
-          python/tests/test_theory_loop.py
-          python/tests/test_caviar_xml_corpus.py
-          python/tests/test_audit_dump_vs_xml.py
-          python/tests/test_xml_meeting_census.py
-          python/tests/test_audit_tool_torch_free.py
-          python/tests/test_maritime_convert.py
-          python/tests/test_maritime_cv.py
-          python/tests/test_maritime_soft.py
-          python/tests/test_maritime_online.py
-
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-  package-metadata:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.11"
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install maturin
-        run: python -m pip install --upgrade pip -c python/constraints-build.txt maturin
-
-      - name: Validate doctor help
-        run: python scripts/xlog_doctor.py --help
-
-      - name: Validate release doctor mode
-        run: python scripts/xlog_doctor.py --workflow release --json > /tmp/xlog-doctor-release.json
-
-      - name: Export cargo metadata
-        run: cargo metadata --locked --no-deps --format-version=1 > cargo-metadata.json
-
-      - name: Validate publishable crate manifests
+      # Keep the required status name stable; this is source acceptance only.
+      # These libraries' default dependency closure contains no xlog-cuda.
+      # GPU builds (including PTX-only builds) are manual and local, never CI.
+      - name: Compile CUDA-independent production libraries
         run: |
           set -euo pipefail
-          crates=(
-            xlog-core
-            xlog-ir
-            xlog-cuda
-            xlog-stats
-            xlog-runtime
-            xlog-logic
-            xlog-solve
-            xlog-gpu
-            xlog-prob
-            xlog-cli
-          )
-          for crate in "${crates[@]}"; do
-            echo "Validating cargo package metadata for $crate"
-            cargo package --locked --allow-dirty --no-verify --list -p "$crate" >/dev/null
-          done
-
-      - name: Validate README quickstart assumptions
-        run: python scripts/validate_package_metadata.py
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
-    env:
-      XLOG_NO_CUBIN: "1"
-    steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            ca-certificates \
-            curl \
-            git \
-            pkg-config \
-            python3 \
-            python3-dev \
-            python3-pip
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Install Rust toolchain
-        run: bash scripts/install_rust_toolchain.sh --toolchain stable --component clippy
-
-      - name: Show CUDA toolkit
-        run: nvcc --version
-
-      - name: Run workspace Clippy policy for self-contained features
-        env:
-          # semantic-policy requires externally delivered pinned policy inputs.
-          XLOG_CLIPPY_FEATURES: >-
-            xlog-cuda/arrow-device-import
-            xlog-cuda/wcoj-phase-timing
-            xlog-runtime/epistemic-logic-tests
-            xlog-runtime/recursive-stats-trace
-            xlog-runtime/resident-graph-tests
-            xlog-runtime/wcoj-phase-timing
-            xlog-prob/host-io
-            pyxlog/arrow-device-import
-            pyxlog/extension-module
-            pyxlog/host-io
-            xlog-neural/pyo3
-            xlog-neural/python
-            xlog-neural/python-tests
-            xlog-integration/wcoj-phase-timing
-            xlog-cli/host-io
-        run: cargo clippy --workspace --all-targets --features "$XLOG_CLIPPY_FEATURES" --locked -- -D warnings
-
-  workspace-tests:
-    name: workspace-tests
-    runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
-    env:
-      # Keep the complete target matrix within hosted-runner memory and disk limits.
-      CARGO_BUILD_JOBS: "1"
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      XLOG_NO_CUBIN: "1"
-    steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            ca-certificates \
-            curl \
-            git \
-            pkg-config \
-            python3 \
-            python3-dev \
-            python3-pip
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Install Rust toolchain
-        run: bash scripts/install_rust_toolchain.sh --toolchain stable
-
-      - name: Show CUDA toolkit
-        run: nvcc --version
-
-      - name: Run CPU-only Rust tests
-        run: |
-          cargo test --locked --all-targets \
-            -p xlog-core \
-            -p xlog-ir \
-            -p xlog-logic \
-            -p xlog-stats \
-            -p xlog-solve \
-            -p xlog-induce
-
-      - name: Compile every workspace test target without GPU execution
-        run: cargo test --workspace --all-targets --locked --no-run
-
-      - name: Build workspace without GPU execution
-        run: cargo build --workspace --locked --release --exclude pyxlog
-
-      - name: Build host-io CLI variant
-        run: cargo build --locked --release -p xlog-cli --features host-io
-
-      - name: Install maturin
-        run: python3 -m pip install --upgrade pip -c python/constraints-build.txt maturin
-
-      - name: Build pyxlog wheel without GPU execution
-        shell: bash
-        run: |
-          set -euo pipefail
-          export SOURCE_DATE_EPOCH
-          SOURCE_DATE_EPOCH="$(git -c safe.directory="$GITHUB_WORKSPACE" show -s --format=%ct HEAD)"
-          maturin build -m crates/pyxlog/Cargo.toml --release --locked --compatibility manylinux_2_34 --out dist
+          cargo check --locked --lib \
+            -p xlog-core -p xlog-ir -p xlog-stats -p xlog-logic -p xlog-neural

@@ -4,7 +4,7 @@ use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
-const INPUT_DOMAIN: &[u8] = b"xlog.learning-phase.inputs.v1\0";
+const INPUT_DOMAIN: &[u8] = b"xlog.learning-phase.inputs.v2\0";
 const RECORD_DOMAIN: &[u8] = b"xlog.learning-phase.record.v1\0";
 const RECORD_OVERHEAD: usize = RECORD_DOMAIN.len() + 1 + 32 + 32 + 8 + 32 + 8 + 24 + 8 + 64;
 
@@ -12,9 +12,11 @@ const RECORD_OVERHEAD: usize = RECORD_DOMAIN.len() + 1 + 32 + 32 + 8 + 32 + 8 + 
 pub(super) enum RecordKind {
     Admission = 0,
     PreparationOutcome = 1,
+    Delivery = 2,
+    TerminalRefusal = 3,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct RecordLimits {
     pub(super) record_bytes: u64,
     pub(super) total_bytes: u64,
@@ -36,12 +38,14 @@ impl RecordLimits {
             || limits.records == 0
             || limits.records > isize::MAX as u64
         {
-            return Err(invalid("phase record limits require explicit positive record/total/count bounds within the platform index range"));
+            return Err(invalid(
+                "phase record limits require explicit positive record/total/count bounds within the platform index range",
+            ));
         }
         Ok(limits)
     }
 
-    fn encode(self) -> [u8; 24] {
+    pub(super) fn encode(self) -> [u8; 24] {
         let mut bytes = [0; 24];
         for (target, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip([
             self.record_bytes,
@@ -54,8 +58,150 @@ impl RecordLimits {
     }
 }
 
+/// A bounded slice of an original signed record or length-delimited payload.
+/// Parsing never invokes a Python callback or allocates from a declared length.
+pub(super) struct RecordReader<'a>(pub(super) &'a [u8]);
+
+impl<'a> RecordReader<'a> {
+    pub(super) fn take(&mut self, count: usize) -> PyResult<&'a [u8]> {
+        if count > self.0.len() {
+            return Err(invalid("signed phase material is truncated"));
+        }
+        let (value, remaining) = self.0.split_at(count);
+        self.0 = remaining;
+        Ok(value)
+    }
+
+    pub(super) fn word(&mut self) -> PyResult<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    pub(super) fn field(&mut self) -> PyResult<&'a [u8]> {
+        let count = usize::try_from(self.word()?)
+            .map_err(|_| invalid("signed phase field length exceeds this host"))?;
+        self.take(count)
+    }
+
+    pub(super) fn finish(self) -> PyResult<()> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid(
+                "signed phase material contains an unconsumed suffix",
+            ))
+        }
+    }
+}
+
+/// Authenticate the complete original lifecycle before any replacement CUDA
+/// owner exists. The issuer and limits come from the independent consumer pin,
+/// never from an untrusted record header or a newly generated signing key.
+pub(super) struct LifecyclePayloads<'a> {
+    pub(super) admission: &'a [u8],
+    pub(super) preparation: Option<&'a [u8]>,
+    pub(super) completion: &'a [u8],
+    pub(super) refused: bool,
+}
+
+pub(super) fn lifecycle_payloads<'a>(
+    records: &[&'a [u8]],
+    issuer: [u8; 32],
+    phase_id: [u8; 32],
+    limits: RecordLimits,
+) -> PyResult<LifecyclePayloads<'a>> {
+    if limits.records < 3 || !matches!(records.len(), 2 | 3) {
+        return Err(invalid(
+            "original phase bounds cannot contain the complete lifecycle",
+        ));
+    }
+    if (records[0].len() as u64)
+        .checked_add(limits.record_bytes)
+        .and_then(|required| required.checked_add(limits.record_bytes))
+        .is_none_or(|required| required > limits.total_bytes)
+    {
+        return Err(invalid(
+            "original phase limits lost their reserved complete outcome custody",
+        ));
+    }
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&issuer)
+        .map_err(|_| invalid("independent phase issuer has an invalid encoding"))?;
+    let mut previous = [0u8; 32];
+    let mut total = 0u64;
+    let mut payloads = [&[][..]; 3];
+    let mut kinds = [0u8; 3];
+    for (ordinal, bytes) in records.iter().copied().enumerate() {
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("original phase record total overflowed"))?;
+        if bytes.len() < RECORD_OVERHEAD
+            || bytes.len() as u64 > limits.record_bytes
+            || total > limits.total_bytes
+        {
+            return Err(invalid(
+                "signed phase chain exceeds its original record bounds",
+            ));
+        }
+        let (message, signature) = bytes.split_at(bytes.len() - 64);
+        let signature = ed25519_dalek::Signature::from_slice(signature)
+            .map_err(|_| invalid("signed phase record has an invalid signature encoding"))?;
+        key.verify_strict(message, &signature)
+            .map_err(|_| invalid("signed phase record differs from its independent issuer"))?;
+        let mut reader = RecordReader(message);
+        if reader.take(RECORD_DOMAIN.len())? != RECORD_DOMAIN {
+            return Err(invalid("signed phase record has another original domain"));
+        }
+        kinds[ordinal] = reader.take(1)?[0];
+        if reader.take(32)? != phase_id
+            || reader.take(32)? != issuer
+            || reader.word()? != ordinal as u64
+            || reader.take(32)? != previous
+            || reader.word()? != total
+            || reader.take(24)? != limits.encode()
+        {
+            return Err(invalid(
+                "signed phase record changed its original lifecycle or limits",
+            ));
+        }
+        payloads[ordinal] = reader.field()?;
+        reader.finish()?;
+        previous = Sha256::digest(bytes).into();
+    }
+    let refused = match &kinds[..records.len()] {
+        [0, 1, 2] => false,
+        [0, 3] | [0, 1, 3] => true,
+        _ => {
+            return Err(invalid(
+                "signed phase chain changed its original lifecycle order",
+            ))
+        }
+    };
+    let admission = payloads[0];
+    let digest: [u8; 32] = Sha256::digest(admission).into();
+    if !admission.starts_with(INPUT_DOMAIN) || digest != phase_id {
+        return Err(invalid(
+            "phase admission changed its original input identity",
+        ));
+    }
+    let mut inputs = RecordReader(&admission[INPUT_DOMAIN.len()..]);
+    for _ in 0..8 {
+        inputs.field()?;
+    }
+    if inputs.field()? != limits.encode() {
+        return Err(invalid(
+            "phase admission changed its independent original bounds",
+        ));
+    }
+    inputs.finish()?;
+    Ok(LifecyclePayloads {
+        admission: payloads[0],
+        preparation: (records.len() == 3).then_some(payloads[1]),
+        completion: payloads[records.len() - 1],
+        refused,
+    })
+}
+
 pub(super) struct RecordAttempt {
-    kind: RecordKind,
+    pub(super) kind: RecordKind,
     pub(super) ordinal: u64,
     pub(super) bytes: Arc<[u8]>,
     pub(super) digest: [u8; 32],
@@ -72,9 +218,13 @@ pub(super) struct PhaseRecords {
     pub(super) issuer_pinned: bool,
     pub(super) pin_attempted: bool,
     pub(super) preparation_outcome_known: bool,
+    pub(super) delivery_known: bool,
+    pub(super) refusal_known: bool,
+    pub(super) refusal_record: Option<Arc<[u8]>>,
     ordinal: u64,
     total_bytes: u64,
     previous: [u8; 32],
+    admission: Option<Arc<[u8]>>,
     pub(super) attempt: Option<RecordAttempt>,
 }
 
@@ -88,6 +238,12 @@ fn append_fields(target: &mut Vec<u8>, fields: &[&[u8]]) -> PyResult<()> {
     Ok(())
 }
 
+pub(super) fn refusal_payload(fields: [&[u8]; 10]) -> PyResult<Arc<[u8]>> {
+    let mut payload = b"xlog.learning-phase.refusal.v1\0".to_vec();
+    append_fields(&mut payload, &fields)?;
+    Ok(payload.into())
+}
+
 impl PhaseRecords {
     pub(super) fn new(fields: &[&[u8]], limits: RecordLimits) -> PyResult<Self> {
         let input_bytes = fields
@@ -98,15 +254,18 @@ impl PhaseRecords {
         let admission_bytes = input_bytes
             .and_then(|input_bytes| input_bytes.checked_add(RECORD_OVERHEAD as u64))
             .ok_or_else(|| invalid("phase admission record size overflowed"))?;
-        // Reserve a complete outcome slot before admission. An oversized actual
-        // outcome cannot authorize publication or free the original owners.
-        if limits.records < 2
+        // Reserve both complete outcomes before admission. The caller's original
+        // bounds are never enlarged after model work or source retirement.
+        if limits.records < 3
             || admission_bytes > limits.record_bytes
             || admission_bytes
                 .checked_add(limits.record_bytes)
+                .and_then(|required| required.checked_add(limits.record_bytes))
                 .is_none_or(|required| required > limits.total_bytes)
         {
-            return Err(invalid("phase record bounds cannot retain the full initial admission and its complete preparation outcome"));
+            return Err(invalid(
+                "phase record bounds cannot retain the full admission, preparation outcome and delivery",
+            ));
         }
         let mut inputs = INPUT_DOMAIN.to_vec();
         append_fields(&mut inputs, fields)?;
@@ -120,15 +279,78 @@ impl PhaseRecords {
             issuer_pinned: false,
             pin_attempted: false,
             preparation_outcome_known: false,
+            delivery_known: false,
+            refusal_known: false,
+            refusal_record: None,
             ordinal: 0,
             total_bytes: 0,
             previous: [0; 32],
+            admission: None,
             attempt: None,
         })
     }
 
     pub(super) fn issuer(&self) -> [u8; 32] {
         self.key.verifying_key().to_bytes()
+    }
+
+    pub(super) fn delivered_identity(&self) -> PyResult<([u8; 32], [u8; 32], Arc<[u8]>)> {
+        if !self.delivery_known
+            || self.ordinal != 3
+            || self.attempt.is_some()
+            || !self.issuer_pinned
+        {
+            return Err(invalid(
+                "checkpoint issuer requires known full signed Delivery readback",
+            ));
+        }
+        Ok((
+            self.phase_id,
+            self.previous,
+            self.admission
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| invalid("known Delivery lost its original native Admission"))?,
+        ))
+    }
+
+    pub(super) fn require_preparation_admission(&self) -> PyResult<()> {
+        if !self.issuer_pinned
+            || self.ordinal != 1
+            || self.attempt.is_some()
+            || self.admission.is_none()
+        {
+            return Err(invalid(
+                "private phase allocation requires exact durable readback of its original signed admission",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only the exact, signed, durably read-back Admission authorizes private
+    /// native writes. Scientific acceptance is not obtained before those writes.
+    pub(super) fn confirmed_admission(&self) -> PyResult<Arc<[u8]>> {
+        self.require_preparation_admission()?;
+        self.admission
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| invalid("private phase lost its original confirmed native admission"))
+    }
+
+    /// A confirmed original pin may still precede the first admission write.
+    /// An unresolved write is not permission to issue a second one.
+    pub(super) fn preparation_admission_needed(&self) -> PyResult<bool> {
+        if !self.pin_attempted
+            || !self.issuer_pinned
+            || self.attempt.is_some()
+            || self.preparation_outcome_known
+            || self.ordinal > 1
+        {
+            return Err(invalid(
+                "preparation continuation requires the original confirmed issuer and no unresolved record write",
+            ));
+        }
+        Ok(self.ordinal == 0)
     }
 
     pub(super) fn check_payload_length(&self, payload_length: usize) -> PyResult<u64> {
@@ -149,10 +371,31 @@ impl PhaseRecords {
 
     pub(super) fn begin(&mut self, kind: RecordKind, payload: &[u8]) -> PyResult<()> {
         if !self.issuer_pinned || self.attempt.is_some() {
-            return Err(invalid("phase record requires its independently pinned issuer and resolution of the original write"));
+            return Err(invalid(
+                "phase record requires its independently pinned issuer and resolution of the original write",
+            ));
         }
         if self.ordinal >= self.limits.records {
             return Err(invalid("original phase record count is exhausted"));
+        }
+        let ordered = !self.refusal_known
+            && match kind {
+                RecordKind::Admission => self.ordinal == 0 && self.admission.is_none(),
+                RecordKind::PreparationOutcome => self.ordinal == 1 && self.admission.is_some(),
+                RecordKind::Delivery => {
+                    self.ordinal == 2 && self.preparation_outcome_known && !self.delivery_known
+                }
+                RecordKind::TerminalRefusal => {
+                    self.admission.is_some()
+                        && !self.delivery_known
+                        && (self.ordinal == 1
+                            || self.ordinal == 2 && self.preparation_outcome_known)
+                }
+            };
+        if !ordered {
+            return Err(invalid(
+                "phase record changed its original signed lifecycle order",
+            ));
         }
         let total = self.check_payload_length(payload.len())?;
         let mut bytes = RECORD_DOMAIN.to_vec();
@@ -213,8 +456,14 @@ impl PhaseRecords {
             .checked_add(attempt.bytes.len() as u64)
             .ok_or_else(|| invalid("phase record total size overflowed"))?;
         self.previous = attempt.digest;
-        if attempt.kind == RecordKind::PreparationOutcome {
-            self.preparation_outcome_known = true;
+        match attempt.kind {
+            RecordKind::Admission => self.admission = Some(Arc::clone(&attempt.bytes)),
+            RecordKind::PreparationOutcome => self.preparation_outcome_known = true,
+            RecordKind::Delivery => self.delivery_known = true,
+            RecordKind::TerminalRefusal => {
+                self.refusal_known = true;
+                self.refusal_record = Some(Arc::clone(&attempt.bytes));
+            }
         }
         self.attempt = None;
         Ok(())

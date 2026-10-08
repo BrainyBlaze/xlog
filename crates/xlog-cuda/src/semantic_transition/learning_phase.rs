@@ -1,8 +1,10 @@
 //! Cold learning-phase transitions over the complete native model allocation map.
 //!
-//! The trusted scientific owner supplies acceptance and the complete copy/reset
-//! recipe. This module owns phase writes, validates alias effects, and retains
-//! acceptance and ancestry; it never infers a phase from a tensor role or grant.
+//! The privileged native owner supplies its durably confirmed Admission and the
+//! complete copy/reset recipe. Scientific acceptance follows private execution
+//! and belongs outside its immutable checkpoint. This module owns phase writes,
+//! validates alias effects, and retains admission and ancestry; it never infers
+//! a phase from a tensor role or grant.
 
 use super::*;
 
@@ -58,8 +60,9 @@ impl SemanticLearningCopyReset {
 }
 
 /// A transition request, not an assertion that a scientific criterion passed.
-/// Acceptance is obtained from the original trusted scientific owner at the public
-/// Controller boundary, separately from checking the original data-use grants.
+/// The privileged Controller supplies its original signed, durably read-back
+/// Admission, separately from checking original data-use grants. This is permission
+/// for private work, never a claim that the scientific comparison passed.
 #[derive(Clone, Debug)]
 pub struct SemanticLearningPhaseTransition {
     pub source: SemanticLearningPhase,
@@ -67,7 +70,7 @@ pub struct SemanticLearningPhaseTransition {
     pub phase_index: u64,
     pub completed_updates_index: u64,
     pub recipe: Vec<SemanticLearningCopyReset>,
-    pub acceptance: Vec<u8>,
+    pub admission: Vec<u8>,
 }
 
 /// Retained evidence for one actual native cold phase change. Ordinary Update and
@@ -83,7 +86,7 @@ pub struct SemanticLearningPhaseRecord {
     pub completed_updates: u64,
     pub recipe_digest: Identity256,
     pub recipe: Vec<SemanticLearningCopyReset>,
-    pub acceptance: Vec<u8>,
+    pub admission: Vec<u8>,
 }
 
 impl SemanticLearningPhaseTransition {
@@ -135,11 +138,11 @@ impl SemanticLearningPhaseTransition {
                 SemanticLearningPhase::Consolidation,
                 SemanticLearningPhase::Fast
             )
-        ) || self.acceptance.is_empty()
+        ) || self.admission.is_empty()
             || self.phase_index == self.completed_updates_index
         {
             return Err(publication_input_error(
-                "learning transition lacks its permitted boundary or original acceptance",
+                "learning transition lacks its permitted boundary or original native admission",
             ));
         }
         material.require_successful_recompute()?;
@@ -162,7 +165,7 @@ impl SemanticLearningPhaseTransition {
             }
         } else if self.source != SemanticLearningPhase::Alignment {
             return Err(publication_input_error(
-                "learning lineage must begin with accepted alignment",
+                "learning lineage must begin with admitted alignment",
             ));
         }
         let expected = material
@@ -261,7 +264,7 @@ impl SemanticLearningPhaseTransition {
                 completed_updates: updates as u64,
                 recipe_digest: self.recipe_digest(),
                 recipe: self.recipe.clone(),
-                acceptance: self.acceptance.clone(),
+                admission: self.admission.clone(),
             },
             fold,
         ))
@@ -940,11 +943,52 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
+        // A cold fold has a genuine private writer, not a second persistent
+        // model bank. Preserve all bytes (including alias padding) before the
+        // unchanged compute/scatter/all-view-check law and sole assignment.
+        let scratch = storage
+            .model_memory
+            .allocation_bytes
+            .iter()
+            .map(|&bytes| allocate_publication::<u8>(&self.provider, bytes as usize))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recorder = self.domain.new_strict_recorder();
+        for (index, destination) in scratch.iter().enumerate() {
+            recorder.read(&storage.allocations[storage.model_slots[index][0]].slice()?);
+            recorder.write(destination);
+        }
+        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            for (index, destination) in scratch.iter().enumerate() {
+                if destination.is_empty() {
+                    continue;
+                }
+                // SAFETY: full source/scratch allocations are disjoint, retained
+                // and recorded; no descriptor names this cold fold's writer.
+                unsafe {
+                    sys::cuMemcpyDtoDAsync_v2(
+                        destination.device_ptr_value(),
+                        storage.allocations[storage.model_slots[index][0]]
+                            .entry()
+                            .pointer,
+                        destination.len(),
+                        enqueue.stream().cu_stream(),
+                    )
+                }
+                .result()
+                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
+            Ok::<(), XlogError>(())
+        })?;
         let pointer = |key: (u64, u64), bank: usize| {
             let (allocation, offset) = storage.model_memory.location(key.0, key.1)?;
-            storage.allocations[storage.model_slots[allocation][bank]]
-                .device_ptr_value()
-                .checked_add(offset as u64)
+            let base = if bank == 0 {
+                storage.allocations[storage.model_slots[allocation][0]]
+                    .entry()
+                    .pointer
+            } else {
+                scratch[allocation].device_ptr_value()
+            };
+            base.checked_add(offset as u64)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         };
         let mut outputs = Vec::new();
@@ -1045,6 +1089,9 @@ impl SemanticTransitionSession {
             .ok_or_else(|| runtime_error("kernel lookup", "learning absorption unavailable"))?;
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
+        for allocation in &scratch {
+            recorder.read_write(allocation);
+        }
         recorder.read_write(&status);
         for output in outputs.iter().flatten() {
             recorder.read_write(output);
@@ -1093,8 +1140,12 @@ impl SemanticTransitionSession {
         }
         let mut recorder = self.domain.new_strict_recorder();
         storage.record(&mut recorder);
+        for (index, allocation) in scratch.iter().enumerate() {
+            recorder.read(allocation);
+            recorder.write(&storage.allocations[storage.model_slots[index][0]].slice()?);
+        }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            for slots in &storage.model_slots {
+            for (index, slots) in storage.model_slots.iter().enumerate() {
                 let destination = &storage.allocations[slots[0]];
                 if destination.is_empty() {
                     continue;
@@ -1103,8 +1154,8 @@ impl SemanticTransitionSession {
                 // original view before this first candidate-bank assignment.
                 unsafe {
                     sys::cuMemcpyDtoDAsync_v2(
-                        destination.device_ptr_value(),
-                        storage.allocations[slots[1]].device_ptr_value(),
+                        destination.entry().pointer,
+                        scratch[index].device_ptr_value(),
                         destination.len(),
                         enqueue.stream().cu_stream(),
                     )
@@ -1173,7 +1224,7 @@ pub(super) fn encode_history(
                 material_u64(bytes, value);
             }
         }
-        material_bytes(bytes, &record.acceptance).map_err(SemanticTransitionError::Semantic)?;
+        material_bytes(bytes, &record.admission).map_err(SemanticTransitionError::Semantic)?;
     }
     Ok(())
 }
@@ -1239,7 +1290,7 @@ pub(super) fn decode_history(
                 }
             });
         }
-        let acceptance = reader
+        let admission = reader
             .bytes()
             .map_err(SemanticTransitionError::Semantic)?
             .to_vec();
@@ -1258,7 +1309,7 @@ pub(super) fn decode_history(
             completed_updates,
             recipe_digest,
             recipe,
-            acceptance,
+            admission,
         });
     }
     Ok(history)
@@ -1280,9 +1331,9 @@ pub(super) fn validate_history(
             phase_index: record.phase_index,
             completed_updates_index: record.completed_updates_index,
             recipe: record.recipe.clone(),
-            acceptance: record.acceptance.clone(),
+            admission: record.admission.clone(),
         };
-        if record.acceptance.is_empty()
+        if record.admission.is_empty()
             || record.phase_index == record.completed_updates_index
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
             || keys.iter().any(|(role, _)| !(18..=25).contains(role))

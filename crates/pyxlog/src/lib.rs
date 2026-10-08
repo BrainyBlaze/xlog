@@ -1263,13 +1263,22 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
     #[cfg(feature = "semantic-policy")]
     {
+        m.add_class::<semantic_transition::learning_phase::cold_model_work::PySemanticColdModelWork>()?;
         m.add(
             "SemanticCompletedSegmentPending",
             m.py()
                 .get_type::<semantic_transition::SemanticCompletedSegmentPending>(),
         )?;
+        m.add(
+            "SemanticModelEvaluationPending",
+            m.py()
+                .get_type::<semantic_transition::model_evaluation::SemanticModelEvaluationPending>(
+                ),
+        )?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
+        m.add_class::<semantic_transition::PySemanticCompletedExecutionObservation>()?;
+        m.add_class::<semantic_transition::model_evaluation::PySemanticCompletedModelEvaluation>()?;
     }
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticCompletedModelCarrier>()?;
@@ -1302,6 +1311,8 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticPolicyInvocation>()?;
     #[cfg(feature = "semantic-policy")]
     m.add_class::<semantic_transition::PySemanticRetainedReplayMember>()?;
+    #[cfg(feature = "semantic-policy")]
+    m.add_class::<semantic_transition::learning_phase::PySemanticPrivateReplayChild>()?;
     m.add_class::<relation_metadata::RelationEvidence>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
@@ -1323,6 +1334,14 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dlpack_is_cuda, m)?)?;
     m.add_function(wrap_pyfunction!(intern_symbols, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_symbols, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        semantic_transition::learning_phase::register_process_resource_observer,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        semantic_transition::learning_phase::resource_observer_device_certificate,
+        m
+    )?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]

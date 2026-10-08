@@ -18,6 +18,35 @@ from typing import Any, Callable, Literal, Optional, Sequence, TypedDict, Union
 
 __version__: str
 
+class _ResourceDeviceCertificate(TypedDict):
+    format: Literal["xlog.device-capacity/1"]
+    observer_identity: str
+    device_uuid: str
+    total_physical_bytes: int
+    process_id: int
+    driver_version: str
+    source: Literal["nvml-memory-v2"]
+    whole_device: Literal[True]
+
+def register_process_resource_observer(capsule: Any) -> None:
+    """Pin the original ABI3 collector before native GPU allocation.
+
+    The same capsule is idempotent; replacement, late attachment and an old ABI
+    are errors. Native root lifetime evidence enters this one collector.
+    """
+    ...
+
+def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDeviceCertificate:
+    """Project the original immutable whole-device NVML capacity certificate.
+
+    The registered collector must precede CUDA. This cold actual-UUID lookup
+    allocates no native GPU storage and is not an observation or admission flag.
+    Compare U against every original operation/cleanup ceiling before model
+    allocation. Signed native restore repeats that check without changing old
+    certificates or expense.
+    """
+    ...
+
 _Path = Union[str, PathLike[str]]
 
 _PublishedIdentity = tuple[bytes, int, bytes, bytes]
@@ -98,11 +127,32 @@ class SemanticCompletedActionProjection:
     @property
     def pre_action_checkpoint(self) -> Optional[SemanticCompletedMaterial]: ...
 
+class SemanticCompletedExecutionObservation:
+    """Native-issued immutable joined result; no constructor or CUDA ownership."""
+
+    @property
+    def device_work(self) -> int: ...
+    @property
+    def model_work(self) -> int: ...
+    @property
+    def native_work(self) -> int: ...
+    @property
+    def model_calls(self) -> int: ...
+
 class SemanticPreparedStep:
     """Session-issued original step; construction is not public."""
 
     @property
     def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
+
+    @property
+    def execution_measurements(self) -> SemanticCompletedExecutionObservation:
+        """Joined step execution only, not preparation or a physical peak."""
+        ...
+
+    def record_model_invocation(self) -> None:
+        """Record the CUDA marker at the actual forward's original capture site."""
+        ...
 
     @property
     def update_measurements(self) -> Optional[_UpdateMeasurements]:
@@ -126,13 +176,30 @@ class SemanticPreparedStep:
 class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""
 
-class _ModelEvaluationResult(TypedDict):
-    status: Literal[0, 1, 2]
-    loss_bits: tuple[int, int, int, int, int, int]
-    model_work: int
-    operation_count: int
-    work_bound: int
-    retained_allocation_bytes: int
+class SemanticCompletedModelEvaluation:
+    """Native-issued original completed result, without model/cohort/reader ownership."""
+
+    @property
+    def status(self) -> Literal[0, 1]: ...
+    @property
+    def loss_bits(self) -> tuple[int, int, int, int, int, int]: ...
+    @property
+    def model_work(self) -> int: ...
+    @property
+    def model_calls(self) -> int: ...
+    @property
+    def operation_count(self) -> int: ...
+    @property
+    def work_bound(self) -> int: ...
+    @property
+    def retained_allocation_bytes(self) -> int: ...
+
+class SemanticModelEvaluationPending(RuntimeError):
+    """Original submitted evaluation awaits resolution, never a second forward or finish.
+
+    Retain its Runtime, objective, native evaluation and original output owners.
+    Fatal CUDA quarantine and known incomplete work do not carry this signal.
+    """
 
 class SemanticModelEvaluation:
     """Single read-only invocation on an authentic published parent."""
@@ -144,13 +211,32 @@ class SemanticModelEvaluation:
     def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
     def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
     def begin(self) -> None: ...
+    def record_model_invocation(self) -> None: ...
     def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
-    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> _ModelEvaluationResult: ...
+    def finish(self, output_witness: Any, *, consumer_streams: Sequence[int]) -> SemanticCompletedModelEvaluation:
+        """Incomplete expenditure raises without a result and retains the original owner/fence."""
+        ...
+    def resolve_completion(self) -> SemanticCompletedModelEvaluation:
+        """Resolve the same submitted report and original streams without resubmitting.
+
+        Returns the identical native-issued observation after successful issuance.
+        A late unpoisoned completion failure raises SemanticModelEvaluationPending.
+        """
+        ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
+
+    def task_actor_eligible(self) -> bool:
+        """Original native ex-ante actor decision, including after restore.
+
+        Available before the first Proposal, without a device read. Reading
+        the decision grants no training rights and does not reclassify records.
+        Missing or stale task bindings raise rather than returning False.
+        """
+        ...
 
     @property
     def proposal_expense(self) -> tuple[int, int]:

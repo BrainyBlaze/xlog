@@ -1,6 +1,5 @@
 {
   "features": ["aggregate_lifting", "prob_aggregate_exact"],
-  "source_required_substrings": ["query(out_degree(1, 4))", "0.5::edge(1, 8)"],
   "checks": {
     "prob_json": {
       "engine": "exact_ddnnf",

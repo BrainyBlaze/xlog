@@ -4,6 +4,12 @@
 every change. Read it completely before modifying code. This file adds agent-specific
 execution and evidence rules; it does not create an alternative engineering standard.
 
+The human-directed test/CI sanitation is governed by
+[Source CI and Manual Validation](ENGINEERING.md#source-ci-and-manual-validation).
+That section owns the manual/local GPU-build boundary and the separation of fast
+source checks from heavy manual suites and certification. It does not authorize
+runtime execution, weaken scientific criteria, or bypass protection.
+
 Before any fix or feature, research the complete production path, relevant history,
 tests, examples, bindings, and documentation. Search for the canonical implementation
 and reuse or improve it. Do not create duplicate paths, legacy branches, silent

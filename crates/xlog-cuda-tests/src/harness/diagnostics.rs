@@ -319,27 +319,3 @@ impl Default for CertificationResults {
         Self::new()
     }
 }
-
-/// Helper macro for running a test and capturing results.
-#[macro_export]
-macro_rules! run_test {
-    ($results:expr, $name:expr, $body:expr) => {{
-        let start = std::time::Instant::now();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body));
-        let duration = start.elapsed();
-
-        match result {
-            Ok(()) => $crate::harness::TestResult::passed($name, duration),
-            Err(e) => {
-                let message = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic".to_string()
-                };
-                $crate::harness::TestResult::error($name, duration, message)
-            }
-        }
-    }};
-}

@@ -54,4 +54,5 @@ exclude = [
 ]
 include = [
   { path = "pyxlog/kernels/*", format = "wheel" },
+  { path = "pyxlog/include/*.h", format = "wheel" },
 ]

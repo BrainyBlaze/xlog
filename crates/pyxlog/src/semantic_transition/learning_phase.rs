@@ -1,19 +1,61 @@
 //! Cold phase ownership through the canonical checkpoint and restoration path.
 
 use super::*;
-use pyo3::types::PyCFunction;
+use pyo3::types::{PyCapsule, PyCapsuleMethods};
 use xlog_cuda::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseTransition,
 };
 
 mod phase_record;
 use phase_record::{PhaseRecords, RecordKind, RecordLimits};
+pub(super) mod cold_restore;
+mod resource_observer;
+pub(super) use resource_observer::require_restore_memory_admission;
+use resource_observer::ResourceObserver;
+pub(crate) use resource_observer::{
+    register_process_resource_observer, resource_observer_device_certificate,
+};
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod cold_model_work;
+#[cfg(feature = "semantic-policy")]
+use cold_model_work::{ColdCallbackScope, PySemanticColdModelWork};
+#[cfg(feature = "semantic-policy")]
+pub(super) mod phase_evaluation;
+#[cfg(feature = "semantic-policy")]
+use phase_evaluation::PhaseEvaluationAndTerminal;
+#[cfg(feature = "semantic-policy")]
+mod private_restore;
+#[cfg(feature = "semantic-policy")]
+use private_restore::PrivateTrajectoryStart;
+#[cfg(feature = "semantic-policy")]
+mod intermediate_restore;
+#[cfg(feature = "semantic-policy")]
+use intermediate_restore::IntermediateRestore;
+#[cfg(feature = "semantic-policy")]
+mod private_execution;
+#[cfg(feature = "semantic-policy")]
+use private_execution::PrivateExecutionGroup;
+#[cfg(feature = "semantic-policy")]
+pub(crate) use private_execution::{PrivateReplayChildCustody, PySemanticPrivateReplayChild};
+#[cfg(feature = "semantic-policy")]
+mod private_checkpoint;
+#[cfg(feature = "semantic-policy")]
+use private_checkpoint::PrivateCheckpoint;
+#[cfg(feature = "semantic-policy")]
+mod control_retirement;
+#[cfg(feature = "semantic-policy")]
+use control_retirement::ControlRetirement;
+#[cfg(feature = "semantic-policy")]
+mod delivery_expense;
+#[cfg(feature = "semantic-policy")]
+use delivery_expense::DeliveryExpense;
 
 struct PhaseRecordStore {
     pin: Py<PyAny>,
     resolve_issuer: Py<PyAny>,
     commit: Py<PyAny>,
     resolve: Py<PyAny>,
+    decode: Py<PyAny>,
 }
 
 impl PhaseRecordStore {
@@ -21,7 +63,9 @@ impl PhaseRecordStore {
         let callback = |name| -> PyResult<Py<PyAny>> {
             let callback = owner.getattr(name)?;
             if !callback.is_callable() {
-                return Err(invalid("early phase store requires its original issuer pin/readback and phase record commit/readback callbacks"));
+                return Err(invalid(
+                    "early phase store requires its original issuer pin/readback and phase record commit/readback callbacks",
+                ));
             }
             Ok(callback.unbind())
         };
@@ -30,6 +74,7 @@ impl PhaseRecordStore {
             resolve_issuer: callback("resolve_phase_issuer")?,
             commit: callback("commit_phase_record")?,
             resolve: callback("resolve_phase_record")?,
+            decode: callback("decode_phase_instruction")?,
         })
     }
 }
@@ -114,7 +159,7 @@ impl PySemanticLearningPhaseRecipe {
                     _ => {
                         return Err(invalid(
                             "copy/reset view has an invalid operation or unused source fields",
-                        ))
+                        ));
                     }
                 })
             })
@@ -126,7 +171,7 @@ impl PySemanticLearningPhaseRecipe {
                 phase_index,
                 completed_updates_index,
                 recipe,
-                acceptance: Vec::new(),
+                admission: Vec::new(),
             },
         })
     }
@@ -192,13 +237,182 @@ enum Completion {
         resolve: Py<PyAny>,
         readback_observed: bool,
     },
+    Refused,
     Committed,
-    Abandoned,
 }
 
 struct PreparedCandidate {
-    owner: Py<PySemanticTransitionRestoredCheckpoint>,
+    owner: Option<Py<PySemanticTransitionRestoredCheckpoint>>,
     checkpoint: Arc<[u8]>,
+    preparation_outcome: Option<Arc<[u8]>>,
+}
+
+/// An immutable scientific call boundary. Even an exception is an entered
+/// attempt, not permission to repeat the original owner's comparison.
+struct ScientificAcceptance {
+    checkpoint: Arc<[u8]>,
+    history: Arc<[u8]>,
+    result: Option<Py<PyAny>>,
+    error: Option<PyErr>,
+    refusal: Option<Arc<[u8]>>,
+}
+
+/// Immutable inputs retained before the first external issuer/store callback.
+/// Continuation consumes these same inputs, never a replacement registration.
+struct PreparationInputs {
+    resource_observer: ResourceObserver,
+    feedback_interventions: Py<PyTuple>,
+    consumer_streams: ColdValue,
+    snapshot: ColdValue,
+    prior_snapshot: AuthoritySnapshot,
+    grant: ColdValue,
+    frozen_program: Vec<u8>,
+    terminal_cleanup: TerminalCleanupTarget,
+    final_phase: SemanticLearningPhase,
+    cold_model_work_capacity: usize,
+    resolve_checkpoint: Option<Py<PyAny>>,
+    max_checkpoint_bytes: Option<ColdValue>,
+    max_total_checkpoint_bytes: Option<ColdValue>,
+}
+
+/// A terminal-only reserve frozen before Admission, never a scientific step.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TerminalCleanupTarget {
+    ordinal: u64,
+    budget: [u64; 3],
+}
+
+impl TerminalCleanupTarget {
+    fn read(program: &[u8]) -> PyResult<Self> {
+        let program = cold_restore::json(program)?;
+        let target = program["terminal_cleanup"]
+            .as_object()
+            .filter(|target| {
+                target.len() == 2
+                    && target.contains_key("operation_ordinal")
+                    && target.contains_key("budget")
+            })
+            .ok_or_else(|| {
+                invalid("phase program requires its original terminal cleanup reserve")
+            })?;
+        let ordinal = target["operation_ordinal"]
+            .as_u64()
+            .ok_or_else(|| invalid("terminal cleanup requires its original unsigned identity"))?;
+        let count = program["schedule"]
+            .as_array()
+            .and_then(|schedule| u64::try_from(schedule.len()).ok())
+            .ok_or_else(|| invalid("terminal cleanup lost its original complete schedule"))?;
+        if ordinal != count {
+            return Err(invalid(
+                "terminal cleanup must not name an unexecuted scientific instruction",
+            ));
+        }
+        let limits = target["budget"]
+            .as_array()
+            .filter(|limits| limits.len() == 3)
+            .ok_or_else(|| {
+                invalid("terminal cleanup requires its original three resource limits")
+            })?;
+        let mut budget = [0; 3];
+        for (limit, value) in budget.iter_mut().zip(limits) {
+            *limit = value.as_u64().ok_or_else(|| {
+                invalid("terminal cleanup resource limits must be exact unsigned integers")
+            })?;
+        }
+        if budget[1] == 0 {
+            return Err(invalid(
+                "terminal cleanup requires a nonzero absolute backing memory limit",
+            ));
+        }
+        Ok(Self { ordinal, budget })
+    }
+}
+
+struct PhaseModelOwners {
+    source: Py<PyAny>,
+    execute: Py<PyAny>,
+    release_cancelled_execution: Py<PyAny>,
+    restore: Py<PyAny>,
+    retire_private: Py<PyAny>,
+    cancelled_retirement_context: Py<PyAny>,
+    serialize_source: Py<PyAny>,
+    serialize_candidate: Py<PyAny>,
+    retire_source: Py<PyAny>,
+}
+
+#[derive(Clone, Copy)]
+enum PhaseModelOwner {
+    Source,
+    Execute,
+    ReleaseCancelledExecution,
+    Restore,
+    RetirePrivate,
+    CancelledRetirementContext,
+    SerializeSource,
+    SerializeCandidate,
+    RetireSource,
+}
+
+/// The two original immutable materials, in real/control order. Reading this
+/// closed transport does not decode or reconstruct the scientific program.
+fn feedback_materials<'py>(value: &Bound<'py, PyAny>) -> PyResult<[Bound<'py, PyBytes>; 2]> {
+    const DOMAIN: &[u8] = b"xlog.learning-feedback-intervention.v1\0";
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid(
+            "feedback interventions require the original exact builtin tuple of real and control bytes",
+        ));
+    }
+    let pair = value.cast::<PyTuple>()?;
+    if pair.len() != 2 {
+        return Err(invalid(
+            "feedback interventions require exactly the original real/control pair",
+        ));
+    }
+    let material = |index| -> PyResult<Bound<'py, PyBytes>> {
+        let value = pair.get_item(index)?;
+        if !value.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "feedback intervention material requires exact builtin bytes",
+            ));
+        }
+        let bytes = value.cast_into::<PyBytes>()?;
+        let raw = bytes.as_bytes();
+        if raw.len() != DOMAIN.len() + 1
+            || !raw.starts_with(DOMAIN)
+            || raw[DOMAIN.len()] != index as u8
+        {
+            return Err(invalid(
+                "feedback interventions require the original real identity and control positive-zero materials in that order",
+            ));
+        }
+        Ok(bytes)
+    };
+    Ok([material(0)?, material(1)?])
+}
+
+impl PreparationInputs {
+    fn require_program(&self, py: Python<'_>, scientific_owner: &Py<PyAny>) -> PyResult<()> {
+        let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
+        require_model_bytes(&original_program, &self.frozen_program)?;
+        self.resource_observer
+            .require_memory_admission(&self.frozen_program)
+    }
+
+    fn require_execution_inputs(
+        &self,
+        py: Python<'_>,
+        source: &Py<PyAny>,
+        execute: &Py<PyAny>,
+    ) -> PyResult<()> {
+        if source.bind(py).is_none() || !execute.bind(py).is_callable() {
+            return Err(invalid(
+                "phase preparation requires its original source model and instruction execution owner",
+            ));
+        }
+        self.resource_observer.require_original(py)?;
+        feedback_materials(self.feedback_interventions.bind(py).as_any())?;
+        Ok(())
+    }
 }
 
 /// Retain each actual owner before the next potentially asynchronous operation.
@@ -211,6 +425,29 @@ struct PrivateRestoreOwners {
     model: Option<Py<PyAny>>,
 }
 
+/// The actual source group and its returned model bytes survive late failures.
+/// Neither resource readback nor a cold continuation may repeat this work.
+struct SourcePreparation {
+    entries: Py<PyTuple>,
+    entry_material: Vec<u8>,
+    instruction: Vec<u8>,
+    memory_byte_ceiling: u64,
+    work_limit: u64,
+    model_calls_limit: u64,
+    #[cfg(feature = "semantic-policy")]
+    cold_model_work: Option<Py<PySemanticColdModelWork>>,
+    #[cfg(feature = "semantic-policy")]
+    model_work_result: Option<xlog_cuda::SemanticColdModelWorkResult>,
+    decoded: Option<Py<PyAny>>,
+    decoded_verified: bool,
+    model_result: Option<Py<PyAny>>,
+    resource_finish_entered: bool,
+    backing_peak: Option<u64>,
+    verified: bool,
+    record_entered: bool,
+    recorded: bool,
+}
+
 /// Native-issued pending owner. No candidate owner escapes before durable commit.
 /// The source Session retains this object even if the caller drops its reference.
 #[pyclass(
@@ -219,23 +456,55 @@ struct PrivateRestoreOwners {
     frozen
 )]
 pub(crate) struct PySemanticLearningPhaseTransition {
+    source_controller: Py<PySemanticTransitionController>,
     source: Py<PySemanticTransitionSession>,
     task_use: Py<PySemanticTransitionTaskUse>,
     parent: Py<PySemanticPublishedParent>,
     candidate: Mutex<Option<PreparedCandidate>>,
     private_restore: Mutex<Option<PrivateRestoreOwners>>,
     source_checkpoint: Vec<u8>,
-    _scientific_owner: Py<PyAny>,
-    _recipe: Py<PySemanticLearningPhaseRecipe>,
-    _restore_model: Py<PyAny>,
-    source_serializer: Py<PyAny>,
-    candidate_serializer: Py<PyAny>,
+    scientific_owner: Py<PyAny>,
+    accept_learning_phase: Py<PyAny>,
+    scientific_acceptance: Mutex<Option<ScientificAcceptance>>,
+    scientific_refusal_type: Py<pyo3::types::PyType>,
+    recipe: Py<PySemanticLearningPhaseRecipe>,
+    model_owners: Mutex<Option<PhaseModelOwners>>,
     refresh_snapshot: Py<PyAny>,
     grant_reference: String,
     destination: String,
     phase_record_owner: Py<PyAny>,
     phase_store: Mutex<Option<PhaseRecordStore>>,
     phase_records: Mutex<PhaseRecords>,
+    preparation_inputs: PreparationInputs,
+    preparation_entered: AtomicBool,
+    source_preparation: Mutex<Option<SourcePreparation>>,
+    #[cfg(feature = "semantic-policy")]
+    phase_evaluations: Mutex<Vec<PhaseEvaluationAndTerminal>>,
+    #[cfg(feature = "semantic-policy")]
+    phase_evaluation_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    control_evaluations_done: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    real_evaluations_done: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    private_checkpoints: Mutex<Vec<PrivateCheckpoint>>,
+    #[cfg(feature = "semantic-policy")]
+    private_checkpoint_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    control_retirement: Mutex<Option<ControlRetirement>>,
+    #[cfg(feature = "semantic-policy")]
+    delivery_expense: Mutex<Option<DeliveryExpense>>,
+    #[cfg(feature = "semantic-policy")]
+    private_trajectory_start: Mutex<Option<PrivateTrajectoryStart>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_restore: Mutex<Option<IntermediateRestore>>,
+    #[cfg(feature = "semantic-policy")]
+    intermediate_snapshot_active: AtomicBool,
+    #[cfg(feature = "semantic-policy")]
+    private_execution: Mutex<Option<PrivateExecutionGroup>>,
+    #[cfg(feature = "semantic-policy")]
+    private_execution_active: AtomicBool,
+    candidate_entered: AtomicBool,
     completion: Mutex<Completion>,
     operating: AtomicBool,
 }
@@ -268,7 +537,21 @@ fn check_learning_grant<'a>(
         .find(|grant| grant.reference == reference)
         .ok_or_else(|| invalid("phase transition requires an original task training grant"))?;
     task.authority.check_snapshot(snapshot)?;
-    if let CheckpointTaskPhase::Segment(operation) = checkpoint_task_phase(&*task.state()?)? {
+    let task_phase = {
+        let state = task.state()?;
+        if matches!(state.phase, TaskUsePhase::Evaluating(_)) {
+            state
+                .content_handoff_binding()?
+                .0
+                .map(CheckpointTaskPhase::Segment)
+                .ok_or_else(|| {
+                    invalid("pending phase evaluation lost its original admitted task operation")
+                })?
+        } else {
+            checkpoint_task_phase(&state)?
+        }
+    };
+    if let CheckpointTaskPhase::Segment(operation) = task_phase {
         task.authority.check_use(&operation, snapshot, false)?;
     }
     task.authority.check_grants(
@@ -320,7 +603,7 @@ fn verify_phase_native(
     Ok(())
 }
 
-fn verify_original_source(
+fn verify_phase_checkpoint(
     py: Python<'_>,
     task: &PySemanticTransitionTaskUse,
     parent: &PySemanticPublishedParent,
@@ -335,7 +618,7 @@ fn verify_original_source(
     let binding = TaskCheckpointBinding::from_owner(&owner)?;
     if task.checkpoint.encode(saved_snapshot, &phase, &binding)? != manifest.task {
         return Err(invalid(
-            "phase source checkpoint differs from its original live task capsule",
+            "phase checkpoint differs from its original live task capsule",
         ));
     }
     let config = SemanticCheckpointSessionConfig {
@@ -345,7 +628,7 @@ fn verify_original_source(
     };
     if config.encode()? != manifest.session {
         return Err(invalid(
-            "phase source checkpoint differs from its original Session configuration",
+            "phase checkpoint differs from its original Session configuration",
         ));
     }
     let (initial_prefill, _) = owner
@@ -353,13 +636,903 @@ fn verify_original_source(
         .map_err(xlog_err)?;
     if initial_prefill != manifest.initial_prefill {
         return Err(invalid(
-            "phase source checkpoint differs from its original initial prefill",
+            "phase checkpoint differs from its original initial prefill",
         ));
     }
     Ok(())
 }
 
 impl PySemanticLearningPhaseTransition {
+    fn model_owner(&self, py: Python<'_>, kind: PhaseModelOwner) -> PyResult<Py<PyAny>> {
+        let retained = self
+            .model_owners
+            .lock()
+            .map_err(|_| invalid("phase model owner custody mutex is poisoned"))?;
+        let owners = retained.as_ref().ok_or_else(|| {
+            invalid("original phase model callbacks have retired; they cannot be repeated")
+        })?;
+        Ok(match kind {
+            PhaseModelOwner::Source => &owners.source,
+            PhaseModelOwner::Execute => &owners.execute,
+            PhaseModelOwner::ReleaseCancelledExecution => &owners.release_cancelled_execution,
+            PhaseModelOwner::Restore => &owners.restore,
+            PhaseModelOwner::RetirePrivate => &owners.retire_private,
+            PhaseModelOwner::CancelledRetirementContext => &owners.cancelled_retirement_context,
+            PhaseModelOwner::SerializeSource => &owners.serialize_source,
+            PhaseModelOwner::SerializeCandidate => &owners.serialize_candidate,
+            PhaseModelOwner::RetireSource => &owners.retire_source,
+        }
+        .clone_ref(py))
+    }
+
+    fn singleton_lifecycle_material(entries: &Bound<'_, PyTuple>) -> PyResult<(Vec<u8>, Vec<u8>)> {
+        if entries.len() != 1 {
+            return Err(invalid(
+                "phase lifecycle changed its original singleton group",
+            ));
+        }
+        let entry = entries.get_item(0)?;
+        if !entry.is_exact_instance_of::<PyDict>() {
+            return Err(invalid(
+                "phase lifecycle changed its original exact scheduled entry",
+            ));
+        }
+        let entry = entry.cast::<PyDict>()?;
+        if entry.len() != 7 {
+            return Err(invalid(
+                "phase lifecycle changed its original scheduled fields",
+            ));
+        }
+        for (key, _) in entry.iter() {
+            if !key.is_exact_instance_of::<PyString>()
+                || ![
+                    "operation",
+                    "branch",
+                    "operation_ordinal",
+                    "step_ordinal",
+                    "budget",
+                    "comparison",
+                    "instruction",
+                ]
+                .contains(&key.cast::<PyString>()?.to_str()?)
+            {
+                return Err(invalid(
+                    "phase lifecycle changed its original exact scheduled keys",
+                ));
+            }
+        }
+        let fields = [
+            "operation",
+            "branch",
+            "operation_ordinal",
+            "step_ordinal",
+            "budget",
+            "comparison",
+        ]
+        .into_iter()
+        .map(|name| {
+            let value = entry
+                .get_item(name)?
+                .ok_or_else(|| invalid("phase lifecycle lost an original scheduled field"))?;
+            ColdValue::read(&value, &mut (16 * 1024 * 1024), 0)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+        let instruction = entry
+            .get_item("instruction")?
+            .ok_or_else(|| invalid("phase lifecycle lost its original instruction bytes"))?;
+        if !instruction.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "phase lifecycle changed its original exact instruction bytes",
+            ));
+        }
+        Ok((
+            ColdValue::Sequence(fields).canonical_bytes(),
+            instruction.cast::<PyBytes>()?.as_bytes().to_vec(),
+        ))
+    }
+
+    fn source_preparation(&self) -> PyResult<MutexGuard<'_, Option<SourcePreparation>>> {
+        self.source_preparation
+            .lock()
+            .map_err(|_| invalid("original source preparation custody mutex is poisoned"))
+    }
+
+    fn source_verified(&self) -> PyResult<bool> {
+        Ok(self
+            .source_preparation()?
+            .as_ref()
+            .is_some_and(|source| source.verified && source.model_result.is_some()))
+    }
+
+    fn capture_source_operation(&self, py: Python<'_>) -> PyResult<()> {
+        if self.source_preparation()?.is_some() {
+            return self.require_source_operation(py);
+        }
+        // Scientific owns schedule projection; the original store owns the one
+        // canonical instruction decoder. Native never parses program JSON.
+        let entries = self.scientific_owner.bind(py).getattr("next_operation")?;
+        if !entries.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid(
+                "source preparation requires its original complete scheduled group",
+            ));
+        }
+        let entries = entries.cast::<PyTuple>()?;
+        if entries.len() != 1 {
+            return Err(invalid(
+                "source preparation requires its sole original lifecycle operation",
+            ));
+        }
+        let entry = entries.get_item(0)?;
+        if !entry.is_exact_instance_of::<PyDict>() {
+            return Err(invalid(
+                "source preparation requires its original exact scheduled entry",
+            ));
+        }
+        let entry = entry.cast::<PyDict>()?;
+        let (material, instruction_material) = Self::singleton_lifecycle_material(entries)?;
+        let field = |name| -> PyResult<ColdValue> {
+            let value = entry
+                .get_item(name)?
+                .ok_or_else(|| invalid("source lifecycle entry lost an original field"))?;
+            ColdValue::read(&value, &mut (16 * 1024 * 1024), 0)
+        };
+        if field("operation")?.text()? != "prepare"
+            || field("branch")?.text()? != "source"
+            || field("operation_ordinal")?.unsigned()? != 0
+            || field("step_ordinal")?.unsigned()? != 0
+        {
+            return Err(invalid(
+                "source preparation differs from its original first scheduled operation",
+            ));
+        }
+        let instruction = entry
+            .get_item("instruction")?
+            .ok_or_else(|| invalid("source preparation lost its original instruction bytes"))?;
+        if !instruction.is_exact_instance_of::<PyBytes>()
+            || instruction.cast::<PyBytes>()?.as_bytes().is_empty()
+        {
+            return Err(invalid(
+                "source preparation requires exact original nonempty instruction bytes",
+            ));
+        }
+        let budget = field("budget")?;
+        let limits = budget
+            .fields(3)?
+            .iter()
+            .map(ColdValue::unsigned)
+            .collect::<PyResult<Vec<_>>>()?;
+        if limits[1] == 0 {
+            return Err(invalid(
+                "source preparation requires its original positive backing memory limit",
+            ));
+        }
+        *self.source_preparation()? = Some(SourcePreparation {
+            entries: entries.clone().unbind(),
+            entry_material: material,
+            instruction: instruction_material,
+            memory_byte_ceiling: limits[1],
+            work_limit: limits[0],
+            model_calls_limit: limits[2],
+            #[cfg(feature = "semantic-policy")]
+            cold_model_work: None,
+            #[cfg(feature = "semantic-policy")]
+            model_work_result: None,
+            decoded: None,
+            decoded_verified: false,
+            model_result: None,
+            resource_finish_entered: false,
+            backing_peak: None,
+            verified: false,
+            record_entered: false,
+            recorded: false,
+        });
+        let decode = self
+            .store()?
+            .as_ref()
+            .ok_or_else(|| invalid("source preparation lost its original lifecycle decoder"))?
+            .decode
+            .clone_ref(py);
+        let decoded = decode.bind(py).call1((entry,))?;
+        // Keep the actual return before checking its projection. A replacement
+        // instruction owner is never registered to repair a late failure.
+        self.source_preparation()?
+            .as_mut()
+            .expect("retained original source group")
+            .decoded = Some(decoded.clone().unbind());
+        if !decoded.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid(
+                "original source decoder requires its exact preparation tuple including cold model capacity",
+            ));
+        }
+        let decoded = decoded.cast::<PyTuple>()?;
+        if decoded.len() != 4
+            || ColdValue::read(&decoded.get_item(0)?, &mut 128, 0)?.text()? != "prepare"
+            || !decoded.get_item(1)?.is_none()
+            || !decoded.get_item(2)?.is_none()
+            || ColdValue::read(&decoded.get_item(3)?, &mut 128, 0)?.unsigned()?
+                != self.preparation_inputs.cold_model_work_capacity as u64
+        {
+            return Err(invalid(
+                "source decoder changed the original preparation lifecycle",
+            ));
+        }
+        self.source_preparation()?
+            .as_mut()
+            .expect("retained original source group")
+            .decoded_verified = true;
+        self.require_source_operation(py)
+    }
+
+    fn require_source_operation(&self, py: Python<'_>) -> PyResult<()> {
+        let retained = self.source_preparation()?;
+        let source = retained
+            .as_ref()
+            .ok_or_else(|| invalid("source preparation lost its original scheduled group"))?;
+        let (material, instruction) = Self::singleton_lifecycle_material(source.entries.bind(py))?;
+        if source.decoded.is_none()
+            || !source.decoded_verified
+            || material != source.entry_material
+            || instruction != source.instruction
+        {
+            return Err(invalid(
+                "source preparation changed or lost its original decoded group",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admit preparation using the same captured inputs and store. Unknown
+    /// native/model execution never grants rights to repeat that execution.
+    fn prepare_candidate(&self, py: Python<'_>, pending: &Py<Self>) -> PyResult<()> {
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        let admission_needed = self.records()?.preparation_admission_needed()?;
+        let entered = self.preparation_entered.load(Ordering::Acquire);
+        if entered && (!self.source_verified()? || self.candidate_entered.load(Ordering::Acquire)) {
+            return Err(invalid(
+                "the original preparation has already entered execution; retain and resolve its outcome",
+            ));
+        }
+        let task = self.task_use.borrow(py);
+        let acquired = self.parent.borrow(py);
+        let checkpoint = self.source_checkpoint.as_slice();
+        let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
+        let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let inputs = &self.preparation_inputs;
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
+        let stream_values = inputs.consumer_streams.python_value(py)?;
+        let consumer_streams = stream_values.bind(py);
+        let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
+        let initial = AuthoritySnapshot::parse(&inputs.snapshot)?;
+        let prior_snapshot = &inputs.prior_snapshot;
+        let scientific_owner = &self.scientific_owner;
+        let serializer = self.model_owner(py, PhaseModelOwner::SerializeSource)?;
+        let snapshot_model_state = serializer.bind(py);
+        let refresh_snapshot = self.refresh_snapshot.bind(py);
+        let learning_grant_ref = self.grant_reference.as_str();
+        // Continuation has a distinct, fresh authority admission. A confirmed
+        // old issuer or record cannot extend the original data-use grants.
+        let refreshed = refresh_snapshot.call0()?;
+        let authority =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        authority.newer_than(&initial)?;
+        authority.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, learning_grant_ref, &authority)?;
+        inputs.require_program(py, scientific_owner)?;
+        if admission_needed {
+            let inputs = Arc::clone(&self.records()?.inputs);
+            self.append_phase_record(py, RecordKind::Admission, &inputs)?;
+        }
+        self.records()?.require_preparation_admission()?;
+        self.capture_source_operation(py)?;
+        // The original store callbacks can fail or change external authority.
+        // Durable admission does not waive verification before execution.
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
+        inputs.require_program(py, scientific_owner)?;
+        self.require_source_operation(py)?;
+        let refreshed = refresh_snapshot.call0()?;
+        let admitted_authority =
+            AuthoritySnapshot::parse(&ColdValue::read(&refreshed, &mut (16 * 1024 * 1024), 0)?)?;
+        admitted_authority.newer_than(&authority)?;
+        admitted_authority.newer_than(&task.state()?.snapshot)?;
+        check_learning_grant(&task, learning_grant_ref, &admitted_authority)?;
+        // Refresh is external code too: recheck the retained inputs after it,
+        // before marking execution entered or touching native/model state.
+        inputs.require_execution_inputs(
+            py,
+            &self.model_owner(py, PhaseModelOwner::Source)?,
+            &self.model_owner(py, PhaseModelOwner::Execute)?,
+        )?;
+        inputs.require_program(py, scientific_owner)?;
+        self.require_source_operation(py)?;
+        // No native/model preparation is entered before the original signed
+        // admission is known durable. This marker is never cleared on failure.
+        if !entered {
+            self.preparation_entered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid("the original preparation has already entered execution; retain and resolve its outcome"))?;
+            inputs.resource_observer.begin(py, 0)?;
+            {
+                if source.importing.load(Ordering::Acquire)
+                    || source.recording.load(Ordering::Acquire)
+                    || source.retiring.load(Ordering::Acquire)
+                {
+                    return Err(invalid(
+                        "phase preparation cannot overlap recording, import or retirement",
+                    ));
+                }
+                let mut owner = source.owner()?;
+                task.require_current(&owner)?;
+                owner
+                    .quiesce_published_reader(&*acquired.lease()?, &streams)
+                    .map_err(xlog_err)?;
+            }
+            #[cfg(feature = "semantic-policy")]
+            {
+                let admission = self.records()?.confirmed_admission()?;
+                let inner = source
+                    .owner()?
+                    .prepare_cold_model_work(
+                        &*acquired.lease()?,
+                        inputs.cold_model_work_capacity,
+                        0,
+                        admission,
+                    )
+                    .map_err(xlog_err)?;
+                let work = Py::new(
+                    py,
+                    PySemanticColdModelWork {
+                        parent: self.parent.clone_ref(py),
+                        reader: self.parent.clone_ref(py),
+                        inner,
+                        region: None,
+                        active: AtomicBool::new(false),
+                    },
+                )?;
+                self.source_preparation()?
+                    .as_mut()
+                    .expect("retained original source group")
+                    .cold_model_work = Some(work);
+            }
+            verify_phase_checkpoint(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            {
+                let _reads = ImportReadScope::checkpoint(&source, &task, &acquired, py)?;
+                #[cfg(feature = "semantic-policy")]
+                let callback_work = self
+                    .source_preparation()?
+                    .as_ref()
+                    .expect("retained source group")
+                    .cold_model_work
+                    .as_ref()
+                    .expect("issued original cold work")
+                    .clone_ref(py);
+                #[cfg(feature = "semantic-policy")]
+                let work = callback_work.borrow(py);
+                #[cfg(feature = "semantic-policy")]
+                let _callback =
+                    ColdCallbackScope::enter(py, &source, &work, callback_work.clone_ref(py))?;
+                let result = snapshot_model_state.call0();
+                #[cfg(feature = "semantic-policy")]
+                if result.is_err() {
+                    source.owner()?.fail_cold_model_work(&work.inner);
+                }
+                let result = result?;
+                self.source_preparation()?
+                    .as_mut()
+                    .expect("retained original source group")
+                    .model_result = Some(result.clone().unbind());
+                require_model_bytes(&result, &manifest.model)?;
+            }
+            verify_phase_checkpoint(py, &task, &acquired, &manifest, &saved_snapshot)?;
+            if task.state()?.snapshot.canonical != prior_snapshot.canonical {
+                return Err(invalid(
+                    "phase source authority changed during model verification",
+                ));
+            }
+            // Join again after the actual serializer result and all native source
+            // verification. finish owns the original end before its cold delivery.
+            source
+                .owner()?
+                .quiesce_published_reader(&*acquired.lease()?, &streams)
+                .map_err(xlog_err)?;
+            self.source_preparation()?
+                .as_mut()
+                .expect("retained original source group")
+                .verified = true;
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let (work, result) = {
+                let retained = self.source_preparation()?;
+                let source = retained.as_ref().expect("retained original source group");
+                (
+                    source
+                        .cold_model_work
+                        .as_ref()
+                        .expect("issued original cold work")
+                        .clone_ref(py),
+                    source.model_work_result,
+                )
+            };
+            let result = if let Some(result) = result {
+                result
+            } else {
+                let mut owner = source.owner()?;
+                let lease = acquired.lease()?;
+                let work = work.borrow(py);
+                // Entering preparation is not proof that this report reached
+                // submission. Native dispatches from the original report's
+                // actual state without re-entering the model callback.
+                owner
+                    .finish_cold_model_work(&lease, &work.inner, &streams)
+                    .map_err(xlog_err)?
+            };
+            // Retain the actual components before refusal. Other source S
+            // still requires its genuine producers, never substituted zeroes.
+            let mut retained = self.source_preparation()?;
+            let source = retained.as_mut().expect("retained original source group");
+            source.model_work_result = Some(result);
+        }
+        let finish_needed = {
+            let mut retained = self.source_preparation()?;
+            let source = retained.as_mut().expect("retained original source group");
+            let needed = !source.resource_finish_entered;
+            source.resource_finish_entered = true;
+            needed
+        };
+        if finish_needed {
+            inputs.resource_observer.finish(py)?;
+        }
+        // Missing backing producer/baseline/coverage/allocator completion is
+        // not zero or a reservation. Keep the completed source result and all
+        // original owners; explicit continuation only reads this same interval.
+        let saved_peak = self
+            .source_preparation()?
+            .as_ref()
+            .expect("retained original source group")
+            .backing_peak;
+        let peak = match saved_peak {
+            Some(peak) => peak,
+            None => {
+                let peak = inputs.resource_observer.backing_peak(py)?;
+                self.source_preparation()?
+                    .as_mut()
+                    .expect("retained original source group")
+                    .backing_peak = Some(peak);
+                peak
+            }
+        };
+        #[cfg(feature = "semantic-policy")]
+        {
+            let retained = self.source_preparation()?;
+            let source = retained.as_ref().expect("retained original source group");
+            let result = source
+                .model_work_result
+                .expect("completed original model component");
+            let recorded_work = result
+                .model_work
+                .checked_add(result.native_work)
+                .ok_or_else(|| {
+                    invalid("source model and semantic work overflowed its original expense")
+                })?;
+            if recorded_work > source.work_limit || result.model_calls > source.model_calls_limit {
+                return Err(invalid("source model and semantic work exceeded its original operation budget; retain the actual result"));
+            }
+        }
+        let memory_limit = self
+            .source_preparation()?
+            .as_ref()
+            .expect("retained original source group")
+            .memory_byte_ceiling;
+        if peak > memory_limit {
+            return Err(invalid("source preparation exceeded its original backing memory budget; retain the actual result without admitting private work"));
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.record_source_preparation(py, peak)?;
+            self.execute_source_evaluations(py)?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.execute_control_branch(py, pending)?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
+            self.prepare_private_trajectory(py, pending, "real")?;
+            self.execute_private_numerical_sequence(py, pending, "real")?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
+            self.execute_private_evaluations(py, "real")?;
+            if self.readonly_terminal_refusal_retained()? {
+                return Ok(());
+            }
+            self.execute_private_checkpoint(py, "real")?;
+            self.retain_final_checkpoint_candidate(py)?;
+            return self.finish_preparation(py);
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = pending;
+            Err(invalid(
+                "private scientific trajectory execution requires semantic-policy",
+            ))
+        }
+    }
+
+    fn preparation_outcome(&self) -> PyResult<Arc<[u8]>> {
+        self.candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .as_ref()
+            .and_then(|candidate| candidate.preparation_outcome.as_ref())
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                invalid("preparation continuation lacks its original complete retained outcome; unknown native/model work cannot be repeated")
+            })
+    }
+
+    /// Finish only the already known cold result. Its checkpoint and history
+    /// are immutable; neither the factory nor scientific acceptance is repeated.
+    fn finish_preparation(&self, py: Python<'_>) -> PyResult<()> {
+        self.finish_scientific_acceptance(py)?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            let refused = self
+                .acceptance()?
+                .as_ref()
+                .is_some_and(|call| call.refusal.is_some());
+            if refused {
+                return self.finish_terminal_refusal(py, "scientific-comparison-refused");
+            }
+        }
+        let outcome = self.preparation_outcome()?;
+        // An attempted signed write belongs exclusively to its resolver, even
+        // when the candidate and the unsigned outcome are already known.
+        self.records()?.require_preparation_admission()?;
+        self.verify(py, true)?;
+        self.append_phase_record(py, RecordKind::PreparationOutcome, &outcome)?;
+        // The complete checkpoint now owns all of the actual restored
+        // handles. Release only the redundant construction references.
+        let construction = self.private_restore()?.take();
+        drop(construction);
+        *self.status_lock()? = Completion::Prepared;
+        Ok(())
+    }
+
+    fn acceptance(&self) -> PyResult<MutexGuard<'_, Option<ScientificAcceptance>>> {
+        self.scientific_acceptance
+            .lock()
+            .map_err(|_| invalid("original scientific acceptance custody mutex is poisoned"))
+    }
+
+    fn require_executed_phase_lineage(&self, checkpoint: &[u8]) -> PyResult<()> {
+        let (inputs, admission) = {
+            let records = self.records()?;
+            (Arc::clone(&records.inputs), records.confirmed_admission()?)
+        };
+        let mut reader = phase_record::RecordReader(
+            inputs
+                .strip_prefix(b"xlog.learning-phase.inputs.v2\0")
+                .ok_or_else(|| invalid("executed phase lost its original input domain"))?,
+        );
+        let source_checkpoint = reader.field()?;
+        if source_checkpoint != self.source_checkpoint.as_slice()
+            || reader.field()? != self.preparation_inputs.frozen_program.as_slice()
+        {
+            return Err(invalid(
+                "executed phase changed its original source or frozen program",
+            ));
+        }
+        let recipe = reader.field()?;
+        let source = SemanticCheckpointManifest::decode(source_checkpoint)?;
+        let selected = SemanticCheckpointManifest::decode(checkpoint)?;
+        cold_restore::require_executed_lineage(
+            &source.native,
+            &selected.native,
+            &admission,
+            recipe,
+            Some(self.preparation_inputs.final_phase),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_scientific_history(&self, py: Python<'_>) -> PyResult<()> {
+        let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+        if !history.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "native scientific history requires original exact bytes",
+            ));
+        }
+        self.preparation_inputs
+            .resource_observer
+            .require_observed_history(
+                &self.preparation_inputs.frozen_program,
+                history.cast::<PyBytes>()?.as_bytes(),
+            )
+    }
+
+    fn finish_scientific_acceptance(&self, py: Python<'_>) -> PyResult<()> {
+        if self.acceptance()?.is_none() {
+            self.records()?.require_preparation_admission()?;
+            self.preparation_inputs
+                .require_program(py, &self.scientific_owner)?;
+            // The scientific owner validates its entire measured prefix when
+            // projecting the next group. Delivery is the sole remaining
+            // operation at acceptance; a prepared candidate is not that proof.
+            let next = self.scientific_owner.bind(py).getattr("next_operation")?;
+            if !next.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "final acceptance requires the original complete prefix before delivery",
+                ));
+            }
+            let next = next.cast::<PyTuple>()?;
+            if next.is_empty() || next.len() != 1 {
+                return Err(invalid("final acceptance cannot precede complete original source, control and real execution"));
+            }
+            let (next_material, _) = Self::singleton_lifecycle_material(next)?;
+            let next_material = ColdValue::from_canonical_bytes(&next_material)?;
+            let fields = next_material.fields(6)?;
+            if fields[0].text()? != "delivery"
+                || fields[1].text()? != "real"
+                || fields[3].unsigned()? != 0
+            {
+                return Err(invalid("final acceptance cannot precede complete original source, control and real execution"));
+            }
+            self.verify(py, true)?;
+            let (candidate, checkpoint) = self.candidate(py)?;
+            self.require_executed_phase_lineage(&checkpoint)?;
+            let history = self.scientific_owner.bind(py).getattr("history_bytes")?;
+            if !history.is_exact_instance_of::<PyBytes>()
+                || history.cast::<PyBytes>()?.as_bytes().is_empty()
+            {
+                return Err(invalid(
+                    "scientific acceptance requires the original complete history bytes",
+                ));
+            }
+            let history: Arc<[u8]> = Arc::from(history.cast::<PyBytes>()?.as_bytes());
+            self.preparation_inputs
+                .resource_observer
+                .require_observed_history(&self.preparation_inputs.frozen_program, &history)?;
+            let latest = self.refresh_snapshot.bind(py).call0()?;
+            let snapshot =
+                AuthoritySnapshot::parse(&ColdValue::read(&latest, &mut (16 * 1024 * 1024), 0)?)?;
+            {
+                let task = self.task_use.borrow(py);
+                snapshot.newer_than(&task.state()?.snapshot)?;
+                check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+                let restored = candidate.borrow(py);
+                let task = restored.task_use.borrow(py);
+                snapshot.newer_than(&task.state()?.snapshot)?;
+                check_learning_grant(&task, &self.grant_reference, &snapshot)?;
+            }
+            self.preparation_inputs
+                .require_program(py, &self.scientific_owner)?;
+            require_model_bytes(
+                &self.scientific_owner.bind(py).getattr("history_bytes")?,
+                &history,
+            )?;
+            let (actual_parent, actual_model) = {
+                let restored = candidate.borrow(py);
+                (restored.parent.clone_ref(py), restored.model.clone_ref(py))
+            };
+            let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
+            verify_phase_native(
+                py,
+                &self.task_use.borrow(py),
+                &self.parent.borrow(py),
+                &source_manifest.native,
+                true,
+            )?;
+            {
+                let restored = candidate.borrow(py);
+                let final_manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
+                verify_phase_native(
+                    py,
+                    &restored.task_use.borrow(py),
+                    &restored.parent.borrow(py),
+                    &final_manifest.native,
+                    false,
+                )?;
+            }
+            // Complete all fallible argument projection before marking the
+            // call entered. Snapshot is the verified immutable cold value.
+            let arguments = (
+                self.parent.clone_ref(py),
+                self.recipe.clone_ref(py),
+                PyBytes::new(py, &self.source_checkpoint),
+                self.preparation_inputs.grant.python_value(py)?,
+                &self.destination,
+                ColdValue::from_canonical_bytes(&snapshot.canonical)?.python_value(py)?,
+                actual_parent,
+                actual_model,
+                PyBytes::new(py, &checkpoint),
+                PyBytes::new(py, &self.preparation_inputs.frozen_program),
+                PyBytes::new(py, &history),
+            )
+                .into_pyobject(py)?;
+            // Retain the exact checkpoint/history before entering external
+            // code. No phase/native/task mutex survives into the owner.
+            *self.acceptance()? = Some(ScientificAcceptance {
+                checkpoint: Arc::clone(&checkpoint),
+                history: Arc::clone(&history),
+                result: None,
+                error: None,
+                refusal: None,
+            });
+            let result = self.accept_learning_phase.bind(py).call1(arguments);
+            match result {
+                Ok(result) => {
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .result = Some(result.unbind())
+                }
+                Err(error) => {
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .error = Some(error.clone_ref(py));
+                    // The exact canonical class is captured before admission.
+                    // Read its original bytes once, never recognize arbitrary
+                    // exceptions by inheritance, text or attribute names alone.
+                    if !error.get_type(py).is(self.scientific_refusal_type.bind(py)) {
+                        return Err(error);
+                    }
+                    let original = error.value(py).getattr("result_bytes")?;
+                    if !original.is_exact_instance_of::<PyBytes>() {
+                        return Err(invalid(
+                            "scientific refusal requires its original exact result bytes",
+                        ));
+                    }
+                    let bytes = original.cast::<PyBytes>()?.as_bytes();
+                    cold_restore::scientific_refusal_reason(
+                        &self.preparation_inputs.frozen_program,
+                        &history,
+                        bytes,
+                    )?;
+                    self.acceptance()?
+                        .as_mut()
+                        .expect("original comparison")
+                        .refusal = Some(Arc::from(bytes));
+                }
+            }
+        }
+        let (checkpoint, history, result) = {
+            let retained = self.acceptance()?;
+            let retained = retained
+                .as_ref()
+                .expect("original scientific call retained");
+            if retained.refusal.is_some() {
+                return Ok(());
+            }
+            if let Some(error) = &retained.error {
+                return Err(error.clone_ref(py));
+            }
+            (
+                Arc::clone(&retained.checkpoint),
+                Arc::clone(&retained.history),
+                retained
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| {
+                        invalid(
+                            "unknown scientific acceptance cannot repeat its original comparison",
+                        )
+                    })?
+                    .clone_ref(py),
+            )
+        };
+        let accepted = result.bind(py);
+        if !accepted.is_exact_instance_of::<PyBytes>()
+            || accepted.cast::<PyBytes>()?.as_bytes().is_empty()
+        {
+            return Err(invalid("scientific owner must return its complete original accepted criteria and result, not an acceptance flag"));
+        }
+        self.preparation_inputs
+            .require_program(py, &self.scientific_owner)?;
+        require_model_bytes(
+            &self.scientific_owner.bind(py).getattr("history_bytes")?,
+            &history,
+        )?;
+        if self.candidate_checkpoint()?.as_ref() != checkpoint.as_ref() {
+            return Err(invalid(
+                "scientific acceptance lost its original full final checkpoint",
+            ));
+        }
+        let accepted = accepted.cast::<PyBytes>()?.as_bytes();
+        let outcome_length = checkpoint
+            .len()
+            .checked_add(history.len())
+            .and_then(|length| length.checked_add(accepted.len()))
+            .and_then(|length| length.checked_add(24))
+            .ok_or_else(|| invalid("complete phase preparation outcome size overflowed"))?;
+        self.records()?.check_payload_length(outcome_length)?;
+        let mut outcome = Vec::with_capacity(outcome_length);
+        // Acceptance is outside Q and cannot change the bytes it accepted.
+        for material in [checkpoint.as_ref(), history.as_ref(), accepted] {
+            outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
+            outcome.extend_from_slice(material);
+        }
+        let mut candidate = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        let candidate = candidate
+            .as_mut()
+            .ok_or_else(|| invalid("scientific acceptance lost its original candidate"))?;
+        if let Some(original) = &candidate.preparation_outcome {
+            if original.as_ref() != outcome.as_slice() {
+                return Err(invalid(
+                    "scientific acceptance changed its retained complete outcome",
+                ));
+            }
+        } else {
+            candidate.preparation_outcome = Some(outcome.into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_restore_admission(
+        &self,
+        py: Python<'_>,
+        checkpoint: &[u8],
+        transition: Option<&SemanticLearningPhaseTransition>,
+    ) -> PyResult<()> {
+        self.source.borrow(py).require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        return self.require_private_restore_admission(py, checkpoint, transition);
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = (checkpoint, transition);
+            Err(invalid(
+                "private scientific trajectory execution requires semantic-policy",
+            ))
+        }
+    }
+
+    pub(super) fn restore_allocation_domain(
+        &self,
+        py: Python<'_>,
+        device_ordinal: usize,
+        memory_bytes: u64,
+    ) -> PyResult<CheckpointAllocationDomain> {
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        if !matches!(*self.status_lock()?, Completion::Preparing)
+            || self.private_restore()?.is_some()
+            || source.device_ordinal != device_ordinal
+            || source.memory_bytes != memory_bytes
+        {
+            return Err(invalid(
+                "private phase allocation requires its original unused preparation and unchanged Session bounds",
+            ));
+        }
+        self.records()?.require_preparation_admission()?;
+        let (provider, domain) = source
+            .owner()?
+            .checkpoint_allocation_domain()
+            .map_err(xlog_err)?;
+        Ok(CheckpointAllocationDomain {
+            provider,
+            domain,
+            #[cfg(feature = "semantic-policy")]
+            cold_work: Some(self.private_restore_native_work(py)?),
+        })
+    }
+
     fn finish_preparation_readback(&self, py: Python<'_>) -> PyResult<&'static str> {
         if !self.records()?.preparation_outcome_known {
             return Ok("unknown");
@@ -547,9 +1720,26 @@ impl PySemanticLearningPhaseTransition {
             invalid("learning-phase preparation has no complete verified candidate checkpoint")
         })?;
         Ok((
-            candidate.owner.clone_ref(py),
+            candidate
+                .owner
+                .as_ref()
+                .ok_or_else(|| invalid("private candidate consumers and owners have retired"))?
+                .clone_ref(py),
             Arc::clone(&candidate.checkpoint),
         ))
+    }
+
+    fn candidate_checkpoint(&self) -> PyResult<Arc<[u8]>> {
+        let candidate = self
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?;
+        candidate
+            .as_ref()
+            .map(|candidate| Arc::clone(&candidate.checkpoint))
+            .ok_or_else(|| {
+                invalid("learning-phase preparation has no complete candidate checkpoint")
+            })
     }
 
     fn private_restore(&self) -> PyResult<MutexGuard<'_, Option<PrivateRestoreOwners>>> {
@@ -683,8 +1873,19 @@ impl PySemanticLearningPhaseTransition {
         check_learning_grant(&task, &self.grant_reference, &snapshot)?;
         let source_manifest = SemanticCheckpointManifest::decode(&self.source_checkpoint)?;
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
-        let model = self.source_serializer.bind(py).call0()?;
-        require_model_bytes(&model, &source_manifest.model)?;
+        {
+            #[cfg(feature = "semantic-policy")]
+            let model = self.serialize_delivery_model(py, true)?;
+            #[cfg(not(feature = "semantic-policy"))]
+            let model = {
+                let _reads = ImportReadScope::checkpoint(&source, &task, &parent, py)?;
+                self.model_owner(py, PhaseModelOwner::SerializeSource)?
+                    .bind(py)
+                    .call0()?
+                    .unbind()
+            };
+            require_model_bytes(model.bind(py), &source_manifest.model)?;
+        }
         verify_phase_native(py, &task, &parent, &source_manifest.native, true)?;
         if include_candidate {
             let (candidate, checkpoint) = self.candidate(py)?;
@@ -695,11 +1896,20 @@ impl PySemanticLearningPhaseTransition {
             let acquired = candidate.parent.borrow(py);
             let manifest = SemanticCheckpointManifest::decode(&checkpoint)?;
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
-            let model = self
-                .candidate_serializer
-                .bind(py)
-                .call1((candidate.model.clone_ref(py),))?;
-            require_model_bytes(&model, &manifest.model)?;
+            {
+                #[cfg(feature = "semantic-policy")]
+                let model = self.serialize_delivery_model(py, false)?;
+                #[cfg(not(feature = "semantic-policy"))]
+                let model = {
+                    let successor = candidate.session.borrow(py);
+                    let _reads = ImportReadScope::checkpoint(&successor, &issued, &acquired, py)?;
+                    self.model_owner(py, PhaseModelOwner::SerializeCandidate)?
+                        .bind(py)
+                        .call1((candidate.model.clone_ref(py),))?
+                        .unbind()
+                };
+                require_model_bytes(model.bind(py), &manifest.model)?;
+            }
             verify_phase_native(py, &issued, &acquired, &manifest.native, false)?;
             issued.state()?.snapshot = snapshot.clone();
         }
@@ -708,7 +1918,22 @@ impl PySemanticLearningPhaseTransition {
     }
 
     fn activate(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
-        self.verify(py, true)?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            if !self.delivery_source_retirement_entered()? {
+                self.verify(py, true)?;
+            }
+            self.finish_delivery_expense(py)?;
+            // External history/store/observer calls do not extend expired
+            // authority. This cold refresh cannot read the retired source or
+            // add native/model work after the original backing interval.
+            self.refresh_delivery_authority(py)?;
+            self.install_delivered_checkpoint_custody(py)?;
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        return Err(invalid(
+            "complete learning-phase delivery requires semantic-policy",
+        ));
         let (candidate_owner, _) = self.candidate(py)?;
         let candidate = candidate_owner.borrow(py);
         let task = self.task_use.borrow(py);
@@ -719,6 +1944,21 @@ impl PySemanticLearningPhaseTransition {
             .learning_transition
             .lock()
             .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
+        let mut successor_retention = successor
+            .learning_transition
+            .lock()
+            .map_err(|_| invalid("successor learning-phase retention mutex is poisoned"))?;
+        if !retention
+            .as_ref()
+            .is_some_and(|pending| std::ptr::eq(&*pending.borrow(py), self))
+            || !successor_retention
+                .as_ref()
+                .is_some_and(|pending| std::ptr::eq(&*pending.borrow(py), self))
+        {
+            return Err(invalid(
+                "delivery lost its original source or successor pending owner",
+            ));
+        }
         let mut completion = self.status_lock()?;
         let mut old = task.state()?;
         let mut new = issued.state()?;
@@ -731,55 +1971,47 @@ impl PySemanticLearningPhaseTransition {
             TaskUsePhase::ArenaPreparing(original) => *original.clone(),
             _ => unreachable!("checked private learning successor"),
         };
-        TaskIssuance::issue(Arc::clone(&source.issuance))?;
+        // The actual source Session release already invalidated its issuance.
         old.phase = TaskUsePhase::Refused;
         new.phase = activated;
         *completion = Completion::Committed;
         source.learning_preparing.store(false, Ordering::Release);
         successor.learning_preparing.store(false, Ordering::Release);
         let retained = retention.take();
+        let retained_successor = successor_retention.take();
         drop(old);
         drop(new);
         drop(completion);
         drop(retention);
+        drop(successor_retention);
         drop(retained);
+        drop(retained_successor);
         Ok(candidate_owner.clone_ref(py))
     }
 
     fn abandon(&self, py: Python<'_>) -> PyResult<()> {
-        self.verify(py, false)?;
-        let source = self.source.borrow(py);
-        let (candidate, _) = self.candidate(py)?;
-        let candidate = candidate.borrow(py);
-        let successor = candidate.session.borrow(py);
-        let task = self.task_use.borrow(py);
-        let issued = candidate.task_use.borrow(py);
-        let mut retention = source
-            .learning_transition
-            .lock()
-            .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
-        let mut completion = self.status_lock()?;
-        let mut old = task.state()?;
-        let mut new = issued.state()?;
-        let resumed = match &old.phase {
-            TaskUsePhase::ArenaPreparing(original) => *original.clone(),
-            _ => return Err(invalid("source lost its retained learning preparation")),
-        };
-        let mut owner = successor.owner()?;
-        owner.abort();
-        old.phase = resumed;
-        new.phase = TaskUsePhase::Refused;
-        *completion = Completion::Abandoned;
-        source.learning_preparing.store(false, Ordering::Release);
-        successor.learning_preparing.store(false, Ordering::Release);
-        let retained = retention.take();
-        drop(owner);
-        drop(old);
-        drop(new);
-        drop(completion);
-        drop(retention);
-        drop(retained);
-        Ok(())
+        #[cfg(feature = "semantic-policy")]
+        {
+            let cause = if matches!(
+                *self.status_lock()?,
+                Completion::Unknown {
+                    readback_observed: false,
+                    ..
+                }
+            ) {
+                "checkpoint-publication-absent"
+            } else {
+                "private-candidate-abandoned"
+            };
+            self.finish_terminal_refusal(py, cause)
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = py;
+            Err(invalid(
+                "terminal private retirement requires semantic-policy",
+            ))
+        }
     }
 }
 
@@ -812,20 +2044,85 @@ impl PySemanticLearningPhaseTransition {
 
     #[getter]
     fn status(&self) -> PyResult<&'static str> {
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? && !matches!(*self.status_lock()?, Completion::Refused)
+        {
+            return Ok("refusal-pending");
+        }
         Ok(match &*self.status_lock()? {
             Completion::Preparing => "preparing",
             Completion::PreparationUnknown => "unknown",
             Completion::Prepared => "prepared",
             Completion::Unknown { .. } => "unknown",
+            Completion::Refused => "refused",
             Completion::Committed => "committed",
-            Completion::Abandoned => "abandoned",
         })
     }
 
     #[getter]
     fn checkpoint_sha256(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
-        let (_, checkpoint) = self.candidate(py)?;
+        let checkpoint = self.candidate_checkpoint()?;
         Ok(PyBytes::new(py, &Sha256::digest(&checkpoint)).unbind())
+    }
+
+    /// Original result, full terminal history and signed terminal record; never
+    /// an accepted checkpoint or authorization to replay the failed attempt.
+    #[getter]
+    fn refusal_outcome(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        #[cfg(feature = "semantic-policy")]
+        return self.terminal_refusal_outcome(py);
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = py;
+            Ok(None)
+        }
+    }
+
+    /// Read the same known Source issuer, never create an accepted handoff or
+    /// issue another key while the consumer is resolving its original pin.
+    #[getter]
+    fn refusal_checkpoint_custody(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        if !matches!(*self.status_lock()?, Completion::Refused) {
+            return Ok(None);
+        }
+        let (phase_id, digest) = {
+            let records = self.records()?;
+            let terminal = records
+                .refusal_record
+                .as_ref()
+                .ok_or_else(|| invalid("known Source refusal lost its original signed record"))?;
+            (records.phase_id, <[u8; 32]>::from(Sha256::digest(terminal)))
+        };
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        if source.learning_preparing.load(Ordering::Acquire) {
+            return Err(invalid(
+                "known Source refusal is held by another unfinished phase",
+            ));
+        }
+        let retained = source.checkpoint_custody()?;
+        let custody = retained
+            .as_ref()
+            .ok_or_else(|| invalid("known Source refusal lost its original checkpoint issuer"))?;
+        if custody.closure.phase_id != phase_id
+            || custody.closure.completion_digest != digest
+            || custody.origin != <[u8; 32]>::from(Sha256::digest(&self.source_checkpoint))
+        {
+            return Err(invalid(
+                "Source refusal issuer differs from this original known terminal origin",
+            ));
+        }
+        let origin = (
+            PyBytes::new(py, &phase_id),
+            PyBytes::new(py, &digest),
+            PyBytes::new(py, &custody.origin),
+        )
+            .into_pyobject(py)?;
+        Ok(Some(
+            (PyBytes::new(py, &custody.issuer()), origin)
+                .into_pyobject(py)?
+                .unbind(),
+        ))
     }
 
     /// The trusted durable owner implements commit(destination, bytes, sha256)
@@ -845,6 +2142,12 @@ impl PySemanticLearningPhaseTransition {
         if !matches!(*self.status_lock()?, Completion::Prepared) {
             return Err(invalid(
                 "phase checkpoint commit is single-attempt; resolve unknown completion instead",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? {
+            return Err(invalid(
+                "a retained terminal refusal cannot publish or activate its private checkpoint",
             ));
         }
         self.verify(py, true)?;
@@ -882,6 +2185,11 @@ impl PySemanticLearningPhaseTransition {
     ) -> PyResult<Option<Py<PySemanticTransitionRestoredCheckpoint>>> {
         let _operation = PhaseOperation::begin(&self.operating)?;
         self.source.borrow(py).require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if self.terminal_refusal_retained()? {
+            self.finish_terminal_refusal(py, "scientific-comparison-refused")?;
+            return Ok(None);
+        }
         let preparation_unknown = matches!(*self.status_lock()?, Completion::PreparationUnknown);
         if preparation_unknown {
             self.resolve_preparation_record(py)?;
@@ -896,6 +2204,12 @@ impl PySemanticLearningPhaseTransition {
             Completion::Prepared => return Ok(None),
             _ => return Err(invalid("only an unknown phase checkpoint needs resolution")),
         };
+        if readback_observed {
+            // The original Q is already durably known. Resolve only the retained
+            // delivery report/record; source retirement cannot undo that fact or
+            // authorize another publication callback.
+            return self.activate(py).map(Some);
+        }
         let (_, checkpoint) = self.candidate(py)?;
         let result = resolve.bind(py).call1((
             &self.destination,
@@ -905,17 +2219,146 @@ impl PySemanticLearningPhaseTransition {
             return Ok(None);
         }
         if result.is_exact_instance_of::<PyBool>() && !result.extract::<bool>()? {
-            if readback_observed {
-                return Err(invalid(
-                    "phase resolver contradicted the original exact durable readback; retain the same pending owners",
-                ));
-            }
             self.abandon(py)?;
             return Ok(None);
         }
         require_model_bytes(&result, &checkpoint)?;
         self.retain_durable_readback()?;
         self.activate(py).map(Some)
+    }
+
+    /// Deliberately continue the same live attempt: enter only from proven
+    /// nonentry, or finish its retained known cold outcome without re-execution.
+    /// Record readback itself never enters preparation or repeats a write.
+    fn continue_preparation(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<Self>> {
+        let pending = slf.borrow(py);
+        let operation = PhaseOperation::begin(&pending.operating)?;
+        let source = pending.source.borrow(py);
+        source.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if pending.terminal_refusal_retained()? {
+            pending.finish_terminal_refusal(py, "scientific-comparison-refused")?;
+            drop(source);
+            drop(operation);
+            drop(pending);
+            return Ok(slf);
+        }
+        if !matches!(*pending.status_lock()?, Completion::PreparationUnknown) {
+            return Err(invalid(
+                "preparation continuation requires the original unknown pending owner",
+            ));
+        }
+        let entered = pending.preparation_entered.load(Ordering::Acquire);
+        let candidate_entered = pending.candidate_entered.load(Ordering::Acquire);
+        let final_candidate_known = pending
+            .candidate
+            .lock()
+            .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+            .is_some();
+        if entered && candidate_entered {
+            #[cfg(feature = "semantic-policy")]
+            if !final_candidate_known && !pending.control_retirement_retained()? {
+                pending.require_known_private_restore(py)?;
+            }
+            if final_candidate_known {
+                // The actual canonical save proves known complete construction,
+                // not full scientific execution or resource use. Only remaining
+                // cold verification may continue; a retained scientific return is
+                // reused and an entered failed comparison is never called again.
+                pending.candidate(py)?;
+                pending.records()?.require_preparation_admission()?;
+                if let Some(acceptance) = pending.acceptance()?.as_ref() {
+                    if acceptance.refusal.is_none() {
+                        if let Some(error) = &acceptance.error {
+                            return Err(error.clone_ref(py));
+                        }
+                    }
+                    if acceptance.result.is_none() && acceptance.refusal.is_none() {
+                        return Err(invalid("unknown scientific comparison cannot be repeated by preparation continuation"));
+                    }
+                }
+            }
+        } else if entered {
+            if !pending.source_verified()? {
+                return Err(invalid(
+                    "unknown source native/model work cannot be repeated by resource continuation",
+                ));
+            }
+            pending.require_source_operation(py)?;
+            pending.records()?.require_preparation_admission()?;
+        } else if pending.private_restore()?.is_some()
+            || pending
+                .candidate
+                .lock()
+                .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))?
+                .is_some()
+        {
+            return Err(invalid(
+                "preparation continuation requires native-proven nonentry; an unknown execution outcome must remain retained",
+            ));
+        }
+        let retained = source
+            .learning_transition
+            .lock()
+            .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?;
+        if !source.learning_preparing.load(Ordering::Acquire)
+            || retained
+                .as_ref()
+                .is_none_or(|owner| owner.as_ptr() != slf.as_ptr())
+        {
+            return Err(invalid(
+                "preparation continuation lost its original source custody",
+            ));
+        }
+        drop(retained);
+        pending.records()?.preparation_admission_needed()?;
+        if pending.store()?.is_none() {
+            return Err(invalid(
+                "preparation continuation lost its original captured store",
+            ));
+        }
+        *pending.status_lock()? = Completion::Preparing;
+        let result = if entered && candidate_entered && final_candidate_known {
+            pending.finish_preparation(py)
+        } else if entered && candidate_entered {
+            #[cfg(feature = "semantic-policy")]
+            {
+                (|| {
+                    pending.execute_control_branch(py, &slf)?;
+                    if pending.readonly_terminal_refusal_retained()? {
+                        return Ok(());
+                    }
+                    pending.prepare_private_trajectory(py, &slf, "real")?;
+                    pending.execute_private_numerical_sequence(py, &slf, "real")?;
+                    if pending.readonly_terminal_refusal_retained()? {
+                        return Ok(());
+                    }
+                    pending.execute_private_evaluations(py, "real")?;
+                    if pending.readonly_terminal_refusal_retained()? {
+                        return Ok(());
+                    }
+                    pending.execute_private_checkpoint(py, "real")?;
+                    pending.retain_final_checkpoint_candidate(py)?;
+                    pending.finish_preparation(py)
+                })()
+            }
+            #[cfg(not(feature = "semantic-policy"))]
+            {
+                Err(invalid(
+                    "private scientific trajectory execution requires semantic-policy",
+                ))
+            }
+        } else {
+            pending.prepare_candidate(py, &slf)
+        };
+        if let Err(error) = result {
+            *pending.status_lock()? = Completion::PreparationUnknown;
+            return Err(error);
+        }
+        drop(source);
+        drop(operation);
+        drop(pending);
+        Ok(slf)
     }
 
     fn abandon_prepared(&self, py: Python<'_>) -> PyResult<()> {
@@ -948,16 +2391,17 @@ impl PySemanticTransitionController {
         Ok(pending)
     }
 
-    #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner,
+    #[pyo3(signature = (task_use, *, parent, recipe, source_checkpoint, consumer_streams, snapshot, scientific_owner, scientific_refusal_type,
+        source_model, execute_phase_instruction, release_cancelled_phase_execution, resource_observer, feedback_interventions,
         learning_grant_ref, checkpoint_destination, snapshot_model_state, restore_model,
-        snapshot_restored_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, resolve_checkpoint=None,
+        snapshot_restored_model, retire_restored_model, cancelled_retirement_context, retire_source_model, refresh_snapshot, phase_record_owner, phase_record_limits, frozen_program_bytes, cold_model_work_capacity, resolve_checkpoint=None,
         max_checkpoint_bytes=None, max_total_checkpoint_bytes=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the original task, scientific acceptance, durable destination and model owners are independent mandatory inputs"
     )]
     fn prepare_learning_phase_transition(
-        &self,
+        slf: Py<Self>,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         parent: Py<PySemanticPublishedParent>,
@@ -966,24 +2410,40 @@ impl PySemanticTransitionController {
         consumer_streams: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         scientific_owner: Py<PyAny>,
+        scientific_refusal_type: Py<pyo3::types::PyType>,
+        source_model: Py<PyAny>,
+        execute_phase_instruction: &Bound<'_, PyAny>,
+        release_cancelled_phase_execution: &Bound<'_, PyAny>,
+        resource_observer: &Bound<'_, PyAny>,
+        feedback_interventions: &Bound<'_, PyAny>,
         learning_grant_ref: &Bound<'_, PyAny>,
         checkpoint_destination: &Bound<'_, PyAny>,
         snapshot_model_state: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         snapshot_restored_model: &Bound<'_, PyAny>,
+        retire_restored_model: &Bound<'_, PyAny>,
+        cancelled_retirement_context: &Bound<'_, PyAny>,
+        retire_source_model: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         phase_record_owner: Py<PyAny>,
         phase_record_limits: &Bound<'_, PyAny>,
         frozen_program_bytes: &Bound<'_, PyAny>,
+        cold_model_work_capacity: &Bound<'_, PyAny>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticLearningPhaseTransition>> {
-        let source = self.session.borrow(py);
+        let controller = slf.borrow(py);
+        if !cfg!(feature = "semantic-policy") {
+            return Err(invalid(
+                "cold model work requires the semantic-policy build",
+            ));
+        }
+        let source = controller.session.borrow(py);
         source.require_creator()?;
         let task = task_use.borrow(py);
         let acquired = parent.borrow(py);
-        self.require_issued(&task)?;
+        controller.require_issued(&task)?;
         acquired.require_task(py, &task)?;
         if !source_checkpoint.is_exact_instance_of::<PyBytes>() {
             return Err(invalid(
@@ -1002,10 +2462,36 @@ impl PySemanticTransitionController {
             ));
         }
         let record_limits = RecordLimits::read(phase_record_limits)?;
+        let terminal_cleanup =
+            TerminalCleanupTarget::read(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?;
+        let cold_capacity_material = ColdValue::read(cold_model_work_capacity, &mut 128, 0)?;
+        let cold_model_work_capacity = usize::try_from(cold_capacity_material.unsigned()?)
+            .ok().filter(|capacity| *capacity > 0)
+            .ok_or_else(|| invalid("cold model work requires an exact positive capacity with bounded allocation arithmetic"))?;
+        #[cfg(feature = "semantic-policy")]
+        xlog_cuda::SemanticColdModelWork::allocation_bytes(cold_model_work_capacity)
+            .map_err(xlog_err)?;
+        let feedback_materials = feedback_materials(feedback_interventions)?;
+        if source_model.bind(py).is_none()
+            || !execute_phase_instruction.is_callable()
+            || !release_cancelled_phase_execution.is_callable()
+        {
+            return Err(invalid(
+                "phase preparation requires its original source model, instruction execution and cancelled-frame release owners",
+            ));
+        }
+        let device_identity = source
+            .owner()?
+            .resource_device_identity()
+            .map_err(xlog_err)?;
+        let resource_observer =
+            ResourceObserver::capture(resource_observer.cast::<PyCapsule>()?, device_identity)?;
+        resource_observer
+            .require_memory_admission(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?;
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (_, saved_snapshot, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         task.authority.check_snapshot(&saved_snapshot)?;
-        let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
+        checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
         let grant_value = ColdValue::read(learning_grant_ref, &mut (16 * 1024 * 1024), 0)?;
         let learning_grant_ref = grant_value.text()?;
         let destination_value =
@@ -1015,12 +2501,17 @@ impl PySemanticTransitionController {
             || !snapshot_model_state.is_callable()
             || !restore_model.is_callable()
             || !snapshot_restored_model.is_callable()
+            || !retire_restored_model.is_callable()
+            || !cancelled_retirement_context.is_callable()
+            || !retire_source_model.is_callable()
             || !refresh_snapshot.is_callable()
         {
-            return Err(invalid("phase preparation requires its original destination, serializers, restore and authority owner"));
+            return Err(invalid(
+                "phase preparation requires its original destination, serializers, restore and authority owner",
+            ));
         }
-        let initial =
-            AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut (16 * 1024 * 1024), 0)?)?;
+        let snapshot_value = ColdValue::read(snapshot, &mut (16 * 1024 * 1024), 0)?;
+        let initial = AuthoritySnapshot::parse(&snapshot_value)?;
         let prior_snapshot = task.state()?.snapshot.clone();
         initial.newer_than(&prior_snapshot)?;
         initial.newer_than(&saved_snapshot)?;
@@ -1061,29 +2552,114 @@ impl PySemanticTransitionController {
                 &recipe_material,
                 &grant_value.canonical_bytes(),
                 checkpoint_destination.as_bytes(),
+                feedback_materials[0].as_bytes(),
+                feedback_materials[1].as_bytes(),
+                &cold_capacity_material.canonical_bytes(),
             ],
             record_limits,
         )?;
+        if !scientific_refusal_type
+            .bind(py)
+            .is_subclass_of::<pyo3::exceptions::PyException>()?
+        {
+            return Err(invalid(
+                "scientific refusal requires its original exception class",
+            ));
+        }
+        let final_phase = phase(
+            cold_restore::json(frozen_program_bytes.cast::<PyBytes>()?.as_bytes())?["final_phase"]
+                .as_str()
+                .ok_or_else(|| {
+                    invalid("frozen learning program requires its original declared final phase")
+                })?,
+        )?;
+        let accept_learning_phase = scientific_owner.bind(py).getattr("accept_learning_phase")?;
+        if !accept_learning_phase.is_callable() {
+            return Err(invalid(
+                "phase preparation requires its original final scientific acceptance owner",
+            ));
+        }
+        let preparation_inputs = PreparationInputs {
+            resource_observer,
+            feedback_interventions: feedback_interventions.cast::<PyTuple>()?.clone().unbind(),
+            consumer_streams: ColdValue::read(consumer_streams, &mut (16 * 1024 * 1024), 0)?,
+            snapshot: snapshot_value,
+            prior_snapshot,
+            grant: grant_value,
+            frozen_program: frozen_program_bytes.cast::<PyBytes>()?.as_bytes().to_vec(),
+            terminal_cleanup,
+            final_phase,
+            cold_model_work_capacity,
+            resolve_checkpoint: resolve_checkpoint.map(|callback| callback.clone().unbind()),
+            max_checkpoint_bytes: max_checkpoint_bytes
+                .map(|value| ColdValue::read(value, &mut 1024, 0))
+                .transpose()?,
+            max_total_checkpoint_bytes: max_total_checkpoint_bytes
+                .map(|value| ColdValue::read(value, &mut 1024, 0))
+                .transpose()?,
+        };
         let pending = Py::new(
             py,
             PySemanticLearningPhaseTransition {
-                source: self.session.clone_ref(py),
+                source_controller: slf.clone_ref(py),
+                source: controller.session.clone_ref(py),
                 task_use: task_use.clone_ref(py),
                 parent: parent.clone_ref(py),
                 candidate: Mutex::new(None),
                 private_restore: Mutex::new(None),
                 source_checkpoint: checkpoint.to_vec(),
-                _scientific_owner: scientific_owner.clone_ref(py),
-                _recipe: recipe.clone_ref(py),
-                _restore_model: restore_model.clone().unbind(),
-                source_serializer: snapshot_model_state.clone().unbind(),
-                candidate_serializer: snapshot_restored_model.clone().unbind(),
+                scientific_owner: scientific_owner.clone_ref(py),
+                accept_learning_phase: accept_learning_phase.unbind(),
+                scientific_acceptance: Mutex::new(None),
+                scientific_refusal_type,
+                recipe: recipe.clone_ref(py),
+                model_owners: Mutex::new(Some(PhaseModelOwners {
+                    source: source_model,
+                    execute: execute_phase_instruction.clone().unbind(),
+                    release_cancelled_execution: release_cancelled_phase_execution.clone().unbind(),
+                    restore: restore_model.clone().unbind(),
+                    retire_private: retire_restored_model.clone().unbind(),
+                    cancelled_retirement_context: cancelled_retirement_context.clone().unbind(),
+                    serialize_source: snapshot_model_state.clone().unbind(),
+                    serialize_candidate: snapshot_restored_model.clone().unbind(),
+                    retire_source: retire_source_model.clone().unbind(),
+                })),
                 refresh_snapshot: refresh_snapshot.clone().unbind(),
                 grant_reference: learning_grant_ref.to_owned(),
                 destination: checkpoint_destination.to_owned(),
                 phase_record_owner,
                 phase_store: Mutex::new(None),
                 phase_records: Mutex::new(phase_records),
+                preparation_inputs,
+                preparation_entered: AtomicBool::new(false),
+                source_preparation: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                phase_evaluations: Mutex::new(Vec::new()),
+                #[cfg(feature = "semantic-policy")]
+                phase_evaluation_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                control_evaluations_done: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                real_evaluations_done: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                private_checkpoints: Mutex::new(Vec::new()),
+                #[cfg(feature = "semantic-policy")]
+                private_checkpoint_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                control_retirement: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                delivery_expense: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                private_trajectory_start: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_restore: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                intermediate_snapshot_active: AtomicBool::new(false),
+                #[cfg(feature = "semantic-policy")]
+                private_execution: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                private_execution_active: AtomicBool::new(false),
+                candidate_entered: AtomicBool::new(false),
                 completion: Mutex::new(Completion::Preparing),
                 operating: AtomicBool::new(false),
             },
@@ -1115,149 +2691,7 @@ impl PySemanticTransitionController {
                 retained_owner.phase_record_owner.bind(py),
             )?);
             retained_owner.pin_issuer(py, &pending)?;
-            let initial_material = Arc::clone(&retained_owner.records()?.inputs);
-            retained_owner.append_phase_record(py, RecordKind::Admission, &initial_material)?;
-            let original_program = scientific_owner.bind(py).getattr("program_bytes")?;
-            require_model_bytes(
-                &original_program,
-                frozen_program_bytes.cast::<PyBytes>()?.as_bytes(),
-            )?;
-            {
-                if source.importing.load(Ordering::Acquire)
-                    || source.recording.load(Ordering::Acquire)
-                    || source.retiring.load(Ordering::Acquire)
-                {
-                    return Err(invalid(
-                        "phase preparation cannot overlap recording, import or retirement",
-                    ));
-                }
-                let mut owner = source.owner()?;
-                task.require_current(&owner)?;
-                owner
-                    .quiesce_published_reader(&*acquired.lease()?, &streams)
-                    .map_err(xlog_err)?;
-            }
-            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
-            require_model_bytes(&snapshot_model_state.call0()?, &manifest.model)?;
-            verify_original_source(py, &task, &acquired, &manifest, &saved_snapshot)?;
-            if task.state()?.snapshot.canonical != prior_snapshot.canonical {
-                return Err(invalid(
-                    "phase source authority changed during model verification",
-                ));
-            }
-            let acceptance = scientific_owner.bind(py).getattr("accept_learning_phase")?;
-            if !acceptance.is_callable() {
-                return Err(invalid(
-                    "phase preparation requires the original scientific acceptance owner",
-                ));
-            }
-            let accepted = acceptance.call1((
-                parent.clone_ref(py),
-                recipe.clone_ref(py),
-                source_checkpoint,
-                grant_value.python_value(py)?,
-                checkpoint_destination,
-                snapshot,
-            ))?;
-            if !accepted.is_exact_instance_of::<PyBytes>()
-                || accepted.cast::<PyBytes>()?.as_bytes().is_empty()
-            {
-                return Err(invalid("scientific owner must return its complete original accepted criteria and result, not an acceptance flag"));
-            }
-            let mut transition = recipe.borrow(py).inner.clone();
-            let mut retained = b"xlog.learning-phase.acceptance.v1\0".to_vec();
-            retained.extend_from_slice(&Sha256::digest(checkpoint));
-            retained.extend_from_slice(transition.recipe_digest().as_bytes());
-            for bytes in [
-                task.authority.canonical.as_slice(),
-                grant_value.canonical_bytes().as_slice(),
-                initial.canonical.as_slice(),
-                checkpoint_destination.as_bytes(),
-                accepted.cast::<PyBytes>()?.as_bytes(),
-            ] {
-                retained.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                retained.extend_from_slice(bytes);
-            }
-            transition.acceptance = retained;
-            let fresh = refresh_snapshot.call0()?;
-            let current =
-                AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
-            current.newer_than(&initial)?;
-            check_learning_grant(&task, learning_grant_ref, &current)?;
-            task.state()?.snapshot = initial.clone();
-            let candidate = PySemanticTransitionSession::restore_checkpoint_impl(
-                py,
-                source_checkpoint,
-                source.device_ordinal,
-                &fresh,
-                restore_model,
-                task.checkpoint.training_domain.python_value(py)?.bind(py),
-                None,
-                Some(&transition),
-                resolve_checkpoint,
-                max_checkpoint_bytes,
-                max_total_checkpoint_bytes,
-                Some(refresh_snapshot),
-                Some(&task.checkpoint.proposal_expense),
-                Some(&task.checkpoint.checkpoint_sources),
-                Some(&pending),
-            )?;
-            let candidate_model = candidate.borrow(py).model.clone_ref(py);
-            let serializer = snapshot_restored_model.clone().unbind();
-            let snapshot_candidate =
-                PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
-                    serializer
-                        .bind(args.py())
-                        .call1((candidate_model.clone_ref(args.py()),))
-                        .map(Bound::unbind)
-                })?;
-            let fresh = refresh_snapshot.call0()?;
-            let checkpoint = {
-                let new = candidate.borrow(py);
-                let blob = new.controller.borrow(py).save_checkpoint(
-                    py,
-                    &new.task_use.borrow(py),
-                    &new.parent.borrow(py),
-                    consumer_streams,
-                    &fresh,
-                    snapshot_candidate.as_any(),
-                )?;
-                blob.bind(py).as_bytes().to_vec()
-            };
-            *retained_owner
-                .candidate
-                .lock()
-                .map_err(|_| invalid("learning-phase candidate owner mutex is poisoned"))? =
-                Some(PreparedCandidate {
-                    owner: candidate,
-                    checkpoint: checkpoint.into(),
-                });
-            retained_owner.verify(py, true)?;
-            let history = scientific_owner.bind(py).getattr("history_bytes")?;
-            if !history.is_exact_instance_of::<PyBytes>() {
-                return Err(invalid("phase preparation outcome requires the original complete scientific history bytes"));
-            }
-            let (_, checkpoint) = retained_owner.candidate(py)?;
-            let outcome_length = checkpoint
-                .len()
-                .checked_add(history.cast::<PyBytes>()?.as_bytes().len())
-                .and_then(|length| length.checked_add(16))
-                .ok_or_else(|| invalid("complete phase preparation outcome size overflowed"))?;
-            retained_owner
-                .records()?
-                .check_payload_length(outcome_length)?;
-            let mut outcome = Vec::new();
-            for material in [checkpoint.as_ref(), history.cast::<PyBytes>()?.as_bytes()] {
-                outcome.extend_from_slice(&(material.len() as u64).to_le_bytes());
-                outcome.extend_from_slice(material);
-            }
-            retained_owner.append_phase_record(py, RecordKind::PreparationOutcome, &outcome)?;
-            // The complete checkpoint now owns all of the actual restored
-            // handles. Release only the redundant construction references.
-            let construction = retained_owner.private_restore()?.take();
-            drop(construction);
-            *retained_owner.status_lock()? = Completion::Prepared;
-            Ok(())
+            retained_owner.prepare_candidate(py, &pending)
         })();
         if let Err(error) = result {
             // Source equality does not prove that an external operation did

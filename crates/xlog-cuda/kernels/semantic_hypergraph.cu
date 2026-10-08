@@ -14,6 +14,7 @@ struct NativeWorkTally {
     uint64_t events[9] = {};
     uint64_t overflow = 0;
 };
+static_assert(sizeof(NativeWorkTally) == 11 * sizeof(uint64_t), "native work tally ABI");
 __device__ void charge_native(NativeWorkTally *work, NativeWorkEvent event, uint64_t count) {
     if (!work || work->overflow) return;
     const unsigned kind = unsigned(event);
@@ -24,6 +25,18 @@ __device__ void charge_native(NativeWorkTally *work, NativeWorkEvent event, uint
     work->units += count;
     work->events[kind] += count;
 }
+#ifdef __CUDACC__
+// Parallel producers contribute only reached logical events to the same
+// original execution tally. Overflow is retained, never saturated or hidden.
+__device__ void charge_native_parallel(NativeWorkTally *work, NativeWorkEvent event, uint64_t count) {
+    if (!work || !count) return;
+    const auto amount = static_cast<unsigned long long>(count);
+    const auto units = atomicAdd(reinterpret_cast<unsigned long long*>(&work->units), amount);
+    const auto events = atomicAdd(reinterpret_cast<unsigned long long*>(&work->events[unsigned(event)]), amount);
+    if (units > UINT64_MAX-count || events > UINT64_MAX-count)
+        atomicExch(reinterpret_cast<unsigned long long*>(&work->overflow), 1ULL);
+}
+#endif
 __device__ uint64_t written_word(uint64_t value, NativeWorkTally *work) {
     charge_native(work, NativeWorkEvent::CanonicalByte, sizeof(value));
     return value;
@@ -2102,7 +2115,10 @@ __device__ inline void execute(uint64_t *arena, const LaunchDescriptor &descript
 
 #ifndef XLOG_SEMANTIC_GRAPH_DEVICE_ONLY
 extern "C" __global__ void semantic_hypergraph_execute(uint64_t *arena,
-                                    semantic_graph::LaunchDescriptor descriptor) {
-    if (blockIdx.x == 0 && threadIdx.x == 0) semantic_graph::execute(arena, descriptor);
+                                    semantic_graph::LaunchDescriptor descriptor,
+                                    uint64_t cold_work) {
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        semantic_graph::execute(arena, descriptor,
+            reinterpret_cast<semantic_graph::NativeWorkTally *>(cold_work));
 }
 #endif

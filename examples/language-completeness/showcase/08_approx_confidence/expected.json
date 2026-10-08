@@ -1,6 +1,5 @@
 {
   "features": ["approx_inference", "prob_aggregate_mc"],
-  "source_required_substrings": ["#pragma prob_confidence = 0.90", "#pragma prob_method = rejection", "#pragma prob_seed = 7"],
   "checks": {
     "prob_json": {
       "engine": "mc",

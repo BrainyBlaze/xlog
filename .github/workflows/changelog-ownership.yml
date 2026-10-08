@@ -8,10 +8,15 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   changelog-ownership:
     name: changelog-ownership
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - name: Require release ownership for generated changelog changes
         env:

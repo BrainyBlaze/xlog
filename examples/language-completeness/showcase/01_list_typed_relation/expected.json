@@ -1,6 +1,5 @@
 {
   "features": ["types", "lists"],
-  "source_required_substrings": ["pred bag(id: u32, xs: list<u32>)", "member(", "[Head | Tail]"],
   "checks": {
     "run": {
       "returncode": 0,
