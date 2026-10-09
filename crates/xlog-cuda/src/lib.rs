@@ -58,10 +58,10 @@ pub use semantic_hypergraph::{
     SemanticHypergraphCapacities, SemanticHypergraphError, SemanticHypergraphExecutionStats,
     SemanticInsertOutcome, SemanticInsertedSupport, SemanticPolarity, SemanticPredicateRecord,
     SemanticRecordRole, SemanticRootDigest, SemanticRootHandle, SemanticRootSnapshot,
-    SemanticStatementHandle, SemanticStatementIdentity, SemanticStatementKey, SemanticStatementRef,
-    SemanticSupportEvent, SemanticSupportHandle, SemanticSupportIdentity, SemanticSupportRecord,
-    SemanticSupportRef, SemanticTruth, SemanticTypedRecord, SemanticVersionHandle,
-    SemanticVersionIdentity, SemanticVersionRef, SemanticView,
+    SemanticRootSupport, SemanticStatementHandle, SemanticStatementIdentity, SemanticStatementKey,
+    SemanticStatementRef, SemanticSupportEvent, SemanticSupportHandle, SemanticSupportIdentity,
+    SemanticSupportRecord, SemanticSupportRef, SemanticTruth, SemanticTypedRecord,
+    SemanticVersionHandle, SemanticVersionIdentity, SemanticVersionRef, SemanticView,
 };
 pub use semantic_program::{SemanticProgramAdmission, SemanticProgramFact, SemanticProgramRule};
 pub use semantic_training_view::{
