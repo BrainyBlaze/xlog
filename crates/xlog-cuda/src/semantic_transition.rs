@@ -11015,6 +11015,14 @@ pub struct SemanticPreparedSegmentNonSubmission {
     steps: Vec<SemanticPreparedStep>,
 }
 
+/// Routing of one closed original launch frame. Neither variant authenticates
+/// numerical completion or replaces the original cancellation/observation law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticPreparedSegmentContinuation {
+    NeverGraphCalled,
+    GraphCallEntered,
+}
+
 impl SemanticPreparedSegmentNonSubmission {
     pub fn matches(&self, steps: &[SemanticPreparedStep]) -> bool {
         self.steps.len() == steps.len()
@@ -17026,6 +17034,39 @@ impl SemanticTransitionSession {
         self.prepared_segment
             .as_ref()
             .is_some_and(|build| build.completed)
+    }
+
+    pub fn prepared_segment_continuation(
+        &self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<SemanticPreparedSegmentContinuation, SemanticTransitionError> {
+        if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let build = self.prepared_segment.as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if !build.submitted
+            || build.completed
+            || build.launch_attempt.as_ref()
+                .is_none_or(|attempt| !attempt.closed.load(Ordering::Acquire))
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)| {
+                step.token != *token
+                    || build.check_retained(step, &self.publication_issuer).is_err()
+                    || self.steps.get(token).is_none_or(|owner| {
+                        owner.prepared.is_none() || owner.identity.is_some()
+                    })
+            })
+        {
+            return Err(publication_input_error(
+                "continuation requires its complete closed original prepared launch attempt",
+            ));
+        }
+        Ok(if build.graph_call_entered {
+            SemanticPreparedSegmentContinuation::GraphCallEntered
+        } else {
+            SemanticPreparedSegmentContinuation::NeverGraphCalled
+        })
     }
 
     /// Close this exact construction before any graph call. A failed submission
