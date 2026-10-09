@@ -11007,7 +11007,8 @@ pub struct SemanticPreparedExecutable {
 }
 
 /// Native disposition of one original whole roster after capture has ended and
-/// its actual preparation consumers have joined, before any submission attempt.
+/// its actual preparation consumers have joined, before any graph call. A failed
+/// authority ingress attempt must first retire its original DMA without result.
 /// It is not a completed/skipped execution observation or permission to retry.
 #[derive(Clone)]
 pub struct SemanticPreparedSegmentNonSubmission {
@@ -11061,6 +11062,23 @@ struct PreparedSegmentCompletionObservations {
     actor_refresh: BTreeMap<(u64, u64), PreparedActorRefreshCompletionObservations>,
 }
 
+struct PreparedLaunchAttempt {
+    closed: AtomicBool,
+}
+
+struct PreparedLaunchFrame(Arc<PreparedLaunchAttempt>);
+
+impl Drop for PreparedLaunchFrame {
+    fn drop(&mut self) {
+        self.0.closed.store(true, Ordering::Release);
+    }
+}
+
+struct PreparedNeverGraphCalled {
+    scope: Arc<()>,
+    attempt: Arc<PreparedLaunchAttempt>,
+}
+
 struct PreparedSegmentState {
     issuer: Arc<()>,
     scope: Arc<()>,
@@ -11076,6 +11094,9 @@ struct PreparedSegmentState {
     completed: bool,
     execution_poisoned: bool,
     graph_call_entered: bool,
+    launch_attempt: Option<Arc<PreparedLaunchAttempt>>,
+    authority_upload: Option<crate::device::RetainedDeviceWrite<u8>>,
+    never_graph_called: Option<PreparedNeverGraphCalled>,
     cancelled: Arc<AtomicBool>,
     construction: Arc<Mutex<()>>,
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
@@ -11093,6 +11114,7 @@ struct PreparedSegmentState {
     parent_quiescent: bool,
     transfers: Option<Arc<SemanticPreparedSegmentTransfers>>,
     completion_observations: PreparedSegmentCompletionObservations,
+    final_consumers: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 impl PreparedSegmentState {
@@ -11133,6 +11155,9 @@ impl PreparedSegmentState {
             completed: false,
             execution_poisoned: false,
             graph_call_entered: false,
+            launch_attempt: None,
+            authority_upload: None,
+            never_graph_called: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             construction: Arc::new(Mutex::new(())),
             graph_retirement: None,
@@ -11151,6 +11176,7 @@ impl PreparedSegmentState {
             parent_quiescent: false,
             transfers: None,
             completion_observations: PreparedSegmentCompletionObservations::default(),
+            final_consumers: BTreeMap::new(),
         })
     }
 
@@ -11277,7 +11303,7 @@ impl PreparedSegmentState {
         &self,
         steps: &[SemanticPreparedStep],
     ) -> Result<(), SemanticTransitionError> {
-        if self.submitted
+        if (self.submitted && !self.has_never_graph_called_proof())
             || self.completed
             || self.cancelled.load(Ordering::Acquire)
             || steps.len() != self.tokens.len()
@@ -11296,7 +11322,7 @@ impl PreparedSegmentState {
         &self,
         proof: &SemanticPreparedSegmentNonSubmission,
     ) -> Result<(), SemanticTransitionError> {
-        if self.submitted
+        if (self.submitted && !self.has_never_graph_called_proof())
             || self.completed
             || !self.cancelled.load(Ordering::Acquire)
             || proof.steps.len() != self.tokens.len()
@@ -11309,6 +11335,17 @@ impl PreparedSegmentState {
             ));
         }
         Ok(())
+    }
+
+    fn has_never_graph_called_proof(&self) -> bool {
+        !self.graph_call_entered
+            && self.never_graph_called.as_ref().is_some_and(|proof| {
+                Arc::ptr_eq(&proof.scope, &self.scope)
+                    && self.launch_attempt.as_ref().is_some_and(|attempt| {
+                        Arc::ptr_eq(attempt, &proof.attempt)
+                            && attempt.closed.load(Ordering::Acquire)
+                    })
+            })
     }
 
     // The Session closes construction under known capture exclusion before any
@@ -16879,8 +16916,18 @@ impl SemanticTransitionSession {
             after_completion_export: None,
             terminal_wait: SemanticSegmentTerminalWait::NotStarted,
         });
+        let authority_upload = crate::device::RetainedDeviceWrite::new(
+            &self.stream,
+            &authority_decisions,
+            storage.allocations[slot].slice()?.view().slice(..authority_decisions.len()),
+        )
+        .map_err(|error| runtime_error("prepared authority staging", error))?;
+        let attempt = Arc::new(PreparedLaunchAttempt { closed: AtomicBool::new(false) });
+        let frame = PreparedLaunchFrame(Arc::clone(&attempt));
         let build = self.prepared_segment.as_mut().expect("checked segment");
         build.submit()?;
+        build.launch_attempt = Some(attempt);
+        build.authority_upload = Some(authority_upload);
         // This original submission owns uncertainty separately from an abort
         // or a semantic graph integrity failure. Arm before its first effect.
         build.execution_poisoned = true;
@@ -16890,13 +16937,13 @@ impl SemanticTransitionSession {
             let PublicationPayload::Metadata(bytes) = &self.publication_uploads[0].1 else {
                 unreachable!("owned authority metadata")
             };
-            let mut destination = storage.allocations[slot]
-                .slice()?
-                .view()
-                .slice(..bytes.len());
-            self.provider
-                .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
+            self.provider.admit_launch_metadata_htod(bytes.len());
+            let upload = self.prepared_segment.as_mut().expect("original segment")
+                .authority_upload.as_mut().expect("original authority upload");
+            upload.enqueue(&self.stream)
                 .map_err(|error| runtime_error("prepared fresh authority upload", error))?;
+            upload.resolve()
+                .map_err(|error| runtime_error("prepared fresh authority completion", error))?;
             let before_launch = self.host_io_stats();
             self.prepared_segment_transfers_mut()?.before_launch = Some(before_launch);
             let graph = self
@@ -16919,12 +16966,56 @@ impl SemanticTransitionSession {
                 graph.launch_in(enqueue)
             })
         })();
+        // Even an unwinding original call closes this exact frame. A later
+        // cancellation can never race a still-admitted graph callback.
+        drop(frame);
         if result.is_err() {
             self.pending = self.prepared_segment.as_ref()
                 .is_some_and(|build| build.graph_call_entered);
             return result;
         }
         self.pending = true;
+        Ok(())
+    }
+
+    fn retire_prepared_authority_without_graph(
+        &mut self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<(), SemanticTransitionError> {
+        let build = self.prepared_segment.as_mut()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if !build.submitted
+            || build.completed
+            || build.graph_call_entered
+            || self.pending
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)| {
+                step.token != *token || build.check_retained(step, &self.publication_issuer).is_err()
+            })
+        {
+            return Err(publication_input_error(
+                "authority retirement requires its exact never-called original graph attempt",
+            ));
+        }
+        if build.has_never_graph_called_proof() {
+            return Ok(());
+        }
+        let attempt = build.launch_attempt.as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !attempt.closed.load(Ordering::Acquire) {
+            return Err(publication_input_error("original graph launch frame remains open"));
+        }
+        build.authority_upload.as_mut()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .retire_without_result(&self.stream)
+            .map_err(|error| runtime_error("original authority upload retirement", error))?;
+        build.never_graph_called = Some(PreparedNeverGraphCalled {
+            scope: Arc::clone(&build.scope),
+            attempt: Arc::clone(attempt),
+        });
+        // Only this original ingress uncertainty is resolved. The submission
+        // reservation, Program attempt and independent Session poison remain.
+        build.execution_poisoned = false;
         Ok(())
     }
 
@@ -16937,9 +17028,9 @@ impl SemanticTransitionSession {
             .is_some_and(|build| build.completed)
     }
 
-    /// Close this exact construction against any later capture or submission.
-    /// A false pending flag is insufficient: submit is marked before upload or
-    /// graph launch, and an unknown capture reservation cannot admit this join.
+    /// Close this exact construction before any graph call. A failed submission
+    /// reservation must first retire its original authority DMA and close the
+    /// original launch frame; a false pending flag alone cannot admit this join.
     /// No reader decrement, result row, allocation release or rights is issued.
     pub fn cancel_prepared_segment_before_submission(
         &mut self,
@@ -16949,8 +17040,7 @@ impl SemanticTransitionSession {
             .prepared_segment
             .as_ref()
             .ok_or(SemanticTransitionError::NotCaptured)?;
-        if build.submitted
-            || build.completed
+        if build.completed
             || steps.len() != build.tokens.len()
             || steps.iter().zip(&build.tokens).any(|(step, token)| {
                 step.token != *token
@@ -16964,6 +17054,10 @@ impl SemanticTransitionSession {
                 "cancellation changed its original unused complete roster",
             ));
         }
+        if build.submitted {
+            self.retire_prepared_authority_without_graph(steps)?;
+        }
+        let build = self.prepared_segment.as_ref().expect("original cancellation scope");
         #[cfg(feature = "semantic-policy")]
         let embedded = if let Some(staged) = &self.actor_refresh {
             let execution = staged.proof.inner.execution.lock().map_err(|_| {
@@ -31023,7 +31117,7 @@ impl SemanticTransitionSession {
             self.prepared_segment.as_ref().filter(|build| {
                 Arc::ptr_eq(&build.scope, scope)
                     && build.cancelled.load(Ordering::Acquire)
-                    && !build.submitted
+                    && (!build.submitted || build.has_never_graph_called_proof())
                     && !build.completed
                     && build.tokens.contains(&token)
             })
@@ -31620,9 +31714,23 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::UnconsumedPolicyTape);
         }
+        let final_streams = self.step_consumer_streams(step.token, consumer_streams)?;
+        if let Some(original) = self.prepared_segment.as_ref()
+            .expect("checked prepared scope").final_consumers.get(&step.token)
+        {
+            if original != &final_streams {
+                return Err(publication_input_error(
+                    "prepared final use changed its original consumer roster",
+                ));
+            }
+            return self.ensure_quiescent();
+        }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared step quiescence stream admission", error))?;
-        self.complete_step_consumers_by_token(step.token, consumer_streams)
+        self.complete_step_consumers_by_token(step.token, consumer_streams)?;
+        self.prepared_segment.as_mut().expect("joined prepared scope")
+            .final_consumers.insert(step.token, final_streams);
+        Ok(())
     }
 
     pub fn admit_transition(
@@ -35365,27 +35473,32 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// Prove that the target executable and every prepared step owner have
-    /// retired. A retained source graph cannot be released merely because the
-    /// target's one-shot launch completed: the executable still holds its
-    /// captured pointers until full segment retirement.
+    /// Authenticate this exact target's final device use while retaining its
+    /// storage for the original source cleanup and retirement report. Actual
+    /// completion, the joined final consumer roster, and destruction of the
+    /// original executable are all required; launch completion alone is not.
     #[cfg(feature = "semantic-policy")]
-    pub fn require_retired_prepared_step(
+    pub fn require_prepared_step_final_use(
         &self,
         step: &SemanticPreparedStep,
     ) -> Result<(), SemanticTransitionError> {
-        if self.is_poisoned() {
-            return Err(SemanticTransitionError::Poisoned);
-        }
-        if !Arc::ptr_eq(&step.issuer, &self.publication_issuer)
-            || self.prepared_segment.is_some()
-            || self.captured.is_some()
-            || self.pending
-            || !self.prepared_resources.is_empty()
-            || self.steps.contains_key(&step.token)
+        self.require_completed_prepared_graph_retirement()?;
+        let build = self.prepared_segment.as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        build.check_retained(step, &self.publication_issuer)?;
+        let owner = self.steps.get(&step.token)
+            .filter(|owner| owner.prepared.is_some() && owner.identity.is_none())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let original = build.final_consumers.get(&step.token)
+            .ok_or_else(|| publication_input_error("target final consumers have not joined"))?;
+        if !build.completed
+            || owner.consumer_completion.is_some()
+            || !owner.consumer_streams.is_subset(original)
+            || self.step_consumer_streams(step.token, &original.iter().copied().collect::<Vec<_>>())?
+                != *original
         {
             return Err(publication_input_error(
-                "retained source requires completed retirement of its target segment",
+                "retained source requires its original target final-use proof",
             ));
         }
         Ok(())

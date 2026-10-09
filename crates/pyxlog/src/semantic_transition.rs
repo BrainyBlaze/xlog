@@ -14558,7 +14558,7 @@ impl PySemanticRetainedReplayMember {
             target_session.require_creator()?;
             let target_owner = target_session.owner()?;
             target_owner
-                .require_retired_prepared_step(&update.inner)
+                .require_prepared_step_final_use(&update.inner)
                 .map_err(xlog_err)?;
         }
         self.finish_original_import(py)

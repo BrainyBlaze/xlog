@@ -92,6 +92,7 @@ pub(crate) struct PinnedHostBuffer {
     context: Arc<CudarcContext>,
     event: Option<CudaEvent>,
     completion: HostTransferCompletion,
+    retirement_proven: bool,
 }
 
 impl PinnedHostBuffer {
@@ -110,6 +111,7 @@ impl PinnedHostBuffer {
             context,
             event: Some(event),
             completion: HostTransferCompletion::Complete,
+            retirement_proven: false,
         })
     }
 
@@ -173,6 +175,9 @@ impl PinnedHostBuffer {
     }
 
     pub(crate) fn wait(&mut self) -> std::result::Result<(), DriverError> {
+        if self.retirement_proven {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
         let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
         self.completion.wait(
             || {
@@ -186,6 +191,39 @@ impl PinnedHostBuffer {
             // context fence could invalidate an uncatalogued external capture.
             || Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN)),
         )
+    }
+
+    fn prove_retirement(
+        &mut self,
+        stream: &CudaStream,
+        original_stream_id: u64,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if stream.context().cu_ctx() != self.context.cu_ctx()
+            || crate::cuda_graph::stream_execution_id(stream)? != original_stream_id
+        {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        self.context.bind_to_thread()?;
+        match self.completion {
+            HostTransferCompletion::Complete => {}
+            HostTransferCompletion::EventRecorded => {
+                if self
+                    .event
+                    .as_ref()
+                    .expect("pinned owner event present")
+                    .synchronize()
+                    .is_err()
+                {
+                    stream.synchronize()?;
+                }
+            }
+            HostTransferCompletion::Unfenced => stream.synchronize()?,
+        }
+        // This proof permits only freeing the original allocation. It does not
+        // authenticate successful DMA or make any staged value readable.
+        self.retirement_proven = true;
+        Ok(())
     }
 
     fn write<T: DeviceRepr>(&mut self, source: &[T]) -> std::result::Result<(), DriverError> {
@@ -261,6 +299,8 @@ pub(crate) struct RetainedDeviceWrite<T: DeviceRepr> {
     entered: bool,
     submitted: bool,
     completed: bool,
+    original_stream_id: u64,
+    retired: bool,
 }
 
 impl<T: DeviceRepr> RetainedDeviceWrite<T> {
@@ -279,6 +319,7 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(source.len())
             .ok_or(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?;
+        let original_stream_id = crate::cuda_graph::stream_execution_id(stream)?;
         let mut buffer = PinnedHostBuffer::new(stream, bytes)?;
         buffer.write(source)?;
         Ok(Self {
@@ -287,6 +328,8 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
             entered: false,
             submitted: false,
             completed: false,
+            original_stream_id,
+            retired: false,
         })
     }
 
@@ -295,7 +338,10 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
     }
 
     pub(crate) fn enqueue(&mut self, stream: &Arc<CudaStream>) -> ResourceResult<()> {
-        if self.entered {
+        if self.entered
+            || self.retired
+            || crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id
+        {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE).into());
         }
         let destination = &self.destination;
@@ -326,6 +372,9 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
     }
 
     pub(crate) fn resolve(&mut self) -> std::result::Result<(), DriverError> {
+        if self.retired {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
         if self.completed {
             return Ok(());
         }
@@ -343,6 +392,27 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
             .expect("original write staging")
             .wait()?;
         self.completed = true;
+        self.buffer = None;
+        Ok(())
+    }
+
+    /// Join only the original DMA's resource lifetime, without accepting its
+    /// result or changing whether the original submission was confirmed.
+    pub(crate) fn retire_without_result(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        if self.retired {
+            return Ok(());
+        }
+        if let Some(buffer) = self.buffer.as_mut() {
+            buffer.prove_retirement(stream, self.original_stream_id)?;
+        }
+        self.retired = true;
         self.buffer = None;
         Ok(())
     }
@@ -468,18 +538,22 @@ impl Drop for PinnedHostBuffer {
             Arc::clone(&self.context),
             self.event.take().expect("pinned owner event present"),
             self.completion,
+            self.retirement_proven,
         );
         crate::cuda_graph::retire_resources_after_completion(
             resources,
-            |(_, context, event, completion)| {
+            |(_, context, event, completion, retirement_proven)| {
                 context.bind_to_thread()?;
+                if *retirement_proven {
+                    return Ok(());
+                }
                 let mut completion = *completion;
                 completion.wait(
                     || event.synchronize(),
                     || Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN)),
                 )
             },
-            |(ptr, _, _, _)| {
+            |(ptr, _, _, _, _)| {
                 // SAFETY: the entire copy batch is complete. The canonical
                 // retirement helper never resubmits an unknown free outcome.
                 unsafe { sys::cuMemFreeHost(*ptr as *mut c_void).result() }
