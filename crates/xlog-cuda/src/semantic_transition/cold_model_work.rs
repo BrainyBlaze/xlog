@@ -1598,7 +1598,7 @@ impl SemanticTransitionSession {
                 "cold model work report is incomplete; retain its original operation",
             ));
         }
-        let result = SemanticColdModelWorkResult {
+        let mut result = SemanticColdModelWorkResult {
             model_work: words[1],
             operation_count: words[2],
             work_bound: words[3],
@@ -1608,6 +1608,11 @@ impl SemanticTransitionSession {
                 .try_into()
                 .expect("checked original native event extent"),
         };
+        storage
+            .allowance
+            .lock()
+            .map_err(|_| publication_input_error("original cold allowance is poisoned"))?
+            .merge_submitted_dma(&mut result)?;
         self.graph
             .complete_cold_work(&storage.native_work.view())
             .map_err(SemanticTransitionError::Semantic)?;
