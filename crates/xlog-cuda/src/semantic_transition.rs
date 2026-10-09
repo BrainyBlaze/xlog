@@ -31731,6 +31731,18 @@ impl SemanticTransitionSession {
         proof: &SemanticPreparedSegmentNonSubmission,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
+        self.quiesce_cancelled_prepared_step(step, proof, consumer_streams)?;
+        self.release_prepared_step_storage(step)
+    }
+
+    /// Join the original cancelled construction's final consumers while
+    /// retaining all storage needed by graph and producer retirement.
+    pub fn quiesce_cancelled_prepared_step(
+        &mut self,
+        step: &SemanticPreparedStep,
+        proof: &SemanticPreparedSegmentNonSubmission,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
         self.checked_original_prepared_consumer_step(step)?;
         self.prepared_segment
             .as_ref()
@@ -31744,10 +31756,23 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::UnconsumedPolicyTape);
         }
+        let final_streams = self.step_consumer_streams(step.token, consumer_streams)?;
+        if let Some(original) = self.prepared_segment.as_ref()
+            .expect("checked cancelled scope").final_consumers.get(&step.token)
+        {
+            if original != &final_streams {
+                return Err(publication_input_error(
+                    "cancelled final use changed its original consumer roster",
+                ));
+            }
+            return self.ensure_quiescent();
+        }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("cancelled preparation retirement admission", error))?;
         self.complete_step_consumers_by_token(step.token, consumer_streams)?;
-        self.release_prepared_step_storage(step)
+        self.prepared_segment.as_mut().expect("joined cancelled scope")
+            .final_consumers.insert(step.token, final_streams);
+        Ok(())
     }
 
     fn release_prepared_step_storage(
@@ -32354,7 +32379,14 @@ impl SemanticTransitionSession {
     }
 
     fn has_unresolved_native_effect(&self) -> bool {
-        self.poisoned || self.graph.ensure_not_poisoned().is_err()
+        self.has_unresolved_session_native_effect()
+            || self.graph.ensure_not_poisoned().is_err()
+    }
+
+    // Graph and retained continuation owners are checked by the enclosing
+    // predicate. No owner-local resolver may omit these independent effects.
+    fn has_unresolved_session_native_effect(&self) -> bool {
+        self.poisoned
             || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
             || {
                 #[cfg(feature = "semantic-policy")]
@@ -32380,7 +32412,14 @@ impl SemanticTransitionSession {
     }
 
     fn original_completion_base_may_submit(&self) -> bool {
-        !self.has_unresolved_native_effect()
+        self.original_session_completion_may_submit()
+            && !self.has_unresolved_native_effect()
+    }
+
+    // A resolver must additionally authenticate its exact retained scope and
+    // graph owner. This common base never grants that exclusion by itself.
+    fn original_session_completion_may_submit(&self) -> bool {
+        !self.has_unresolved_session_native_effect()
             && !self.readers.values().any(|reader| reader.acquisition_pending)
             && !self.pending
             && self.pending_replay_delivery.is_none()
@@ -35628,6 +35667,31 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
     ) -> Result<(), SemanticTransitionError> {
         self.require_completed_prepared_graph_retirement()?;
+        if !self.prepared_segment.as_ref()
+            .is_some_and(|build| build.completed)
+        {
+            return Err(publication_input_error(
+                "retained source requires its original completed target",
+            ));
+        }
+        self.require_original_prepared_step_final_use(step)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub fn require_cancelled_prepared_step_final_use(
+        &self,
+        step: &SemanticPreparedStep,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_cancelled_prepared_graph_retirement(proof)?;
+        self.require_original_prepared_step_final_use(step)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_original_prepared_step_final_use(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(), SemanticTransitionError> {
         let build = self.prepared_segment.as_ref()
             .ok_or(SemanticTransitionError::NotCaptured)?;
         build.check_retained(step, &self.publication_issuer)?;
@@ -35636,8 +35700,7 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let original = build.final_consumers.get(&step.token)
             .ok_or_else(|| publication_input_error("target final consumers have not joined"))?;
-        if !build.completed
-            || owner.consumer_completion.is_some()
+        if owner.consumer_completion.is_some()
             || !owner.consumer_streams.is_subset(original)
             || self.step_consumer_streams(step.token, &original.iter().copied().collect::<Vec<_>>())?
                 != *original
