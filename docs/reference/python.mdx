@@ -354,6 +354,62 @@ only unacknowledged `(stable_identity, effect, payload)` rows. The older
 a delivery queue. An exhausted FINAL parent cannot start an unacknowledged
 delivery; an already acknowledged terminal intent cannot be activated again.
 
+An operator can instead bind one nonterminal file-request interval before the
+first publication. The optional parent metadata `nonterminal_intent` is an
+exact dictionary with `plan_digest` (32 nonzero bytes),
+`candidate_prefix_begin` and `candidate_prefix_end` (exact `u64` values with
+`begin < end`). The native publisher emits it once, on the first nonterminal
+publication that crosses `end`, after authenticating the committed prefix.
+Its payload is `plan_digest || LE64(begin) || LE64(end-begin) || tokens`, where
+each original token ID occupies eight little-endian bytes. This is not a byte
+file or an instruction to execute: the trusted application must retain the
+original payload and apply its separately admitted, bounded file projection.
+FINAL output and its acknowledgement-only operation remain unchanged.
+
+After durable checkpoint and actual external execution,
+`controller.acknowledge_replay_delivery(task_use, parent=..., snapshot=...,
+delivery_receipt=..., result_receipt=..., replay_row=...)` accepts one complete
+original episode transport row, including every original material and native
+publication evidence. It rejects actor rows and checkpoint-only referents.
+The result receipt is HMAC-SHA256 under the bound receiver key over
+`b"xlog.replay.result.v2\0"` followed by seven 32-byte fields:
+stable intent, SHA256 of the complete delivery receipt, original action base
+logical identity, original action successor logical identity, nonzero execution
+identity, SHA256 of the canonical UTF-8 record line, and SHA256 of the original
+native evidence, then a little-endian 64-bit disposition (`1` for an eligible
+replay row, `2` for rejected measurement evidence). The final 32 bytes are the MAC.
+The disposition is derived from the original five ordered verification receipt
+families and their complete materials, not a caller flag or process exit status.
+Measurement retains its frozen comparator, metric and tolerance identities.
+The delivery receipt alone
+does not attest an execution result or replace the record's result materials.
+
+One original publication CAS commits both the acknowledgement and full result
+archive. An eligible row additionally requires current training rights and
+becomes visible to later selection only after that CAS. A `REJECTED` measurement
+retains every original material and signed result but writes no arena slot and
+does not advance the eligible-row count. Both dispositions consume the original
+finite result and payload reservation. The operation preserves the ordinary training
+cursor, RNG, selected model and original action pair. Its returned identity is
+the separate append publication pair: acquire it before further work.
+`SemanticReplayDeliveryPending` retains the original controller, parent, task
+use and receipt custody when submission completion is unknown. Resolve it with
+`controller.resolve_replay_delivery(parent=original_parent)`; this joins the
+same submission without a new snapshot, row parse, authority acquisition or
+CAS replay. Native retains a known completion until Python has built the full
+returned identity. Do not submit the acknowledgement again while it is pending.
+
+Checkpoint restoration reconstitutes the original committed raw slots, but
+their hashes alone do not authorize Training. Before selecting restored append
+rows, call the existing `bind_delivery_receiver` with the current trusted
+receiver. It parses the full archived rows with current live rights and verifies
+their original delivery/result receipts, raw content, dispositions and action coordinates.
+Each archived row uses the same per-acquisition metadata, material and evidence
+limits as its original admission; the complete archive retains its separate
+frozen native payload capacity.
+The secret key is never put in the checkpoint. Failed authentication or reader
+cleanup does not install a receiver binding or enable those rows.
+
 `SemanticTransitionController.save_checkpoint(task_use, *, parent,
 consumer_streams, snapshot, snapshot_model_state)` returns one sealed `bytes`
 value containing the selected native publication, the task capsule, the session
@@ -525,6 +581,40 @@ block size and padding/mask tokens; its source extent must satisfy `2*L <= W`.
 The existing packed-view parser bounds branch geometry and target arrays by `W`.
 Byte caps and arena storage capacities are never substituted for `R`.
 
+`import_task` also requires `replay_capacity`, either explicit `None` for an
+original-only arena or this exact dictionary before arena allocation:
+
+```text
+{
+    "row_capacity": total_original_and_append_slots,
+    "raw_byte_capacity": total_fixed_stride_raw_bytes,
+    "append_groups": ((group_kind, ...), ...),
+    "metadata_bytes": original_metadata_limit,
+    "max_material_bytes": original_per_material_limit,
+    "total_material_bytes": original_total_material_limit,
+    "max_evidence_bytes": original_evidence_limit,
+    "payload_capacity_bytes": complete_append_transport_capacity,
+}
+```
+
+Each future slot has a nonempty, ordered, duplicate-free subset of regular
+group kinds `1..5`; retention kinds `6/7` and actor kind `8` are excluded.
+The total episode count, including all reserved append slots, must fit the
+original manifest record bound. Raw capacity must fit every fixed-stride slot;
+transport capacity includes the full episode materials/evidence, original row
+descriptor and raw bytes, and signed result receipt. The same reservation is
+required as parent metadata `replay_append` and survives the original task seed
+and private restore. It cannot be introduced or resized after task import.
+Public caller `role_counts` still has 55 entries; the two append queues are
+native-owned records and cannot be supplied by the caller.
+
+Selected tensor shapes and numerical/work upper bounds cover the full reserved
+capacity. Actual objective membership and denominators use only the original
+rows plus the atomically committed append prefix. The original actor roster is
+not enlarged. The updated task seed has 15 fields; older 14-field seeds are not
+accepted as matching this reservation contract. Episode transport remains
+unchanged.
+
 `task_use.task_training_domain()` returns
 `(domain_identity_bytes, original_domain_projection)` in the same immutable read
 scope as `task_objective_law()`, or `None` for a task without prospective training.
@@ -533,6 +623,12 @@ uniform physical numerical certificate. Task capsules now use version 3;
 version 2 capsules and older task/scoring identities cannot restore under the
 new binding. Restore and late arena admission require exact original-domain
 equality; changed manifests, caps or loader fields cannot enlarge it.
+
+`task_use.task_replay_capacity()` returns the retained original reservation as
+`(row_capacity, raw_byte_capacity, append_groups, metadata_bytes,
+max_material_bytes, total_material_bytes, max_evidence_bytes,
+payload_capacity_bytes)`, or `None`. It projects the saved seed after validating
+the current owner; it does not reconstruct a budget from active rows or geometry.
 
 `task_use.task_actor_eligible()` reads the original ex-ante actor decision from
 that retained native task, before the first Proposal (and its initial checkpoint)
@@ -1736,6 +1832,14 @@ accounting, its proved total bound, the full return consumer, and path-specific
 GPU evidence remain unfinished. The model receiver does not establish those gates.
 
 ### Completed-step model inputs
+
+`step.tensor_metadata(role, index, bank)` and
+`parent.tensor_metadata(role=..., index=...)` expose the original cache roles
+`4..13` as `(layout, logical_begin, logical_end)`. The layout is the same
+eight-field typed input carrier accepted by content capture. Prepared metadata
+comes from the original bank template; acquired metadata comes from that
+parent's retained directory. Neither getter reads a live device extent,
+exports storage, changes provenance, or grants a tensor role by argument position.
 
 Before retiring a completed segment, call its original step's
 `completed_model_binding(consumer_streams=[...])` to authenticate that step's

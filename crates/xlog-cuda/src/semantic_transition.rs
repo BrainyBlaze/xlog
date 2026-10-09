@@ -7,7 +7,9 @@
 use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWorkRecording};
 #[cfg(feature = "semantic-policy")]
 mod cold_model_work;
+mod late_replay;
 mod learning_phase;
+use late_replay::PendingReplayDelivery;
 #[cfg(feature = "semantic-policy")]
 mod model_evaluation;
 mod prepared_replay;
@@ -2130,11 +2132,13 @@ pub enum SemanticStateRole {
     ActiveConvolution = 53,
     ActiveRecurrent = 54,
     TensorLayout = 55,
+    ReplayAppendEntries = 56,
+    ReplayAppendPayload = 57,
 }
 
 impl SemanticStateRole {
     pub fn from_code(code: u64) -> Option<Self> {
-        const ROLES: [SemanticStateRole; 55] = [
+        const ROLES: [SemanticStateRole; 57] = [
             SemanticStateRole::PrefixSource,
             SemanticStateRole::TokenProvenanceRecords,
             SemanticStateRole::PrefixIdentity,
@@ -2190,6 +2194,8 @@ impl SemanticStateRole {
             SemanticStateRole::ActiveConvolution,
             SemanticStateRole::ActiveRecurrent,
             SemanticStateRole::TensorLayout,
+            SemanticStateRole::ReplayAppendEntries,
+            SemanticStateRole::ReplayAppendPayload,
         ];
         let index = usize::try_from(code.checked_sub(1)?).ok()?;
         ROLES.get(index).copied()
@@ -2551,6 +2557,62 @@ fn prepare_model_memory(
     Ok(geometry)
 }
 
+/// Operator-granted plan and finite candidate interval in the native prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticNonterminalIntentBinding {
+    pub plan_digest: Identity256,
+    pub candidate_prefix_begin: u64,
+    pub candidate_prefix_end: u64,
+}
+
+impl SemanticNonterminalIntentBinding {
+    fn validate(self, prefix_capacity: u64) -> Result<(), SemanticTransitionError> {
+        if self.plan_digest == Identity256::default()
+            || self.candidate_prefix_begin >= self.candidate_prefix_end
+            || self.candidate_prefix_end > prefix_capacity
+        {
+            return Err(publication_input_error(
+                "nonterminal intent requires its original plan and bounded candidate prefix",
+            ));
+        }
+        self.payload_bytes()?;
+        Ok(())
+    }
+
+    fn payload_bytes(self) -> Result<u64, SemanticTransitionError> {
+        self.candidate_prefix_end
+            .checked_sub(self.candidate_prefix_begin)
+            .and_then(|count| count.checked_mul(size_of::<u64>() as u64))
+            .and_then(|bytes| bytes.checked_add(32 + 2 * size_of::<u64>() as u64))
+            .ok_or_else(|| publication_input_error("nonterminal intent payload extent overflowed"))
+    }
+
+    fn matches_payload(self, payload: &[u8]) -> bool {
+        self.payload_bytes().ok() == Some(payload.len() as u64)
+            && payload.get(..32) == Some(self.plan_digest.as_bytes().as_slice())
+            && payload.get(32..40) == Some(self.candidate_prefix_begin.to_le_bytes().as_slice())
+            && payload.get(40..48)
+                == Some(
+                    (self.candidate_prefix_end - self.candidate_prefix_begin)
+                        .to_le_bytes()
+                        .as_slice(),
+                )
+    }
+}
+
+/// Original finite reservation for acquired non-actor replay rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticReplayAppendBinding {
+    pub row_capacity: usize,
+    pub raw_byte_capacity: usize,
+    pub append_groups: Vec<Vec<u64>>,
+    pub metadata_bytes: u64,
+    pub max_material_bytes: u64,
+    pub total_material_bytes: u64,
+    pub max_evidence_bytes: u64,
+    pub payload_capacity_bytes: usize,
+}
+
 /// Initial canonical parent only. A model continuation cannot be supplied here:
 /// it is admitted after a real Acquire and a forward using that acquired parent.
 /// PrefixIdentity is native-owned: fresh publication derives its 32 bytes from
@@ -2567,6 +2629,11 @@ pub struct SemanticParentBinding {
     pub pad_token: u64,
     pub terminal_tokens: Vec<u64>,
     pub final_intent_payload_bytes: u64,
+    /// Operator-bound plan and original native prefix interval, never a model
+    /// token convention or a caller-encoded intent queue.
+    pub nonterminal_intent: Option<SemanticNonterminalIntentBinding>,
+    /// Original finite replay reservation, allocated during the task import.
+    pub replay_append: Option<SemanticReplayAppendBinding>,
     /// Actual application effect descriptor. The native owner constructs the
     /// empty intent queue; callers never encode its private header or entries.
     pub intent_effect: Vec<u8>,
@@ -3796,7 +3863,7 @@ fn is_tensor_role(role: u64) -> bool {
     matches!(role, 4..=13 | 18..=25 | 51..=54)
 }
 
-fn validate_publication_counts(counts: &[u64; 55]) -> Result<usize, SemanticTransitionError> {
+fn validate_publication_counts(counts: &[u64; 57]) -> Result<usize, SemanticTransitionError> {
     let mut total = 0u64;
     for (index, &count) in counts.iter().enumerate() {
         let role = index as u64 + 1;
@@ -4579,6 +4646,18 @@ struct PublicationContract {
     terminal_tokens: u64,
     terminal_token_count: u64,
     final_intent_payload_bytes: u64,
+    nonterminal_intent_mode: u64,
+    nonterminal_intent_plan_digest: Identity256,
+    nonterminal_intent_prefix_begin: u64,
+    nonterminal_intent_prefix_end: u64,
+    replay_row_capacity: u64,
+    replay_initial_row_count: u64,
+    replay_raw_capacity_bytes: u64,
+    replay_payload_capacity_bytes: u64,
+    replay_metadata_bytes: u64,
+    replay_max_material_bytes: u64,
+    replay_total_material_bytes: u64,
+    replay_max_evidence_bytes: u64,
     model_generation: u64,
     policy_generation: u64,
     authority_generation: u64,
@@ -4589,6 +4668,75 @@ struct PublicationContract {
     role_counts: u64,
     role_count: u64,
     model_contract_layout: SemanticModelContractLayout,
+}
+
+impl PublicationContract {
+    fn replay_append_entry_capacity(self) -> Result<u64, SemanticTransitionError> {
+        if self.replay_row_capacity == 0 {
+            if [
+                self.replay_initial_row_count,
+                self.replay_raw_capacity_bytes,
+                self.replay_payload_capacity_bytes,
+                self.replay_metadata_bytes,
+                self.replay_max_material_bytes,
+                self.replay_total_material_bytes,
+                self.replay_max_evidence_bytes,
+            ]
+            .into_iter()
+            .any(|field| field != 0)
+            {
+                return Err(publication_input_error(
+                    "publication has replay limits without an original reservation",
+                ));
+            }
+            return Ok(0);
+        }
+        if [
+            self.replay_raw_capacity_bytes,
+            self.replay_payload_capacity_bytes,
+            self.replay_metadata_bytes,
+            self.replay_max_material_bytes,
+            self.replay_total_material_bytes,
+            self.replay_max_evidence_bytes,
+        ]
+        .into_iter()
+        .any(|field| field == 0)
+        {
+            return Err(publication_input_error(
+                "publication replay reservation omits an original finite limit",
+            ));
+        }
+        self.replay_row_capacity
+            .checked_sub(self.replay_initial_row_count)
+            .filter(|capacity| *capacity != 0)
+            .ok_or_else(|| {
+                publication_input_error("publication replay reservation has no append slots")
+            })
+    }
+
+    fn nonterminal_intent_binding(
+        self,
+    ) -> Result<Option<SemanticNonterminalIntentBinding>, SemanticTransitionError> {
+        if self.nonterminal_intent_mode == 0
+            && self.nonterminal_intent_plan_digest == Identity256::default()
+            && self.nonterminal_intent_prefix_begin == 0
+            && self.nonterminal_intent_prefix_end == 0
+        {
+            return Ok(None);
+        }
+        if self.nonterminal_intent_mode != 1 {
+            return Err(publication_input_error(
+                "nonterminal intent mode differs from its original operator binding",
+            ));
+        }
+        let binding = SemanticNonterminalIntentBinding {
+            plan_digest: self.nonterminal_intent_plan_digest,
+            candidate_prefix_begin: self.nonterminal_intent_prefix_begin,
+            candidate_prefix_end: self.nonterminal_intent_prefix_end,
+        };
+        binding.validate(self.prefix_capacity)?;
+        Ok(Some(binding))
+    }
 }
 
 #[repr(C)]
@@ -6961,7 +7109,7 @@ impl SemanticReplayMaterial {
 struct PublicationMaterial {
     bank: PublicationBank,
     contract: PublicationContract,
-    role_counts: [u64; 55],
+    role_counts: [u64; 57],
     terminals: Vec<u64>,
     layouts: BTreeMap<(u64, u64), SemanticTensorLayout>,
     model_memory: ModelMemoryGeometry,
@@ -7318,24 +7466,11 @@ fn verify_delivery_receipt(
             "delivery receipt differs from its durable record digest",
         ));
     }
-    let mut ipad = [0x36u8; 64];
-    let mut opad = [0x5cu8; 64];
-    for (index, &byte) in verification_key.iter().enumerate() {
-        ipad[index] ^= byte;
-        opad[index] ^= byte;
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(&receipt[..body_len]);
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner.finalize());
-    let expected_mac: [u8; 32] = outer.finalize().into();
-    let mut mismatch = 0u8;
-    for (actual, expected) in receipt[body_len..].iter().zip(expected_mac) {
-        mismatch |= *actual ^ expected;
-    }
-    if mismatch != 0 {
+    if !late_replay::receiver_mac_matches(
+        &receipt[..body_len],
+        &receipt[body_len..],
+        verification_key,
+    ) {
         return Err(publication_input_error(
             "delivery receipt MAC does not match the trusted receiver",
         ));
@@ -7467,13 +7602,15 @@ const RUNTIME_CONTRACT_MAGIC: &[u8] = b"XLOG-PUBLICATION-RUNTIME\0";
 /// not belong here. The original model contribution is retained in full.
 fn runtime_contract_bytes(
     contract: PublicationContract,
-    counts: &[u64; 55],
+    counts: &[u64; 57],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     capacities: &[(u64, u64, usize)],
     model_mode: &[u8],
     model_memory: &ModelMemoryGeometry,
 ) -> Result<Vec<u8>, SemanticTransitionError> {
+    contract.nonterminal_intent_binding()?;
+    contract.replay_append_entry_capacity()?;
     if model_mode.is_empty() || model_mode.len() > 16 * 1024 * 1024 {
         return Err(publication_input_error(
             "runtime contract requires the complete bounded model numerical mode",
@@ -7493,6 +7630,17 @@ fn runtime_contract_bytes(
         contract.pad_token,
         contract.terminal_token_count,
         contract.final_intent_payload_bytes,
+        contract.nonterminal_intent_mode,
+        contract.nonterminal_intent_prefix_begin,
+        contract.nonterminal_intent_prefix_end,
+        contract.replay_row_capacity,
+        contract.replay_initial_row_count,
+        contract.replay_raw_capacity_bytes,
+        contract.replay_payload_capacity_bytes,
+        contract.replay_metadata_bytes,
+        contract.replay_max_material_bytes,
+        contract.replay_total_material_bytes,
+        contract.replay_max_evidence_bytes,
         contract.model_generation,
         contract.policy_generation,
         contract.authority_generation,
@@ -7500,6 +7648,7 @@ fn runtime_contract_bytes(
     ] {
         material_u64(&mut bytes, field);
     }
+    bytes.extend_from_slice(contract.nonterminal_intent_plan_digest.as_bytes());
     let model = contract.model_contract_layout;
     for field in [
         model.schema_begin,
@@ -7558,7 +7707,7 @@ fn runtime_contract_bytes(
 fn verified_runtime_model_mode<'a>(
     bytes: &'a [u8],
     contract: PublicationContract,
-    counts: &[u64; 55],
+    counts: &[u64; 57],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     capacities: &[(u64, u64, usize)],
@@ -7616,7 +7765,7 @@ fn verified_runtime_model_mode<'a>(
 
 fn initial_runtime_contract_record(
     contract: PublicationContract,
-    counts: &[u64; 55],
+    counts: &[u64; 57],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     mut capacities: Vec<(u64, u64, usize)>,
@@ -7792,7 +7941,7 @@ impl PublicationMaterial {
         // SAFETY: these fixed ABI records contain only all-bit-valid scalars.
         let bank = unsafe { publication_material_record::<PublicationBank>(&mut reader)? };
         let contract = unsafe { publication_material_record::<PublicationContract>(&mut reader)? };
-        let role_counts = unsafe { publication_material_record::<[u64; 55]>(&mut reader)? };
+        let role_counts = unsafe { publication_material_record::<[u64; 57]>(&mut reader)? };
         let terminal_bytes = reader.bytes().map_err(SemanticTransitionError::Semantic)?;
         if terminal_bytes.len() % 8 != 0 {
             return Err(publication_input_error(
@@ -8078,7 +8227,7 @@ impl PublicationMaterial {
             || contract.role_counts != 0
             || contract.semantic_owner != 0
             || contract.window_capacity != 32
-            || contract.role_count != 55
+            || contract.role_count != 57
             || contract.terminal_token_count != self.terminals.len() as u64
             || contract.model_generation == 0
             || header.model_generation < contract.model_generation
@@ -8105,6 +8254,10 @@ impl PublicationMaterial {
                     || item.range.generation != 1
                     || item.range.length_bytes != item.bytes.len() as u64
                     || (item.capacity == 0
+                        && !(role == SemanticStateRole::ReplayAppendPayload.code()
+                            && index == 0
+                            && item.bytes.is_empty()
+                            && contract.replay_payload_capacity_bytes == 0)
                         && !self
                             .layouts
                             .get(&(role, index))
@@ -8177,6 +8330,7 @@ impl PublicationMaterial {
                 ));
             }
         }
+        validate_replay_append_records(contract, &self.ranges)?;
         self.model_numerical_mode()?;
         Ok(())
     }
@@ -8291,27 +8445,29 @@ impl PublicationStorage {
     }
 
     #[cfg(feature = "semantic-policy")]
-    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
-        let mut allocations = Vec::new();
-        account_tracked_allocation(&mut allocations, &self.control)?;
+    fn account_allocations(
+        &self,
+        allocations: &mut Vec<DeviceAllocationProvenance>,
+    ) -> Result<(), SemanticTransitionError> {
+        account_tracked_allocation(allocations, &self.control)?;
         for bank in &self.banks {
-            account_tracked_allocation(&mut allocations, bank)?;
+            account_tracked_allocation(allocations, bank)?;
         }
         for directory in &self.directories {
-            account_tracked_allocation(&mut allocations, directory)?;
+            account_tracked_allocation(allocations, directory)?;
         }
-        account_tracked_allocation(&mut allocations, &self.storage)?;
-        account_tracked_allocation(&mut allocations, &self.contract)?;
-        account_tracked_allocation(&mut allocations, &self.role_counts)?;
-        account_tracked_allocation(&mut allocations, &self.terminals)?;
-        account_tracked_allocation(&mut allocations, &self.continuation)?;
-        account_tracked_allocation(&mut allocations, &self.continuation_directory)?;
+        account_tracked_allocation(allocations, &self.storage)?;
+        account_tracked_allocation(allocations, &self.contract)?;
+        account_tracked_allocation(allocations, &self.role_counts)?;
+        account_tracked_allocation(allocations, &self.terminals)?;
+        account_tracked_allocation(allocations, &self.continuation)?;
+        account_tracked_allocation(allocations, &self.continuation_directory)?;
         for allocation in &self.allocations {
             if let Some(owner) = allocation.live_slice() {
-                account_tracked_allocation(&mut allocations, &owner)?;
+                account_tracked_allocation(allocations, &owner)?;
             }
         }
-        accounted_tracked_bytes(allocations)
+        Ok(())
     }
 
     #[expect(
@@ -8469,6 +8625,10 @@ impl PublicationStorage {
         }
         for plan in plans {
             if (plan.capacity == 0
+                && !(plan.role == SemanticStateRole::ReplayAppendPayload.code()
+                    && plan.index == 0
+                    && plan.length == 0
+                    && contract.replay_payload_capacity_bytes == 0)
                 && !layouts
                     .get(&(plan.role, plan.index))
                     .is_some_and(empty_model_tensor_layout))
@@ -8564,7 +8724,7 @@ impl PublicationStorage {
             });
         }
         let terminals = allocate_publication::<u64>(provider, terminal_tokens.len())?;
-        let role_counts = allocate_publication::<PublicationRoleCount>(provider, 55)?;
+        let role_counts = allocate_publication::<PublicationRoleCount>(provider, 57)?;
         contract.terminal_tokens = terminals.device_ptr_value();
         contract.role_counts = role_counts.device_ptr_value();
         let contract_value = contract;
@@ -10624,7 +10784,10 @@ impl PreparedModelUpdate {
         let canary_results = self.canary_results.device_ptr_value();
         let admissibility_destination = self.admissibility.device_ptr_value();
         let refusal_destination = self.refusal.device_ptr_value();
-        let training_view_bytes = training_view.accounted_allocation_bytes()?;
+        let mut native_allocations = Vec::new();
+        storage.account_allocations(&mut native_allocations)?;
+        training_view.account_allocations(&mut native_allocations)?;
+        let native_allocation_bytes = accounted_tracked_bytes(native_allocations)?;
         let model_work_bytes = model_work.accounted_allocation_bytes()?;
         let update_bytes = self.accounted_allocation_bytes()?;
         let task_bytes = task
@@ -10634,8 +10797,7 @@ impl PreparedModelUpdate {
             .allocation_bytes();
         let accounted_reserved_bytes = output
             .accounted_reserved_bytes
-            .checked_add(storage.accounted_allocation_bytes()?)
-            .and_then(|bytes| bytes.checked_add(training_view_bytes))
+            .checked_add(native_allocation_bytes)
             .and_then(|bytes| bytes.checked_add(task_bytes))
             .and_then(|bytes| bytes.checked_add(model_work_bytes))
             .and_then(|bytes| bytes.checked_add(update_bytes))
@@ -12636,6 +12798,122 @@ fn initial_intent_records(
     ])
 }
 
+fn initial_replay_append_records(
+    binding: Option<&SemanticReplayAppendBinding>,
+) -> Result<[SemanticStateRecord; 2], SemanticTransitionError> {
+    use crate::semantic_training_view::{
+        SemanticTrainingReplayAppendEntry, SemanticTrainingReplayAppendHeader,
+    };
+    let (entry_capacity, payload_capacity) = if let Some(binding) = binding {
+        if binding.row_capacity == 0
+            || binding.raw_byte_capacity == 0
+            || binding.append_groups.is_empty()
+            || binding.append_groups.len() > binding.row_capacity
+            || binding.metadata_bytes == 0
+            || binding.max_material_bytes == 0
+            || binding.total_material_bytes == 0
+            || binding.max_evidence_bytes == 0
+            || binding.payload_capacity_bytes == 0
+        {
+            return Err(publication_input_error(
+                "replay append requires its original finite row, payload and acquisition reservation",
+            ));
+        }
+        (binding.append_groups.len(), binding.payload_capacity_bytes)
+    } else {
+        (0, 0)
+    };
+    let entries_bytes = entry_capacity
+        .checked_mul(size_of::<SemanticTrainingReplayAppendEntry>())
+        .and_then(|bytes| bytes.checked_add(size_of::<SemanticTrainingReplayAppendHeader>()))
+        .ok_or_else(|| publication_input_error("replay append entry capacity overflowed"))?;
+    let header = SemanticTrainingReplayAppendHeader {
+        abi: 1,
+        count: 0,
+        capacity: u64::try_from(entry_capacity)
+            .map_err(|_| publication_input_error("replay append entry capacity exceeds u64"))?,
+        payload_used_bytes: 0,
+        payload_capacity_bytes: u64::try_from(payload_capacity)
+            .map_err(|_| publication_input_error("replay append payload capacity exceeds u64"))?,
+        eligible_count: 0,
+        chain_head: Identity256::default(),
+    };
+    Ok([
+        SemanticStateRecord {
+            role: SemanticStateRole::ReplayAppendEntries,
+            index: 0,
+            bytes: publication_abi_bytes(&[header]),
+            capacity_bytes: entries_bytes,
+        },
+        SemanticStateRecord {
+            role: SemanticStateRole::ReplayAppendPayload,
+            index: 0,
+            bytes: Vec::new(),
+            capacity_bytes: payload_capacity,
+        },
+    ])
+}
+
+fn validate_replay_append_records(
+    contract: PublicationContract,
+    ranges: &[PublicationMaterialRange],
+) -> Result<(), SemanticTransitionError> {
+    use crate::semantic_training_view::{
+        SemanticTrainingReplayAppendEntry, SemanticTrainingReplayAppendHeader,
+    };
+    let entries = ranges
+        .iter()
+        .find(|item| {
+            (item.range.role, item.range.index)
+                == (SemanticStateRole::ReplayAppendEntries.code(), 0)
+        })
+        .ok_or_else(|| publication_input_error("publication omits its acquired replay entries"))?;
+    let payload = ranges
+        .iter()
+        .find(|item| {
+            (item.range.role, item.range.index)
+                == (SemanticStateRole::ReplayAppendPayload.code(), 0)
+        })
+        .ok_or_else(|| publication_input_error("publication omits its acquired replay payload"))?;
+    if entries.bytes.len() < size_of::<SemanticTrainingReplayAppendHeader>() {
+        return Err(publication_input_error(
+            "publication acquired replay header is incomplete",
+        ));
+    }
+    // SAFETY: the checked prefix is a complete, padding-free integer/digest record.
+    let header = unsafe {
+        entries
+            .bytes
+            .as_ptr()
+            .cast::<SemanticTrainingReplayAppendHeader>()
+            .read_unaligned()
+    };
+    let entry_extent = |count: u64| {
+        usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(size_of::<SemanticTrainingReplayAppendEntry>()))
+            .and_then(|bytes| bytes.checked_add(size_of::<SemanticTrainingReplayAppendHeader>()))
+    };
+    if header.abi != 1
+        || header.capacity != contract.replay_append_entry_capacity()?
+        || header.count > header.capacity
+        || header.eligible_count > header.count
+        || entry_extent(header.count) != Some(entries.bytes.len())
+        || entry_extent(header.capacity) != Some(entries.capacity)
+        || header.payload_capacity_bytes != contract.replay_payload_capacity_bytes
+        || header.payload_used_bytes != payload.bytes.len() as u64
+        || header.payload_used_bytes > header.payload_capacity_bytes
+        || payload.capacity as u64 != contract.replay_payload_capacity_bytes
+        || (header.count == 0
+            && (header.payload_used_bytes != 0 || header.chain_head != Identity256::default()))
+    {
+        return Err(publication_input_error(
+            "publication acquired replay queue differs from its original reservation",
+        ));
+    }
+    Ok(())
+}
+
 fn initial_acknowledgement_record(
     entry_capacity: u64,
     payload_capacity: usize,
@@ -12679,7 +12957,7 @@ fn initial_acknowledgement_record(
 }
 
 fn publication_mutable_role(role: u64) -> bool {
-    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=55)
+    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=57)
 }
 
 fn continuation_role(role: u64) -> bool {
@@ -12689,8 +12967,9 @@ fn continuation_role(role: u64) -> bool {
 fn validate_parent_records(
     parent: &SemanticParentBinding,
     tensors: &[PreparedSemanticTensor],
+    role_counts: &[u64; 57],
 ) -> Result<(), SemanticTransitionError> {
-    validate_publication_counts(&parent.role_counts)?;
+    validate_publication_counts(role_counts)?;
     validate_text_parent(
         &parent.source,
         parent.prefix.len() as u64,
@@ -12740,7 +13019,7 @@ fn validate_parent_records(
     for record in &parent.records {
         let role = record.role as u64;
         if is_tensor_role(role)
-            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55)
+            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55..=57)
             || record.index >= parent.role_counts[role as usize - 1]
             || (record.bytes.is_empty() && role != 2)
             || record.bytes.len() > record.capacity_bytes
@@ -14753,6 +15032,7 @@ pub struct SemanticTransitionSession {
     steps: BTreeMap<u64, StepContentStorage>,
     prepared_segment: Option<PreparedSegmentState>,
     prepared_resources: Vec<Arc<dyn Send + Sync>>,
+    pending_replay_delivery: Option<PendingReplayDelivery>,
     next_reader: u64,
     continuation_base: Option<u64>,
     text_binding: Option<Arc<TextBindingStorage>>,
@@ -15862,6 +16142,7 @@ struct UnreleasedPublicationOwners {
     _steps: BTreeMap<u64, StepContentStorage>,
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
+    _pending_replay_delivery: Option<PendingReplayDelivery>,
     _prepared_segment: Option<PreparedSegmentState>,
     _text_binding: Option<Arc<TextBindingStorage>>,
     #[cfg(feature = "semantic-policy")]
@@ -15886,7 +16167,8 @@ impl Drop for SemanticTransitionSession {
     fn drop(&mut self) {
         // Captured work retires before either the semantic owner or its banks.
         drop(self.captured.take());
-        if !self.readers.is_empty()
+        if self.pending_replay_delivery.is_some()
+            || !self.readers.is_empty()
             || !self.steps.is_empty()
             || self
                 .prepared_segment
@@ -15909,6 +16191,7 @@ impl Drop for SemanticTransitionSession {
                     _initial_prefill_content: self.retained_initial_prefill.take(),
                     _text_binding: self.text_binding.take(),
                     _prepared_resources: std::mem::take(&mut self.prepared_resources),
+                    _pending_replay_delivery: self.pending_replay_delivery.take(),
                     _prepared_segment: self.prepared_segment.take(),
                     #[cfg(feature = "semantic-policy")]
                     _policy: self.policy.take(),
@@ -17465,6 +17748,37 @@ impl SemanticTransitionSession {
             .collect()
     }
 
+    /// Project the original cold cache layout and template interval, without
+    /// observing the device-selected live extent or exporting tensor storage.
+    pub fn prepared_tensor_metadata(
+        &self,
+        step: &SemanticPreparedStep,
+        role: SemanticStateRole,
+        index: u64,
+        bank: usize,
+    ) -> Result<(SemanticTensorLayout, u64, u64), SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        if !matches!(role as u64, 4..=13) || bank > 1 {
+            return Err(publication_input_error(
+                "cache metadata requires an original cache role and bank zero or one",
+            ));
+        }
+        let inputs = self.steps[&step.token]
+            .inputs
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let plan = inputs
+            .plans
+            .iter()
+            .find(|plan| (plan.role, plan.index) == (role as u64, index))
+            .ok_or_else(|| publication_input_error("cache metadata has no original input owner"))?;
+        let range = inputs.storage.bank_templates[bank]
+            .iter()
+            .find(|range| (range.role, range.index) == (role as u64, index))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        Ok((plan.layout, range.logical_begin, range.logical_end))
+    }
+
     /// Export the fixed original capacity; live extents remain device inputs.
     pub fn prepared_tensor(
         &mut self,
@@ -18196,8 +18510,8 @@ impl SemanticTransitionSession {
             if canaries.len() != 5
                 || results.len() != 5
                 || receipts.len() != 2
-                || selection.status > 3
-                || selection.row_count != rows.len() as u64
+                || selection.status > 4
+                || selection.row_count > rows.len() as u64
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
@@ -21178,9 +21492,11 @@ impl SemanticTransitionSession {
                 // Retain its witness below; never read identities on the host.
                 Some(seals.contract.view())
             }
-            _ => return Err(publication_input_error(
-                "prepared proposal blocks and their model-content witness must be supplied together",
-            )),
+            _ => {
+                return Err(publication_input_error(
+                    "prepared proposal blocks and their model-content witness must be supplied together",
+                ));
+            }
         };
         let service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
@@ -23621,6 +23937,16 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::NotBound)?
             .0
             .content_identity();
+        if self
+            .training_views
+            .as_ref()
+            .and_then(|arena| arena.replay_capacity())
+            != parent.replay_append.as_ref()
+        {
+            return Err(publication_input_error(
+                "parent replay reservation differs from its original cold training import",
+            ));
+        }
         if parent.authority_generation != self.task_epoch {
             return Err(publication_input_error(
                 "parent authority generation differs from the retained task import",
@@ -23633,10 +23959,29 @@ impl SemanticTransitionSession {
                     SemanticStateRole::IntentEntries
                         | SemanticStateRole::IntentPayload
                         | SemanticStateRole::Acknowledgements
+                        | SemanticStateRole::ReplayAppendEntries
+                        | SemanticStateRole::ReplayAppendPayload
                 )
             })
         {
-            return Err(publication_input_error("fresh parent initialization cannot replace recovered history or accept private intent records"));
+            return Err(publication_input_error(
+                "fresh parent initialization cannot replace recovered history or accept private intent records",
+            ));
+        }
+        if let Some(binding) = parent.nonterminal_intent {
+            binding.validate(parent.prefix_capacity)?;
+            let required_payload = (parent.intent_effect.len() as u64)
+                .checked_add(binding.payload_bytes()?)
+                .and_then(|bytes| bytes.checked_add(parent.final_intent_payload_bytes))
+                .ok_or_else(|| publication_input_error("intent payload reservation overflowed"))?;
+            if binding.candidate_prefix_end <= parent.prefix.len() as u64
+                || parent.intent_entry_capacity < 2
+                || required_payload > parent.intent_payload_capacity_bytes as u64
+            {
+                return Err(publication_input_error(
+                    "nonterminal intent requires a future prefix and reserved tool and final queue capacity",
+                ));
+            }
         }
         parent.records.extend(initial_intent_records(
             &parent.intent_effect,
@@ -23650,7 +23995,12 @@ impl SemanticTransitionSession {
             parent.intent_payload_capacity_bytes,
             parent.intent_effect.len(),
         )?);
-        validate_parent_records(&parent, &tensors)?;
+        let mut role_counts = [1; 57];
+        role_counts[..55].copy_from_slice(&parent.role_counts);
+        validate_parent_records(&parent, &tensors, &role_counts)?;
+        parent.records.extend(initial_replay_append_records(
+            parent.replay_append.as_ref(),
+        )?);
         let mut layouts = BTreeMap::new();
         let mut plans = Vec::new();
         for tensor in tensors {
@@ -23792,6 +24142,30 @@ impl SemanticTransitionSession {
         getrandom::fill(&mut instance)
             .map_err(|error| runtime_error("publication instance entropy", error))?;
         let instance = Identity256::from_bytes(instance);
+        let (
+            replay_row_capacity,
+            replay_initial_row_count,
+            replay_raw_capacity_bytes,
+            replay_payload_capacity_bytes,
+        ) = if let Some(binding) = &parent.replay_append {
+            let arena = self
+                .training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            (
+                u64::try_from(binding.row_capacity)
+                    .map_err(|_| publication_input_error("replay row capacity exceeds u64"))?,
+                u64::try_from(arena.original_count()).map_err(|_| {
+                    publication_input_error("original replay row count exceeds u64")
+                })?,
+                u64::try_from(binding.raw_byte_capacity)
+                    .map_err(|_| publication_input_error("replay raw capacity exceeds u64"))?,
+                u64::try_from(binding.payload_capacity_bytes)
+                    .map_err(|_| publication_input_error("replay payload capacity exceeds u64"))?,
+            )
+        } else {
+            (0, 0, 0, 0)
+        };
         let contract = PublicationContract {
             abi: 1,
             range_capacity: plans.len() as u64 + 1,
@@ -23802,6 +24176,36 @@ impl SemanticTransitionSession {
             pad_token: parent.pad_token,
             terminal_token_count: parent.terminal_tokens.len() as u64,
             final_intent_payload_bytes: parent.final_intent_payload_bytes,
+            nonterminal_intent_mode: u64::from(parent.nonterminal_intent.is_some()),
+            nonterminal_intent_plan_digest: parent
+                .nonterminal_intent
+                .map_or(Identity256::default(), |binding| binding.plan_digest),
+            nonterminal_intent_prefix_begin: parent
+                .nonterminal_intent
+                .map_or(0, |binding| binding.candidate_prefix_begin),
+            nonterminal_intent_prefix_end: parent
+                .nonterminal_intent
+                .map_or(0, |binding| binding.candidate_prefix_end),
+            replay_row_capacity,
+            replay_initial_row_count,
+            replay_raw_capacity_bytes,
+            replay_payload_capacity_bytes,
+            replay_metadata_bytes: parent
+                .replay_append
+                .as_ref()
+                .map_or(0, |binding| binding.metadata_bytes),
+            replay_max_material_bytes: parent
+                .replay_append
+                .as_ref()
+                .map_or(0, |binding| binding.max_material_bytes),
+            replay_total_material_bytes: parent
+                .replay_append
+                .as_ref()
+                .map_or(0, |binding| binding.total_material_bytes),
+            replay_max_evidence_bytes: parent
+                .replay_append
+                .as_ref()
+                .map_or(0, |binding| binding.max_evidence_bytes),
             model_generation: parent.model_generation,
             policy_generation: parent.policy_generation,
             authority_generation: parent.authority_generation,
@@ -23810,12 +24214,12 @@ impl SemanticTransitionSession {
             topology_identity: parent.topology_identity,
             table_identity: parent.table_identity,
             model_contract_layout: parent.model_contract_layout,
-            role_count: 55,
+            role_count: 57,
             ..PublicationContract::default()
         };
         let runtime = initial_runtime_contract_record(
             contract,
-            &parent.role_counts,
+            &role_counts,
             &parent.terminal_tokens,
             &layouts,
             plans
@@ -23856,6 +24260,7 @@ impl SemanticTransitionSession {
         self.publication = Some(Arc::new(storage));
         self.publication_uploads = uploads;
         self.model_owners = model_owners;
+        self.bind_training_publication()?;
         self.captured = None;
         let extents = self.base_snapshot.extents();
         let header = PublicationHeader {
@@ -23904,7 +24309,7 @@ impl SemanticTransitionSession {
         let result = self.initialize_publication(
             bank,
             &parent.terminal_tokens,
-            &parent.role_counts,
+            &role_counts,
             parent.rng,
             1,
             None,
@@ -24138,6 +24543,7 @@ impl SemanticTransitionSession {
             self.publication = Some(Arc::new(storage));
             self.publication_uploads = uploads;
             self.model_owners = model_owners;
+            self.bind_training_publication()?;
             let restored = self.initialize_publication(
                 material.bank,
                 &material.terminals,
@@ -24152,6 +24558,9 @@ impl SemanticTransitionSession {
                 },
                 fold.as_ref(),
             )?;
+            if self.training_views.is_some() {
+                self.restore_replay_append_rows()?;
+            }
             if transition.is_none()
                 && (restored.logical_digest != header.logical_digest
                     || restored.state_digest != header.state_digest)
@@ -24198,6 +24607,7 @@ impl SemanticTransitionSession {
         witness: SemanticTaskGoalWitness,
         rows: Vec<SemanticTrainingViewRow>,
         objective: SemanticTrainingObjective,
+        replay_capacity: Option<SemanticReplayAppendBinding>,
     ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
         self.ensure_quiescent()?;
         if self.poisoned
@@ -24303,6 +24713,7 @@ impl SemanticTransitionSession {
                 task_identity,
                 task.content().0,
                 task.content().1,
+                replay_capacity,
             )?);
             material.contract.task_identity = task_identity;
             material.contract.authority_generation = next_epoch;
@@ -24391,6 +24802,7 @@ impl SemanticTransitionSession {
             self.publication_uploads = uploads;
             self.model_owners = model_owners;
             self.task_epoch = next_epoch;
+            self.bind_training_publication()?;
             let published = self.initialize_publication(
                 bank,
                 &material.terminals,
@@ -24399,6 +24811,7 @@ impl SemanticTransitionSession {
                 5,
                 None,
             )?;
+            self.restore_replay_append_rows()?;
             if published.logical_digest == original.logical_digest
                 || published.state_digest == original.state_digest
             {
@@ -24581,7 +24994,7 @@ impl SemanticTransitionSession {
         &mut self,
         bank: PublicationBank,
         terminal_tokens: &[u64],
-        role_counts: &[u64; 55],
+        role_counts: &[u64; 57],
         rng: SemanticRngBinding,
         operation: u64,
         fold: Option<&learning_phase::LearningFoldPlan>,
@@ -26283,13 +26696,16 @@ impl SemanticTransitionSession {
         })
     }
 
-    /// A FINAL acquired bank must contain its actual native terminal intent.
+    /// Admit the original native intent of a current acquired publication.
     /// This readiness check does not deliver an effect or issue use authority.
     pub fn admit_external_activation(
         &mut self,
         lease: &SemanticPublishedLease,
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
+        if lease.header.terminal == 0 {
+            return self.admit_nonterminal_intent_activation(lease);
+        }
         if lease.header.terminal != 2 {
             return Err(publication_input_error(
                 "external activation requires a genuinely published FINAL parent",
@@ -26403,6 +26819,53 @@ impl SemanticTransitionSession {
         }) {
             return Err(publication_input_error(
                 "FINAL publication has no unacknowledged delivery intent",
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_nonterminal_intent_activation(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let binding = storage
+            .contract_value
+            .nonterminal_intent_binding()?
+            .ok_or_else(|| {
+                publication_input_error(
+                    "nonterminal external activation has no operator intent binding",
+                )
+            })?;
+        if lease.header.fuel == 0 || lease.header.prefix_extent < binding.candidate_prefix_end {
+            return Err(publication_input_error(
+                "nonterminal intent has no completed prefix or reserved acknowledgement fuel",
+            ));
+        }
+        let current = self.publication_read(storage.control.view())?[0];
+        if current.instance != lease.identity.instance || current.word != lease.identity.word {
+            return Err(publication_input_error(
+                "external activation requires the current acquired nonterminal parent",
+            ));
+        }
+        let entries = self.read_published_control_record(lease, 30)?;
+        let payload = self.read_published_control_record(lease, 31)?;
+        let acknowledgements = self.read_published_control_record(lease, 32)?;
+        let intents = output_intents_from_ranges(&entries, &payload)?;
+        let acknowledged =
+            acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+        if !intents.iter().any(|intent| {
+            binding.matches_payload(&intent.payload)
+                && !acknowledged
+                    .iter()
+                    .any(|(identity, _)| *identity == intent.stable_identity)
+        }) {
+            return Err(publication_input_error(
+                "nonterminal publication has no unacknowledged operator-bound prefix intent",
             ));
         }
         Ok(())
@@ -26523,6 +26986,23 @@ impl SemanticTransitionSession {
         Ok((provenance, tensor))
     }
 
+    /// Project an acquired cache's retained layout and sealed logical interval.
+    /// This reads only the original host-retained publication metadata.
+    pub fn published_tensor_metadata(
+        &self,
+        lease: &SemanticPublishedLease,
+        role: SemanticStateRole,
+        index: u64,
+    ) -> Result<(SemanticTensorLayout, u64, u64), SemanticTransitionError> {
+        if !matches!(role as u64, 4..=13) {
+            return Err(publication_input_error(
+                "cache metadata requires an original cache role",
+            ));
+        }
+        let (range, layout) = self.published_tensor_layout(lease, role, index)?;
+        Ok((layout, range.logical_begin, range.logical_end))
+    }
+
     fn published_tensor_layout(
         &self,
         lease: &SemanticPublishedLease,
@@ -26611,7 +27091,7 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let counts = self.publication_read(storage.role_counts.view())?;
-        let mut role_counts = [0; 55];
+        let mut role_counts = [0; 57];
         for (index, count) in counts.iter().enumerate() {
             if count.role != index as u64 + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -26671,7 +27151,7 @@ impl SemanticTransitionSession {
             )
             .map_err(SemanticTransitionError::Semantic)?;
         let counts = self.publication_read(storage.role_counts.view())?;
-        let mut role_counts = [0; 55];
+        let mut role_counts = [0; 57];
         for (index, count) in counts.iter().enumerate() {
             if count.role != index as u64 + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -28225,6 +28705,7 @@ impl SemanticTransitionSession {
             next_reader: 0,
             prepared_segment: None,
             prepared_resources: Vec::new(),
+            pending_replay_delivery: None,
             continuation_base: None,
             text_binding: None,
             admitted_transition: None,
@@ -28778,12 +29259,99 @@ impl SemanticTransitionSession {
             .map(|(binding, _)| binding.priority_levels())
     }
 
-    /// Bind every admitted training view once while the task is still cold.
+    fn bind_training_publication(&mut self) -> Result<(), SemanticTransitionError> {
+        let Some(arena) = self.training_views.as_mut() else {
+            return Ok(());
+        };
+        let arena = Arc::get_mut(arena).ok_or_else(|| {
+            publication_input_error(
+                "training replay publication must bind before any selected arena alias",
+            )
+        })?;
+        let storage = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let expected = arena.replay_capacity().map_or([0; 8], |capacity| {
+            [
+                capacity.row_capacity as u64,
+                arena.original_count() as u64,
+                capacity.raw_byte_capacity as u64,
+                capacity.payload_capacity_bytes as u64,
+                capacity.metadata_bytes,
+                capacity.max_material_bytes,
+                capacity.total_material_bytes,
+                capacity.max_evidence_bytes,
+            ]
+        });
+        let contract = storage.contract_value;
+        if expected
+            != [
+                contract.replay_row_capacity,
+                contract.replay_initial_row_count,
+                contract.replay_raw_capacity_bytes,
+                contract.replay_payload_capacity_bytes,
+                contract.replay_metadata_bytes,
+                contract.replay_max_material_bytes,
+                contract.replay_total_material_bytes,
+                contract.replay_max_evidence_bytes,
+            ]
+        {
+            return Err(publication_input_error(
+                "publication replay reservation differs from its retained original training arena",
+            ));
+        }
+        // SAFETY: the native control, directory and storage ABIs contain only u64 words.
+        let control = unsafe { storage.control.view().cast::<u64>() }
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let word = control
+            .try_slice(1..2)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let directory = |bank: usize| {
+            unsafe { storage.directories[bank].view().cast::<u64>() }
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        };
+        let allocation = |bank: usize, role: SemanticStateRole| {
+            let range = storage.bank_templates[bank]
+                .iter()
+                .find(|range| range.role == role as u64 && range.index == 0)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let slot = usize::try_from(range.storage_slot)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+            let begin = usize::try_from(range.offset_bytes)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+            storage
+                .allocations
+                .get(slot)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .slice()?
+                .view()
+                .try_slice(begin..)
+                .ok_or(SemanticTransitionError::ObservationMismatch)
+        };
+        arena.bind_publication(
+            word,
+            [directory(0)?, directory(1)?],
+            unsafe { storage.storage.view().cast::<u64>() }
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            [
+                allocation(0, SemanticStateRole::ReplayAppendEntries)?,
+                allocation(1, SemanticStateRole::ReplayAppendEntries)?,
+            ],
+            [
+                allocation(0, SemanticStateRole::ReplayAppendPayload)?,
+                allocation(1, SemanticStateRole::ReplayAppendPayload)?,
+            ],
+        )
+    }
+
+    /// Bind every admitted training view and finite append reservation once cold.
     /// No row is selected here and the arena cannot be replaced after binding.
     pub fn bind_training_view_arena(
         &mut self,
         rows: Vec<SemanticTrainingViewRow>,
         objective: SemanticTrainingObjective,
+        replay_capacity: Option<SemanticReplayAppendBinding>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.training_views.is_some() || self.task.is_none() {
@@ -28819,6 +29387,7 @@ impl SemanticTransitionSession {
             task_identity,
             task_content,
             expected_truth,
+            replay_capacity,
         )?);
         Ok(())
     }
@@ -32480,7 +33049,7 @@ impl SemanticTransitionSession {
     fn ensure_quiescent(&self) -> Result<(), SemanticTransitionError> {
         if self.is_poisoned() {
             Err(SemanticTransitionError::Poisoned)
-        } else if self.pending {
+        } else if self.pending || self.pending_replay_delivery.is_some() {
             Err(SemanticTransitionError::OverlappingLaunch)
         } else {
             Ok(())
