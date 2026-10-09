@@ -11784,6 +11784,7 @@ impl ModelContentSeals {
         directory: &TrackedCudaSlice<PublicationRange>,
         source: &TrackedCudaSlice<u8>,
         plan: &ModelContentCopyPlan,
+        #[cfg(feature = "semantic-policy")] allowance: Option<&Arc<Mutex<native_work_bound::ColdNativeAllowance>>>,
     ) -> Result<(), SemanticTransitionError> {
         let row_bytes = size_of::<PublicationRange>();
         let directory_bytes = directory
@@ -11810,6 +11811,15 @@ impl ModelContentSeals {
                 let commands = (0..=plan.directory_offsets.len())
                     .map(|_| native_work_bound::OriginalNativeCommand::new(domain))
                     .collect::<Result<Vec<_>, _>>()?;
+                let allowance = allowance
+                    .map(|allowance| -> Result<_, SemanticTransitionError> {
+                        let claimed = allowance.lock().map_err(|_| {
+                            publication_input_error("original model snapshot allowance is poisoned")
+                        })?.claim_model_snapshot(plan.directory_offsets.len(), plan.contract_span.len())?;
+                        Ok(claimed.then(|| Arc::downgrade(allowance)))
+                    })
+                    .transpose()?
+                    .flatten();
                 *retained = Some(native_work_bound::OriginalModelSnapshot {
                     directory: directory.view(),
                     source: source.view(),
@@ -11817,6 +11827,7 @@ impl ModelContentSeals {
                     contract_span: plan.contract_span.clone(),
                     cursor: 0,
                     commands,
+                    allowance,
                 });
             }
             let original = retained.as_mut().expect("retained original model snapshot");
@@ -11831,6 +11842,15 @@ impl ModelContentSeals {
                     "original model snapshot changed its retained source or intervals",
                 ));
             }
+            let original_allowance = original.allowance.as_ref().map(|original| {
+                let original = original.upgrade().ok_or_else(|| {
+                    publication_input_error("original model snapshot lost its admitted report owner")
+                })?;
+                if allowance.is_none_or(|current| !Arc::ptr_eq(current, &original)) {
+                    return Err(publication_input_error("model snapshot changed its original admitted report"));
+                }
+                Ok(original)
+            }).transpose()?;
             while original.cursor < original.commands.len() {
                 let index = original.cursor;
                 let (destination, input, bytes) = if index < original.offsets.len() {
@@ -11851,10 +11871,12 @@ impl ModelContentSeals {
                 recorder.read(&original.source);
                 recorder.write(&self.ranges);
                 recorder.write(&self.contract);
-                original.commands[index].run(
+                original.commands[index].run_dma(
                     domain,
                     poisoned,
                     recorder,
+                    original_allowance.as_ref(),
+                    bytes,
                     |enqueue, entered, submitted| {
                         // SAFETY: the immutable original plan bounds both retained
                         // allocations. Entry is recorded at the actual driver call.
@@ -26680,6 +26702,7 @@ impl SemanticTransitionSession {
                     original.consumer_stream,
                     original.guard.as_mut(),
                 )?;
+                let allowance = self.cold_native_allowance(lease.token)?;
                 let storage = self
                     .publication
                     .as_ref()
@@ -26695,6 +26718,7 @@ impl SemanticTransitionSession {
                     &storage.directories[(lease.identity.word & 1) as usize],
                     &storage.allocations[plan.contract_storage_slot].slice()?,
                     plan,
+                    allowance.as_ref(),
                 )?;
             }
             let reader = &self.steps[&lease.token];
@@ -26982,6 +27006,8 @@ impl SemanticTransitionSession {
                 &storage.directories[(lease.identity.word & 1) as usize],
                 &storage.allocations[plan.contract_storage_slot].slice()?,
                 &plan,
+                #[cfg(feature = "semantic-policy")]
+                None,
             )?;
         }
         self.enqueue_tensor_content(lease, &handle, consumer_stream, model)?;
