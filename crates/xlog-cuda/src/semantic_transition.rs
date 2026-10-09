@@ -11117,12 +11117,20 @@ struct PreparedModelCatalogueInitialization {
 }
 
 struct PreparedSegmentInitialization {
+    issuer: Arc<()>,
+    scope: Arc<()>,
+    cancelled: Arc<AtomicBool>,
     writes: Vec<state_restoration::OriginalDeviceWrite>,
     cursor: usize,
     catalogue: Option<PreparedModelCatalogueInitialization>,
     poisoned: bool,
     complete: bool,
     retired: bool,
+}
+
+struct RetiredPreparedInitialization {
+    scope: Arc<()>,
+    owner: Arc<Mutex<PreparedSegmentInitialization>>,
 }
 
 struct PreparedSegmentMetadataFreeze {
@@ -16512,6 +16520,7 @@ pub struct SemanticTransitionSession {
     readers: BTreeMap<u64, PublishedReader>,
     steps: BTreeMap<u64, StepContentStorage>,
     prepared_segment: Option<PreparedSegmentState>,
+    retired_preparation: Option<RetiredPreparedInitialization>,
     prepared_resources: Vec<Arc<dyn Send + Sync>>,
     #[cfg(feature = "semantic-policy")]
     actor_refresh: Option<actor_refresh::StagedActorRefresh>,
@@ -18466,6 +18475,7 @@ struct UnreleasedPublicationOwners {
     _replay_authentication: Option<ReplayAuthentication>,
     _pending_training_materialization: Option<PendingTrainingMaterialization>,
     _prepared_segment: Option<PreparedSegmentState>,
+    _retired_preparation: Option<RetiredPreparedInitialization>,
     #[cfg(feature = "semantic-policy")]
     _actor_refresh: Option<actor_refresh::StagedActorRefresh>,
     #[cfg(feature = "semantic-policy")]
@@ -18516,6 +18526,7 @@ impl Drop for SemanticTransitionSession {
         let embedded_pending = false;
         if self.pending_replay_delivery.is_some()
             || self.has_pending_state_restoration_except(None, None)
+            || self.retired_preparation.is_some()
             || embedded_pending
             || self.pending_training_materialization.is_some()
             || !self.readers.is_empty()
@@ -18547,6 +18558,7 @@ impl Drop for SemanticTransitionSession {
                     _replay_authentication: self.replay_authentication.take(),
                     _pending_training_materialization: self.pending_training_materialization.take(),
                     _prepared_segment: self.prepared_segment.take(),
+                    _retired_preparation: self.retired_preparation.take(),
                     #[cfg(feature = "semantic-policy")]
                     _actor_refresh: self.actor_refresh.take(),
                     #[cfg(feature = "semantic-policy")]
@@ -18852,6 +18864,43 @@ impl SemanticTransitionSession {
 
     fn has_pending_prepared_metadata_freeze(&self) -> bool {
         self.prepared_segment.as_ref().is_some_and(|build| build.metadata_pending.load(Ordering::Acquire))
+    }
+
+    fn has_retired_prepared_initialization(&self) -> bool {
+        self.retired_preparation.is_some()
+    }
+
+    fn original_retired_prepared_catalogue(
+        &self,
+    ) -> Result<Option<Arc<Mutex<PreparedSegmentInitialization>>>, SemanticTransitionError> {
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let Some(owner) = &build.initialization else {
+            return Ok(None);
+        };
+        let retained = owner.lock().map_err(|_| {
+            publication_input_error("original segment initialization custody is poisoned")
+        })?;
+        if !Arc::ptr_eq(&retained.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&retained.scope, &build.scope)
+            || !Arc::ptr_eq(&retained.cancelled, &build.cancelled)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if retained.retired && !retained.complete && retained.catalogue.is_some() {
+            if !retained.cancelled.load(Ordering::Acquire)
+                || build.completed
+                || (build.submitted && !build.has_never_graph_called_proof())
+                || !retained.writes.is_empty()
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Ok(Some(Arc::clone(owner)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn retire_original_prepared_metadata(
@@ -19789,6 +19838,9 @@ impl SemanticTransitionSession {
             Ok(()) => {
                 build.cold_reservation = Some(reservation);
                 build.initialization = Some(Arc::new(Mutex::new(PreparedSegmentInitialization {
+                    issuer: Arc::clone(&build.issuer),
+                    scope: Arc::clone(&build.scope),
+                    cancelled: Arc::clone(&build.cancelled),
                     writes, cursor: 0, catalogue, poisoned: false, complete: false, retired: false,
                 })));
                 build.initialization_pending.store(true, Ordering::Release);
@@ -25979,12 +26031,30 @@ impl SemanticTransitionSession {
                 "original prepared resources still own an executable or retained step",
             ));
         }
+        let retired_preparation = self.original_retired_prepared_catalogue()?;
+        let retired_preparation = if let Some(owner) = retired_preparation {
+            if cancellation.is_none() || self.retired_preparation.is_some() {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            Some(RetiredPreparedInitialization {
+                scope: Arc::clone(&build.scope),
+                owner,
+            })
+        } else {
+            None
+        };
         #[cfg(feature = "semantic-policy")]
         self.retire_instruction_resources()?;
         #[cfg(feature = "semantic-policy")]
         self.actor_refresh_work.clear();
-        self.reclaim_model_generations()?;
+        if retired_preparation.is_none() {
+            self.reclaim_model_generations()?;
+        }
         let resources = std::mem::take(&mut self.prepared_resources);
+        // An original catalogue retired without a result does not establish
+        // which storage Control selected. Keep both catalogues terminally
+        // pinned rather than interpreting it for another preparation.
+        self.retired_preparation = retired_preparation;
         self.prepared_segment = None;
         Ok(resources)
     }
@@ -31698,7 +31768,9 @@ impl SemanticTransitionSession {
                 "output aliases still retain this prepared step",
             ));
         }
-        self.reclaim_model_generations()?;
+        if self.original_retired_prepared_catalogue()?.is_none() {
+            self.reclaim_model_generations()?;
+        }
         self.steps.remove(&step.token);
         Ok(())
     }
@@ -32225,6 +32297,7 @@ impl SemanticTransitionSession {
             steps: BTreeMap::new(),
             next_reader: 0,
             prepared_segment: None,
+            retired_preparation: None,
             prepared_resources: Vec::new(),
             pending_replay_delivery: None,
             replay_authentication: None,
@@ -32412,8 +32485,37 @@ impl SemanticTransitionSession {
     }
 
     fn finish_joined_allocation_release(
-        self,
+        mut self,
     ) -> Result<Arc<crate::memory::GpuMemoryManager>, SemanticTransitionError> {
+        if let Some(original) = &self.retired_preparation {
+            let may_release = self.retired_prepared_initialization_may_release();
+            let retained = original.owner.lock().map_err(|_| {
+                publication_input_error("retired original preparation custody is poisoned")
+            })?;
+            if !Arc::ptr_eq(&retained.issuer, &self.publication_issuer)
+                || !Arc::ptr_eq(&retained.scope, &original.scope)
+                || !retained.cancelled.load(Ordering::Acquire)
+                || !retained.retired
+                || retained.complete
+                || retained.catalogue.is_none()
+                || !retained.writes.is_empty()
+                || !self.readers.is_empty()
+                || !self.steps.is_empty()
+                || self.prepared_segment.is_some()
+                || !self.prepared_resources.is_empty()
+                || self.captured.is_some()
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            self.require_completed_graph_retirements()?;
+            if !may_release {
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            drop(retained);
+            // This consuming boundary follows the original cancellation and
+            // every final-use join. No catalogue result or suffix is executed.
+            self.retired_preparation = None;
+        }
         let memory = Arc::clone(self.provider.memory());
         drop(self);
         memory
