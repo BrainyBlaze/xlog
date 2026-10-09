@@ -580,6 +580,7 @@ pub(crate) struct RetainedDeviceRead<T: DeviceRepr + Copy> {
     entered: bool,
     submitted: bool,
     retired: bool,
+    original_stream_id: u64,
     values: Option<Vec<T>>,
 }
 
@@ -598,6 +599,7 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
             entered: false,
             submitted: false,
             retired: false,
+            original_stream_id: crate::cuda_graph::stream_execution_id(stream)?,
             values: None,
         })
     }
@@ -616,7 +618,9 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
 
     /// The caller must record this exact retained source in its execution domain.
     pub(crate) fn enqueue(&mut self, stream: &CudaStream) -> std::result::Result<(), DriverError> {
-        if self.entered {
+        if self.entered || self.retired
+            || crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id
+        {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
         }
         let source = &self.source;
@@ -682,6 +686,28 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
         );
         self.values = None;
         self.retired = true;
+    }
+
+    /// Retire only this original copy's allocations, without accepting or
+    /// constructing a host result and without changing submission history.
+    pub(crate) fn retire_without_result(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        if self.retired {
+            return Ok(());
+        }
+        if let Some(buffer) = self.buffer.as_mut() {
+            buffer.prove_retirement(stream, self.original_stream_id)?;
+        }
+        self.retired = true;
+        self.buffer = None;
+        self.values = None;
+        Ok(())
     }
 }
 

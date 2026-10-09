@@ -16494,6 +16494,8 @@ pub struct SemanticTransitionSession {
     // A cold read can precede the final observed-source/authority import. The
     // later binding must reproduce this exact executed task content.
     cold_content: Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)>,
+    cold_observer_entered: bool,
+    cold_observer_completed: bool,
     cold_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     training_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     initial_prefill: Option<InitialPrefillStage>,
@@ -16511,6 +16513,10 @@ pub struct SemanticTransitionSession {
     publication_uploads: Vec<(usize, PublicationPayload)>,
     state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
     publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
+    construction_codebooks: Option<Arc<Mutex<OriginalSessionCodebooks>>>,
+    construction_pending: Arc<AtomicBool>,
+    #[cfg(feature = "semantic-policy")]
+    actor_refresh_construction: Option<Arc<actor_refresh::ActorRefreshConstructionBinding>>,
     publication_issuer: Arc<()>,
     readers: BTreeMap<u64, PublishedReader>,
     steps: BTreeMap<u64, StepContentStorage>,
@@ -17204,6 +17210,9 @@ pub fn cancel_prepared_segment_before_submission(
             self.steps[&step.token].consumer_completion.is_some()
         });
         if !resuming {
+            if !embedded {
+                build.require_cancellable(steps)?;
+            }
             if initialization_pending {
                 if !self.original_prepared_initialization_may_submit() {
                     return Err(SemanticTransitionError::Poisoned);
@@ -17213,10 +17222,14 @@ pub fn cancel_prepared_segment_before_submission(
                     return Err(SemanticTransitionError::Poisoned);
                 }
             } else {
-                self.ensure_quiescent()?;
-            }
-            if !embedded {
-                build.require_cancellable(steps)?;
+                if !self.original_completion_base_may_submit_for_cancellation(
+                    #[cfg(feature = "semantic-policy")]
+                    Some(build),
+                ) || self.readers.values().any(|reader| reader.retirement_pending)
+                    || self.steps.values().any(|step| step.consumer_completion.is_some())
+                {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
             }
         }
         let construction = Arc::clone(&build.construction);
@@ -18491,7 +18504,98 @@ struct UnreleasedPublicationOwners {
     _uploads: Vec<(usize, PublicationPayload)>,
     _state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
     _publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
+    _construction_codebooks: Option<Arc<Mutex<OriginalSessionCodebooks>>>,
     _stream: Arc<CudaStream>,
+}
+
+struct OriginalSessionCodebooks {
+    writes: Vec<state_restoration::OriginalDeviceWrite>,
+    cursor: usize,
+    poisoned: bool,
+    complete: bool,
+    retired: bool,
+}
+
+/// Retains actual graph and Session allocations before the first constructor
+/// effect. Only the original target may resolve or retire this issued owner.
+#[cfg(feature = "semantic-policy")]
+pub struct SemanticTransitionSessionConstruction {
+    graph: Option<crate::semantic_hypergraph::OriginalSemanticGraphConstruction>,
+    admitted_graph: Option<SemanticHypergraph>,
+    program: Option<Arc<crate::SemanticProgramAdmission>>,
+    session: Option<SemanticTransitionSession>,
+    completed: Option<Arc<Mutex<Option<SemanticTransitionSession>>>>,
+    binding: Arc<actor_refresh::ActorRefreshConstructionBinding>,
+    retired: bool,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticTransitionSessionConstruction {
+    fn resolve(
+        &mut self,
+        may_submit: bool,
+    ) -> Result<Arc<Mutex<Option<SemanticTransitionSession>>>, SemanticTransitionError> {
+        if self.retired {
+            return Err(publication_input_error("original Session construction has retired"));
+        }
+        if let Some(completed) = &self.completed {
+            return Ok(Arc::clone(completed));
+        }
+        if self.admitted_graph.is_none() && self.session.is_none() {
+            let graph = self.graph.as_mut().ok_or(SemanticTransitionError::NotBound)?;
+            graph.resolve(may_submit).map_err(SemanticTransitionError::Semantic)?;
+            // Allocate the actual Session before either original codebook
+            // upload, then retain it here before resolving that upload owner.
+            self.admitted_graph = Some(graph.take_graph().map_err(SemanticTransitionError::Semantic)?);
+            self.graph = None;
+        }
+        if self.session.is_none() {
+            if !may_submit {
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            let mut session = SemanticTransitionSession::allocate_from_hypergraph_with_program(
+                &mut self.admitted_graph, self.program.as_deref(), Arc::clone(&self.binding.issuer),
+            )?;
+            session.actor_refresh_construction = Some(Arc::clone(&self.binding));
+            self.session = Some(session);
+        }
+        let session = self.session.as_mut().expect("original allocated Session");
+        session.resolve_constructor_codebooks(may_submit)?;
+        let session = self.session.take().expect("original completed Session");
+        let completed = Arc::new(Mutex::new(Some(session)));
+        self.completed = Some(Arc::clone(&completed));
+        self.binding.pending.store(false, Ordering::Release);
+        Ok(completed)
+    }
+
+    fn retire(&mut self) -> Result<(), SemanticTransitionError> {
+        if self.retired {
+            return Ok(());
+        }
+        if let Some(graph) = &mut self.graph {
+            graph.retire().map_err(SemanticTransitionError::Semantic)?;
+        }
+        if let Some(session) = &mut self.session {
+            session.retire_constructor_codebooks()?;
+        }
+        if let Some(completed) = &self.completed {
+            let mut completed = completed.lock().map_err(|_| {
+                publication_input_error("original constructed Session lock is poisoned")
+            })?;
+            if let Some(session) = completed.as_mut() {
+                session.require_constructor_only_retirement()?;
+                session.retire_constructor_codebooks()?;
+            }
+            *completed = None;
+        }
+        self.graph = None;
+        self.admitted_graph = None;
+        self.session = None;
+        self.program = None;
+        self.retired = true;
+        self.binding.pending.store(false, Ordering::Release);
+        Ok(())
+    }
 }
 
 thread_local! {
@@ -18523,6 +18627,7 @@ impl Drop for SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let embedded_pending = false;
         if self.pending_replay_delivery.is_some()
+            || (self.construction_pending.load(Ordering::Acquire) && self.constructor_effect_entered())
             || self.has_pending_state_restoration_except(None, None)
             || self.retired_preparation.is_some()
             || embedded_pending
@@ -18573,6 +18678,7 @@ impl Drop for SemanticTransitionSession {
                     _uploads: std::mem::take(&mut self.publication_uploads),
                     _state_material_restore: self.state_material_restore.take(),
                     _publication_preparation: self.publication_preparation.take(),
+                    _construction_codebooks: self.construction_codebooks.take(),
                     _stream: Arc::clone(&self.stream),
                 };
                 eprintln!("semantic publication owners retained: Session dropped with unreleased readers or retained steps");
@@ -18888,7 +18994,8 @@ impl SemanticTransitionSession {
                 step.consumer_completion.is_some() && !build.tokens.contains(token))
             || {
                 #[cfg(feature = "semantic-policy")]
-                { self.has_pending_actor_refresh_context_except(None) }
+                { self.has_pending_actor_refresh_context_except(None)
+                    || self.has_pending_actor_refresh_construction_except(None) }
                 #[cfg(not(feature = "semantic-policy"))]
                 { false }
             }
@@ -31439,10 +31546,12 @@ impl SemanticTransitionSession {
         consumer: Option<&Arc<Mutex<OriginalStepConsumers>>>,
         reader: Option<&Arc<Mutex<PublishedReaderRetirement>>>,
     ) -> bool {
-        if !self.original_completion_base_may_submit() {
-            return false;
-        }
         let cancellation_scope = consumer.and_then(|owner| {
+            if self.steps.get(&token).and_then(|step| step.consumer_completion.as_ref())
+                .is_none_or(|actual| !Arc::ptr_eq(actual, owner))
+            {
+                return None;
+            }
             let owner = owner.lock().ok()?;
             (owner.purpose == OriginalConsumerPurpose::Cancellation)
                 .then(|| owner.cancellation_scope.clone())
@@ -31457,6 +31566,12 @@ impl SemanticTransitionSession {
                     && build.tokens.contains(&token)
             })
         });
+        if !self.original_completion_base_may_submit_for_cancellation(
+            #[cfg(feature = "semantic-policy")]
+            cancellation,
+        ) {
+            return false;
+        }
         let other_reader = self.readers.iter().any(|(other, owner)| {
             owner.retirement_pending
                 && !(*other == token
@@ -32449,6 +32564,18 @@ impl SemanticTransitionSession {
         graph: SemanticHypergraph,
         program: Option<&crate::SemanticProgramAdmission>,
     ) -> Result<Self, SemanticTransitionError> {
+        let mut graph = Some(graph);
+        let mut session = Self::allocate_from_hypergraph_with_program(&mut graph, program, Arc::new(()))?;
+        session.upload_cold_codebooks()?;
+        Ok(session)
+    }
+
+    fn allocate_from_hypergraph_with_program(
+        original_graph: &mut Option<SemanticHypergraph>,
+        program: Option<&crate::SemanticProgramAdmission>,
+        publication_issuer: Arc<()>,
+    ) -> Result<Self, SemanticTransitionError> {
+        let graph = original_graph.as_ref().ok_or(SemanticTransitionError::NotBound)?;
         let (provider, domain) = graph
             .transition_owner()
             .map_err(SemanticTransitionError::Semantic)?;
@@ -32503,13 +32630,22 @@ impl SemanticTransitionSession {
             .runtime()
             .and_then(|r| r.stream_pool().resolve(domain.stream_id()))
             .ok_or_else(|| runtime_error("stream resolution", "owned stream is unavailable"))?;
-        let mut session = Self {
+        let pinned = PinnedObservation::new(stream.clone())?;
+        let writes = vec![
+            state_restoration::OriginalDeviceWrite::new(
+                &stream, &codebooks.words, device_codebooks.view(), true,
+            )?,
+            state_restoration::OriginalDeviceWrite::new(
+                &stream, &codebooks.components, device_components.view(), true,
+            )?,
+        ];
+        let session = Self {
             captured: None,
             graph_retirements: Vec::new(),
             provider,
             domain: domain.clone(),
             stream: stream.clone(),
-            graph: std::mem::ManuallyDrop::new(graph),
+            graph: std::mem::ManuallyDrop::new(original_graph.take().expect("original admitted graph")),
             root,
             base_snapshot,
             codebooks,
@@ -32518,6 +32654,8 @@ impl SemanticTransitionSession {
             task: None,
             task_ground: None,
             cold_content: None,
+            cold_observer_entered: false,
+            cold_observer_completed: false,
             cold_canary_source: None,
             training_canary_source: None,
             initial_prefill: None,
@@ -32533,7 +32671,13 @@ impl SemanticTransitionSession {
             publication_uploads: Vec::new(),
             state_material_restore: None,
             publication_preparation: None,
-            publication_issuer: Arc::new(()),
+            construction_codebooks: Some(Arc::new(Mutex::new(OriginalSessionCodebooks {
+                writes, cursor: 0, poisoned: false, complete: false, retired: false,
+            }))),
+            construction_pending: Arc::new(AtomicBool::new(true)),
+            #[cfg(feature = "semantic-policy")]
+            actor_refresh_construction: None,
+            publication_issuer,
             readers: BTreeMap::new(),
             steps: BTreeMap::new(),
             next_reader: 0,
@@ -32565,7 +32709,7 @@ impl SemanticTransitionSession {
             scratch,
             receipts,
             state,
-            pinned: PinnedObservation::new(stream.clone())?,
+            pinned,
             execute,
             #[cfg(feature = "semantic-policy")]
             policy: None,
@@ -32579,8 +32723,6 @@ impl SemanticTransitionSession {
             poisoned: false,
             stream_waits: 0,
         };
-        session.validate_ranges()?;
-        session.upload_cold_codebooks()?;
         Ok(session)
     }
 
@@ -32589,12 +32731,23 @@ impl SemanticTransitionSession {
     }
 
     fn has_unresolved_native_effect(&self) -> bool {
+        self.has_unresolved_native_effect_except_actor_cancellation(
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    fn has_unresolved_native_effect_except_actor_cancellation(
+        &self,
+        #[cfg(feature = "semantic-policy")] cancellation: Option<&PreparedSegmentState>,
+    ) -> bool {
         self.has_unresolved_session_native_effect()
             || self.graph.ensure_not_poisoned().is_err()
             || self.has_pending_state_restoration_except(None, None)
             || {
                 #[cfg(feature = "semantic-policy")]
-                { self.has_pending_actor_refresh_context_except(None) }
+                { self.has_pending_actor_refresh_context_except(None)
+                    || self.has_pending_actor_refresh_construction_except_cancellation(cancellation) }
                 #[cfg(not(feature = "semantic-policy"))]
                 { false }
             }
@@ -32623,6 +32776,7 @@ impl SemanticTransitionSession {
 
     fn has_independent_session_native_effect_except_retired_preparation(&self) -> bool {
         self.poisoned
+            || self.construction_pending.load(Ordering::Acquire)
             || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
             || {
                 #[cfg(feature = "semantic-policy")]
@@ -32648,8 +32802,21 @@ impl SemanticTransitionSession {
     }
 
     fn original_completion_base_may_submit(&self) -> bool {
+        self.original_completion_base_may_submit_for_cancellation(
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    fn original_completion_base_may_submit_for_cancellation(
+        &self,
+        #[cfg(feature = "semantic-policy")] cancellation: Option<&PreparedSegmentState>,
+    ) -> bool {
         self.original_session_completion_may_submit()
-            && !self.has_unresolved_native_effect()
+            && !self.has_unresolved_native_effect_except_actor_cancellation(
+                #[cfg(feature = "semantic-policy")]
+                cancellation,
+            )
     }
 
     // A resolver must additionally authenticate its exact retained scope and
@@ -32710,6 +32877,16 @@ impl SemanticTransitionSession {
     }
 
     fn original_prepared_non_owner_effects_are_clear(&self) -> bool {
+        self.original_prepared_non_owner_effects_are_clear_except_actor_construction(
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    fn original_prepared_non_owner_effects_are_clear_except_actor_construction(
+        &self,
+        #[cfg(feature = "semantic-policy")] original: Option<&Arc<actor_refresh::ActorRefreshConstructionBinding>>,
+    ) -> bool {
         self.original_session_completion_is_uncontended()
             && !self.readers.values().any(|reader| reader.retirement_pending)
             && !self.steps.values().any(|step| step.consumer_completion.is_some())
@@ -32717,7 +32894,8 @@ impl SemanticTransitionSession {
             && !self.has_pending_state_restoration_except(None, None)
             && {
                 #[cfg(feature = "semantic-policy")]
-                { !self.has_pending_actor_refresh_context_except(None) }
+                { !self.has_pending_actor_refresh_context_except(None)
+                    && !self.has_pending_actor_refresh_construction_except(original) }
                 #[cfg(not(feature = "semantic-policy"))]
                 { true }
             }
@@ -33020,7 +33198,9 @@ impl SemanticTransitionSession {
     ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
         self.ensure_rebindable()?;
-        if self.publication.is_some() || self.task.is_some() || self.cold_content.is_some() {
+        if self.publication.is_some() || self.task.is_some() || self.cold_content.is_some()
+            || self.cold_observer_entered
+        {
             return Err(publication_input_error(
                 "cold task content can be observed only once before final import",
             ));
@@ -33038,9 +33218,11 @@ impl SemanticTransitionSession {
                 "cold task observer differs from the admitted edit grammar",
             ));
         }
+        self.cold_observer_entered = true;
         let observation = program
             .observe(Arc::clone(&self.provider))
             .inspect_err(|_| self.poisoned = true)?;
+        self.cold_observer_completed = true;
         let content = TaskEvaluationBinding::cold_content(
             admission,
             statement_records,
@@ -33062,6 +33244,18 @@ impl SemanticTransitionSession {
         }
         self.cold_content = Some(content.clone());
         Ok(content)
+    }
+
+    /// Whether the original cold observer invocation entered. This metadata
+    /// distinguishes pre-entry refusal from an unfinished one-shot observer.
+    pub fn cold_task_observer_entered(&self) -> bool {
+        self.cold_observer_entered
+    }
+
+    /// A positive observer return proves its submitted work completed. Later
+    /// task-content validation errors remain errors, not uncertain execution.
+    pub fn cold_task_observer_completed(&self) -> bool {
+        self.cold_observer_completed
     }
 
     /// Borrow the original completed Logical observation, without another device read.
@@ -37254,18 +37448,63 @@ impl SemanticTransitionSession {
     // Only construction and fresh native restoration may initialize these
     // private immutable allocations. Proposal tapes keep views of the same bytes.
     fn upload_cold_codebooks(&mut self) -> Result<(), SemanticTransitionError> {
-        let upload = (|| {
-            self.provider
-                .htod_sync_copy_into_tracked(&self.codebooks.words, &mut self.device_codebooks)?;
-            self.provider.htod_sync_copy_into_tracked(
-                &self.codebooks.components,
-                &mut self.device_components,
-            )
-        })();
-        upload.map_err(|error| {
-            self.poisoned = true;
-            runtime_error("cold codebook upload", error)
+        self.resolve_constructor_codebooks(true)
+    }
+
+    fn constructor_effect_entered(&self) -> bool {
+        self.construction_codebooks.as_ref().is_some_and(|owner| {
+            owner.lock().map_or(true, |owner| owner.writes.iter().any(|write| write.entered()))
         })
+    }
+
+    fn resolve_constructor_codebooks(&mut self, may_submit: bool) -> Result<(), SemanticTransitionError> {
+        self.validate_ranges()?;
+        let original = Arc::clone(self.construction_codebooks.as_ref().ok_or(SemanticTransitionError::NotBound)?);
+        let mut original = original.lock().map_err(|_| publication_input_error("original codebook upload lock is poisoned"))?;
+        if original.retired {
+            return Err(publication_input_error("original codebook uploads were retired"));
+        }
+        if original.complete {
+            return Ok(());
+        }
+        while original.cursor < original.writes.len() {
+            let cursor = original.cursor;
+            let OriginalSessionCodebooks { writes, poisoned, .. } = &mut *original;
+            writes[cursor].resolve(&self.domain, &self.stream, &self.provider, poisoned, may_submit)?;
+            original.cursor += 1;
+        }
+        original.writes.clear();
+        original.complete = true;
+        self.construction_pending.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn retire_constructor_codebooks(&mut self) -> Result<(), SemanticTransitionError> {
+        let original = Arc::clone(self.construction_codebooks.as_ref().ok_or(SemanticTransitionError::NotBound)?);
+        let mut original = original.lock().map_err(|_| publication_input_error("original codebook upload lock is poisoned"))?;
+        if !original.retired {
+            for write in &mut original.writes {
+                write.retire_without_result(&self.stream)?;
+            }
+            original.writes.clear();
+            original.retired = true;
+        }
+        self.construction_pending.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_constructor_only_retirement(&self) -> Result<(), SemanticTransitionError> {
+        if self.actor_refresh.is_some() || self.publication.is_some() || self.task.is_some()
+            || self.cold_content.is_some() || self.cold_observer_entered
+            || !self.steps.is_empty() || !self.readers.is_empty()
+            || self.prepared_segment.is_some() || self.pending || self.poisoned
+            || self.has_pending_state_restoration_except(None, None)
+            || self.graph.ensure_not_poisoned().is_err()
+        {
+            return Err(publication_input_error("constructed Session has later original work to retire"));
+        }
+        Ok(())
     }
 
     fn upload_rng_state(

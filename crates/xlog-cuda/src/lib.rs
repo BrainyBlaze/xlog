@@ -134,7 +134,7 @@ pub use semantic_transition::{
     SemanticCompletedReplayMaterials, SemanticCompletedStepWitnessMaterial,
     SemanticCompletedTaskGroundMaterial, SemanticCompletedTheoryDeltaMaterial,
     SemanticActorRefreshInitializerRefusal, SemanticPreparedActorRefresh,
-    SemanticSegmentInstructionAdmission,
+    SemanticSegmentInstructionAdmission, SemanticTransitionSessionConstruction,
     SemanticPolicyGradients, SemanticSelectedPolicyGradients, SemanticUpdateCanaryMeasurement,
     SemanticUpdateForwardReceipt, SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };

@@ -375,7 +375,7 @@ fn task_content_read(
 /// on workers. Only a retained content witness may verify from a worker thread.
 #[pyclass(name = "SemanticTransitionSession", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionSession {
-    inner: Mutex<Option<SemanticTransitionSession>>,
+    inner: Arc<Mutex<Option<SemanticTransitionSession>>>,
     editable_program: Option<Arc<SemanticProgramAdmission>>,
     editable_observer_source: Option<String>,
     editable_initial_source: Option<String>,
@@ -721,13 +721,32 @@ impl PySemanticTransitionSession {
                 .bind_training_canary_source(Arc::clone(source))
                 .map_err(xlog_err)?;
         }
-        Ok(Self {
-            inner: Mutex::new(Some(session)),
+        Ok(Self::from_shared_native(
+            Arc::new(Mutex::new(Some(session))), editable_source.as_ref(), device_ordinal,
+            capacities, admission_limits, memory_bytes, proposal_expense, checkpoint_sources,
+            training_canary_owner,
+        ))
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "the same Session wrapper retains its original admission and allocation owners")]
+    fn from_shared_native(
+        inner: Arc<Mutex<Option<SemanticTransitionSession>>>,
+        editable_source: Option<&cold_task::EditableTaskSource>,
+        device_ordinal: usize,
+        capacities: (u32, u32, u32, u32),
+        admission_limits: (u32, u32, u32, usize),
+        memory_bytes: u64,
+        proposal_expense: Arc<Mutex<ProposalExpense>>,
+        checkpoint_sources: Arc<Mutex<CheckpointSources>>,
+        training_canary_owner: Option<TrainingCanaryOwner>,
+    ) -> Self {
+        Self {
+            inner,
             editable_program: editable_source
                 .as_ref()
                 .map(|source| Arc::clone(&source.program)),
             editable_initial_source: editable_source.as_ref().map(|source| source.initial_source.clone()),
-            editable_observer_source: editable_source.and_then(|source| source.observer_source),
+            editable_observer_source: editable_source.and_then(|source| source.observer_source.clone()),
             importing: Arc::new(AtomicBool::new(false)),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
@@ -756,7 +775,7 @@ impl PySemanticTransitionSession {
             capacities,
             admission_limits,
             memory_bytes,
-        })
+        }
     }
 }
 
@@ -769,6 +788,7 @@ struct SemanticCheckpointManifest {
     phase_seal: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct CheckpointAllocationDomain {
     provider: Arc<CudaKernelProvider>,
     domain: ResidentExecutionDomain,
@@ -23463,7 +23483,7 @@ mod tests {
     #[test]
     fn released_cold_session_rejects_saved_session_aliases() {
         let session = super::PySemanticTransitionSession {
-            inner: Mutex::new(None),
+            inner: Arc::new(Mutex::new(None)),
             editable_program: None,
             editable_observer_source: None,
             importing: Arc::new(AtomicBool::new(false)),

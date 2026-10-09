@@ -161,7 +161,7 @@ pub(super) fn editable_source_from_admission(
     }))
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct FreshRecord {
     role: u64,
     bytes: Vec<u8>,
@@ -178,6 +178,7 @@ struct FreshRecord {
     module = "pyxlog._native",
     frozen
 )]
+#[derive(PartialEq, Eq)]
 pub(crate) struct PySemanticTransitionFreshParent {
     owner_thread: ThreadId,
     provenance_capacity_records: u64,
@@ -559,37 +560,53 @@ impl PySemanticTransitionColdTask {
         };
         #[cfg(not(feature = "semantic-policy"))]
         let (proposal_expense, checkpoint_sources) = import_owners();
-        let native_session = PySemanticTransitionSession::from_admission(
-            admission,
-            capacities,
-            admission_limits,
-            device_ordinal,
-            memory_bytes,
-            proposal_expense,
-            checkpoint_sources,
-            allocation,
-            canary_source.zip(canary_owner),
-        );
-        let native_session = native_session.map_err(|error| {
-            #[cfg(feature = "semantic-policy")]
-            if let Some(child) = &replay_custody {
-                child.fail();
+        let canary = canary_source.zip(canary_owner);
+        #[cfg(feature = "semantic-policy")]
+        let actor_session = actor_custody.as_ref().map(|owner| owner.construct_session(
+            py, actor_refresh_bank.expect("checked actor bank"), admission.clone(), &parent,
+            &task_ground, capacities, admission_limits, device_ordinal, memory_bytes,
+            Arc::clone(&proposal_expense), Arc::clone(&checkpoint_sources), canary.clone(),
+        )).transpose()?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let actor_session: Option<(Py<PySemanticTransitionSession>, Py<PySemanticTransitionFreshParent>)> = None;
+        let (session, parent) = match actor_session {
+            Some(original) => original,
+            None => {
+                let native_session = PySemanticTransitionSession::from_admission(
+                    admission, capacities, admission_limits, device_ordinal, memory_bytes,
+                    proposal_expense, checkpoint_sources, allocation, canary,
+                ).map_err(|error| {
+                    #[cfg(feature = "semantic-policy")]
+                    if let Some(child) = &replay_custody { child.fail(); }
+                    error
+                })?;
+                (Py::new(py, native_session)?, parent)
             }
-            error
-        })?;
-        let session = Py::new(py, native_session)?;
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_session(py, &session)?;
         }
         #[cfg(feature = "semantic-policy")]
-        if let Some(child) = &actor_custody {
-            child.retain_session(py, actor_refresh_bank.expect("checked actor bank"), &session)?;
-        }
+        let cached_content = actor_custody.as_ref().map(|owner| owner.constructed_content(
+            actor_refresh_bank.expect("checked actor bank"),
+        )).transpose()?.flatten();
+        #[cfg(not(feature = "semantic-policy"))]
+        let cached_content = None;
+        let content = match cached_content {
+            Some(content) => content,
+            None => {
         let content = (|| {
             let native_session = session.borrow(py);
             if let Some(editable) = native_session.editable_program.as_ref() {
                 program = program.with_editable_program(Arc::clone(editable));
+            }
+            #[cfg(feature = "semantic-policy")]
+            if let Some(owner) = &actor_custody {
+                return owner.observe_constructed_content(
+                    py, actor_refresh_bank.expect("checked actor bank"),
+                    Arc::new(program), &statement_records, &native_ground,
+                );
             }
             let result = native_session
                 .owner()?
@@ -604,14 +621,23 @@ impl PySemanticTransitionColdTask {
             }
             error
         })?;
+                content
+            }
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.observed()?;
         }
-        let controller = Py::new(
-            py,
-            PySemanticTransitionController::new(py, session.clone_ref(py))?,
-        )?;
+        #[cfg(feature = "semantic-policy")]
+        let cached_controller = actor_custody.as_ref().map(|owner| owner.constructed_controller(
+            py, actor_refresh_bank.expect("checked actor bank"),
+        )).transpose()?.flatten();
+        #[cfg(not(feature = "semantic-policy"))]
+        let cached_controller = None;
+        let controller = match cached_controller {
+            Some(controller) => controller,
+            None => Py::new(py, PySemanticTransitionController::new(py, session.clone_ref(py))?)?,
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_controller(&controller.borrow(py).identity)?;

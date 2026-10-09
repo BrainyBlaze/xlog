@@ -47,6 +47,14 @@ pub(super) struct PreparedActorRefreshOwner {
     pub(super) target: Arc<PublicationStorage>,
     work: Arc<ActorRefreshWork>,
     children: Mutex<[Option<Arc<()>>; 2]>,
+    construction_pending: [Arc<AtomicBool>; 2],
+}
+
+pub(super) struct ActorRefreshConstructionBinding {
+    pub(super) proof: SemanticPreparedActorRefresh,
+    pub(super) bank: usize,
+    pub(super) issuer: Arc<()>,
+    pub(super) pending: Arc<AtomicBool>,
 }
 
 /// Only the original native segment submission may advance this owner.
@@ -892,6 +900,7 @@ impl SemanticTransitionSession {
                 ),
                 work,
                 children: Mutex::new([None, None]),
+                construction_pending: std::array::from_fn(|_| Arc::new(AtomicBool::new(false))),
             }),
         };
         if let Some(assignment) = self.actor_refresh_program.as_mut().and_then(|program| {
@@ -910,6 +919,167 @@ impl SemanticTransitionSession {
         self.actor_refresh_preparations
             .insert((step.token, member_ordinal), Arc::downgrade(&proof.inner));
         Ok(proof)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "original constructor retains the admitted graph geometry, program and cold operation")]
+    pub fn prepare_actor_refresh_construction(
+        &self,
+        update: &SemanticPreparedStep,
+        bank: usize,
+        proof: &SemanticPreparedActorRefresh,
+        records: crate::SemanticAdmissionRecords,
+        capacities: crate::SemanticHypergraphCapacities,
+        limits: crate::SemanticAdmissionLimits,
+        program: Option<Arc<crate::SemanticProgramAdmission>>,
+        work: SemanticColdNativeWork,
+    ) -> Result<SemanticTransitionSessionConstruction, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.require_actor_refresh_construction_target(update, bank, proof)?;
+        if proof.inner.cancelled.load(Ordering::Acquire)
+            || matches!(*proof.inner.execution.lock().map_err(|_| publication_input_error(
+                "original actor submission custody lock is poisoned"
+            ))?, ActorRefreshParentExecution::NeverSubmitted)
+        {
+            return Err(publication_input_error("cancelled actor cannot begin Session construction"));
+        }
+        let graph = self.provider.prepare_semantic_graph_construction(
+            &proof.inner.domain, capacities, records, limits, work,
+        ).map_err(SemanticTransitionError::Semantic)?;
+        let binding = Arc::new(ActorRefreshConstructionBinding {
+            proof: proof.clone(), bank, issuer: Arc::new(()),
+            pending: Arc::clone(&proof.inner.construction_pending[bank]),
+        });
+        {
+            let mut children = proof.inner.children.lock().map_err(|_| {
+                publication_input_error("original actor child issuance lock is poisoned")
+            })?;
+            if proof.inner.cancelled.load(Ordering::Acquire) || children[bank].is_some() {
+                return Err(publication_input_error("actor construction is issued once per original bank"));
+            }
+            children[bank] = Some(Arc::clone(&binding.issuer));
+            binding.pending.store(true, Ordering::Release);
+        }
+        Ok(SemanticTransitionSessionConstruction {
+            graph: Some(graph), admitted_graph: None, program, session: None,
+            completed: None, binding, retired: false,
+        })
+    }
+
+    pub fn resolve_actor_refresh_construction(
+        &self,
+        update: &SemanticPreparedStep,
+        bank: usize,
+        proof: &SemanticPreparedActorRefresh,
+        original: &mut SemanticTransitionSessionConstruction,
+    ) -> Result<Arc<Mutex<Option<SemanticTransitionSession>>>, SemanticTransitionError> {
+        self.require_actor_refresh_construction_target(update, bank, proof)?;
+        self.require_actor_refresh_construction_binding(bank, proof, &original.binding)?;
+        let cancelled = proof.inner.cancelled.load(Ordering::Acquire)
+            || matches!(*proof.inner.execution.lock().map_err(|_| publication_input_error(
+                "original actor submission custody lock is poisoned"
+            ))?, ActorRefreshParentExecution::NeverSubmitted);
+        let may_submit = !cancelled
+            && self.original_session_completion_may_submit()
+            && self.original_prepared_non_owner_effects_are_clear_except_actor_construction(Some(&original.binding));
+        original.resolve(may_submit)
+    }
+
+    pub fn retire_actor_refresh_construction(
+        &self,
+        update: &SemanticPreparedStep,
+        bank: usize,
+        proof: &SemanticPreparedActorRefresh,
+        outer: &SemanticPreparedSegmentNonSubmission,
+        original: &mut SemanticTransitionSessionConstruction,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_actor_refresh_construction_target(update, bank, proof)?;
+        self.require_actor_refresh_construction_binding(bank, proof, &original.binding)?;
+        self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?.require_non_submission(outer)?;
+        self.require_original_prepared_graph_retirement()?;
+        if !proof.inner.cancelled.load(Ordering::Acquire)
+            || !matches!(*proof.inner.execution.lock().map_err(|_| publication_input_error(
+                "original actor submission custody lock is poisoned"
+            ))?, ActorRefreshParentExecution::NeverSubmitted)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        original.retire()
+    }
+
+    fn require_actor_refresh_construction_target(
+        &self,
+        update: &SemanticPreparedStep,
+        bank: usize,
+        proof: &SemanticPreparedActorRefresh,
+    ) -> Result<(), SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        build.check_retained(update, &self.publication_issuer)?;
+        if bank > 1 || !Arc::ptr_eq(&update.issuer, &proof.inner.issuer)
+            || !Arc::ptr_eq(&update.scope, &proof.inner.scope) || update.token != proof.inner.step
+            || !Arc::ptr_eq(&self.provider, &proof.inner.provider)
+            || !Arc::ptr_eq(&build.actor_refresh_execution, &proof.inner.execution)
+            || !Arc::ptr_eq(&build.cancelled, &proof.inner.cancelled)
+            || build.tokens.iter().position(|token| *token == update.token)
+                .is_none_or(|index| build.transitions[index] != SemanticTransitionKind::Update)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
+    }
+
+    fn require_actor_refresh_construction_binding(
+        &self,
+        bank: usize,
+        proof: &SemanticPreparedActorRefresh,
+        binding: &Arc<ActorRefreshConstructionBinding>,
+    ) -> Result<(), SemanticTransitionError> {
+        let children = proof.inner.children.lock().map_err(|_| {
+            publication_input_error("original actor child issuance lock is poisoned")
+        })?;
+        if binding.bank != bank || !Arc::ptr_eq(&binding.proof.inner, &proof.inner)
+            || !Arc::ptr_eq(&binding.pending, &proof.inner.construction_pending[bank])
+            || children[bank].as_ref().is_none_or(|issuer| !Arc::ptr_eq(issuer, &binding.issuer))
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn has_pending_actor_refresh_construction_except(
+        &self,
+        original: Option<&Arc<ActorRefreshConstructionBinding>>,
+    ) -> bool {
+        self.has_pending_actor_refresh_construction_except_owners(original, None)
+    }
+
+    pub(super) fn has_pending_actor_refresh_construction_except_cancellation(
+        &self,
+        cancellation: Option<&PreparedSegmentState>,
+    ) -> bool {
+        self.has_pending_actor_refresh_construction_except_owners(None, cancellation)
+    }
+
+    fn has_pending_actor_refresh_construction_except_owners(
+        &self,
+        original: Option<&Arc<ActorRefreshConstructionBinding>>,
+        cancellation: Option<&PreparedSegmentState>,
+    ) -> bool {
+        self.actor_refresh_preparations.values().filter_map(std::sync::Weak::upgrade).any(|proof| {
+            proof.construction_pending.iter().enumerate().any(|(bank, pending)| {
+                pending.load(Ordering::Acquire) && original.is_none_or(|original| {
+                    original.bank != bank || !Arc::ptr_eq(&original.proof.inner, &proof)
+                        || !Arc::ptr_eq(&original.pending, pending)
+                }) && cancellation.is_none_or(|build| {
+                    !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+                        || !Arc::ptr_eq(&proof.issuer, &build.issuer)
+                        || !Arc::ptr_eq(&proof.scope, &build.scope)
+                        || !Arc::ptr_eq(&proof.cancelled, &build.cancelled)
+                        || !Arc::ptr_eq(&proof.execution, &build.actor_refresh_execution)
+                        || build.tokens.iter().position(|token| *token == proof.step)
+                            .is_none_or(|index| build.transitions[index] != SemanticTransitionKind::Update)
+                })
+            })
+        })
     }
 
     /// Cold-stage original context with the target's retained CURRENT owners.
@@ -972,7 +1142,14 @@ impl SemanticTransitionSession {
         {
             let mut children = proof.inner.children.lock()
                 .map_err(|_| publication_input_error("actor context custody lock is poisoned"))?;
-            if children[target_bank].is_some() {
+            if children[target_bank].as_ref().is_some_and(|issuer| {
+                !Arc::ptr_eq(issuer, &self.publication_issuer)
+                    || self.actor_refresh_construction.as_ref().is_none_or(|construction| {
+                        !Arc::ptr_eq(&construction.proof.inner, &proof.inner)
+                            || construction.bank != target_bank
+                            || !Arc::ptr_eq(&construction.issuer, issuer)
+                    })
+            }) {
                 return Err(publication_input_error(
                     "actor context is staged once per original conditional bank",
                 ));
