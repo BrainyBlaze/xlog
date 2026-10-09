@@ -104,6 +104,13 @@ pub struct SemanticColdNativeWork {
 }
 
 impl SemanticColdNativeWork {
+    pub fn same_custody(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.custody, &other.custody)
+            && Arc::ptr_eq(&self.allowance, &other.allowance)
+            && Arc::ptr_eq(&self.provider, &other.provider)
+            && self.domain.stream_id() == other.domain.stream_id()
+    }
+
     pub(crate) fn graph_custody(
         self,
         provider: &Arc<CudaKernelProvider>,
@@ -180,6 +187,14 @@ struct EvaluationCleanup {
     cancellation: Option<SemanticCancelledModelEvaluation>,
 }
 
+struct ColdReportCompletion {
+    metadata: Option<crate::device::RetainedDeviceWrite<ModelWorkEvent>>,
+    metadata_counted: bool,
+    command: OriginalNativeCommand,
+    read: PublicationRead<u64>,
+    poisoned: bool,
+}
+
 pub(super) struct ColdModelWorkStorage {
     invocation: Arc<()>,
     aliases: Arc<()>,
@@ -189,11 +204,12 @@ pub(super) struct ColdModelWorkStorage {
     allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
     work: PreparedModelWork,
     native_work: TrackedCudaSlice<u64>,
-    initialization_reset: native_work_bound::OriginalNativeCommand,
+    initialization_reset: OriginalNativeCommand,
     initialization_write: crate::device::RetainedDeviceWrite<u64>,
     initialization_poisoned: bool,
     initialized: bool,
     report: TrackedCudaSlice<u64>,
+    completion: Option<Arc<Mutex<ColdReportCompletion>>>,
     state: RecordingState,
     regions: Vec<RecordingState>,
     plan: Option<ModelWorkPlan>,
@@ -317,7 +333,12 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
-        self.checked_reader(lease)?;
+        self.checked_original_consumer_step(lease)?;
+        if !lease.active {
+            return Err(publication_input_error(
+                "shared cold completion requires its original acquired reader",
+            ));
+        }
         let work = self.graph.borrowed_cold_work().ok_or_else(|| {
             publication_input_error("child completion lost its original borrowed tally")
         })?;
@@ -1035,7 +1056,7 @@ impl SemanticTransitionSession {
         let report = reservation
             .alloc(15)
             .map_err(|error| runtime_error("cold model work report allocation", error))?;
-        let initialization_reset = native_work_bound::OriginalNativeCommand::new(&self.domain)?;
+        let initialization_reset = OriginalNativeCommand::new(&self.domain)?;
         let initialization_write = crate::device::RetainedDeviceWrite::new(
             self.domain.execution_stream(),
             &[0u64; 11],
@@ -1072,6 +1093,7 @@ impl SemanticTransitionSession {
             initialization_poisoned: false,
             initialized: false,
             report,
+            completion: None,
             state: RecordingState::Waiting,
             regions: Vec::new(),
             plan: None,
@@ -1184,11 +1206,29 @@ impl SemanticTransitionSession {
         })
     }
 
+    pub(super) fn has_pending_cold_model_work_completion(&self, except_token: Option<u64>) -> bool {
+        self.steps.iter().any(|(token, step)| {
+            except_token != Some(*token)
+                && step.cold_model_work.as_ref().is_some_and(|storage| {
+                    storage.completion.is_some() && storage.result.is_none()
+                })
+        })
+    }
+
     fn cold_model_work(
         &self,
         handle: &SemanticColdModelWork,
     ) -> Result<&ColdModelWorkStorage, SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.original_cold_model_work(handle)
+    }
+
+    // Metadata authentication alone permits the original completion owner to
+    // join its pending consumer edge. It grants no new model or report effect.
+    fn original_cold_model_work(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<&ColdModelWorkStorage, SemanticTransitionError> {
         let work = self
             .steps
             .get(&handle.token)
@@ -1213,11 +1253,20 @@ impl SemanticTransitionSession {
         reader: ColdWorkReader<'_>,
         handle: &SemanticColdModelWork,
     ) -> Result<u64, SemanticTransitionError> {
-        let storage = self.cold_model_work(handle)?;
+        self.ensure_quiescent()?;
+        self.check_cold_work_completion_reader(reader, handle)
+    }
+
+    fn check_cold_work_completion_reader(
+        &self,
+        reader: ColdWorkReader<'_>,
+        handle: &SemanticColdModelWork,
+    ) -> Result<u64, SemanticTransitionError> {
+        let storage = self.original_cold_model_work(handle)?;
         let token = match reader {
             ColdWorkReader::Published(lease) => {
-                self.checked_reader(lease)?;
-                if storage.prepared_scope.is_some() {
+                self.checked_original_consumer_step(lease)?;
+                if !lease.active || storage.prepared_scope.is_some() {
                     return Err(publication_input_error(
                         "prepared cold work cannot substitute a published reader",
                     ));
@@ -1238,7 +1287,7 @@ impl SemanticTransitionSession {
                         "cold completion requires its same handed-off instruction and original invocation",
                     ));
                 }
-                self.checked_step(parent)?;
+                self.checked_original_consumer_step(parent)?;
                 parent.token
             }
             ColdWorkReader::AdmittedRetirement(admission) => {
@@ -1270,7 +1319,7 @@ impl SemanticTransitionSession {
                 handle.token
             }
             ColdWorkReader::Prepared(step, parent) => {
-                self.require_prepared_replay_parent(step, parent)?;
+                self.require_original_prepared_replay_parent(step, parent)?;
                 if storage
                     .prepared_scope
                     .as_ref()
@@ -2368,8 +2417,8 @@ impl SemanticTransitionSession {
         streams: &[u64],
         disposition: SemanticColdModelWorkDisposition,
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
-        let token = self.check_cold_work_reader(reader, handle)?;
-        let storage = self.cold_model_work(handle)?;
+        let token = self.check_cold_work_completion_reader(reader, handle)?;
+        let storage = self.original_cold_model_work(handle)?;
         if storage.pending_operation.is_some()
             || (storage.stopped_before_entry
                 && disposition != SemanticColdModelWorkDisposition::KnownRefusal)
@@ -2399,7 +2448,7 @@ impl SemanticTransitionSession {
         }
         if matches!(
             storage.state,
-            RecordingState::Submitted | RecordingState::Completed
+            RecordingState::Submitting | RecordingState::Submitted | RecordingState::Completed
         ) {
             if storage.streams.as_deref() != Some(streams)
                 || storage.disposition != Some(disposition)
@@ -2410,8 +2459,8 @@ impl SemanticTransitionSession {
             }
             return self.resolve_cold_model_work_for_reader(reader, handle);
         }
-        if self.cold_model_work(handle)?.state != RecordingState::Closed
-            || Arc::strong_count(&self.cold_model_work(handle)?.aliases) != 1
+        if self.original_cold_model_work(handle)?.state != RecordingState::Closed
+            || Arc::strong_count(&self.original_cold_model_work(handle)?.aliases) != 1
         {
             return Err(publication_input_error(
                 "cold completion requires its original closed recorder without scratch or child aliases",
@@ -2431,15 +2480,33 @@ impl SemanticTransitionSession {
                 self.complete_step_consumers_by_token(token, streams)?;
             }
         }
-        let kernel = self
-            .provider
-            .device()
-            .inner()
-            .get_func(
-                "xlog_semantic_transition",
-                "semantic_cold_model_work_result",
+        // Joining only this retained consumer owner must not authorize a fresh
+        // report submission while another operation remains pending or poisoned.
+        self.ensure_quiescent()?;
+        let storage = self.original_cold_model_work(handle)?;
+        let metadata = if storage.work.recording.events().is_empty() {
+            None
+        } else {
+            Some(
+                crate::device::RetainedDeviceWrite::new(
+                    self.domain.execution_stream(),
+                    storage.work.recording.events(),
+                    storage
+                        .work
+                        .device
+                        .view()
+                        .slice(..storage.work.recording.events().len()),
+                )
+                .map_err(|error| runtime_error("cold model work metadata staging", error))?,
             )
-            .ok_or_else(|| runtime_error("kernel lookup", "cold model work result unavailable"))?;
+        };
+        let completion = ColdReportCompletion {
+            metadata,
+            metadata_counted: false,
+            command: OriginalNativeCommand::new(&self.domain)?,
+            read: self.stage_publication_read(storage.report.view())?,
+            poisoned: false,
+        };
         let storage = self
             .steps
             .get_mut(&handle.token)
@@ -2455,50 +2522,7 @@ impl SemanticTransitionSession {
         storage.state = RecordingState::Submitting;
         storage.streams = Some(streams.to_vec());
         storage.disposition = Some(disposition);
-        let work = &storage.work;
-        let input = if work.recording.events().is_empty() {
-            ModelWorkInput::default()
-        } else {
-            let mut destination = work.device.view().slice(..work.recording.events().len());
-            self.provider
-                .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
-                .map_err(|error| runtime_error("cold model work metadata upload", error))?;
-            work.descriptor()
-        };
-        let mut recorder = self.domain.new_strict_recorder();
-        work.record_reads(&mut recorder);
-        recorder.read(&storage.native_work);
-        recorder.write(&storage.report);
-        let arguments = (
-            input.events,
-            input.count,
-            input.bound,
-            storage.native_work.device_ptr_value(),
-            storage.report.device_ptr_value(),
-        );
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            // SAFETY: the retained private inputs and fifteen-word report belong to
-            // this one operation; no model alias can modify event metadata.
-            unsafe {
-                kernel.clone().launch_in(
-                    enqueue,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    arguments,
-                )
-            }
-            .map_err(|error| XlogError::Kernel(error.to_string()))
-        })?;
-        self.steps
-            .get_mut(&handle.token)
-            .expect("submitted reader")
-            .cold_model_work
-            .as_mut()
-            .expect("submitted cold work")
-            .state = RecordingState::Submitted;
+        storage.completion = Some(Arc::new(Mutex::new(completion)));
         self.resolve_cold_model_work_for_reader(reader, handle)
     }
 
@@ -2526,11 +2550,11 @@ impl SemanticTransitionSession {
         reader: ColdWorkReader<'_>,
         handle: &SemanticColdModelWork,
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
-        let token = self.check_cold_work_reader(reader, handle)?;
-        let storage = self.cold_model_work(handle)?;
+        let token = self.check_cold_work_completion_reader(reader, handle)?;
+        let storage = self.original_cold_model_work(handle)?;
         if !matches!(
             storage.state,
-            RecordingState::Submitted | RecordingState::Completed
+            RecordingState::Submitting | RecordingState::Submitted | RecordingState::Completed
         ) {
             return Err(publication_input_error(
                 "cold resolution requires its original submitted report",
@@ -2539,13 +2563,118 @@ impl SemanticTransitionSession {
         if let Some(result) = storage.result {
             return Ok(result);
         }
-        let streams = storage
-            .streams
-            .as_ref()
-            .expect("submitted original streams")
-            .clone();
-        self.complete_step_consumers_by_token(token, &streams)?;
-        let words = self.publication_read(self.cold_model_work(handle)?.report.view())?;
+        // This owner is installed only after the original consumers joined.
+        // Do not create another edge owner while resolving its report prefix.
+        let mut admission_error = self.ensure_quiescent_except_cold_report(Some(token)).err();
+        let original = Arc::clone(storage.completion.as_ref().ok_or_else(|| {
+            publication_input_error("cold resolution lost its original report completion owner")
+        })?);
+        let mut original = original.lock().map_err(|_| {
+            publication_input_error("original cold report completion owner is poisoned")
+        })?;
+        let completion = &mut *original;
+        let storage = self
+            .steps
+            .get_mut(&handle.token)
+            .expect("completed reader")
+            .cold_model_work
+            .as_mut()
+            .expect("completed cold work");
+        if let Some(metadata) = &mut completion.metadata {
+            if !metadata.entered() {
+                if let Some(error) = admission_error.take() {
+                    return Err(error);
+                }
+                if !completion.metadata_counted {
+                    self.provider.admit_launch_metadata_htod(
+                        std::mem::size_of_val(storage.work.recording.events()),
+                    );
+                    completion.metadata_counted = true;
+                }
+                metadata
+                    .enqueue(self.domain.execution_stream())
+                    .map_err(|error| {
+                        completion.poisoned |= metadata.entered();
+                        runtime_error("cold model work metadata upload", error)
+                    })?;
+            }
+            metadata.resolve().map_err(|error| {
+                completion.poisoned |= metadata.entered();
+                runtime_error("cold model work metadata completion", error)
+            })?;
+        }
+        if !completion.command.resolve_entered(&mut completion.poisoned)? {
+            if let Some(error) = admission_error.take() {
+                return Err(error);
+            }
+            let kernel = self
+                .provider
+                .device()
+                .inner()
+                .get_func("xlog_semantic_transition", "semantic_cold_model_work_result")
+                .ok_or_else(|| runtime_error("kernel lookup", "cold model work result unavailable"))?;
+            let input = if storage.work.recording.events().is_empty() {
+                ModelWorkInput::default()
+            } else {
+                storage.work.descriptor()
+            };
+            let mut recorder = self.domain.new_strict_recorder();
+            storage.work.record_reads(&mut recorder);
+            recorder.read(&storage.native_work);
+            recorder.write(&storage.report);
+            let arguments = (
+                input.events,
+                input.count,
+                input.bound,
+                storage.native_work.device_ptr_value(),
+                storage.report.device_ptr_value(),
+            );
+            completion.command.run(
+                &self.domain,
+                &mut completion.poisoned,
+                recorder,
+                |enqueue, entered, submitted| {
+                    let (events, count, bound, native, report) = arguments;
+                    let events = events.into_kernel_param_storage();
+                    let count = count.into_kernel_param_storage();
+                    let bound = bound.into_kernel_param_storage();
+                    let native = native.into_kernel_param_storage();
+                    let report = report.into_kernel_param_storage();
+                    let mut parameters = [
+                        events.as_kernel_param(),
+                        count.as_kernel_param(),
+                        bound.as_kernel_param(),
+                        native.as_kernel_param(),
+                        report.as_kernel_param(),
+                    ];
+                    // SAFETY: all inputs and the report remain in this exact
+                    // original invocation through driver entry and completion.
+                    unsafe {
+                        kernel.launch_raw_in_original(
+                            enqueue,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            &mut parameters,
+                            false,
+                            entered,
+                            submitted,
+                        )
+                    }
+                    .map_err(|error| XlogError::Kernel(error.to_string()))
+                },
+            )?;
+        }
+        storage.state = RecordingState::Submitted;
+        if !completion.read.read.entered() {
+            if let Some(error) = admission_error.take() {
+                return Err(error);
+            }
+        }
+        let words = self
+            .resolve_publication_read_with_poison(&mut completion.read, &mut completion.poisoned)?;
         let storage = self
             .steps
             .get_mut(&handle.token)
@@ -2597,6 +2726,7 @@ impl SemanticTransitionSession {
             .map_err(SemanticTransitionError::Semantic)?;
         storage.result = Some(result);
         storage.state = RecordingState::Completed;
+        completion.read.read.retire_completed_values();
         Ok(result)
     }
 }

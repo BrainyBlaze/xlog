@@ -3245,8 +3245,8 @@ struct SegmentInstructionPreparation {
     retirement_entered: bool,
     retirement_work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
     retirement_report: Option<xlog_cuda::SemanticColdModelWorkResult>,
-    retirement_callback_entered: bool,
-    retirement_children_entered: bool,
+    retirement_custody: Option<xlog_cuda::SemanticColdNativeWork>,
+    retirement_children_completed: usize,
     retirement_children_ready: bool,
     preparation_total: Option<xlog_cuda::SemanticColdModelWorkResult>,
     preparation_totals_frozen: bool,
@@ -3742,6 +3742,10 @@ struct PreparedPythonSegment {
     #[cfg(feature = "semantic-policy")]
     checkpoint_phase: CheckpointTaskPhase,
     producers_retired: bool,
+    producer_retirement_entered: bool,
+    retirement_streams: Option<Vec<u64>>,
+    retirement_steps_quiesced: usize,
+    graph_retired: bool,
     // Retain the entire native roster before entering any post-completion
     // Python callback. Neither a lost return nor callback failure resubmits it.
     #[cfg(feature = "semantic-policy")]
@@ -16948,6 +16952,10 @@ impl PySemanticTransitionController {
                 resources: Arc::clone(&resources),
                 checkpoint_phase: checkpoint_phase.clone(),
                 producers_retired: false,
+                producer_retirement_entered: false,
+                retirement_streams: None,
+                retirement_steps_quiesced: 0,
+                graph_retired: false,
                 #[cfg(feature = "semantic-policy")]
                 outcomes: None,
                 #[cfg(feature = "semantic-policy")]
@@ -17751,13 +17759,6 @@ impl PySemanticTransitionController {
         }
         let _retirement = PreparedRetirementGuard(&session.retiring);
         let private = private_execution_owner(py, &session)?;
-        if let Some(private) = &private {
-            private.borrow(py).begin_private_segment_retirement(
-                py,
-                &session,
-                &task_use.borrow(py),
-            )?;
-        }
         let snapshot = task_use.borrow(py).state()?.snapshot.canonical.clone();
         let mut budget = 16 * 1024 * 1024;
         let streams = ColdValue::read(consumer_streams, &mut budget, 0)?;
@@ -17775,16 +17776,33 @@ impl PySemanticTransitionController {
                 "final segment retirement requires exact supported consumer streams",
             ));
         }
-        let (steps, resources, producers_retired, instruction) = {
-            let stored = session
+        let (
+            steps,
+            resources,
+            producers_retired,
+            producer_entered,
+            instruction,
+            mut quiesced,
+            graph_retired,
+        ) = {
+            let mut stored = session
                 .prepared_segment
                 .lock()
                 .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
             let stored = stored
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| invalid("no original prepared segment to retire"))?;
             if stored.task_use.as_ptr() != task_use.as_ptr() {
                 return Err(invalid("segment retirement belongs to another task use"));
+            }
+            if let Some(original) = &stored.retirement_streams {
+                if original != &streams {
+                    return Err(invalid(
+                        "segment retirement changed its original consumer roster",
+                    ));
+                }
+            } else {
+                stored.retirement_streams = Some(streams.clone());
             }
             (
                 stored
@@ -17794,13 +17812,23 @@ impl PySemanticTransitionController {
                     .collect::<Vec<_>>(),
                 Arc::clone(&stored.resources),
                 stored.producers_retired,
+                stored.producer_retirement_entered,
                 stored
                     .instruction
                     .as_ref()
                     .filter(|_| private.is_none())
                     .map(Arc::clone),
+                stored.retirement_steps_quiesced,
+                stored.graph_retired,
             )
         };
+        if let Some(private) = &private {
+            private.borrow(py).begin_private_segment_retirement(
+                py,
+                &session,
+                &task_use.borrow(py),
+            )?;
+        }
         let retirement_work = if let Some(instruction) = &instruction {
             let mut original = instruction.preparation()?;
             if original.retirement_report.is_some() {
@@ -17832,55 +17860,67 @@ impl PySemanticTransitionController {
         } else {
             None
         };
-        let retirement_ref = retirement_work.as_ref().map(|work| work.borrow(py));
-        let retirement_scope = match (retirement_work.as_ref(), retirement_ref.as_ref()) {
-            (Some(work), Some(work_ref)) => {
-                Some(learning_phase::cold_model_work::ColdCallbackScope::enter(
-                    py,
-                    &session,
-                    work_ref,
-                    work.clone_ref(py),
-                )?)
-            }
-            _ => None,
-        };
         if let (Some(instruction), Some(work)) = (&instruction, &retirement_work) {
             let mut original = instruction.preparation()?;
             if !original.retirement_children_ready {
-                if original.retirement_children_entered {
-                    return Err(invalid(
-                        "retain the original unresolved replay retirement attachment",
-                    ));
+                if original.retirement_custody.is_none() {
+                    let custody = session
+                        .owner()?
+                        .share_cold_native_work(&work.borrow(py).inner)
+                        .map_err(xlog_err)?;
+                    original.retirement_custody = Some(custody);
                 }
-                original.retirement_children_entered = true;
+                let custody = original
+                    .retirement_custody
+                    .as_ref()
+                    .expect("retained original retirement custody")
+                    .clone();
                 let children = original.replay_children.clone();
+                let first = original.retirement_children_completed;
                 drop(original);
-                let custody = session
-                    .owner()?
-                    .share_cold_native_work(&work.borrow(py).inner)
-                    .map_err(xlog_err)?;
-                for child in children {
+                for (index, child) in children.iter().enumerate().skip(first) {
                     child.attach_retirement_work(py, custody.clone())?;
+                    instruction.preparation()?.retirement_children_completed = index + 1;
                 }
-                instruction.preparation()?.retirement_children_ready = true;
+                let mut original = instruction.preparation()?;
+                original.retirement_children_ready = true;
+                let custody = original.retirement_custody.take();
+                drop(original);
+                drop(custody);
             }
         }
-        let graph = {
-            let mut owner = session.owner()?;
-            for step in &steps {
-                owner
-                    .quiesce_prepared_step(&step.borrow(py).inner, &streams)
+        if !graph_retired {
+            while quiesced < steps.len() {
+                session
+                    .owner()?
+                    .quiesce_prepared_step(&steps[quiesced].borrow(py).inner, &streams)
                     .map_err(xlog_err)?;
+                quiesced += 1;
+                session
+                    .prepared_segment
+                    .lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                    .as_mut()
+                    .ok_or_else(|| invalid("original segment disappeared during retirement"))?
+                    .retirement_steps_quiesced = quiesced;
             }
-            owner
+            let graph = session
+                .owner()?
                 .take_prepared_executable_for_retirement()
-                .map_err(xlog_err)?
-        };
-        drop(graph);
-        session
-            .owner()?
-            .require_completed_prepared_graph_retirement()
-            .map_err(xlog_err)?;
+                .map_err(xlog_err)?;
+            drop(graph);
+            session
+                .owner()?
+                .require_completed_prepared_graph_retirement()
+                .map_err(xlog_err)?;
+            session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_mut()
+                .ok_or_else(|| invalid("original segment disappeared during retirement"))?
+                .graph_retired = true;
+        }
         let prepared = {
             let retained = resources
                 .producers
@@ -17892,13 +17932,28 @@ impl PySemanticTransitionController {
                 .clone_ref(py)
         };
         if !producers_retired {
-            if let Some(instruction) = &instruction {
-                let mut original = instruction.preparation()?;
-                if original.retirement_callback_entered {
-                    return Err(invalid("original producer retirement cannot be repeated after an uncertain callback"));
-                }
-                original.retirement_callback_entered = true;
+            if producer_entered {
+                return Err(invalid("original producer retirement cannot be repeated after an uncertain callback"));
             }
+            let retirement_ref = retirement_work.as_ref().map(|work| work.borrow(py));
+            let _retirement_scope = match (retirement_work.as_ref(), retirement_ref.as_ref()) {
+                (Some(work), Some(work_ref)) => Some(
+                    learning_phase::cold_model_work::ColdCallbackScope::enter(
+                        py,
+                        &session,
+                        work_ref,
+                        work.clone_ref(py),
+                    )?
+                ),
+                _ => None,
+            };
+            session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_mut()
+                .ok_or_else(|| invalid("original segment disappeared during retirement"))?
+                .producer_retirement_entered = true;
             let check = || -> PyResult<()> {
                 let issued = task_use.borrow(py);
                 self.require_read_issued(&issued)?;
@@ -17956,7 +18011,6 @@ impl PySemanticTransitionController {
         }
         // The actual final-use report is complete before its target storage
         // token can be removed. Neither callbacks nor entered report work recur.
-        drop(retirement_scope);
         for step in &steps {
             session
                 .owner()?

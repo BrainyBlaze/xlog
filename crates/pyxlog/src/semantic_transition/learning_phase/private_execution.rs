@@ -44,6 +44,7 @@ pub(super) struct PrivateExecutionGroup {
     retirement_report: Option<SemanticColdModelWorkResult>,
     retirement_ready: bool,
     retirement_entered: bool,
+    retirement_children_ready: bool,
     adoption_work: Option<Py<PySemanticColdModelWork>>,
     adoption_custody: Option<SemanticColdNativeWork>,
     adoption_report: Option<SemanticColdModelWorkResult>,
@@ -88,6 +89,7 @@ struct PrivateReplayChildState {
     callbacks: Vec<Py<PyAny>>,
     native_work: Option<SemanticColdNativeWork>,
     retirement_entered: bool,
+    retirement_attached: bool,
     released: bool,
     source: Option<Arc<VerifiedCheckpointSource>>,
 }
@@ -817,20 +819,39 @@ impl PrivateReplayChildCustody {
         py: Python<'_>,
         work: SemanticColdNativeWork,
     ) -> PyResult<()> {
-        let (child, parent) = {
+        let (child, parent, work) = {
             let mut state = self.state()?;
             if self.failed.load(Ordering::Acquire)
                 || !state.import_returned
-                || state.native_work.is_some()
-                || state.retirement_entered
                 || state.released
             {
                 return Err(invalid(
                     "private replay retirement requires its original known import exactly once",
                 ));
             }
-            state.retirement_entered = true;
-            state.native_work = Some(work.clone());
+            let work = if state.retirement_entered {
+                let original = state.native_work.as_ref().ok_or_else(|| {
+                    invalid("private replay retirement lost its original shared custody")
+                })?;
+                if !original.same_custody(&work) {
+                    return Err(invalid(
+                        "private replay retirement changed its original shared custody",
+                    ));
+                }
+                if state.retirement_attached {
+                    return Ok(());
+                }
+                original.clone()
+            } else {
+                if state.native_work.is_some() {
+                    return Err(invalid(
+                        "private replay still retains its preparation tally",
+                    ));
+                }
+                state.retirement_entered = true;
+                state.native_work = Some(work.clone());
+                work
+            };
             (
                 state.child.as_ref().expect("returned child").clone_ref(py),
                 state
@@ -838,14 +859,18 @@ impl PrivateReplayChildCustody {
                     .as_ref()
                     .expect("returned reader")
                     .clone_ref(py),
+                work,
             )
         };
-        let result = child
+        // This native attachment is metadata-only. Its checked graph setter
+        // has no fallible suffix after installing the original borrowed owner.
+        child
             .borrow(py)
             .owner()?
             .attach_shared_cold_native_work(&*parent.borrow(py).lease()?, work)
-            .map_err(xlog_err);
-        result
+            .map_err(xlog_err)?;
+        self.state()?.retirement_attached = true;
+        Ok(())
     }
 
     pub(in crate::semantic_transition) fn require_cancelled_final_use(
@@ -2216,12 +2241,14 @@ impl PySemanticLearningPhaseTransition {
         let group = retained.as_mut().expect("retained original group");
         if group.retirement_work.is_none()
             || !group.retirement_ready
-            || group.retirement_entered
             || group.native_retired
         {
             return Err(invalid(
                 "private retirement requires its original final-use cold owner",
             ));
+        }
+        if group.retirement_entered && group.retirement_children_ready {
+            return Ok(());
         }
         group.retirement_entered = true;
         let work = group
@@ -2230,8 +2257,12 @@ impl PySemanticLearningPhaseTransition {
             .expect("checked original retirement work")
             .clone_ref(py);
         drop(retained);
-        let result = self.attach_replay_retirement_work(py, &work.borrow(py));
-        result
+        self.attach_replay_retirement_work(py, &work.borrow(py))?;
+        self.private_group()?
+            .as_mut()
+            .expect("retained original group")
+            .retirement_children_ready = true;
+        Ok(())
     }
 
     pub(in crate::semantic_transition) fn retain_private_selected_parent(
@@ -2640,6 +2671,7 @@ impl PySemanticLearningPhaseTransition {
                 retirement_report: None,
                 retirement_ready: false,
                 retirement_entered: false,
+                retirement_children_ready: false,
                 callback_entered: false,
                 callback_pending: false,
                 callback_result: None,
