@@ -2744,6 +2744,7 @@ pub struct SemanticHypergraph {
     root_export: Option<Arc<()>>,
     original_command: Option<(Option<Arc<()>>, Arc<Mutex<OriginalSemanticCommand>>)>,
     root_restoration: Option<(Arc<()>, Arc<Mutex<OriginalRootRestoration>>)>,
+    root_restore_submission_allowed: bool,
     // Retire device state before releasing its allocation and driver owner.
     provider: Arc<CudaKernelProvider>,
 }
@@ -3232,6 +3233,7 @@ impl CudaKernelProvider {
             root_export: None,
             original_command: None,
             root_restoration: None,
+            root_restore_submission_allowed: true,
         };
         let command = graph.command_for(OP_INITIALIZE);
         let receipt = graph.run(command, ArenaAccess::ReadWrite)?;
@@ -3652,6 +3654,21 @@ impl SemanticHypergraph {
     }
 
     pub(crate) fn resolve_root_restore(&mut self) -> Result<SemanticRootHandle, SemanticHypergraphError> {
+        self.resolve_root_restore_with_submission(true)
+    }
+
+    pub(crate) fn resolve_root_restore_with_submission(
+        &mut self,
+        may_submit: bool,
+    ) -> Result<SemanticRootHandle, SemanticHypergraphError> {
+        let previous = self.root_restore_submission_allowed;
+        self.root_restore_submission_allowed &= may_submit;
+        let result = self.resume_original_root_restore();
+        self.root_restore_submission_allowed = previous;
+        result
+    }
+
+    fn resume_original_root_restore(&mut self) -> Result<SemanticRootHandle, SemanticHypergraphError> {
         let (scope, original) = self.root_restoration.as_ref()
             .map(|(scope, original)| (Arc::clone(scope), Arc::clone(original)))
             .ok_or_else(|| admission_error("no original root restoration is retained"))?;
@@ -4442,7 +4459,8 @@ impl SemanticHypergraph {
                 return Err(admission_error("semantic continuation changed its original command"));
             }
         } else {
-            if self.poisoned || self.root_export.is_some() {
+            if self.poisoned || self.root_export.is_some()
+                || (scope.is_some() && !self.root_restore_submission_allowed) {
                 return Err(SemanticHypergraphError::Poisoned);
             }
             let original = self.prepare_original_command(command, access)?;
@@ -4452,7 +4470,8 @@ impl SemanticHypergraph {
         let receipt = {
             let mut original = original.lock()
                 .map_err(|_| admission_error("original semantic command lock is poisoned"))?;
-            self.resolve_original_command(&mut original, !self.poisoned && self.root_export.is_none())?
+            self.resolve_original_command(&mut original, !self.poisoned && self.root_export.is_none()
+                && (scope.is_none() || self.root_restore_submission_allowed))?
         };
         self.original_command = None;
         Ok(receipt)

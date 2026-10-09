@@ -392,6 +392,13 @@ impl SemanticTransitionSession {
             ));
         }
         if self.has_unresolved_session_native_effect_except_replay_verification()
+            || self.has_pending_state_restoration_except(None, None)
+            || {
+                #[cfg(feature = "semantic-policy")]
+                { self.has_pending_actor_refresh_context_except(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { false }
+            }
             || self.pending
             || self.pending_replay_delivery.is_some()
             || self.pending_training_materialization.is_some()

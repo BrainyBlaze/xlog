@@ -30,6 +30,7 @@ mod prepared_replay;
 mod replay_verification;
 pub use replay_verification::SemanticReplayPublicationVerification;
 mod replay_model_backing;
+mod state_restoration;
 mod task_ground;
 mod verification_receipts;
 pub use task_ground::{
@@ -16457,6 +16458,8 @@ pub struct SemanticTransitionSession {
     model_owners: ModelGenerationOwners,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
+    state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
+    publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
     publication_issuer: Arc<()>,
     readers: BTreeMap<u64, PublishedReader>,
     steps: BTreeMap<u64, StepContentStorage>,
@@ -18383,7 +18386,7 @@ struct PendingTrainingMaterialization {
 
 struct UnreleasedPublicationOwners {
     _graph: SemanticHypergraph,
-    _publication: Arc<PublicationStorage>,
+    _publication: Option<Arc<PublicationStorage>>,
     _model_owners: ModelGenerationOwners,
     _training_views: Option<Arc<SemanticTrainingViewArena>>,
     _training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
@@ -18412,6 +18415,8 @@ struct UnreleasedPublicationOwners {
     _policy_tapes: Vec<PolicyTape>,
     _events: Vec<cudarc::driver::CudaEvent>,
     _uploads: Vec<(usize, PublicationPayload)>,
+    _state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
+    _publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
     _stream: Arc<CudaStream>,
 }
 
@@ -18444,6 +18449,7 @@ impl Drop for SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let embedded_pending = false;
         if self.pending_replay_delivery.is_some()
+            || self.has_pending_state_restoration_except(None, None)
             || embedded_pending
             || self.pending_training_materialization.is_some()
             || !self.readers.is_empty()
@@ -18453,7 +18459,8 @@ impl Drop for SemanticTransitionSession {
                 .as_ref()
                 .is_some_and(|build| (build.capturing || build.submitted) && !build.completed)
         {
-            if let Some(publication) = self.publication.take() {
+            {
+                let publication = self.publication.take();
                 // SAFETY: graph is taken exactly once here and its normal
                 // destructor is disabled by ManuallyDrop in Session storage.
                 let graph = unsafe { std::mem::ManuallyDrop::take(&mut self.graph) };
@@ -18488,6 +18495,8 @@ impl Drop for SemanticTransitionSession {
                     #[cfg(feature = "semantic-policy")]
                     _policy_tapes: std::mem::take(&mut self.policy_tapes),
                     _uploads: std::mem::take(&mut self.publication_uploads),
+                    _state_material_restore: self.state_material_restore.take(),
+                    _publication_preparation: self.publication_preparation.take(),
                     _stream: Arc::clone(&self.stream),
                 };
                 eprintln!("semantic publication owners retained: Session dropped with unreleased readers or retained steps");
@@ -26967,258 +26976,6 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 
-    fn restore_state_material_inner(
-        &mut self,
-        bytes: &[u8],
-        transition: Option<&SemanticLearningPhaseTransition>,
-        immutable_models: Option<RestoredModelOwners<'_>>,
-    ) -> Result<Option<SemanticPublishedIdentity>, SemanticTransitionError> {
-        self.ensure_rebindable()?;
-        if self.publication.is_some() || self.captured.is_some() || self.task.is_none() {
-            return Err(publication_input_error(
-                "state restoration requires a fresh uncaptured task-bound Session",
-            ));
-        }
-        let mut material = PublicationMaterial::decode(bytes)?;
-        let retain_current_models = immutable_models.is_some_and(RestoredModelOwners::current);
-        if retain_current_models && transition.is_some() {
-            return Err(publication_input_error("actor context cannot apply a learning-phase fold"));
-        }
-        if retain_current_models {
-            let coverage = material.ranges.iter_mut().find(|range| range.range.role == 14)
-                .filter(|range| range.bytes.len() == size_of::<CompletionCoverage>())
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            // SAFETY: the canonical material decoder checked this integer-only
-            // record, and its exact complete ABI extent was checked above.
-            let mut invalidated = unsafe {
-                std::ptr::read_unaligned(coverage.bytes.as_ptr().cast::<CompletionCoverage>())
-            };
-            invalidated.model_generation = 0;
-            coverage.bytes = publication_abi_bytes(&[invalidated]);
-        }
-        let ground = self.task_ground.as_ref().ok_or(SemanticTransitionError::NotBound)?;
-        let saved_ground = material.ranges.iter()
-            .find(|range| range.range.role == SemanticStateRole::TaskGround as u64
-                && range.range.index == 0)
-            .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        ground.layout.validate(&saved_ground.bytes)?;
-        self.task_observations_authenticated = !saved_ground.bytes[64..ground.layout.query_offset]
-            .chunks_exact(144)
-            .any(|observation| observation[..8] != [0; 8]);
-        let header = material.bank.header;
-        let mut rng = header.rng_binding()?;
-        let mut fold = None;
-        if let Some(transition) = transition {
-            let (record, absorption) = transition.apply(&mut material)?;
-            material.learning_phases.push(record);
-            fold = absorption;
-        }
-        if fold.is_some() {
-            let generation = header
-                .model_generation
-                .checked_add(1)
-                .filter(|n| *n <= u64::from(u32::MAX))
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            material.bank.header.model_generation = generation;
-            material.bank.header.neural_generation = header
-                .neural_generation
-                .checked_add(1)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            material.bank.state.model_generation = generation as u32;
-            rng.model_generation = generation as u32;
-        }
-        if header.authority_generation == 0 {
-            return Err(publication_input_error(
-                "restored RNG or task generation exceeds its native domain",
-            ));
-        }
-        // Validate immutable task statements before any graph mutation. Symbols
-        // are compared through admitted canonical bytes, never process IDs.
-        for (index, statement) in self.feedback_statement_bytes()?.iter().enumerate() {
-            let saved = material
-                .ranges
-                .iter()
-                .find(|item| item.range.role == 16 && item.range.index == index as u64)
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            if saved.bytes != *statement {
-                return Err(publication_input_error(
-                    "restored feedback statement differs from the actual admitted task",
-                ));
-            }
-        }
-        let result = (|| {
-            let root = self
-                .graph
-                .restore_root(&material.graph)
-                .map_err(SemanticTransitionError::Semantic)?;
-            let snapshot = self
-                .graph
-                .snapshot(crate::SemanticView::Root(root))
-                .map_err(SemanticTransitionError::Semantic)?;
-            let admission = self
-                .graph
-                .admission()
-                .ok_or(SemanticTransitionError::NotBound)?;
-            let codebooks = ActionCodebooks::derive(
-                admission,
-                self.graph.transition_arena()[1],
-                self.task
-                    .as_ref()
-                    .and_then(|(task, _)| task.spec.program.editable_program()),
-            )?;
-            if codebooks.input_cells != self.codebooks.input_cells
-                || codebooks.words.len() != self.device_codebooks.len()
-            {
-                return Err(publication_input_error(
-                    "restored action catalogue changes its allocated shape",
-                ));
-            }
-            let (task, device) = self
-                .task
-                .as_mut()
-                .ok_or(SemanticTransitionError::NotBound)?;
-            task.admission_identity = admission.identity();
-            if task.identity() != material.contract.task_identity {
-                return Err(publication_input_error(
-                    "restored native task differs from its original complete admission",
-                ));
-            }
-            let words = task.words(self.graph.transition_arena()[1]);
-            self.provider
-                .htod_sync_copy_into_tracked(&words, device)
-                .map_err(|error| runtime_error("restored task owner upload", error))?;
-            let codebook = material
-                .ranges
-                .iter_mut()
-                .find(|item| item.range.role == 48)
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            codebook.bytes = relocate_publication_codebooks(&codebook.bytes, &codebooks.words)?;
-            self.codebooks = codebooks;
-            self.upload_cold_codebooks()?;
-            self.root = root;
-            self.base_snapshot = snapshot;
-            self.task_epoch = header.authority_generation;
-            self.learning_phases = material.learning_phases;
-            let mut instance = [0; 32];
-            getrandom::fill(&mut instance)
-                .map_err(|error| runtime_error("restored instance entropy", error))?;
-            let instance = Identity256::from_bytes(instance);
-            if instance == header.instance {
-                return Err(publication_input_error(
-                    "restoration must create a fresh instance",
-                ));
-            }
-            let mut contract = material.contract;
-            contract.semantic_owner = self.graph.transition_arena()[1];
-            #[cfg(feature = "semantic-policy")]
-            if let Some(RestoredModelOwners::Current { minimum_generation, .. }) = immutable_models {
-                if minimum_generation == 0 || minimum_generation > u64::from(u32::MAX) {
-                    return Err(SemanticTransitionError::ObservationMismatch);
-                }
-                // This immutable lifetime floor is the real released target
-                // lineage's known generation, never the historical row's
-                // unrelated generation or an unexecuted future input header.
-                contract.model_generation = minimum_generation;
-            }
-            let plans: Vec<_> = material
-                .ranges
-                .into_iter()
-                .map(|item| PublicationAllocationPlan {
-                    role: item.range.role,
-                    index: item.range.index,
-                    capacity: item.capacity,
-                    length: item.bytes.len(),
-                    logical_begin: item.range.logical_begin,
-                    logical_end: item.range.logical_end,
-                    payload: if matches!(item.range.role, 18..=25) {
-                        PublicationPayload::Uncomputed
-                    } else {
-                        PublicationPayload::Metadata(item.bytes)
-                    },
-                })
-                .collect();
-            let model_payloads = material
-                .model_allocations
-                .into_iter()
-                .map(PublicationPayload::Metadata)
-                .collect::<Vec<_>>();
-            let (storage, uploads, model_owners) = PublicationStorage::allocate(
-                &self.provider,
-                &plans,
-                material.layouts,
-                material.model_memory,
-                &model_payloads,
-                contract,
-                &material.terminals,
-                instance,
-                immutable_models,
-            )?;
-            material.bank.header.abi = 0;
-            material.bank.header.instance = instance;
-            material.bank.header.recovered_instance = header.instance;
-            material.bank.header.sealed_epoch = 0;
-            material.bank.header.base_word = 0;
-            material.bank.header.publication_word = 0;
-            material.bank.header.semantic_owner = contract.semantic_owner;
-            material.bank.header.semantic_slot = u64::from(root.slot());
-            material.bank.header.semantic_generation = root.generation();
-            material.bank.header.neural_bank = 0;
-            // Historical receipts and feedback stay unchanged. Only the live
-            // descriptor is rebound by initialize_publication; its kernel checks
-            // fresh native hashes against the saved logical/state expectations.
-            self.publication = Some(Arc::new(storage));
-            self.publication_uploads = uploads;
-            self.model_owners = model_owners;
-            self.bind_training_publication()?;
-            if retain_current_models {
-                // Only native metadata and the original semantic context are
-                // staged cold. The target Update's actual model basis does not
-                // exist yet for a later step in this same captured segment.
-                self.prepare_publication_storage(material.bank, &material.terminals,
-                    &material.role_counts, rng, None, true)?;
-                self.publication_uploads.clear();
-                self.rng = Some(rng);
-                self.next_proposal = u64::from(rng.proposal);
-                return Ok(None);
-            }
-            let restored = self.initialize_publication(
-                material.bank,
-                &material.terminals,
-                &material.role_counts,
-                rng,
-                if fold.is_some() {
-                    7
-                } else if transition.is_some() {
-                    5
-                } else {
-                    4
-                },
-                fold.as_ref(),
-            )?;
-            if self.training_views.is_some() {
-                self.restore_replay_append_rows()?;
-            }
-            if transition.is_none()
-                && (restored.logical_digest != header.logical_digest
-                    || restored.state_digest != header.state_digest)
-            {
-                return Err(SemanticTransitionError::ObservationMismatch);
-            }
-            for allocation in &self
-                .publication
-                .as_ref()
-                .expect("restored publication owner")
-                .allocations
-            {
-                allocation.seal_restoration();
-            }
-            Ok(Some(restored))
-        })();
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
 
     /// Actual phase lineage owned by this Session. This is a cold metadata read,
     /// not a scientific acceptance result or permission to execute training.
@@ -27436,169 +27193,6 @@ impl SemanticTransitionSession {
         })
     }
 
-    fn prepare_publication_storage(
-        &mut self,
-        bank: PublicationBank,
-        terminal_tokens: &[u64],
-        role_counts: &[u64; PUBLICATION_ROLE_COUNT],
-        rng: SemanticRngBinding,
-        fold: Option<&learning_phase::LearningFoldPlan>,
-        retain_current_models: bool,
-    ) -> Result<(), SemanticTransitionError> {
-        let storage = Arc::clone(
-            self.publication
-                .as_ref()
-                .expect("installed publication owner"),
-        );
-        let mut recorder = self.domain.new_strict_recorder();
-        storage.record(&mut recorder);
-        for allocation in &storage.allocations {
-            if allocation.immutable() && allocation.initializing() && !retain_current_models {
-                recorder.write(&allocation.slice()?);
-            }
-        }
-        for (_, payload) in &self.publication_uploads {
-            if let PublicationPayload::Tensor(tensor) = payload {
-                if let Some(source) = &tensor.source {
-                    recorder.read(source);
-                }
-            }
-        }
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            for allocation in &storage.allocations {
-                // A genuine empty model buffer retains an owner and layout,
-                // but has no device pointer on which to submit a memory write.
-                if allocation.is_empty() || !allocation.initializing()
-                    || (retain_current_models && allocation.immutable()) {
-                    continue;
-                }
-                // SAFETY: all actual fixed allocations were recorded before this
-                // first may-enqueue boundary; zero bytes do not mark a bank valid.
-                unsafe {
-                    sys::cuMemsetD8Async(
-                        allocation.entry().pointer,
-                        0,
-                        allocation.len(),
-                        enqueue.stream().cu_stream(),
-                    )
-                }
-                .result()
-                .map_err(|error| XlogError::Kernel(error.to_string()))?;
-            }
-            for (slot, payload) in &self.publication_uploads {
-                if let PublicationPayload::Tensor(tensor) = payload {
-                    if let Some(source) = &tensor.source {
-                        let destination = &storage.allocations[*slot];
-                        let layout = if tensor.layout.role == 0 {
-                            &tensor.layout
-                        } else {
-                            &storage.layouts[&(tensor.layout.role, tensor.layout.index)]
-                        };
-                        for (source_offset, destination_offset, bytes) in
-                            tensor_copy_plan(&tensor.layout, layout)
-                                .map_err(|error| XlogError::Kernel(error.to_string()))?
-                        {
-                            unsafe {
-                                sys::cuMemcpyDtoDAsync_v2(
-                                    destination.entry().pointer + destination_offset,
-                                    *source.device_ptr() + source_offset,
-                                    bytes,
-                                    enqueue.stream().cu_stream(),
-                                )
-                            }
-                            .result()
-                            .map_err(|error| XlogError::Kernel(error.to_string()))?;
-                        }
-                    }
-                }
-            }
-            Ok::<(), XlogError>(())
-        })?;
-        wait_on_stream(
-            &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "cold publication tensor snapshot",
-            CudaStream::synchronize,
-        )?;
-        for (slot, payload) in &self.publication_uploads {
-            if let PublicationPayload::Metadata(bytes) = payload {
-                if !bytes.is_empty() {
-                    let mut destination = storage.allocations[*slot]
-                        .slice()?
-                        .view()
-                        .slice(..bytes.len());
-                    self.provider
-                        .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
-                        .map_err(|error| runtime_error("cold publication record upload", error))?;
-                }
-            }
-        }
-        if let Some(fold) = fold {
-            self.apply_learning_fold(fold)?;
-        }
-        upload_publication(&self.provider, &[bank], &storage.banks[0])?;
-        upload_publication(&self.provider, &[bank], &storage.banks[1])?;
-        for bank in 0..2 {
-            upload_publication(
-                &self.provider,
-                &storage.bank_templates[bank],
-                &storage.directories[bank],
-            )?;
-        }
-        let entries: Vec<_> = storage
-            .allocations
-            .iter()
-            .map(PublicationAllocation::entry)
-            .collect();
-        upload_publication(&self.provider, &entries, &storage.storage)?;
-        upload_publication(&self.provider, &[storage.contract_value], &storage.contract)?;
-        upload_publication(&self.provider, terminal_tokens, &storage.terminals)?;
-        let counts: Vec<_> = role_counts
-            .iter()
-            .enumerate()
-            .map(|(index, &count)| PublicationRoleCount {
-                role: index as u64 + 1,
-                count,
-            })
-            .collect();
-        upload_publication(&self.provider, &counts, &storage.role_counts)?;
-        upload_publication(
-            &self.provider,
-            &[PendingContinuation {
-                abi: 1,
-                ranges: storage.continuation_directory.device_ptr_value(),
-                range_count: storage.continuation_templates.len() as u64,
-                ..PendingContinuation::default()
-            }],
-            &storage.continuation,
-        )?;
-        upload_publication(
-            &self.provider,
-            &storage.continuation_templates,
-            &storage.continuation_directory,
-        )?;
-        upload_publication(
-            &self.provider,
-            &[PublicationControl {
-                abi: 1,
-                instance: storage.instance,
-                banks: storage.banks.each_ref().map(|bank| bank.device_ptr_value()),
-                directories: storage
-                    .directories
-                    .each_ref()
-                    .map(|directory| directory.device_ptr_value()),
-                storage: storage.storage.device_ptr_value(),
-                storage_count: storage.allocations.len() as u64,
-                contract: storage.contract.device_ptr_value(),
-                continuation: storage.continuation.device_ptr_value(),
-                ..PublicationControl::default()
-            }],
-            &storage.control,
-        )?;
-        self.upload_rng_state(self.binding(), rng)?;
-        Ok(())
-    }
 
     fn publication_command(
         &mut self,
@@ -32436,6 +32030,8 @@ impl SemanticTransitionSession {
             model_owners: BTreeMap::new(),
             learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
+            state_material_restore: None,
+            publication_preparation: None,
             publication_issuer: Arc::new(()),
             readers: BTreeMap::new(),
             steps: BTreeMap::new(),
@@ -32493,6 +32089,13 @@ impl SemanticTransitionSession {
     fn has_unresolved_native_effect(&self) -> bool {
         self.has_unresolved_session_native_effect()
             || self.graph.ensure_not_poisoned().is_err()
+            || self.has_pending_state_restoration_except(None, None)
+            || {
+                #[cfg(feature = "semantic-policy")]
+                { self.has_pending_actor_refresh_context_except(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { false }
+            }
     }
 
     // Graph and retained continuation owners are checked by the enclosing
@@ -37922,6 +37525,10 @@ impl SemanticTransitionSession {
 
     fn ensure_rebindable_with_prefill(&self) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.ensure_rebinding_ownership()
+    }
+
+    fn ensure_rebinding_ownership(&self) -> Result<(), SemanticTransitionError> {
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         validate_rebinding_ownership(
