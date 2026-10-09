@@ -93,7 +93,8 @@ struct SemanticTrainingObjectiveGroupRecord {
 };
 
 struct SemanticTrainingReplayAppendHeader {
-    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count,chain_head[4];
+    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count;
+    uint64_t original_stage,original_count,original_prefix_identity[4],chain_head[4];
 };
 
 struct SemanticTrainingReplayAppendEntry {
@@ -136,6 +137,7 @@ struct TrainingViewLaunch {
     uint64_t parents;
     uint64_t cold_work;
     uint64_t initial_row_count;
+    uint64_t original_slot_boundary;
     uint64_t objective_template;
     uint64_t groups_template;
     uint64_t group_members_template;
@@ -155,7 +157,7 @@ struct TrainingViewLaunch {
 };
 
 static_assert(sizeof(TrainingPublicationRange)==128 && sizeof(TrainingPublicationStorageEntry)==24 &&
-    sizeof(SemanticTrainingReplayAppendHeader)==80 && sizeof(SemanticTrainingReplayAppendEntry)==480,
+    sizeof(SemanticTrainingReplayAppendHeader)==128 && sizeof(SemanticTrainingReplayAppendEntry)==480,
     "training replay publication ABI");
 
 __device__ bool semantic_training_identity_equal(const uint64_t* left, const uint64_t* right) {
@@ -221,7 +223,10 @@ __device__ bool semantic_training_append_queue(const TrainingViewLaunch& launch,
             launch.append_payload_bytes[bank],&payload_bytes)) return false;
     *header=reinterpret_cast<const SemanticTrainingReplayAppendHeader*>(queue_bytes);
     const auto& value=**header;
-    if (value.abi!=1 || value.capacity!=launch.row_count-launch.initial_row_count ||
+    if (value.abi!=1 || value.original_stage!=1 || value.original_count!=launch.initial_row_count ||
+        value.original_count>launch.original_slot_boundary ||
+        !semantic_training_identity_present(value.original_prefix_identity) ||
+        value.capacity!=launch.row_count-launch.original_slot_boundary ||
         value.count>value.capacity || value.eligible_count>value.count ||
         value.payload_used_bytes!=payload->length_bytes ||
         value.payload_used_bytes>value.payload_capacity_bytes ||
@@ -231,6 +236,11 @@ __device__ bool semantic_training_append_queue(const TrainingViewLaunch& launch,
         (value.count && !semantic_training_identity_present(value.chain_head))) return false;
     *entries=reinterpret_cast<const SemanticTrainingReplayAppendEntry*>(queue_bytes+sizeof(value));
     return true;
+}
+
+__device__ uint64_t semantic_training_physical_row(const TrainingViewLaunch& launch,uint64_t logical) {
+    return logical<launch.initial_row_count ? logical :
+        launch.original_slot_boundary+(logical-launch.initial_row_count);
 }
 
 __device__ bool semantic_training_committed_origin(const TrainingViewRowDescriptor& descriptor,
@@ -357,8 +367,11 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             target.member_offset = member_count;
             for (uint64_t member = 0; member < source.member_count; ++member) {
                 semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
-                const uint64_t ordinal = member_templates[source.member_offset + member];
-                if (ordinal < selection->row_count) {
+                const uint64_t physical = member_templates[source.member_offset + member];
+                const uint64_t ordinal = physical<launch.original_slot_boundary ? physical :
+                    launch.initial_row_count+(physical-launch.original_slot_boundary);
+                if ((physical<launch.initial_row_count || physical>=launch.original_slot_boundary) &&
+                    ordinal < selection->row_count) {
                     members[member_count++] = ordinal;
                     semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
                         sizeof(ordinal));
@@ -378,7 +391,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         return;
     }
     const auto* descriptors = reinterpret_cast<const TrainingViewRowDescriptor*>(launch.descriptors);
-    const auto descriptor = descriptors[cursor];
+    const auto descriptor = descriptors[semantic_training_physical_row(launch,cursor)];
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const auto* selected = reinterpret_cast<const uint8_t*>(launch.selected_view);
     if (threadIdx.x == 0 &&
@@ -405,7 +418,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             launch.origin_candidates);
         for (uint64_t row = 0; row < selection->row_count; ++row) {
             semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
-            const auto item = descriptors[row];
+            const auto item = descriptors[semantic_training_physical_row(launch,row)];
             uint64_t origin_candidate = UINT64_MAX;
             if (row>=launch.initial_row_count) {
                 const uint64_t slot=row-launch.initial_row_count;
@@ -537,7 +550,7 @@ extern "C" __global__ void semantic_training_view_gather(TrainingViewLaunch laun
         return;
     }
     const auto* descriptors = reinterpret_cast<const TrainingViewRowDescriptor*>(launch.descriptors);
-    const auto descriptor = descriptors[row];
+    const auto descriptor = descriptors[semantic_training_physical_row(launch,row)];
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const uint64_t window = descriptor.window;
     const uint64_t padding = (window & 1ULL) * 4ULL;
