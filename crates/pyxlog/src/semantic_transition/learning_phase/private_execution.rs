@@ -376,13 +376,11 @@ impl PrivateReplayChildCustody {
         rows: &ColdValue,
     ) -> PyResult<()> {
         let task = self.task.borrow(py);
+        let roster = task.checkpoint.original_training_roster()?;
+        let roster = roster.fields(2)?;
         let ordinal = usize::try_from(self.replay_ordinal)
             .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
-        if selection != Some(ordinal)
-            || *objective != task.checkpoint.training_objective
-            || rows.sequence()?.get(ordinal)
-                != task.checkpoint.authority[3].sequence()?.get(ordinal)
-        {
+        if selection != Some(ordinal) || *objective != roster[1] || *rows != roster[0] {
             return Err(invalid(
                 "private replay changed its frozen objective or original replay row",
             ));
@@ -701,17 +699,19 @@ impl PySemanticLearningPhaseTransition {
     ) -> PyResult<Arc<PrivateReplayChildCustody>> {
         self.require_private_group_owner(py, &session.borrow(py), &task.borrow(py))?;
         let issued = task.borrow(py);
-        let objective = read_training_objective(&issued.checkpoint.training_objective)?
-            .ok_or_else(|| {
-                invalid("private replay requires the original frozen training objective")
-            })?;
+        let roster = issued.checkpoint.original_training_roster()?;
+        let roster = roster.fields(2)?;
+        let objective = read_training_objective(&roster[1])?.ok_or_else(|| {
+            invalid("private replay requires the original frozen training objective")
+        })?;
         let ordinal = usize::try_from(replay_ordinal)
             .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
-        if !issued
-            .authority
-            .replay
+        let original_row = roster[0]
+            .sequence()?
             .get(ordinal)
-            .is_some_and(|row| matches!(row.basis, ReplayBasis::Episode { .. }))
+            .ok_or_else(|| invalid("private replay row is absent from its original full roster"))?;
+        let original_row = ReplayRow::parse_with_live(original_row, &issued.authority.live)?;
+        if !matches!(original_row.basis, ReplayBasis::Episode { .. })
             || !objective.groups.iter().any(|group| {
                 matches!(
                     group.kind,
