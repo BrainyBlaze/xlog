@@ -21474,13 +21474,17 @@ impl SemanticTransitionSession {
             (Some(_), Some(model_witness)) => {
                 self.checked_prepared_content_witness(step, model_witness)?;
                 let owner = &self.steps[&step.token];
-                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals else {
+                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals
+                else {
                     return Err(publication_input_error(
                         "prepared block bounds require their original model-content witness",
                     ));
                 };
                 let prepared = owner.prepared.as_ref().expect("prepared model owner");
-                if seals.prepared.as_ref().is_none_or(|source| source.bank != bank)
+                if seals
+                    .prepared
+                    .as_ref()
+                    .is_none_or(|source| source.bank != bank)
                     || prepared.model_content_recorded & (1 << bank) == 0
                 {
                     return Err(publication_input_error(

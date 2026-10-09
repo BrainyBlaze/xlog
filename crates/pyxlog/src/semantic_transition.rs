@@ -5023,6 +5023,12 @@ impl ReplayRow {
         if actions.next().is_some() {
             return Err(invalid("replay episode has more than one action owner"));
         }
+        let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
+        if replay_json_value(replay_json_field(&envelope, "action_identity")?)? != action.identity {
+            return Err(invalid(
+                "replay episode differs from its original action owner",
+            ));
+        }
         replay_digest_identity(&action.identity)
     }
 
@@ -5278,10 +5284,15 @@ impl ReplayRow {
         let receipts: Vec<serde_json::Value> =
             serde_json::from_str(replay_json_field(&self.record, "receipts")?)
                 .map_err(|_| invalid("acquired result receipts are not an array"))?;
-        let begin = receipts.iter().position(|receipt| {
-            receipt.get("kind").and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| FAMILIES.contains(&kind))
-        }).ok_or_else(|| invalid("acquired result requires all five verification families"))?;
+        let begin = receipts
+            .iter()
+            .position(|receipt| {
+                receipt
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| FAMILIES.contains(&kind))
+            })
+            .ok_or_else(|| invalid("acquired result requires all five verification families"))?;
         let mut identities = BTreeSet::new();
         let mut seen = [false; 5];
         let mut previous = 0;
@@ -5290,12 +5301,18 @@ impl ReplayRow {
             let body = receipt
                 .as_object()
                 .ok_or_else(|| invalid("verification receipt is not an object"))?;
-            let family = body.get("kind").and_then(serde_json::Value::as_str)
+            let family = body
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| invalid("verification receipt family is absent"))?;
-            let ordinal = FAMILIES.iter().position(|value| *value == family)
+            let ordinal = FAMILIES
+                .iter()
+                .position(|value| *value == family)
                 .ok_or_else(|| invalid("acquired verification receipt has another family"))?;
             if ordinal < previous {
-                return Err(invalid("acquired verification families changed their original order"));
+                return Err(invalid(
+                    "acquired verification families changed their original order",
+                ));
             }
             seen[ordinal] = true;
             previous = ordinal;
@@ -5358,7 +5375,9 @@ impl ReplayRow {
             }
         }
         if !seen.into_iter().all(|present| present) {
-            return Err(invalid("acquired result requires all five verification families"));
+            return Err(invalid(
+                "acquired result requires all five verification families",
+            ));
         }
         Ok(disposition)
     }
@@ -18385,10 +18404,12 @@ impl PySemanticTransitionController {
                         Identity256::from_bytes(Sha256::digest(&row.evidence).into());
                     let training_row = row.training_view_row()?;
                     let disposition = row.acquired_result_disposition()?;
+                    let action_identity = row.action_identity()?;
                     parsed.push((
                         row.native_replay()?.material,
                         training_row,
                         bytes,
+                        action_identity,
                         record_digest,
                         evidence_digest,
                         disposition,
@@ -18567,6 +18588,7 @@ impl PySemanticTransitionController {
         let record_digest =
             Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
         let evidence_digest = Identity256::from_bytes(Sha256::digest(&row.evidence).into());
+        let action_identity = row.action_identity()?;
         let disposition = row.acquired_result_disposition()?;
         let training_row = row.training_view_row()?;
         let replay = row.native_replay()?;
@@ -18605,6 +18627,7 @@ impl PySemanticTransitionController {
             &replay.material,
             training_row,
             &canonical_row,
+            action_identity,
             record_digest,
             evidence_digest,
             disposition,
