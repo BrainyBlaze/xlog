@@ -131,6 +131,12 @@ enum RecordingState {
     NotEntered,
 }
 
+#[derive(Clone, Copy)]
+enum ColdWorkReader<'a> {
+    Published(&'a SemanticPublishedLease),
+    Prepared(&'a SemanticPreparedStep, &'a SemanticPublishedLease),
+}
+
 struct EvaluationCleanup {
     region: usize,
     original: SemanticModelEvaluation,
@@ -140,6 +146,7 @@ struct EvaluationCleanup {
 pub(super) struct ColdModelWorkStorage {
     invocation: Arc<()>,
     aliases: Arc<()>,
+    prepared_scope: Option<Arc<()>>,
     operation_ordinal: u64,
     admission: Arc<[u8]>,
     allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
@@ -383,7 +390,7 @@ impl SemanticTransitionSession {
         let storage = self
             .steps
             .get_mut(&lease.token)
-            .expect("checked original reader")
+            .expect("checked original step owner")
             .cold_model_work
             .take()
             .expect("checked original cold report");
@@ -476,6 +483,63 @@ impl SemanticTransitionSession {
             ));
         }
         self.retire_completed_evaluation_storage(lease)?;
+        self.install_cold_model_work(
+            lease.token,
+            capacity,
+            operation_ordinal,
+            admission,
+            purpose,
+            None,
+        )
+    }
+
+    /// Retain the original prepared callback's report without acquiring a reader.
+    pub fn prepare_prepared_cold_model_work(
+        &mut self,
+        step: &SemanticPreparedStep,
+        parent: &SemanticPublishedLease,
+        capacity: usize,
+        operation_ordinal: u64,
+        admission: Arc<[u8]>,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.require_prepared_replay_parent(step, parent)?;
+        self.require_completed_cold_model_work()?;
+        let owner = self.checked_prepared_step(step, false)?;
+        if capacity == 0
+            || admission.is_empty()
+            || owner.cold_model_work.is_some()
+            || owner.evaluation.is_some()
+            || capacity
+                > self
+                    .prepared_segment
+                    .as_ref()
+                    .expect("checked prepared scope")
+                    .cold_capacity
+                    .model_work_capacity
+        {
+            return Err(publication_input_error(
+                "prepared cold work requires one original admitted callback before execution",
+            ));
+        }
+        self.install_cold_model_work(
+            step.token,
+            capacity,
+            operation_ordinal,
+            admission,
+            SemanticColdModelWorkPurpose::PreparedActorRefresh,
+            Some(Arc::clone(&step.scope)),
+        )
+    }
+
+    fn install_cold_model_work(
+        &mut self,
+        token: u64,
+        capacity: usize,
+        operation_ordinal: u64,
+        admission: Arc<[u8]>,
+        purpose: SemanticColdModelWorkPurpose,
+        prepared_scope: Option<Arc<()>>,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         let bytes = SemanticColdModelWork::allocation_bytes(capacity)?;
         let mut reservation = self
             .provider
@@ -493,7 +557,7 @@ impl SemanticTransitionSession {
         let handle = SemanticColdModelWork {
             issuer: Arc::clone(&self.publication_issuer),
             invocation: Arc::clone(&invocation),
-            token: lease.token,
+            token,
             operation_ordinal,
             admission: Arc::clone(&admission),
         };
@@ -501,11 +565,12 @@ impl SemanticTransitionSession {
         // new invocation is retained before reset or any model callback; an
         // allocation failure grants no rights to replay the prior callback.
         self.steps
-            .get_mut(&lease.token)
+            .get_mut(&token)
             .expect("checked original reader")
             .cold_model_work = Some(ColdModelWorkStorage {
             invocation,
             aliases: Arc::new(()),
+            prepared_scope,
             operation_ordinal,
             admission,
             allowance: Arc::new(Mutex::new(native_work_bound::ColdNativeAllowance::new(
@@ -522,7 +587,7 @@ impl SemanticTransitionSession {
             result: None,
             streams: None,
         });
-        self.steps[&lease.token]
+        self.steps[&token]
             .cold_model_work
             .as_ref()
             .expect("retained cold work")
@@ -530,8 +595,8 @@ impl SemanticTransitionSession {
             .reset_slots(&self.domain, &mut self.poisoned, 0, capacity)?;
         let storage = self
             .steps
-            .get_mut(&lease.token)
-            .expect("retained reader")
+            .get_mut(&token)
+            .expect("retained original step owner")
             .cold_model_work
             .as_mut()
             .expect("retained cold work");
@@ -568,6 +633,44 @@ impl SemanticTransitionSession {
             ));
         }
         Ok(work)
+    }
+
+    fn check_cold_work_reader(
+        &self,
+        reader: ColdWorkReader<'_>,
+        handle: &SemanticColdModelWork,
+    ) -> Result<u64, SemanticTransitionError> {
+        let storage = self.cold_model_work(handle)?;
+        let token = match reader {
+            ColdWorkReader::Published(lease) => {
+                self.checked_reader(lease)?;
+                if storage.prepared_scope.is_some() {
+                    return Err(publication_input_error(
+                        "prepared cold work cannot substitute a published reader",
+                    ));
+                }
+                lease.token
+            }
+            ColdWorkReader::Prepared(step, parent) => {
+                self.require_prepared_replay_parent(step, parent)?;
+                if storage
+                    .prepared_scope
+                    .as_ref()
+                    .is_none_or(|scope| !Arc::ptr_eq(scope, &step.scope))
+                {
+                    return Err(publication_input_error(
+                        "prepared cold work changed its original construction scope",
+                    ));
+                }
+                step.token
+            }
+        };
+        if token != handle.token {
+            return Err(publication_input_error(
+                "cold work changed its original native storage owner",
+            ));
+        }
+        Ok(token)
     }
 
     pub fn cold_model_work_stream(
@@ -747,7 +850,38 @@ impl SemanticTransitionSession {
         stream: u64,
         region: Option<&SemanticColdModelWorkRegion>,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
-        self.checked_reader(lease)?;
+        self.cold_model_work_buffer_for_reader(
+            ColdWorkReader::Published(lease),
+            handle,
+            stream,
+            region,
+        )
+    }
+
+    pub fn prepared_cold_model_work_buffer(
+        &mut self,
+        step: &SemanticPreparedStep,
+        parent: &SemanticPublishedLease,
+        handle: &SemanticColdModelWork,
+        stream: u64,
+        region: Option<&SemanticColdModelWorkRegion>,
+    ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.cold_model_work_buffer_for_reader(
+            ColdWorkReader::Prepared(step, parent),
+            handle,
+            stream,
+            region,
+        )
+    }
+
+    fn cold_model_work_buffer_for_reader(
+        &mut self,
+        reader: ColdWorkReader<'_>,
+        handle: &SemanticColdModelWork,
+        stream: u64,
+        region: Option<&SemanticColdModelWorkRegion>,
+    ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        let token = self.check_cold_work_reader(reader, handle)?;
         let storage = self.cold_model_work(handle)?;
         let available = if let Some(region) = region {
             self.require_cold_model_work_region(region, RecordingState::Waiting)?;
@@ -755,7 +889,7 @@ impl SemanticTransitionSession {
         } else {
             storage.regions.is_empty() && storage.state == RecordingState::Waiting
         };
-        if lease.token != handle.token || stream != self.stream.cu_stream() as u64 || !available {
+        if stream != self.stream.cu_stream() as u64 || !available {
             return Err(publication_input_error(
                 "cold model scratch requires its original reader and stream before recording",
             ));
@@ -769,7 +903,7 @@ impl SemanticTransitionSession {
         // This is the Session's own stream, already joined by cold completion,
         // not an additional external consumer omitted from the frozen roster.
         let scratch = Arc::clone(&storage.aliases);
-        let guard = Arc::clone(&self.checked_step(lease)?.aliases);
+        let guard = Arc::clone(&self.steps[&token].aliases);
         self.export_owned_view(
             view,
             vec![capacity, 3],
@@ -1234,7 +1368,38 @@ impl SemanticTransitionSession {
         streams: &[u64],
         disposition: SemanticColdModelWorkDisposition,
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
-        self.checked_reader(lease)?;
+        self.finish_cold_model_work_for_reader(
+            ColdWorkReader::Published(lease),
+            handle,
+            streams,
+            disposition,
+        )
+    }
+
+    pub fn finish_prepared_cold_model_work(
+        &mut self,
+        step: &SemanticPreparedStep,
+        parent: &SemanticPublishedLease,
+        handle: &SemanticColdModelWork,
+        streams: &[u64],
+        disposition: SemanticColdModelWorkDisposition,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.finish_cold_model_work_for_reader(
+            ColdWorkReader::Prepared(step, parent),
+            handle,
+            streams,
+            disposition,
+        )
+    }
+
+    fn finish_cold_model_work_for_reader(
+        &mut self,
+        reader: ColdWorkReader<'_>,
+        handle: &SemanticColdModelWork,
+        streams: &[u64],
+        disposition: SemanticColdModelWorkDisposition,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        let token = self.check_cold_work_reader(reader, handle)?;
         let storage = self.cold_model_work(handle)?;
         if let Some(plan) = &storage.plan {
             plan.require_recorded_trace(storage.work.recording.events())
@@ -1266,17 +1431,27 @@ impl SemanticTransitionSession {
                     "cold completion changed its original submitted consumer roster or disposition",
                 ));
             }
-            return self.resolve_cold_model_work(lease, handle);
+            return self.resolve_cold_model_work_for_reader(reader, handle);
         }
-        if lease.token != handle.token
-            || self.cold_model_work(handle)?.state != RecordingState::Closed
+        if self.cold_model_work(handle)?.state != RecordingState::Closed
             || Arc::strong_count(&self.cold_model_work(handle)?.aliases) != 1
         {
             return Err(publication_input_error(
                 "cold completion requires its original closed recorder without scratch or child aliases",
             ));
         }
-        self.quiesce_published_reader(lease, streams)?;
+        match reader {
+            ColdWorkReader::Published(lease) => self.quiesce_published_reader(lease, streams)?,
+            ColdWorkReader::Prepared(_, _) => {
+                let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+                    .map_err(|error| {
+                        runtime_error("prepared cold completion stream admission", error)
+                    })?;
+                // Join this original cold callback without retiring the live
+                // prepared model/content aliases needed by its future graph.
+                self.complete_step_consumers_by_token(token, streams)?;
+            }
+        }
         let kernel = self
             .provider
             .device()
@@ -1345,7 +1520,7 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("submitted cold work")
             .state = RecordingState::Submitted;
-        self.resolve_cold_model_work(lease, handle)
+        self.resolve_cold_model_work_for_reader(reader, handle)
     }
 
     /// Read only the original already submitted report; never replay a callback,
@@ -1355,14 +1530,29 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticColdModelWork,
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
-        self.checked_reader(lease)?;
+        self.resolve_cold_model_work_for_reader(ColdWorkReader::Published(lease), handle)
+    }
+
+    pub fn resolve_prepared_cold_model_work(
+        &mut self,
+        step: &SemanticPreparedStep,
+        parent: &SemanticPublishedLease,
+        handle: &SemanticColdModelWork,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.resolve_cold_model_work_for_reader(ColdWorkReader::Prepared(step, parent), handle)
+    }
+
+    fn resolve_cold_model_work_for_reader(
+        &mut self,
+        reader: ColdWorkReader<'_>,
+        handle: &SemanticColdModelWork,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        let token = self.check_cold_work_reader(reader, handle)?;
         let storage = self.cold_model_work(handle)?;
-        if lease.token != handle.token
-            || !matches!(
-                storage.state,
-                RecordingState::Submitted | RecordingState::Completed
-            )
-        {
+        if !matches!(
+            storage.state,
+            RecordingState::Submitted | RecordingState::Completed
+        ) {
             return Err(publication_input_error(
                 "cold resolution requires its original submitted report",
             ));
@@ -1375,7 +1565,7 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("submitted original streams")
             .clone();
-        self.complete_step_consumers(lease, &streams)?;
+        self.complete_step_consumers_by_token(token, &streams)?;
         let words = self.publication_read(self.cold_model_work(handle)?.report.view())?;
         let storage = self
             .steps

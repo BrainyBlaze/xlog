@@ -10602,6 +10602,7 @@ struct PreparedSegmentState {
     construction: Arc<Mutex<()>>,
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
     parent_reader: Option<u64>,
+    original_parent: Option<(PublicationControl, Vec<PublicationRange>)>,
     parent_quiescent: bool,
     transfers: Option<Arc<SemanticPreparedSegmentTransfers>>,
 }
@@ -10646,6 +10647,7 @@ impl PreparedSegmentState {
             construction: Arc::new(Mutex::new(())),
             graph_retirement: None,
             parent_reader: None,
+            original_parent: None,
             parent_quiescent: false,
             transfers: None,
         })
@@ -17555,12 +17557,13 @@ impl SemanticTransitionSession {
             .try_reserve_exact(transition_bound)
             .map_err(|error| runtime_error("prepared token reservation", error))?;
         tokens.extend((self.next_reader..end).map(|token| token + 1));
-        let build = PreparedSegmentState::new(
+        let mut build = PreparedSegmentState::new(
             Arc::clone(&self.publication_issuer),
             tokens,
             transitions.iter().copied(),
             cold_capacity,
         )?;
+        build.original_parent = Some((control, directory));
         let handles = build.handles()?;
         let kernel = |name| {
             self.provider
@@ -21591,6 +21594,48 @@ impl SemanticTransitionSession {
             ));
         }
         build.parent_reader = Some(parent.token);
+        Ok(())
+    }
+
+    /// Authenticate cold replay provenance against the original preparation,
+    /// without reacquiring a released reader or observing an unexecuted step.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn require_prepared_replay_parent(
+        &self,
+        step: &SemanticPreparedStep,
+        parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        build.check_retained(step, &self.publication_issuer)?;
+        let (control, directory) = build
+            .original_parent
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let header = parent.model_context_header()?;
+        if self.is_poisoned()
+            || !Arc::ptr_eq(&parent.issuer, &self.publication_issuer)
+            || parent.active
+            || self.readers.contains_key(&parent.token)
+            || build.capturing
+            || build.finished
+            || build.submitted
+            || build.completed
+            || build.cancelled.load(Ordering::Acquire)
+            || build.requested_kind(step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+            || control.abi != 1
+            || control.instance != parent.identity.instance
+            || control.word != parent.identity.word
+            || header.range_count != directory.len() as u64
+            || publication_abi_bytes(directory) != publication_abi_bytes(&parent.directory)
+        {
+            return Err(publication_input_error(
+                "prepared replay requires its original released native parent and unused Update scope",
+            ));
+        }
         Ok(())
     }
 
