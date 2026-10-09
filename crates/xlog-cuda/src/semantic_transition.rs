@@ -8528,6 +8528,12 @@ impl PublicationMaterial {
 
 type ModelGenerationOwners = BTreeMap<usize, Arc<ModelGenerationOwner>>;
 
+#[derive(Default)]
+struct PublishedMaterialSources {
+    identity: Option<SemanticPublishedIdentity>,
+    digests: BTreeSet<Identity256>,
+}
+
 struct PublicationStorage {
     control: TrackedCudaSlice<PublicationControl>,
     banks: [TrackedCudaSlice<PublicationBank>; 2],
@@ -8549,6 +8555,7 @@ struct PublicationStorage {
     layouts: BTreeMap<(u64, u64), SemanticTensorLayout>,
     contract_value: PublicationContract,
     instance: Identity256,
+    material_sources: Arc<Mutex<[PublishedMaterialSources; 2]>>,
 }
 
 fn allocate_publication<T: DeviceRepr>(
@@ -8933,6 +8940,7 @@ impl PublicationStorage {
                 layouts,
                 contract_value,
                 instance,
+                material_sources: Arc::new(Mutex::new(std::array::from_fn(|_| PublishedMaterialSources::default()))),
             },
             uploads,
             model_owners,
@@ -9051,6 +9059,7 @@ impl PublicationStorage {
                 layouts: self.layouts.clone(),
                 contract_value: self.contract_value,
                 instance: self.instance,
+                material_sources: Arc::clone(&self.material_sources),
             },
             pending,
             model_owners,
@@ -30673,6 +30682,19 @@ impl SemanticTransitionSession {
             if original.control.is_some() {
                 PublicationMaterial::decode(&material)?.require_successful_recompute()?;
             }
+            // Only a positive original export can authenticate these exact bytes.
+            // The receipt follows the actual two banks, including catalogue-only
+            // extensions that retain those same banks. No tensor is read again.
+            let digest = Identity256::from_bytes(Sha256::digest(&material).into());
+            let mut sources = original.storage.material_sources.lock()
+                .map_err(|_| SemanticTransitionError::Poisoned)?;
+            let source = &mut sources[(original.identity.word & 1) as usize];
+            if source.identity != Some(original.identity) {
+                source.identity = Some(original.identity);
+                source.digests.clear();
+            }
+            source.digests.insert(digest);
+            drop(sources);
             original.material = Some(material.clone());
             original.bank.read.retire_completed_values();
             if let Some(control) = &mut original.control {

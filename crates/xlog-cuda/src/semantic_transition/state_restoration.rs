@@ -1,6 +1,50 @@
 use super::*;
 
 impl SemanticTransitionSession {
+    /// Authenticate the exact checkpoint material for an active original reader.
+    /// A fresh restored instance is accepted only through its completed native
+    /// restore owner, never by logical-digest equivalence alone.
+    pub fn verify_checkpoint_source_material(
+        &self,
+        parent: &SemanticPublishedLease,
+        bytes: &[u8],
+    ) -> Result<(Identity256, bool), SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        self.checked_reader(parent)?;
+        let material = PublicationMaterial::decode(bytes)?;
+        let header = material.bank.header;
+        let source = SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        };
+        let digest = Identity256::from_bytes(Sha256::digest(bytes).into());
+        if source == parent.identity {
+            let storage = self.publication.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+            let sources = storage.material_sources.lock()
+                .map_err(|_| SemanticTransitionError::Poisoned)?;
+            let source = &sources[(parent.identity.word & 1) as usize];
+            if source.identity != Some(parent.identity) || !source.digests.contains(&digest) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            return Ok((digest, false));
+        }
+        let restoration = self.state_material_restore.as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !Arc::ptr_eq(&restoration.issuer, &self.publication_issuer)
+            || restoration.pending.load(Ordering::Acquire)
+            || restoration.source_digest != digest
+        { return Err(SemanticTransitionError::ObservationMismatch); }
+        let original = restoration.original.lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if original.stage != StateRestoreStage::Completed
+            || original.transitioned || original.retain_current_models
+            || original.result != Some(parent.identity)
+        { return Err(SemanticTransitionError::ObservationMismatch); }
+        Ok((digest, true))
+    }
+
     pub(super) fn require_restored_replay_append_material(
         &self,
         owner: &Arc<OriginalStateMaterialRestore>,
@@ -300,6 +344,7 @@ impl SemanticTransitionSession {
         let owner = Arc::new(OriginalStateMaterialRestore {
             issuer: Arc::clone(&self.publication_issuer),
             issuance,
+            source_digest: Identity256::from_bytes(Sha256::digest(bytes).into()),
             context,
             instance,
             initialized: AtomicBool::new(false),
@@ -999,6 +1044,7 @@ enum StateRestoreStage {
 pub(super) struct OriginalStateMaterialRestore {
     issuer: Arc<()>,
     issuance: Arc<()>,
+    source_digest: Identity256,
     context: Option<Arc<()>>,
     instance: Identity256,
     initialized: AtomicBool,

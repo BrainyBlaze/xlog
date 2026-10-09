@@ -95,6 +95,7 @@ pub(super) enum InstructionState {
     BuildEntered = 3,
     Bound = 4,
     Completed = 5,
+    Cancelled = 6,
 }
 
 pub(super) struct InstructionAdmission {
@@ -103,6 +104,7 @@ pub(super) struct InstructionAdmission {
     end: u64,
     pub(super) instruction: Arc<[u8]>,
     instruction_identity: Identity256,
+    checkpoint_source: Option<Identity256>,
     parent: SemanticPublishedIdentity,
     parent_token: u64,
     pub(super) state: InstructionState,
@@ -531,6 +533,145 @@ impl ActorRefreshProgram {
     }
 }
 
+fn require_retired_instruction_expense(claim: &InstructionAdmission) -> Result<(), SemanticTransitionError> {
+    if !claim.parent_fully_retired || !claim.resources_retired
+        || claim.cold_result.is_none() || claim.retirement_result.is_none()
+        || claim.prepared_cold_results.iter().any(|(_, result)| result.is_none())
+    { return Err(publication_input_error("cancelled instruction lacks its complete original retirement and expense")); }
+    Ok(())
+}
+
+fn require_cancelled_instruction_material(claim: &InstructionAdmission) -> Result<(), SemanticTransitionError> {
+    require_retired_instruction_expense(claim)?;
+    if claim.checkpoint_source.is_none() { return Err(invalid_program()); }
+    Ok(())
+}
+
+// One canonical parser serves both live restoration and terminal preflight.
+// It authenticates every original instruction and assignment before GPU entry.
+fn decode_assignment_material(
+    program: &ActorRefreshProgram,
+    initial_index: Identity256,
+    bytes: &[u8],
+) -> Result<(Option<SemanticRngBinding>, Vec<InstructionAdmission>, Vec<MainActorAssignment>), SemanticTransitionError> {
+    let mut reader = SemanticMaterialReader::new(bytes);
+    let magic = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0";
+    let semantic = SemanticTransitionError::Semantic;
+    if reader.take(magic.len()).map_err(semantic)? != magic
+        || reader.u64().map_err(semantic)? != 4
+        || reader.take(32).map_err(semantic)? != program.identity.as_bytes()
+        || reader.take(32).map_err(semantic)? != initial_index.as_bytes() { return Err(invalid_program()); }
+    let rng = match reader.u64().map_err(semantic)? {
+        0 => None,
+        1 => {
+            let stream_serial = reader.u64().map_err(semantic)?;
+            let family_id = u8::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
+            let proposal = u32::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
+            if stream_serial >= 1u64 << 56 { return Err(invalid_program()); }
+            Some(SemanticRngBinding { model_generation: 0, stream_serial, family_id, proposal })
+        }
+        _ => return Err(invalid_program()),
+    };
+    let claims = reader.u64().map_err(semantic)?;
+    if claims > program.steps.len() as u64 || (claims != 0 && rng.is_none()) { return Err(invalid_program()); }
+    let mut admissions = Vec::new();
+    for _ in 0..claims {
+        let first = reader.u64().map_err(semantic)?;
+        let end = reader.u64().map_err(semantic)?;
+        let state = match reader.u64().map_err(semantic)? {
+            0 => InstructionState::Admitted,
+            1 => InstructionState::HandoffEntered,
+            2 => InstructionState::Released,
+            3 => InstructionState::BuildEntered,
+            4 => InstructionState::Bound,
+            5 => InstructionState::Completed,
+            6 => InstructionState::Cancelled,
+            _ => return Err(invalid_program()),
+        };
+        let word = reader.u64().map_err(semantic)?;
+        let parent_token = reader.u64().map_err(semantic)?;
+        let parent_fully_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
+        let resources_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
+        let instance = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+        let logical_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+        let state_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+        let instruction_identity = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+        let instruction_len = usize::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
+        if instruction_len == 0 || instruction_len > PROGRAM_BYTES { return Err(invalid_program()); }
+        let instruction: Arc<[u8]> = Arc::from(reader.take(instruction_len).map_err(semantic)?);
+        let checkpoint_source = match reader.u64().map_err(semantic)? {
+            0 => None,
+            1 => Some(Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?)),
+            _ => return Err(invalid_program()),
+        };
+        let original = usize::try_from(first).ok().and_then(|index| program.steps.get(index)).ok_or_else(invalid_program)?;
+        if original.kind.is_none() || original.segment_begin != first || original.segment_end != end
+            || instruction_projection(&instruction)? != original.instruction
+            || Identity256::from_bytes(Sha256::digest(&instruction).into()) != instruction_identity { return Err(invalid_program()); }
+        require_completed_instruction_prefix(program, first as usize, &admissions)?;
+        let cold_result = read_instruction_cold_result(&mut reader)?;
+        let retirement_result = read_instruction_cold_result(&mut reader)?;
+        let prepared_count = reader.u64().map_err(semantic)?;
+        if prepared_count > end - first { return Err(invalid_program()); }
+        let mut prepared_cold_results = Vec::new();
+        for _ in 0..prepared_count {
+            let ordinal = reader.u64().map_err(semantic)?;
+            if ordinal < first || ordinal >= end
+                || program.steps[ordinal as usize].kind != Some(SemanticTransitionKind::Update)
+                || prepared_cold_results.iter().any(|(previous, _)| *previous == ordinal) { return Err(invalid_program()); }
+            prepared_cold_results.push((ordinal, read_instruction_cold_result(&mut reader)?));
+        }
+        // An incomplete restored attempt is retained, not re-issued. Only
+        // the original live handle can resolve its asynchronous owners.
+        admissions.push(InstructionAdmission { issuance: Arc::new(()), first, end,
+            instruction, instruction_identity, checkpoint_source,
+            parent: SemanticPublishedIdentity { instance, word, logical_digest, state_digest }, parent_token, state,
+            cold_work: None, cold_result, retirement_work: None, retirement_result,
+            retirement_cancellation: None,
+            prepared_cold_results,
+            handoff_streams: None, parent_fully_retired, resources_retired,
+            _publication: None, _model_owners: Vec::new() });
+    }
+    let count = reader.u64().map_err(semantic)?;
+    if count > program.proposals || (count != 0 && rng.is_none()) { return Err(invalid_program()); }
+    let mut assignments = Vec::new();
+    for _ in 0..count {
+        let ordinal = reader.u64().map_err(semantic)?;
+        let raw = reader.take(size_of::<SemanticTrainingViewOriginRecord>()).map_err(semantic)?;
+        // SAFETY: fixed integer-only ABI with its exact extent checked.
+        let origin = unsafe { std::ptr::read_unaligned(raw.as_ptr().cast::<SemanticTrainingViewOriginRecord>()) };
+        let batch = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+        let batch_bytes = reader.take(size_of::<SemanticActionBatchReceipt>()).map_err(semantic)?.to_vec();
+        if Identity256::from_bytes(Sha256::digest(&batch_bytes).into()) != batch { return Err(invalid_program()); }
+        let address = usize::try_from(ordinal).ok().and_then(|ordinal| program.steps.get(ordinal)).ok_or_else(invalid_program)?;
+        let slot = address.actor_slot.ok_or_else(invalid_program)?;
+        if assignments.last().is_some_and(|previous: &MainActorAssignment| previous.ordinal >= ordinal)
+            || assignments.iter().any(|previous| previous.origin == origin) { return Err(invalid_program()); }
+        assignments.push(MainActorAssignment { ordinal, origin, slot, batch, batch_bytes,
+            replay: AssignmentReplayProof::Unresolved });
+    }
+    reader.finish().map_err(semantic)?;
+    for (index, claim) in admissions.iter().enumerate() {
+        if claim.state == InstructionState::Cancelled {
+            require_cancelled_instruction_material(claim)?;
+            if index + 1 != admissions.len()
+                || admissions[..index].iter().any(|previous| previous.state != InstructionState::Completed)
+            { return Err(invalid_program()); }
+            for previous in &admissions[..index] {
+                require_retired_instruction_expense(previous)?;
+            }
+        }
+        if claim.state == InstructionState::Completed {
+            for step in &program.steps[claim.first as usize..claim.end as usize] {
+                if step.actor_slot.is_some() && !assignments.iter().any(|assignment| assignment.ordinal == step.ordinal) {
+                    return Err(publication_input_error("completed instruction lacks its original native Proposal assignment"));
+                }
+            }
+        }
+    }
+    Ok((rng, admissions, assignments))
+}
+
 impl SemanticTransitionSession {
     pub fn bind_actor_refresh_program(&mut self, program_bytes: &[u8]) -> Result<[u64; 2], SemanticTransitionError> {
         self.ensure_quiescent()?;
@@ -567,6 +708,9 @@ impl SemanticTransitionSession {
         if original.kind.is_none() || original.segment_begin != first_program_ordinal || end > program.steps.len() {
             return Err(invalid_program());
         }
+        if program.admissions.iter().any(|claim| claim.state == InstructionState::Cancelled) {
+            return Err(publication_input_error("cancelled instruction cannot admit another segment"));
+        }
         // A SOURCE checkpoint forks independent control/real execution. Their
         // equal logical assignments do not make either branch's effects receipts
         // for the other. Prior real/ordinary work, and this branch's prefix, must
@@ -588,6 +732,7 @@ impl SemanticTransitionSession {
         let claim = InstructionAdmission {
             issuance, first: first_program_ordinal, end: end as u64,
             instruction: Arc::from(instruction_bytes), instruction_identity: Identity256::from_bytes(Sha256::digest(instruction_bytes).into()),
+            checkpoint_source: None,
             parent: parent.identity, parent_token: parent.token, state: InstructionState::Admitted,
             cold_work: None, cold_result: None,
             retirement_work: None, retirement_result: None, retirement_cancellation: None,
@@ -617,6 +762,24 @@ impl SemanticTransitionSession {
         self.actor_refresh_program.as_mut().ok_or_else(invalid_program)?.admissions.iter_mut()
             .find(|claim| claim.first == admission.first && Arc::ptr_eq(&claim.issuance, &admission.issuance))
             .ok_or_else(invalid_program)
+    }
+
+    /// Bind the original sealed source to this native claim before any charge,
+    /// handoff, cold callback or initializer. A repeated binding is identical.
+    pub fn bind_segment_checkpoint_source(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        source_material: &[u8],
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let (digest, _) = self.verify_checkpoint_source_material(parent, source_material)?;
+        let claim = self.instruction_admission_mut(admission)?;
+        if claim.state != InstructionState::Admitted
+            || claim.checkpoint_source.is_some_and(|original| original != digest)
+        { return Err(invalid_program()); }
+        claim.checkpoint_source = Some(digest);
+        Ok(())
     }
 
     pub fn require_segment_instruction_admission(&self, admission: &SemanticSegmentInstructionAdmission,
@@ -803,7 +966,7 @@ impl SemanticTransitionSession {
         let program = self.actor_refresh_program.as_ref().ok_or_else(invalid_program)?;
         let initial = self.actor_refresh_initial.as_ref().ok_or_else(invalid_program)?;
         let mut bytes = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0".to_vec();
-        material_u64(&mut bytes, 3);
+        material_u64(&mut bytes, 4);
         bytes.extend_from_slice(program.identity.as_bytes());
         bytes.extend_from_slice(initial.index.as_bytes());
         material_u64(&mut bytes, u64::from(program.original_rng.is_some()));
@@ -824,6 +987,10 @@ impl SemanticTransitionSession {
             bytes.extend_from_slice(claim.instruction_identity.as_bytes());
             material_u64(&mut bytes, claim.instruction.len() as u64);
             bytes.extend_from_slice(&claim.instruction);
+            material_u64(&mut bytes, u64::from(claim.checkpoint_source.is_some()));
+            if let Some(source) = claim.checkpoint_source {
+                bytes.extend_from_slice(source.as_bytes());
+            }
             for result in [claim.cold_result, claim.retirement_result] {
                 write_instruction_cold_result(&mut bytes, result);
             }
@@ -845,6 +1012,53 @@ impl SemanticTransitionSession {
         Ok(bytes)
     }
 
+    /// Seal the original non-submitted instruction after actual owner retirement
+    /// and all native preparation/retirement reports are positively complete.
+    /// This metadata operation cannot acquire a reader or publish a successor.
+    pub fn cancelled_segment_assignment_material(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        if self.prepared_segment.is_some() || self.captured.is_some() {
+            return Err(publication_input_error("cancelled instruction still owns prepared execution"));
+        }
+        let claim = self.instruction_admission(admission)?;
+        if !matches!(claim.state, InstructionState::Bound | InstructionState::Cancelled)
+            || claim.retirement_cancellation.is_none()
+        { return Err(publication_input_error("cancelled checkpoint requires the original whole non-submission proof")); }
+        require_cancelled_instruction_material(claim)?;
+        let program = self.actor_refresh_program.as_ref().ok_or_else(invalid_program)?;
+        let (last, previous) = program.admissions.split_last().ok_or_else(invalid_program)?;
+        if !Arc::ptr_eq(&last.issuance, &admission.issuance)
+            || previous.iter().any(|claim| claim.state != InstructionState::Completed)
+        { return Err(invalid_program()); }
+        for previous in previous {
+            require_retired_instruction_expense(previous)?;
+        }
+        self.instruction_admission_mut(admission)?.state = InstructionState::Cancelled;
+        self.actor_refresh_assignment_material()
+    }
+
+    /// Verify terminal instruction custody before allocating a Session or
+    /// restoring a model. Returned expense counts original charged Proposals,
+    /// not executions, outcomes, or a refundable continuation allowance.
+    pub fn verify_cancelled_segment_assignment_material(
+        program_bytes: &[u8],
+        initial_index: Identity256,
+        bytes: &[u8],
+    ) -> Result<Option<(u64, u64, SemanticPublishedIdentity, u64, Identity256)>, SemanticTransitionError> {
+        let program = ActorRefreshProgram::decode(program_bytes)?;
+        let (_, admissions, _) = decode_assignment_material(&program, initial_index, bytes)?;
+        let Some(claim) = admissions.last().filter(|claim| claim.state == InstructionState::Cancelled) else { return Ok(None); };
+        let charged = admissions.iter().try_fold(0u64, |total, original| {
+            let count = program.steps[original.first as usize..original.end as usize].iter()
+                .filter(|step| step.kind == Some(SemanticTransitionKind::Proposal)).count() as u64;
+            total.checked_add(count).ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
+        Ok(Some((claim.first, claim.end, claim.parent, charged,
+            claim.checkpoint_source.ok_or_else(invalid_program)?)))
+    }
+
     /// Restore every native-issued assignment from the authenticated checkpoint.
     /// An unavailable episode remains unresolved, not dropped or authenticated.
     /// Actor preparation joins its complete original replay before any draw.
@@ -857,112 +1071,19 @@ impl SemanticTransitionSession {
         let program = self.actor_refresh_program.as_ref().ok_or_else(invalid_program)?;
         let initial = self.actor_refresh_initial.as_ref().ok_or_else(invalid_program)?;
         if !program.main_origins.is_empty() || !program.admissions.is_empty() || self.prepared_segment.is_some() { return Err(invalid_program()); }
-        let mut reader = SemanticMaterialReader::new(bytes);
-        let magic = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0";
-        let semantic = SemanticTransitionError::Semantic;
-        if reader.take(magic.len()).map_err(semantic)? != magic
-            || reader.u64().map_err(semantic)? != 3
-            || reader.take(32).map_err(semantic)? != program.identity.as_bytes()
-            || reader.take(32).map_err(semantic)? != initial.index.as_bytes() { return Err(invalid_program()); }
-        let rng = match reader.u64().map_err(semantic)? {
-            0 => None,
-            1 => {
-                let stream_serial = reader.u64().map_err(semantic)?;
-                let family_id = u8::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
-                let proposal = u32::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
-                if stream_serial >= 1u64 << 56 { return Err(invalid_program()); }
-                Some(SemanticRngBinding { model_generation: 0, stream_serial, family_id, proposal })
-            }
-            _ => return Err(invalid_program()),
-        };
-        let claims = reader.u64().map_err(semantic)?;
-        if claims > program.steps.len() as u64 || (claims != 0 && rng.is_none()) { return Err(invalid_program()); }
-        let mut admissions = Vec::new();
-        for _ in 0..claims {
-            let first = reader.u64().map_err(semantic)?;
-            let end = reader.u64().map_err(semantic)?;
-            let state = match reader.u64().map_err(semantic)? {
-                0 => InstructionState::Admitted,
-                1 => InstructionState::HandoffEntered,
-                2 => InstructionState::Released,
-                3 => InstructionState::BuildEntered,
-                4 => InstructionState::Bound,
-                5 => InstructionState::Completed,
-                _ => return Err(invalid_program()),
-            };
-            let word = reader.u64().map_err(semantic)?;
-            let parent_token = reader.u64().map_err(semantic)?;
-            let parent_fully_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
-            let resources_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
-            let instance = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
-            let logical_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
-            let state_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
-            let instruction_identity = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
-            let instruction_len = usize::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
-            if instruction_len == 0 || instruction_len > PROGRAM_BYTES { return Err(invalid_program()); }
-            let instruction: Arc<[u8]> = Arc::from(reader.take(instruction_len).map_err(semantic)?);
-            let original = usize::try_from(first).ok().and_then(|index| program.steps.get(index)).ok_or_else(invalid_program)?;
-            if original.kind.is_none() || original.segment_begin != first || original.segment_end != end
-                || instruction_projection(&instruction)? != original.instruction
-                || Identity256::from_bytes(Sha256::digest(&instruction).into()) != instruction_identity { return Err(invalid_program()); }
-            require_completed_instruction_prefix(program, first as usize, &admissions)?;
-            let cold_result = read_instruction_cold_result(&mut reader)?;
-            let retirement_result = read_instruction_cold_result(&mut reader)?;
-            let prepared_count = reader.u64().map_err(semantic)?;
-            if prepared_count > end - first { return Err(invalid_program()); }
-            let mut prepared_cold_results = Vec::new();
-            for _ in 0..prepared_count {
-                let ordinal = reader.u64().map_err(semantic)?;
-                if ordinal < first || ordinal >= end
-                    || program.steps[ordinal as usize].kind != Some(SemanticTransitionKind::Update)
-                    || prepared_cold_results.iter().any(|(previous, _)| *previous == ordinal) { return Err(invalid_program()); }
-                prepared_cold_results.push((ordinal, read_instruction_cold_result(&mut reader)?));
-            }
-            // An incomplete restored attempt is retained, not re-issued. Only
-            // the original live handle can resolve its asynchronous owners.
-            admissions.push(InstructionAdmission { issuance: Arc::new(()), first, end,
-                instruction, instruction_identity,
-                parent: SemanticPublishedIdentity { instance, word, logical_digest, state_digest }, parent_token, state,
-                cold_work: None, cold_result, retirement_work: None, retirement_result,
-                retirement_cancellation: None,
-                prepared_cold_results,
-                handoff_streams: None, parent_fully_retired, resources_retired,
-                _publication: None, _model_owners: Vec::new() });
+        let (rng, admissions, mut assignments) = decode_assignment_material(program, initial.index, bytes)?;
+        if admissions.iter().any(|claim| claim.state == InstructionState::Cancelled) {
+            return Err(publication_input_error("cancelled checkpoint has no live actor execution"));
         }
-        let count = reader.u64().map_err(semantic)?;
-        if count > program.proposals || (count != 0 && rng.is_none()) { return Err(invalid_program()); }
-        let mut assignments = Vec::new();
-        for _ in 0..count {
-            let ordinal = reader.u64().map_err(semantic)?;
-            let raw = reader.take(size_of::<SemanticTrainingViewOriginRecord>()).map_err(semantic)?;
-            // SAFETY: fixed integer-only ABI with its exact extent checked.
-            let origin = unsafe { std::ptr::read_unaligned(raw.as_ptr().cast::<SemanticTrainingViewOriginRecord>()) };
-            let batch = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
-            let batch_bytes = reader.take(size_of::<SemanticActionBatchReceipt>()).map_err(semantic)?.to_vec();
-            if Identity256::from_bytes(Sha256::digest(&batch_bytes).into()) != batch { return Err(invalid_program()); }
-            let address = usize::try_from(ordinal).ok().and_then(|ordinal| program.steps.get(ordinal)).ok_or_else(invalid_program)?;
-            let slot = address.actor_slot.ok_or_else(invalid_program)?;
-            if assignments.last().is_some_and(|previous: &MainActorAssignment| previous.ordinal >= ordinal)
-                || assignments.iter().any(|previous| previous.origin == origin) { return Err(invalid_program()); }
+        for assignment in &mut assignments {
             let mut matches = 0usize;
             for (material, identity, bytes) in episodes {
-                if *identity != batch { continue; }
+                if *identity != assignment.batch { continue; }
                 let (actual, actor) = actor_refresh::initial_episode_actor(material, *identity, bytes)?;
-                if actual == origin && actor { matches += 1; }
+                if actual == assignment.origin && actor { matches += 1; }
             }
             if matches > 1 { return Err(invalid_program()); }
-            assignments.push(MainActorAssignment { ordinal, origin, slot, batch, batch_bytes,
-                replay: if matches == 1 { AssignmentReplayProof::Joined } else { AssignmentReplayProof::Unresolved } });
-        }
-        reader.finish().map_err(semantic)?;
-        for claim in &admissions {
-            if claim.state == InstructionState::Completed {
-                for step in &program.steps[claim.first as usize..claim.end as usize] {
-                    if step.actor_slot.is_some() && !assignments.iter().any(|assignment| assignment.ordinal == step.ordinal) {
-                        return Err(publication_input_error("completed instruction lacks its original native Proposal assignment"));
-                    }
-                }
-            }
+            assignment.replay = if matches == 1 { AssignmentReplayProof::Joined } else { AssignmentReplayProof::Unresolved };
         }
         let program = self.actor_refresh_program.as_mut().expect("checked original program");
         program.main_origins = assignments;
