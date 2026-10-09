@@ -798,7 +798,7 @@ impl SemanticTransitionSession {
         }
         storage
             .plan()?
-            .require_evaluation_result_copy_suffix(region.index)
+            .require_evaluation_result_copy_region(region.index)
             .map_err(publication_input_error)?;
         self.steps
             .get_mut(&region.work.token)
@@ -835,7 +835,7 @@ impl SemanticTransitionSession {
         if cancelled {
             storage
                 .plan()?
-                .require_evaluation_result_copy_suffix(region.index)
+                .require_evaluation_result_copy_region(region.index)
                 .map_err(publication_input_error)?;
             storage
                 .plan_mut()?
