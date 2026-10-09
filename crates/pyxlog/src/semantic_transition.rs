@@ -341,6 +341,8 @@ pub(crate) struct PySemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     pending_content_binding: Mutex<Option<PendingPythonContentBinding>>,
     #[cfg(feature = "semantic-policy")]
+    pending_evaluation_preparation: Mutex<Option<model_evaluation::PendingEvaluationPreparation>>,
+    #[cfg(feature = "semantic-policy")]
     active_cold_model_work:
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
     #[cfg(feature = "semantic-policy")]
@@ -601,6 +603,8 @@ impl PySemanticTransitionSession {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             pending_content_binding: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            pending_evaluation_preparation: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]

@@ -449,7 +449,7 @@ struct PendingContinuation {
     uint64_t model_update_admissibility,model_update_refusal,model_update_canary_results;
     uint64_t numerical_blocks,physical_blocks,model_schema_digest[4],model_identity[4];
 };
-struct PublicationCommand { uint64_t control,lease,operation; };
+struct PublicationCommand { uint64_t control,lease,operation,native_work; };
 struct PublicationDeliveryInput {
     uint64_t lease,receipt,receipt_len,recipient_id[4],receipt_digest[4];
 };
@@ -1175,7 +1175,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1368,"launch ABI");
+static_assert(sizeof(Descriptor)==1384,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 #ifdef XLOG_SEMANTIC_POLICY
 #include "semantic_policy_domains.cuh"
@@ -1449,8 +1449,10 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     return bank.header.fuel<((transition_kind==1 || transition_kind==3) ? 2 : 1) ? 5 : 0;
 }
 __device__ uint64_t publication_acquire(PublicationControl& control,PublicationLease& lease,
-        uint64_t requested_kind=0,uint64_t expected_word=UINT64_MAX) {
+        uint64_t requested_kind=0,uint64_t expected_word=UINT64_MAX,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(control.abi!=1 || lease.active || !control.banks[0] || !control.banks[1])return 1;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     if(!publication_compare_exchange(control.reader_gate,0,1))return 2;
     const uint64_t word=publication_load(control.word),bank=word&1;
     uint64_t status=0;
@@ -1462,26 +1464,39 @@ __device__ uint64_t publication_acquire(PublicationControl& control,PublicationL
     if(!status &&
        control.reader_counts[bank]==UINT64_MAX)status=1;
     if(!status) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(PublicationLease)+88);
         ++control.reader_counts[bank];
         lease=PublicationLease{};lease.abi=1;lease.word=word;lease.bank=bank;lease.epoch=word>>1;
         lease.transition_kind=kind;
         for(uint32_t i=0;i<4;++i)lease.instance[i]=control.instance[i];
         publication_store(lease.active,1);
     }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,16);
     publication_store(control.reader_gate,0);
     lease.status=status;
     return status;
 }
 // Session schedules this only after every consumer's stream join. A replayed or
 // foreign lease cannot decrement a later reader's count, including after reuse.
-__device__ uint64_t publication_release(PublicationControl& control,PublicationLease& lease) {
+__device__ uint64_t publication_release(PublicationControl& control,PublicationLease& lease,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(control.abi!=1 || lease.abi!=1 || lease.bank>1 || lease.bank!=(lease.word&1) ||
        lease.epoch!=lease.word>>1 || !publication_identity_equal(lease.instance,control.instance))return 1;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     if(!publication_compare_exchange(control.reader_gate,0,1))return 2;
     uint64_t status=0;
     if(!publication_bank_matches(control,*publication_bank(control,lease.word),lease.word) ||
-       !control.reader_counts[lease.bank] || !publication_compare_exchange(lease.active,1,0))status=1;
-    else --control.reader_counts[lease.bank];
+       !control.reader_counts[lease.bank])status=1;
+    else {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
+        if(!publication_compare_exchange(lease.active,1,0))status=1;
+        else {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
+            --control.reader_counts[lease.bank];
+        }
+    }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,16);
     publication_store(control.reader_gate,0);
     lease.status=status;
     return status;
@@ -5958,6 +5973,9 @@ __device__ uint64_t publication_materialize_training(PublicationControl& control
 __device__ void publication_command(const Descriptor& descriptor) {
     if(!descriptor.publication.control)return;
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+    auto* work=descriptor.publication.operation==2 || descriptor.publication.operation==3 ?
+        reinterpret_cast<semantic_graph::NativeWorkTally*>(descriptor.publication.native_work) : nullptr;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     uint64_t status=1;
     if(descriptor.publication.operation==1 || descriptor.publication.operation==4 ||
        descriptor.publication.operation==5 || descriptor.publication.operation==7) {
@@ -5974,8 +5992,9 @@ __device__ void publication_command(const Descriptor& descriptor) {
             *reinterpret_cast<const TrainingOriginalMaterializationInput*>(descriptor.publication.lease));
     } else if(descriptor.publication.lease) {
         auto& lease=*reinterpret_cast<PublicationLease*>(descriptor.publication.lease);
-        if(descriptor.publication.operation==2)status=publication_acquire(control,lease);
-        if(descriptor.publication.operation==3)status=publication_release(control,lease);
+        if(descriptor.publication.operation==2)status=publication_acquire(control,lease,0,UINT64_MAX,work);
+        if(descriptor.publication.operation==3)status=publication_release(control,lease,work);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
         lease.status=status;
     }
     if(descriptor.publication.operation==8 && descriptor.publication.lease) {
@@ -5983,6 +6002,7 @@ __device__ void publication_command(const Descriptor& descriptor) {
         auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(replay.native_work);
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(control.refusal));
     }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     control.refusal=status;
 }
 __device__ uint64_t publication_begin(const Descriptor& descriptor,State* state,PublicationBank** acquired,

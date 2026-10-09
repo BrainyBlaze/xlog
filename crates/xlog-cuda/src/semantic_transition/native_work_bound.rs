@@ -3,7 +3,7 @@ use crate::device::ExecutionCompletion;
 
 /// One command of an original cold producer. Driver entry and successful
 /// submission are distinct: a late commit/fence error never authorizes replay.
-pub(super) struct OriginalNativeCommand {
+pub(crate) struct OriginalNativeCommand {
     completion: ExecutionCompletion,
     completion_entered: bool,
     entered: bool,
@@ -12,7 +12,7 @@ pub(super) struct OriginalNativeCommand {
 }
 
 impl OriginalNativeCommand {
-    pub(super) fn new(domain: &ResidentExecutionDomain) -> Result<Self, SemanticTransitionError> {
+    pub(crate) fn new(domain: &ResidentExecutionDomain) -> Result<Self, SemanticTransitionError> {
         Ok(Self {
             completion: ExecutionCompletion::new(domain.execution_stream().context())
                 .map_err(|error| runtime_error("original content completion allocation", error))?,
@@ -23,7 +23,7 @@ impl OriginalNativeCommand {
         })
     }
 
-    pub(super) fn run(
+    pub(crate) fn run(
         &mut self,
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
