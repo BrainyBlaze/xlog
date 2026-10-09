@@ -349,7 +349,11 @@ The old parent cannot acknowledge again. After a cold restore, bind the same
 trusted receiver to the newly issued task use before invoking
 `controller.checkpoint_pending_output_intents(task_use, checkpoint)`. That
 projection verifies both sealed queues and every stored receipt MAC, returning
-only unacknowledged `(stable_identity, effect, payload)` rows. The older
+only unacknowledged `(stable_identity, effect, payload, action_base_logical,
+action_successor_logical)` rows. Both action digests are the original 32-byte
+coordinates retained by the intent, not the later acknowledgement publication.
+Match durable action custody by this original pair; equal payload bytes alone
+do not identify an execution. The older
 `checkpoint_output_intents(checkpoint)` remains an all-intents audit read, not
 a delivery queue. An exhausted FINAL parent cannot start an unacknowledged
 delivery; an already acknowledged terminal intent cannot be activated again.

@@ -17223,6 +17223,8 @@ impl PySemanticTransitionController {
                     PyBytes::new(py, intent.stable_identity.as_bytes()),
                     PyBytes::new(py, &intent.effect),
                     PyBytes::new(py, &intent.payload),
+                    PyBytes::new(py, intent.action_base_logical.as_bytes()),
+                    PyBytes::new(py, intent.action_successor_logical.as_bytes()),
                 )
             })
             .collect::<Vec<_>>();
