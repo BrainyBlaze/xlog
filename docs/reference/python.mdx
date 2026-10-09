@@ -1627,6 +1627,26 @@ owners and derives finite content-producer allowances from their geometry. These
 allowances are not a whole cold lifecycle ceiling: publication, graph, save,
 restore and retirement producers still require their own complete native bounds.
 
+For each model primitive, allocation, fill, copy, save or unpack effect, call
+`prepare_operation(kind, dimensions, device_produced=False)` before the effect.
+The native-issued `SemanticColdModelWorkOperation` holds the exact next original
+event without charging it or advancing the plan. Call its single-use `enter()`
+immediately before the original effect and `complete()` only after that same call
+returns successfully. Completion registers that event once; repeated completion
+returns its original slot without another charge. For a device-produced actual
+count, use `device_produced=True` and the permit's `slot`: native initializes this
+slot before entry and never resets it after the actual producer may have written.
+
+If an entered call raises or its outcome is unknown, call `unknown()` and retain
+the original invocation, operation and physical owners. The unresolved attempt
+blocks later operations, legacy registration, region closure and finalization;
+it is not zero expenditure, a reusable permission or an instruction to rerun the
+effect. `cancel_before_entry()` is accepted only before `enter()` and closes the
+original prefix; only the enclosing native owner's known-refusal path may
+finalize it. It cannot authorize a second attempt or a successful report.
+Model-invocation markers and native saved-content witnesses retain their existing
+specialized producers; a generic operation cannot fabricate either receipt.
+
 Obtain its `consumer_stream` and `model_work_buffer(consumer_stream=...)`, an
 original CUDA UInt64 `[capacity, 3]` buffer, before calling `begin()`.
 The existing model-work recorder

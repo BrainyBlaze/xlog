@@ -79,8 +79,120 @@ impl PySemanticColdModelWork {
     }
 }
 
+#[pyclass(
+    name = "SemanticColdModelWorkOperation",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticColdModelWorkOperation {
+    work: Py<PySemanticColdModelWork>,
+    inner: xlog_cuda::SemanticColdModelWorkOperation,
+}
+
+#[pymethods]
+impl PySemanticColdModelWorkOperation {
+    /// The original pre-initialized device slot, not actual expenditure.
+    #[getter]
+    fn slot(&self, py: Python<'_>) -> PyResult<usize> {
+        let work = self.work.borrow(py);
+        work.check(py)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let result = session
+            .owner()?
+            .cold_model_work_operation_slot(&self.inner)
+            .map_err(xlog_err);
+        result
+    }
+
+    fn enter(&self, py: Python<'_>) -> PyResult<usize> {
+        let work = self.work.borrow(py);
+        work.check(py)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let result = session
+            .owner()?
+            .enter_cold_model_work_operation(&self.inner)
+            .map_err(xlog_err);
+        result
+    }
+
+    fn complete(&self, py: Python<'_>) -> PyResult<usize> {
+        let work = self.work.borrow(py);
+        work.check(py)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let result = session
+            .owner()?
+            .complete_cold_model_work_operation(&self.inner)
+            .map_err(xlog_err);
+        result
+    }
+
+    fn unknown(&self, py: Python<'_>) -> PyResult<()> {
+        let work = self.work.borrow(py);
+        work.check(py)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let result = session
+            .owner()?
+            .retain_unknown_cold_model_work_operation(&self.inner)
+            .map_err(xlog_err);
+        result
+    }
+
+    fn cancel_before_entry(&self, py: Python<'_>) -> PyResult<()> {
+        let work = self.work.borrow(py);
+        work.check(py)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let result = session
+            .owner()?
+            .cancel_unentered_cold_model_work_operation(&self.inner)
+            .map_err(xlog_err);
+        result
+    }
+}
+
 #[pymethods]
 impl PySemanticColdModelWork {
+    #[pyo3(signature = (kind, dimensions, *, device_produced = false))]
+    fn prepare_operation(
+        slf: Py<Self>,
+        py: Python<'_>,
+        kind: &Bound<'_, PyAny>,
+        dimensions: &Bound<'_, PyAny>,
+        device_produced: bool,
+    ) -> PyResult<Py<PySemanticColdModelWorkOperation>> {
+        let work = slf.borrow(py);
+        work.check(py)?;
+        if !dimensions.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid(
+                "operation geometry requires its exact immutable tuple",
+            ));
+        }
+        let (kind, values, rank) = parse_model_work(kind, dimensions)?;
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let inner = session
+            .owner()?
+            .prepare_cold_model_work_operation(
+                &work.inner,
+                work.region.as_ref(),
+                kind,
+                &values[..rank],
+                device_produced,
+            )
+            .map_err(xlog_err)?;
+        Py::new(
+            py,
+            PySemanticColdModelWorkOperation {
+                work: slf.clone_ref(py),
+                inner,
+            },
+        )
+    }
+
     /// Original native plan state, not a Python callback invocation count.
     #[getter]
     fn plan_admitted(&self, py: Python<'_>) -> PyResult<bool> {

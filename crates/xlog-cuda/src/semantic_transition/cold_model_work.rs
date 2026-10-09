@@ -43,6 +43,32 @@ pub struct SemanticColdModelWorkRegion {
     index: usize,
 }
 
+/// An original plan occurrence, issued before the corresponding model effect.
+#[derive(Clone)]
+pub struct SemanticColdModelWorkOperation {
+    work: SemanticColdModelWork,
+    index: usize,
+    issuance: Arc<()>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperationState {
+    Prepared,
+    Entered,
+    Completing,
+    Complete,
+    NotEntered,
+    Unknown,
+}
+
+struct ColdOperationAttempt {
+    issuance: Arc<()>,
+    region: Option<usize>,
+    event: ModelWorkEvent,
+    slot: usize,
+    state: OperationState,
+}
+
 impl SemanticColdModelWork {
     pub fn same_invocation(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.issuer, &other.issuer)
@@ -160,6 +186,9 @@ pub(super) struct ColdModelWorkStorage {
     disposition: Option<SemanticColdModelWorkDisposition>,
     result: Option<SemanticColdModelWorkResult>,
     streams: Option<Vec<u64>>,
+    operations: Vec<ColdOperationAttempt>,
+    pending_operation: Option<usize>,
+    stopped_before_entry: bool,
 }
 
 impl ColdModelWorkStorage {
@@ -586,6 +615,9 @@ impl SemanticTransitionSession {
             disposition: None,
             result: None,
             streams: None,
+            operations: Vec::new(),
+            pending_operation: None,
+            stopped_before_entry: false,
         });
         self.steps[&token]
             .cold_model_work
@@ -976,6 +1008,11 @@ impl SemanticTransitionSession {
         &mut self,
         region: &SemanticColdModelWorkRegion,
     ) -> Result<(), SemanticTransitionError> {
+        if self.cold_model_work(&region.work)?.stopped_before_entry {
+            return Err(publication_input_error(
+                "known non-entry closed its original recording prefix",
+            ));
+        }
         self.require_cold_model_work_region(region, RecordingState::Waiting)?;
         self.cold_model_work(&region.work)?
             .plan()?
@@ -1072,6 +1109,15 @@ impl SemanticTransitionSession {
         region: &SemanticColdModelWorkRegion,
     ) -> Result<(), SemanticTransitionError> {
         self.require_cold_model_work_region(region, RecordingState::Recording)?;
+        if self
+            .cold_model_work(&region.work)?
+            .pending_operation
+            .is_some()
+        {
+            return Err(publication_input_error(
+                "an unresolved original operation keeps its region open",
+            ));
+        }
         let cancelled = self
             .cold_model_work(&region.work)?
             .evaluation_cleanup
@@ -1095,7 +1141,11 @@ impl SemanticTransitionSession {
                 .plan_mut()?
                 .skip_unentered_region(region.index)
                 .map_err(publication_input_error)?;
-        } else {
+        } else if !(storage.stopped_before_entry
+            && storage.operations.last().is_some_and(|attempt| {
+                attempt.region == Some(region.index) && attempt.state == OperationState::NotEntered
+            }))
+        {
             storage
                 .plan()?
                 .require_region_end(region.index)
@@ -1141,6 +1191,7 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         let storage = self.cold_model_work(handle)?;
         if storage.state != RecordingState::Recording
+            || storage.pending_operation.is_some()
             || before > storage.regions.len()
             || storage.regions[..before].iter().any(|state| {
                 !matches!(
@@ -1178,6 +1229,7 @@ impl SemanticTransitionSession {
     ) -> Result<(), SemanticTransitionError> {
         let storage = self.cold_model_work(handle)?;
         if storage.state != RecordingState::Recording
+            || storage.pending_operation.is_some()
             || storage
                 .regions
                 .iter()
@@ -1210,6 +1262,243 @@ impl SemanticTransitionSession {
             storage.state = RecordingState::Failed;
             storage.work.uncaptured_recording = false;
         }
+    }
+
+    /// Authenticate the next immutable occurrence without registering expenditure.
+    pub fn prepare_cold_model_work_operation(
+        &mut self,
+        handle: &SemanticColdModelWork,
+        region: Option<&SemanticColdModelWorkRegion>,
+        kind: ModelWorkKind,
+        dimensions: &[u64],
+        device_produced: bool,
+    ) -> Result<SemanticColdModelWorkOperation, SemanticTransitionError> {
+        if let Some(region) = region {
+            if !region.work.same_invocation(handle) {
+                return Err(publication_input_error(
+                    "operation changed its original region owner",
+                ));
+            }
+            self.require_cold_model_work_region(region, RecordingState::Recording)?;
+        }
+        let storage = self.cold_model_work(handle)?;
+        if storage.state != RecordingState::Recording
+            || storage.pending_operation.is_some()
+            || storage.stopped_before_entry
+            || (region.is_none() && !storage.regions.is_empty())
+            || storage.evaluation_cleanup.as_ref().is_some_and(|cleanup| {
+                region.is_some_and(|region| region.index == cleanup.region)
+                    && cleanup.cancellation.is_some()
+            })
+        {
+            return Err(publication_input_error(
+                "operation requires its original active recorder without an unresolved attempt",
+            ));
+        }
+        storage
+            .plan()?
+            .require_next(kind, dimensions, region.map(|region| region.index))
+            .map_err(publication_input_error)?;
+        let slot = storage.work.next_slot().map_err(publication_input_error)?;
+        if slot >= storage.work.actual.len() / 3
+            || storage.operations.len() >= storage.work.actual.len() / 3
+        {
+            return Err(publication_input_error(
+                "operation exceeds its original finite event capacity",
+            ));
+        }
+        let event = if device_produced {
+            let address = storage
+                .work
+                .actual
+                .device_ptr_value()
+                .checked_add((slot * 3 * size_of::<u64>()) as u64)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            ModelWorkEvent::device_operation(kind, dimensions, address)
+        } else {
+            ModelWorkEvent::operation(kind, dimensions)
+        }
+        .map_err(publication_input_error)?;
+        let storage = self
+            .steps
+            .get_mut(&handle.token)
+            .expect("checked original step")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original recorder");
+        storage
+            .operations
+            .try_reserve(1)
+            .map_err(|error| runtime_error("original operation custody reservation", error))?;
+        let index = storage.operations.len();
+        let issuance = Arc::new(());
+        storage.operations.push(ColdOperationAttempt {
+            issuance: Arc::clone(&issuance),
+            region: region.map(|region| region.index),
+            event,
+            slot,
+            state: OperationState::Prepared,
+        });
+        storage.pending_operation = Some(index);
+        // Instrumentation is prepared before the real effect. Never reset this
+        // slot after the actual producer may have written its reached usage.
+        if device_produced {
+            if let Err(error) = storage
+                .work
+                .reset_slots(&self.domain, &mut self.poisoned, slot, 1)
+            {
+                storage.operations[index].state = OperationState::Unknown;
+                return Err(error);
+            }
+        }
+        Ok(SemanticColdModelWorkOperation {
+            work: handle.clone(),
+            index,
+            issuance,
+        })
+    }
+
+    fn original_cold_operation(
+        &self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<&ColdOperationAttempt, SemanticTransitionError> {
+        self.cold_model_work(&operation.work)?
+            .operations
+            .get(operation.index)
+            .filter(|attempt| Arc::ptr_eq(&attempt.issuance, &operation.issuance))
+            .ok_or_else(|| {
+                publication_input_error("operation is not its original native issued attempt")
+            })
+    }
+
+    pub fn cold_model_work_operation_slot(
+        &self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<usize, SemanticTransitionError> {
+        Ok(self.original_cold_operation(operation)?.slot)
+    }
+
+    /// Cross the effect boundary once; this is not an actual-work receipt.
+    pub fn enter_cold_model_work_operation(
+        &mut self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<usize, SemanticTransitionError> {
+        let attempt = self.original_cold_operation(operation)?;
+        let storage = self.cold_model_work(&operation.work)?;
+        if attempt.state != OperationState::Prepared
+            || storage.state != RecordingState::Recording
+            || storage.pending_operation != Some(operation.index)
+            || attempt.region.is_some_and(|region| {
+                storage.regions.get(region) != Some(&RecordingState::Recording)
+            })
+        {
+            return Err(publication_input_error(
+                "original operation entry is single-use",
+            ));
+        }
+        let slot = attempt.slot;
+        self.steps
+            .get_mut(&operation.work.token)
+            .expect("checked original step")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original recorder")
+            .operations[operation.index]
+            .state = OperationState::Entered;
+        Ok(slot)
+    }
+
+    /// Register only the original successfully returned effect, once.
+    pub fn complete_cold_model_work_operation(
+        &mut self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<usize, SemanticTransitionError> {
+        let attempt = self.original_cold_operation(operation)?;
+        if attempt.state == OperationState::Complete {
+            return Ok(attempt.slot);
+        }
+        let storage = self.cold_model_work(&operation.work)?;
+        if attempt.state != OperationState::Entered
+            || storage.state != RecordingState::Recording
+            || storage.pending_operation != Some(operation.index)
+            || attempt.region.is_some_and(|region| {
+                storage.regions.get(region) != Some(&RecordingState::Recording)
+            })
+            || storage.work.next_slot().map_err(publication_input_error)? != attempt.slot
+        {
+            return Err(publication_input_error(
+                "completion requires its same entered original operation",
+            ));
+        }
+        let event = attempt.event;
+        let slot = attempt.slot;
+        let storage = self
+            .steps
+            .get_mut(&operation.work.token)
+            .expect("checked original step")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original recorder");
+        storage.operations[operation.index].state = OperationState::Completing;
+        // The event and slot were validated before entry. This sole registrar
+        // does not launch the model, reset its slot, or repeat its callback.
+        let recorded = storage
+            .work
+            .record_event(event)
+            .map_err(publication_input_error)?;
+        debug_assert_eq!(recorded, slot);
+        storage.plan_mut()?.consume();
+        storage.operations[operation.index].state = OperationState::Complete;
+        storage.pending_operation = None;
+        Ok(slot)
+    }
+
+    pub fn retain_unknown_cold_model_work_operation(
+        &mut self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<(), SemanticTransitionError> {
+        let attempt = self.original_cold_operation(operation)?;
+        if !matches!(
+            attempt.state,
+            OperationState::Entered | OperationState::Completing | OperationState::Unknown
+        ) {
+            return Err(publication_input_error(
+                "unknown outcome requires its original entered attempt",
+            ));
+        }
+        self.steps
+            .get_mut(&operation.work.token)
+            .expect("checked original step")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original recorder")
+            .operations[operation.index]
+            .state = OperationState::Unknown;
+        Ok(())
+    }
+
+    /// Proven non-entry closes the original prefix, never reopens this event.
+    pub fn cancel_unentered_cold_model_work_operation(
+        &mut self,
+        operation: &SemanticColdModelWorkOperation,
+    ) -> Result<(), SemanticTransitionError> {
+        let attempt = self.original_cold_operation(operation)?;
+        if attempt.state != OperationState::Prepared {
+            return Err(publication_input_error(
+                "non-entry cannot revoke an entered original operation",
+            ));
+        }
+        let storage = self
+            .steps
+            .get_mut(&operation.work.token)
+            .expect("checked original step")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original recorder");
+        storage.operations[operation.index].state = OperationState::NotEntered;
+        storage.pending_operation = None;
+        storage.stopped_before_entry = true;
+        Ok(())
     }
 
     pub fn record_cold_model_work(
@@ -1247,6 +1536,13 @@ impl SemanticTransitionSession {
         device_produced: bool,
     ) -> Result<usize, SemanticTransitionError> {
         let result = (|| {
+            if self.cold_model_work(handle)?.pending_operation.is_some()
+                || self.cold_model_work(handle)?.stopped_before_entry
+            {
+                return Err(publication_input_error(
+                    "direct registration cannot bypass an original operation attempt",
+                ));
+            }
             if let Some(region) = region {
                 self.require_cold_model_work_region(region, RecordingState::Recording)?;
             } else if !self.cold_model_work(handle)?.regions.is_empty() {
@@ -1319,6 +1615,13 @@ impl SemanticTransitionSession {
         region: Option<&SemanticColdModelWorkRegion>,
     ) -> Result<(), SemanticTransitionError> {
         let result = (|| {
+            if self.cold_model_work(handle)?.pending_operation.is_some()
+                || self.cold_model_work(handle)?.stopped_before_entry
+            {
+                return Err(publication_input_error(
+                    "model invocation cannot bypass an original operation attempt",
+                ));
+            }
             if let Some(region) = region {
                 self.require_cold_model_work_region(region, RecordingState::Recording)?;
             } else if !self.cold_model_work(handle)?.regions.is_empty() {
@@ -1401,6 +1704,14 @@ impl SemanticTransitionSession {
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
         let token = self.check_cold_work_reader(reader, handle)?;
         let storage = self.cold_model_work(handle)?;
+        if storage.pending_operation.is_some()
+            || (storage.stopped_before_entry
+                && disposition != SemanticColdModelWorkDisposition::KnownRefusal)
+        {
+            return Err(publication_input_error(
+                "cold completion cannot resolve or discard an original operation attempt",
+            ));
+        }
         if let Some(plan) = &storage.plan {
             plan.require_recorded_trace(storage.work.recording.events())
                 .map_err(publication_input_error)?;

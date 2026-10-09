@@ -26,8 +26,9 @@ pub use task_ground::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
-    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkPurpose,
-    SemanticColdModelWorkRegion, SemanticColdModelWorkResult, SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkOperation,
+    SemanticColdModelWorkPurpose, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
+    SemanticColdNativeWork,
 };
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
