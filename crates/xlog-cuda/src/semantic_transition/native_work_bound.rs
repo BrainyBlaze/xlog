@@ -10,6 +10,7 @@ pub(crate) struct OriginalNativeCommand {
     submitted: bool,
     completed: bool,
     dma_recorded: bool,
+    allowance_claim: Option<std::sync::Weak<Mutex<ColdNativeAllowance>>>,
 }
 
 impl OriginalNativeCommand {
@@ -22,6 +23,7 @@ impl OriginalNativeCommand {
             submitted: false,
             completed: false,
             dma_recorded: false,
+            allowance_claim: None,
         })
     }
 
@@ -127,6 +129,29 @@ impl OriginalNativeCommand {
         }
         result
     }
+
+    pub(super) fn claim_model_contract_guard(
+        &mut self,
+        allowance: &Arc<Mutex<ColdNativeAllowance>>,
+        ceiling: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if let Some(original) = &self.allowance_claim {
+            if !original.ptr_eq(&Arc::downgrade(allowance)) {
+                return Err(publication_input_error(
+                    "original native guard changed its admitted report",
+                ));
+            }
+            return Ok(());
+        }
+        if allowance
+            .lock()
+            .map_err(|_| publication_input_error("original model guard allowance is poisoned"))?
+            .claim_model_contract_guard(ceiling)?
+        {
+            self.allowance_claim = Some(Arc::downgrade(allowance));
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct OriginalContentBatch {
@@ -175,6 +200,7 @@ pub(super) struct FrozenColdEvaluationContent {
     ceiling: [u64; 9],
     remaining: [[u8; 2]; 4],
     model_snapshot: Option<[u64; 9]>,
+    model_contract_guard: Option<[u64; 9]>,
 }
 
 impl ColdNativeAllowance {
@@ -322,6 +348,25 @@ impl ColdNativeAllowance {
         Ok(true)
     }
 
+    fn claim_model_contract_guard(
+        &mut self,
+        ceiling: [u64; 9],
+    ) -> Result<bool, SemanticTransitionError> {
+        if !self.is_evaluation() {
+            return Ok(false);
+        }
+        let content = self.content.as_mut().ok_or_else(|| {
+            publication_input_error("model contract guard precedes its original admission")
+        })?;
+        if content.model_contract_guard != Some(ceiling) {
+            return Err(publication_input_error(
+                "model contract guard exceeded or changed its original finite producer",
+            ));
+        }
+        content.model_contract_guard = None;
+        Ok(true)
+    }
+
     fn record_submitted_dma(&mut self, bytes: usize) -> Result<(), SemanticTransitionError> {
         let mut reached = self.submitted_dma;
         add_native_work_ceiling(
@@ -383,6 +428,7 @@ impl ColdNativeAllowance {
 }
 
 impl FrozenColdEvaluationContent {
+    #[expect(clippy::too_many_arguments, reason = "original admitted producer geometry stays bound to its evaluation owner")]
     pub(super) fn new(
         invocation: Arc<()>,
         cohort: Arc<SemanticEvaluationCohort>,
@@ -391,6 +437,7 @@ impl FrozenColdEvaluationContent {
         model_ceiling: [u64; 9],
         preparation_ceiling: [u64; 9],
         model_snapshot: [u64; 9],
+        model_contract_guard: [u64; 9],
     ) -> Result<Self, SemanticTransitionError> {
         let original = cohort.content_tensors();
         if original.len() != 17 || output.len() != 3 || objective.len() != 8 {
@@ -456,6 +503,7 @@ impl FrozenColdEvaluationContent {
         let remaining = [[0, 4], [2, 5], [1, 1], [1, 2]];
         let mut ceiling = preparation_ceiling;
         add_native_work_ceiling(&mut ceiling, model_snapshot)?;
+        add_native_work_ceiling(&mut ceiling, model_contract_guard)?;
         let sources = [&output, &objective];
         for (kind, tensors) in sources.into_iter().enumerate() {
             for verify in [false, true] {
@@ -496,6 +544,7 @@ impl FrozenColdEvaluationContent {
             ceiling,
             remaining,
             model_snapshot: Some(model_snapshot),
+            model_contract_guard: Some(model_contract_guard),
         })
     }
 }
@@ -532,6 +581,55 @@ pub(super) fn model_snapshot_native_work_ceiling(
         0,
         u64::try_from(bytes).map_err(|_| native_work_ceiling_overflow())?,
     ])
+}
+
+/// The actual publication ModelContract guard authenticates its original bank,
+/// every directory seal, the schema/identity, and the selected model seal fold.
+/// Its outer guard hashes the raw contract a second time; private retained
+/// contract verifications are separate content occurrences.
+pub(super) fn model_contract_guard_native_work_ceiling(
+    storage: &PublicationStorage,
+    directory: &[PublicationRange],
+) -> Result<[u64; 9], SemanticTransitionError> {
+    let record = directory
+        .iter()
+        .find(|range| range.role == 44 && range.index == 0)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let blocks = |bytes: u64| {
+        bytes
+            .checked_add(9 + 63)
+            .map(|bytes| bytes / 64)
+            .ok_or_else(native_work_ceiling_overflow)
+    };
+    let mut ceiling = [1, 0, 0, 0, 0, 0, 0, 0, 752];
+    ceiling[7] = blocks(size_of::<PublicationBank>() as u64)?
+        .checked_add(
+            blocks(
+                record
+                    .length_bytes
+                    .checked_add(128)
+                    .ok_or_else(native_work_ceiling_overflow)?,
+            )?
+            .checked_mul(2)
+            .ok_or_else(native_work_ceiling_overflow)?,
+        )
+        .and_then(|value| value.checked_add(5))
+        .ok_or_else(native_work_ceiling_overflow)?;
+    ceiling[7] = ceiling[7]
+        .checked_add(blocks(
+            storage.contract_value.model_contract_layout.schema_bytes,
+        )?)
+        .ok_or_else(native_work_ceiling_overflow)?;
+    let range_blocks = blocks(size_of::<PublicationRange>() as u64)?
+        .checked_add(2)
+        .ok_or_else(native_work_ceiling_overflow)?;
+    for range in directory {
+        add_native_work_ceiling(&mut ceiling, [0, 4, 0, 0, 0, 0, 0, range_blocks, 144])?;
+        if matches!(range.role, 18..=25) {
+            add_native_work_ceiling(&mut ceiling, [0, 0, 0, 0, 0, 0, 0, 4, 224])?;
+        }
+    }
+    Ok(ceiling)
 }
 
 /// Add producer ceilings in the native tally's fixed event order.

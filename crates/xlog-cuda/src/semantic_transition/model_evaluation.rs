@@ -342,6 +342,7 @@ impl SemanticTransitionSession {
                 model_ceiling,
                 preparation_ceiling,
                 model_snapshot,
+                native_work_bound::model_contract_guard_native_work_ceiling(storage, &lease.directory)?,
             )?,
         })
     }

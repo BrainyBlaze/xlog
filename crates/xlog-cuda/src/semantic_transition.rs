@@ -26573,6 +26573,15 @@ impl SemanticTransitionSession {
             })?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|e| runtime_error("content guard stream admission", e))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(original) = original.as_deref_mut() {
+            if let Some(allowance) = self.cold_native_allowance(lease.token)? {
+                original.claim_model_contract_guard(
+                    &allowance,
+                    native_work_bound::model_contract_guard_native_work_ceiling(&storage, &lease.directory)?,
+                )?;
+            }
+        }
         let result = (|| {
             self.order_content_inputs(lease, consumer_stream)?;
             if let Some(inputs) = &inputs {
