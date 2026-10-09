@@ -19020,7 +19020,10 @@ impl SemanticTransitionSession {
             });
         #[cfg(not(feature = "semantic-policy"))]
         let source = PreparedSegmentSource::Publication;
-        self.prepare_segment_steps_from_source(transitions, cold_capacity, source)
+        #[cfg(feature = "semantic-policy")]
+        { self.prepare_segment_steps_from_source(transitions, cold_capacity, source, None) }
+        #[cfg(not(feature = "semantic-policy"))]
+        { self.prepare_segment_steps_from_source(transitions, cold_capacity, source) }
     }
 
     fn prepare_segment_steps_from_source(
@@ -19028,6 +19031,8 @@ impl SemanticTransitionSession {
         transitions: impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone,
         cold_capacity: SemanticSegmentColdCapacity,
         source: PreparedSegmentSource,
+        #[cfg(feature = "semantic-policy")]
+        admission: Option<(&SemanticSegmentInstructionAdmission, &SemanticPublishedLease)>,
     ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
         self.ensure_rebindable()?;
         self.require_authenticated_task_observations()?;
@@ -19796,6 +19801,10 @@ impl SemanticTransitionSession {
                 self.training_origins = training_origins;
                 self.publication = Some(storage);
                 self.model_owners.extend(model_owners);
+                #[cfg(feature = "semantic-policy")]
+                if let Some((admission, parent)) = admission {
+                    self.bind_original_segment_preparation(admission, parent, &handles)?;
+                }
                 self.resolve_prepared_segment_preparation()
             }
             Err(error) => {

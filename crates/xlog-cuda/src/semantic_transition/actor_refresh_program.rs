@@ -702,19 +702,35 @@ impl SemanticTransitionSession {
             || transitions.clone().collect::<Vec<_>>() != self.admitted_segment_transitions(admission)?
             || cold_capacity != self.admitted_segment_cold_capacity(admission)? { return Err(invalid_program()); }
         self.instruction_admission_mut(admission)?.state = InstructionState::BuildEntered;
-        let steps = self.prepare_segment_steps(transitions, cold_capacity)?;
+        self.prepare_segment_steps_from_source(transitions, cold_capacity,
+            PreparedSegmentSource::Publication, Some((admission, parent)))
+    }
+
+    // Bind the issued complete allocation roster before the first initializer
+    // effect. This is original claim custody, not execution or completion.
+    pub(super) fn bind_original_segment_preparation(&mut self,
+        admission: &SemanticSegmentInstructionAdmission, parent: &SemanticPublishedLease,
+        steps: &[SemanticPreparedStep]) -> Result<(), SemanticTransitionError> {
         let first = steps.first().ok_or_else(invalid_program)?;
-        self.require_prepared_program_parent(first, parent)?;
+        self.require_original_prepared_program_parent(first, parent)?;
         let claim = self.instruction_admission(admission)?;
+        if claim.state != InstructionState::BuildEntered { return Err(invalid_program()); }
         let program = self.actor_refresh_program.as_ref().expect("original program");
-        let mapping = steps.iter().zip(&program.steps[claim.first as usize..claim.end as usize])
+        let expected = &program.steps[claim.first as usize..claim.end as usize];
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        if steps.len() != expected.len()
+            || build.tokens.len() != steps.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)|
+                step.token != *token || build.check_retained(step, &self.publication_issuer).is_err())
+        { return Err(invalid_program()); }
+        let mapping = steps.iter().zip(expected)
             .map(|(step, expected)| (step.token, expected.clone())).collect();
         let build = self.prepared_segment.as_mut().expect("original scope");
         build.program_steps = mapping;
         build.program_admission = Some(admission.clone());
         build.parent_quiescent = true;
         self.instruction_admission_mut(admission)?.state = InstructionState::Bound;
-        Ok(steps)
+        Ok(())
     }
 
     pub(super) fn complete_segment_instruction(&mut self) -> Result<(), SemanticTransitionError> {
