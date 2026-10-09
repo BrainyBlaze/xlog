@@ -8,6 +8,7 @@ use super::*;
 use xlog_cuda::{
     SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkDisposition,
     SemanticColdModelWorkResult, SemanticColdNativeWork, SemanticModelEvaluation,
+    SemanticPublishedStateObservation,
 };
 
 pub(super) struct EvaluationOwners {
@@ -94,6 +95,8 @@ struct ReadOnlyTerminalRefusal {
     serializer_entered: bool,
     serialized_model: Option<Py<PyAny>>,
     source_verified: bool,
+    source_native_observations: [Option<SemanticPublishedStateObservation>; 2],
+    source_native_verified: [bool; 2],
     history: Option<Arc<[u8]>>,
     payload: Option<Arc<[u8]>>,
 }
@@ -376,6 +379,8 @@ impl PySemanticLearningPhaseTransition {
                     serializer_entered: false,
                     serialized_model: None,
                     source_verified: false,
+                    source_native_observations: [None, None],
+                    source_native_verified: [false; 2],
                     history: None,
                     payload: None,
                 }),
@@ -563,6 +568,8 @@ impl PySemanticLearningPhaseTransition {
             serializer_entered: false,
             serialized_model: None,
             source_verified: false,
+            source_native_observations: [None, None],
+            source_native_verified: [false; 2],
             history: None,
             payload: None,
         });
@@ -1282,6 +1289,83 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    fn verify_terminal_source_native(
+        &self,
+        py: Python<'_>,
+        task: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        expected: &[u8],
+        occurrence: usize,
+    ) -> PyResult<()> {
+        let (verified, prepared) = {
+            let retained = self.phase_evaluations()?;
+            let refusal = retained
+                .last()
+                .expect("retained cancellation")
+                .refusal
+                .as_ref()
+                .expect("original cancellation");
+            (
+                refusal.source_native_verified[occurrence],
+                refusal.source_native_observations[occurrence].is_some(),
+            )
+        };
+        if verified {
+            return Ok(());
+        }
+        require_phase_native_scope(py, task, parent)?;
+        let session = task.session.borrow(py);
+        let mut owner = session.owner()?;
+        let lease = parent.lease()?;
+        if !prepared {
+            task.require_current(&owner)?;
+            let observation = owner
+                .prepare_published_state_observation(&lease, true)
+                .map_err(xlog_err)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .refusal
+                .as_mut()
+                .expect("original cancellation")
+                .source_native_observations[occurrence] = Some(observation);
+        }
+        // The phase lock is released before any native submission or join.
+        let mut observation = self
+            .phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .source_native_observations[occurrence]
+            .take()
+            .expect("original native observation");
+        let result = owner
+            .resolve_published_state_observation(&lease, &mut observation)
+            .map_err(xlog_err);
+        self.phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .source_native_observations[occurrence] = Some(observation);
+        if result? != expected {
+            return Err(invalid("retained learning-phase native state changed"));
+        }
+        let mut retained = self.phase_evaluations()?;
+        let refusal = retained
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation");
+        refusal.source_native_verified[occurrence] = true;
+        refusal.source_native_observations[occurrence] = None;
+        Ok(())
+    }
+
     fn verify_terminal_source(&self, py: Python<'_>) -> PyResult<()> {
         let source = self.source.borrow(py);
         source.require_creator()?;
@@ -1325,7 +1409,7 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         let parent = self.parent.borrow(py);
-        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        self.verify_terminal_source_native(py, &task, &parent, &manifest.native, 0)?;
         let (entered, result, region) = {
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained cancellation");
@@ -1391,7 +1475,7 @@ impl PySemanticLearningPhaseTransition {
             )
             .map_err(xlog_err)?;
         require_model_bytes(model.bind(py), &manifest.model)?;
-        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        self.verify_terminal_source_native(py, &task, &parent, &manifest.native, 1)?;
         task.state()?.snapshot = snapshot;
         self.phase_evaluations()?
             .last_mut()

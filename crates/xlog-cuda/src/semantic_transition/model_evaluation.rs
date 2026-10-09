@@ -174,6 +174,12 @@ pub(super) struct EvaluationStorage {
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
     capture_native_work: [u64; 9],
     frozen_native_work: Option<[u64; 9]>,
+    launch_marker_read: Option<PublicationRead<u64>>,
+    launch_markers: Option<Vec<u64>>,
+    report_read: Option<PublicationRead<u64>>,
+    report_words: Option<[u64; 12]>,
+    source_observation: Option<SemanticPublishedStateObservation>,
+    resolved_source_material: Option<Identity256>,
 }
 
 impl SemanticTransitionSession {
@@ -339,6 +345,12 @@ impl SemanticTransitionSession {
             graph_retirement: None,
             capture_native_work: [0; 9],
             frozen_native_work: None,
+            launch_marker_read: None,
+            launch_markers: None,
+            report_read: None,
+            report_words: None,
+            source_observation: None,
+            resolved_source_material: None,
         });
         self.guard_evaluation_cohort(&handle)?;
         let work = &self.steps[&lease.token]
@@ -384,6 +396,15 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
     ) -> Result<&EvaluationStorage, SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.original_evaluation(handle)
+    }
+
+    /// Identity-only lookup for joining an already retained original operation.
+    /// It grants no new submission and never clears Session poison.
+    fn original_evaluation(
+        &self,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<&EvaluationStorage, SemanticTransitionError> {
         let evaluation = self
             .steps
             .get(&handle.token)
@@ -400,6 +421,26 @@ impl SemanticTransitionSession {
             ));
         }
         Ok(evaluation)
+    }
+
+    fn checked_original_evaluation_reader(
+        &self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<&EvaluationStorage, SemanticTransitionError> {
+        if self.pending {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        if !lease.active
+            || !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+            || lease.token != handle.token
+            || !self.readers.contains_key(&lease.token)
+        {
+            return Err(publication_input_error(
+                "evaluation resolution lost its original live reader",
+            ));
+        }
+        self.original_evaluation(handle)
     }
 
     fn guard_evaluation_cohort(
@@ -756,8 +797,12 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticModelEvaluation,
     ) -> Result<(), SemanticTransitionError> {
-        self.checked_evaluation_parent(lease, handle)?;
-        let evaluation = self.evaluation(handle)?;
+        let evaluation = self.checked_original_evaluation_reader(lease, handle)?;
+        if evaluation.submitted || evaluation.result.is_some() {
+            return Err(publication_input_error(
+                "evaluation launch resolution cannot reopen its submitted result",
+            ));
+        }
         if evaluation.execution == EvaluationExecution::Completed {
             return Ok(());
         }
@@ -777,13 +822,21 @@ impl SemanticTransitionSession {
                 publication_input_error("evaluation lost its original capture consumer roster")
             })?
             .clone();
-        self.complete_step_consumers(lease, &streams)?;
+        if !self.is_poisoned() {
+            self.complete_step_consumers(lease, &streams)?;
+        } else if self
+            .original_evaluation(handle)?
+            .launch_marker_read
+            .is_none()
+        {
+            return Err(SemanticTransitionError::Poisoned);
+        }
         if uncertain {
             // A successful join is not proof that an errored graph submission
             // entered. Only this original capture's real invocation markers
             // can prove execution; zero markers remain unknown, never replay.
             let (actual, invocations) = {
-                let evaluation = self.evaluation(handle)?;
+                let evaluation = self.original_evaluation(handle)?;
                 (
                     evaluation.work.actual.view(),
                     evaluation
@@ -803,7 +856,58 @@ impl SemanticTransitionSession {
                     "evaluation launch resolution lost its original model invocation roster",
                 ));
             }
-            let actual = self.publication_read(actual)?;
+            if self.original_evaluation(handle)?.launch_markers.is_none() {
+                if self
+                    .original_evaluation(handle)?
+                    .launch_marker_read
+                    .is_none()
+                {
+                    let read = self.prepare_publication_read(actual)?;
+                    self.steps
+                        .get_mut(&handle.token)
+                        .expect("checked invocation")
+                        .evaluation
+                        .as_mut()
+                        .expect("checked evaluation")
+                        .launch_marker_read = Some(read);
+                }
+                let mut read = self
+                    .steps
+                    .get_mut(&handle.token)
+                    .expect("checked invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("checked evaluation")
+                    .launch_marker_read
+                    .take()
+                    .expect("retained original marker copy");
+                let result = if !read.read.entered() {
+                    self.submit_publication_read(&mut read)
+                        .and_then(|()| self.resolve_publication_read(&mut read))
+                } else {
+                    self.resolve_publication_read(&mut read)
+                };
+                self.steps
+                    .get_mut(&handle.token)
+                    .expect("checked invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("checked evaluation")
+                    .launch_marker_read = Some(read);
+                let words = result?;
+                self.steps
+                    .get_mut(&handle.token)
+                    .expect("checked invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("checked evaluation")
+                    .launch_markers = Some(words);
+            }
+            let actual = self
+                .original_evaluation(handle)?
+                .launch_markers
+                .as_ref()
+                .expect("original marker observation");
             for slot in invocations {
                 if actual.get(slot * 3..slot * 3 + 3) != Some(&[1, 0, 1][..]) {
                     return Err(publication_input_error("unknown evaluation graph submission lacks its original completed invocation markers"));
@@ -1105,36 +1209,119 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticModelEvaluation,
     ) -> Result<SemanticCompletedModelEvaluation, SemanticTransitionError> {
-        self.checked_reader(lease)?;
-        let evaluation = self.evaluation(handle)?;
+        let evaluation = self.checked_original_evaluation_reader(lease, handle)?;
         if lease.token != handle.token || !evaluation.report_submitted {
             return Err(publication_input_error(
                 "evaluation resolution requires its original submitted invocation",
             ));
         }
-        let parent = self.published_identity(lease)?;
-        let result = if let Some(result) = self.evaluation(handle)?.result {
+        let parent = lease.identity;
+        let result = if let Some(result) = self.original_evaluation(handle)?.result {
             result
         } else {
             let streams = self
-                .evaluation(handle)?
+                .original_evaluation(handle)?
                 .consumer_streams
                 .as_ref()
                 .ok_or_else(|| {
                     publication_input_error("evaluation lost its original consumer streams")
                 })?
                 .clone();
-            self.complete_step_consumers(lease, &streams)?;
+            if !self.is_poisoned() {
+                self.complete_step_consumers(lease, &streams)?;
+            } else if self.original_evaluation(handle)?.report_read.is_none() {
+                return Err(SemanticTransitionError::Poisoned);
+            }
             let report = self.steps[&handle.token]
                 .evaluation
                 .as_ref()
                 .expect("retained evaluation")
                 .report
                 .view();
-            let words = self.publication_read(report)?;
-            let material = Identity256::from_bytes(
-                Sha256::digest(self.published_state_material(lease)?).into(),
-            );
+            if self.original_evaluation(handle)?.report_read.is_none() {
+                // Both observations must retain their entire original suffix
+                // before the first DMA can leave completion unknown.
+                let read = self.prepare_publication_read(report)?;
+                let observation = self.prepare_published_state_observation(lease, false)?;
+                let evaluation = self
+                    .steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation");
+                evaluation.report_read = Some(read);
+                evaluation.source_observation = Some(observation);
+            }
+            if self.original_evaluation(handle)?.report_words.is_none() {
+                let mut read = self
+                    .steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation")
+                    .report_read
+                    .take()
+                    .expect("retained original report copy");
+                let result = if !read.read.entered() {
+                    self.submit_publication_read(&mut read)
+                        .and_then(|()| self.resolve_publication_read(&mut read))
+                } else {
+                    self.resolve_publication_read(&mut read)
+                };
+                self.steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation")
+                    .report_read = Some(read);
+                let words: [u64; 12] = result?
+                    .try_into()
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                self.steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation")
+                    .report_words = Some(words);
+            }
+            if self
+                .original_evaluation(handle)?
+                .resolved_source_material
+                .is_none()
+            {
+                let mut observation = self
+                    .steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation")
+                    .source_observation
+                    .take()
+                    .expect("retained original source observation");
+                let result = self.resolve_published_state_observation(lease, &mut observation);
+                self.steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation")
+                    .source_observation = Some(observation);
+                let material = Identity256::from_bytes(Sha256::digest(result?).into());
+                let evaluation = self
+                    .steps
+                    .get_mut(&handle.token)
+                    .expect("retained invocation")
+                    .evaluation
+                    .as_mut()
+                    .expect("retained evaluation");
+                evaluation.resolved_source_material = Some(material);
+                evaluation.source_observation = None;
+            }
             let evaluation = self
                 .steps
                 .get_mut(&handle.token)
@@ -1142,12 +1329,15 @@ impl SemanticTransitionSession {
                 .evaluation
                 .as_mut()
                 .expect("retained evaluation");
-            if material != evaluation.source_material {
+            if evaluation.resolved_source_material != Some(evaluation.source_material) {
                 self.poisoned = true;
                 return Err(publication_input_error(
                     "read-only evaluation changed the full original publication",
                 ));
             }
+            let words = evaluation
+                .report_words
+                .expect("original completed report observation");
             let result = SemanticModelEvaluationResult {
                 status: words[0],
                 loss_bits: std::array::from_fn(|index| words[index + 1] as u32),

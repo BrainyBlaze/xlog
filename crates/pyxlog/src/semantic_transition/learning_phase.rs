@@ -584,12 +584,7 @@ fn verify_phase_native(
     let session = task.session.borrow(py);
     let mut owner = session.owner()?;
     task.require_current(&owner)?;
-    parent.require_task(py, task)?;
-    if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
-        return Err(invalid(
-            "learning-phase owner escaped its retained preparation",
-        ));
-    }
+    require_phase_native_scope(py, task, parent)?;
     let lease = parent.lease()?;
     let actual = if recompute {
         owner.current_recompute_state_material(&lease)
@@ -599,6 +594,20 @@ fn verify_phase_native(
     .map_err(xlog_err)?;
     if actual != expected {
         return Err(invalid("retained learning-phase native state changed"));
+    }
+    Ok(())
+}
+
+fn require_phase_native_scope(
+    py: Python<'_>,
+    task: &PySemanticTransitionTaskUse,
+    parent: &PySemanticPublishedParent,
+) -> PyResult<()> {
+    parent.require_task(py, task)?;
+    if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+        return Err(invalid(
+            "learning-phase owner escaped its retained preparation",
+        ));
     }
     Ok(())
 }
