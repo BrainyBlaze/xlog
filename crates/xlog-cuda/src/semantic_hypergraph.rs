@@ -2742,19 +2742,28 @@ impl SemanticHypergraph {
                 scope_words: words(event.scope.as_bytes()),
                 record: u32::MAX,
             });
-            if !self
-                .authenticated_supports
+            if !prepared
+                .references
                 .iter()
-                .chain(&prepared.references)
                 .any(|(previous, _)| *previous == identity)
             {
                 prepared.references.push((identity, source));
             }
         }
+        let additional = prepared
+            .references
+            .iter()
+            .filter(|(identity, _)| {
+                !self
+                    .authenticated_supports
+                    .iter()
+                    .any(|(previous, _)| previous == identity)
+            })
+            .count();
         if self
             .authenticated_supports
             .len()
-            .checked_add(prepared.references.len())
+            .checked_add(additional)
             .is_none_or(|count| count > self.capacities.supports as usize)
         {
             return Err(admission_error(
@@ -2762,7 +2771,7 @@ impl SemanticHypergraph {
             ));
         }
         self.authenticated_supports
-            .try_reserve(prepared.references.len())
+            .try_reserve(additional)
             .map_err(|_| {
                 admission_error("cannot retain original authenticated support metadata")
             })?;
