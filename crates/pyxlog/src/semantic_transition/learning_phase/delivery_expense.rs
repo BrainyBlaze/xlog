@@ -218,6 +218,30 @@ impl PySemanticLearningPhaseTransition {
                 .source_verified[0] = true;
         }
         self.handoff_terminal_report(py)?;
+        let (work, retired) = {
+            let retained = self.delivery_expense()?;
+            let current = retained.as_ref().expect("original delivery");
+            (
+                current.work.clone().expect("original work"),
+                current.refusal.as_ref().expect("original refusal").retired,
+            )
+        };
+        if !retired {
+            // The known refusal authorizes only original callbacks that never
+            // entered to be skipped. Keep Source serialization before private
+            // retirement, in the order of the one frozen full report.
+            self.source
+                .borrow(py)
+                .owner()?
+                .cancel_unentered_cold_model_work_regions(&work, 6)
+                .map_err(xlog_err)?;
+            self.require_terminal_source(py, true)?;
+            self.source
+                .borrow(py)
+                .owner()?
+                .cancel_unentered_cold_model_work_regions(&work, 8)
+                .map_err(xlog_err)?;
+        }
         self.retire_terminal_candidate(py)?;
         let verified = self
             .delivery_expense()?

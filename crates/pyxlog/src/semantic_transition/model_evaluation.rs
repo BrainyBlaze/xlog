@@ -10,7 +10,7 @@ pyo3::create_exception!(
     pyxlog._native,
     SemanticModelEvaluationPending,
     PyRuntimeError,
-    "An original submitted evaluation awaits cold completion; retain its owners and never resubmit."
+    "An original evaluation or its cold producer awaits completion; retain its owners and never resubmit."
 );
 
 /// Immutable completed observation, deliberately independent of the temporary
