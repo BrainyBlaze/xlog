@@ -652,6 +652,7 @@ fn require_private_expense(
     let expense = private_seed.proposal_expense()?;
     if source.session != private.session
         || source_seed.training_domain != private_seed.training_domain
+        || source_seed.replay_capacity != private_seed.replay_capacity
         || source_seed.training_objective != private_seed.training_objective
         || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
         || source_seed.proposal_expense()?.capacity != expense.capacity
@@ -1322,6 +1323,7 @@ impl VerifiedClosure {
         let (source_seed, _, _, _) = TaskCheckpointSeed::decode(&source_manifest.task)?;
         let (final_seed, final_snapshot, _, _) = TaskCheckpointSeed::decode(&final_manifest.task)?;
         if source_seed.training_domain != final_seed.training_domain
+            || source_seed.replay_capacity != final_seed.replay_capacity
             || source_seed.training_objective != final_seed.training_objective
             || source_seed.checkpoint_source_limits()? != final_seed.checkpoint_source_limits()?
             || source_seed.proposal_expense()?.capacity != final_seed.proposal_expense()?.capacity
@@ -1654,6 +1656,7 @@ impl VerifiedClosure {
         let current_expense = current.proposal_expense()?;
         if original_phases != actual_phases
             || saved.training_domain != current.training_domain
+            || saved.replay_capacity != current.replay_capacity
             || saved.checkpoint_source_limits()? != current.checkpoint_source_limits()?
             || saved.proposal_expense()?.capacity != current_expense.capacity
             || saved.proposal_expense()?.spent > current_expense.spent

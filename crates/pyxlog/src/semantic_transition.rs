@@ -28,16 +28,16 @@ use xlog_cuda::{
     SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
     SemanticHypergraphCapacities, SemanticInitialPrefillContentWitness,
     SemanticInitialPrefillLease, SemanticInitialSourceLayout, SemanticModelForwardWitness,
-    SemanticObservedSource, SemanticParentBinding, SemanticPolarity, SemanticPredicateRecord,
-    SemanticPreparedStep, SemanticProgramAdmission, SemanticPublishedLease, SemanticRecordRole,
-    SemanticRngBinding, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
-    SemanticSupportRecord, SemanticTaskContentIdentity, SemanticTaskGoalWitness,
-    SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot,
-    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingDomain,
-    SemanticTrainingManifest, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
-    SemanticTrainingObjectiveGroupKind, SemanticTrainingViewBasis, SemanticTrainingViewPort,
-    SemanticTrainingViewRow, SemanticTransitionKind, SemanticTransitionSession, SemanticTruth,
-    SemanticTypedRecord,
+    SemanticNonterminalIntentBinding, SemanticObservedSource, SemanticParentBinding,
+    SemanticPolarity, SemanticPredicateRecord, SemanticPreparedStep, SemanticProgramAdmission,
+    SemanticPublishedLease, SemanticRecordRole, SemanticReplayAppendBinding, SemanticRngBinding,
+    SemanticSourceMapping, SemanticStateRecord, SemanticStateRole, SemanticSupportRecord,
+    SemanticTaskContentIdentity, SemanticTaskGoalWitness, SemanticTensorContentWitness,
+    SemanticTensorInput, SemanticTensorLayout, SemanticTextSlot, SemanticTrainingCanary,
+    SemanticTrainingCanaryKind, SemanticTrainingDomain, SemanticTrainingManifest,
+    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingViewBasis, SemanticTrainingViewPort, SemanticTrainingViewRow,
+    SemanticTransitionKind, SemanticTransitionSession, SemanticTruth, SemanticTypedRecord,
 };
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
@@ -51,6 +51,71 @@ pub(crate) mod cold_task;
 pub(crate) mod learning_phase;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod model_evaluation;
+
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticReplayDeliveryPending,
+    PyRuntimeError,
+    "An entered replay delivery retains its original owners; resolve it without resubmitting."
+);
+
+fn replay_delivery_pending_error(
+    py: Python<'_>,
+    controller: &Bound<'_, PySemanticTransitionController>,
+    parent: &Bound<'_, PySemanticPublishedParent>,
+) -> PyResult<PyErr> {
+    let pending = SemanticReplayDeliveryPending::new_err(
+        "replay delivery may have entered; retain controller and parent, then resolve_replay_delivery with the same parent instead of resubmitting",
+    );
+    let value = pending.value(py);
+    value.setattr("controller", controller)?;
+    value.setattr("parent", parent)?;
+    value.setattr("task_use", parent.borrow().task_use.clone_ref(py))?;
+    Ok(pending)
+}
+
+fn replay_delivery_identity_result(
+    py: Python<'_>,
+    controller: &Bound<'_, PySemanticTransitionController>,
+    parent: &Bound<'_, PySemanticPublishedParent>,
+    identity: xlog_cuda::SemanticPublishedIdentity,
+    original_pending: bool,
+    pending: PyErr,
+) -> PyResult<Py<PyTuple>> {
+    let value = match (
+        PyBytes::new(py, identity.instance.as_bytes()),
+        identity.word,
+        PyBytes::new(py, identity.logical_digest.as_bytes()),
+        PyBytes::new(py, identity.state_digest.as_bytes()),
+    )
+        .into_pyobject(py)
+    {
+        Ok(value) => value.unbind(),
+        Err(original) => {
+            if original_pending {
+                pending.set_cause(py, Some(original));
+                return Err(pending);
+            }
+            return Err(original);
+        }
+    };
+    if original_pending {
+        let completion = (|| -> PyResult<()> {
+            let controlled = controller.borrow();
+            let acquired = parent.borrow();
+            let session = controlled.session.borrow(py);
+            let mut owner = session.owner()?;
+            owner
+                .acknowledge_replay_delivery_completion(&*acquired.lease()?)
+                .map_err(xlog_err)
+        })();
+        if let Err(original) = completion {
+            pending.set_cause(py, Some(original));
+            return Err(pending);
+        }
+    }
+    Ok(value)
+}
 
 #[cfg(feature = "semantic-policy")]
 pyo3::create_exception!(
@@ -2017,6 +2082,12 @@ impl PySemanticTransitionSession {
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective = read_training_objective(&seed.training_objective)?;
+        let replay_capacity = read_replay_capacity(&seed.replay_capacity)?;
+        if training_views.is_empty() && replay_capacity.is_some() {
+            return Err(invalid(
+                "checkpoint replay capacity has no original training roster",
+            ));
+        }
         if training_views.is_empty() != training_objective.is_none() {
             return Err(invalid(
                 "checkpoint training objective differs from its retained replay rows",
@@ -2113,7 +2184,7 @@ impl PySemanticTransitionSession {
                 .map_err(xlog_err)?;
             if let Some(objective) = training_objective {
                 owner
-                    .bind_training_view_arena(training_views, objective)
+                    .bind_training_view_arena(training_views, objective, replay_capacity)
                     .map_err(xlog_err)?;
             }
             match learning_transition {
@@ -3419,6 +3490,28 @@ fn parse_tensor_layout(value: &ColdValue) -> PyResult<SemanticTensorLayout> {
     })
 }
 
+fn tensor_metadata_value(
+    py: Python<'_>,
+    (layout, begin, end): (SemanticTensorLayout, u64, u64),
+) -> PyResult<Py<PyTuple>> {
+    Ok((
+        (
+            layout.role,
+            layout.index,
+            layout.element_bytes,
+            layout.scalar_type,
+            layout.rank,
+            layout.logical_axis,
+            PyTuple::new(py, layout.dimensions)?,
+            PyTuple::new(py, layout.strides_bytes)?,
+        ),
+        begin,
+        end,
+    )
+        .into_pyobject(py)?
+        .unbind())
+}
+
 fn parse_content_ranges(value: &ColdValue) -> PyResult<Vec<(SemanticStateRole, u64)>> {
     let rows = value.sequence()?;
     if rows.is_empty() {
@@ -3672,6 +3765,76 @@ fn metadata_integer(metadata: &Bound<'_, PyDict>, name: &str, budget: &mut usize
     metadata_value(metadata, name, budget)?.unsigned()
 }
 
+fn replay_capacity_value(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResult<ColdValue> {
+    const FIELDS: &[&str] = &[
+        "row_capacity",
+        "raw_byte_capacity",
+        "append_groups",
+        "metadata_bytes",
+        "max_material_bytes",
+        "total_material_bytes",
+        "max_evidence_bytes",
+        "payload_capacity_bytes",
+    ];
+    if value.is_none() {
+        return Ok(ColdValue::None);
+    }
+    if !value.is_exact_instance_of::<PyDict>() {
+        return Err(invalid(
+            "replay capacity requires an exact builtin dict or explicit None",
+        ));
+    }
+    let value = value.cast::<PyDict>()?;
+    if value.len() != FIELDS.len() {
+        return Err(invalid(
+            "replay capacity requires its complete original reservation",
+        ));
+    }
+    for key in value.keys().iter() {
+        if !key.is_exact_instance_of::<PyString>()
+            || !FIELDS.contains(&key.cast::<PyString>()?.to_str()?)
+        {
+            return Err(invalid("unknown replay capacity reservation field"));
+        }
+    }
+    Ok(ColdValue::Sequence(
+        FIELDS
+            .iter()
+            .map(|name| metadata_value(value, name, budget))
+            .collect::<PyResult<Vec<_>>>()?,
+    ))
+}
+
+fn read_replay_capacity(value: &ColdValue) -> PyResult<Option<SemanticReplayAppendBinding>> {
+    if *value == ColdValue::None {
+        return Ok(None);
+    }
+    let fields = value.fields(8)?;
+    Ok(Some(SemanticReplayAppendBinding {
+        row_capacity: usize::try_from(fields[0].unsigned()?)
+            .map_err(|_| invalid("replay row capacity overflows"))?,
+        raw_byte_capacity: usize::try_from(fields[1].unsigned()?)
+            .map_err(|_| invalid("replay raw byte capacity overflows"))?,
+        append_groups: fields[2]
+            .sequence()?
+            .iter()
+            .map(|group| {
+                group
+                    .sequence()?
+                    .iter()
+                    .map(ColdValue::unsigned)
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .collect::<PyResult<Vec<_>>>()?,
+        metadata_bytes: fields[3].unsigned()?,
+        max_material_bytes: fields[4].unsigned()?,
+        total_material_bytes: fields[5].unsigned()?,
+        max_evidence_bytes: fields[6].unsigned()?,
+        payload_capacity_bytes: usize::try_from(fields[7].unsigned()?)
+            .map_err(|_| invalid("replay payload capacity overflows"))?,
+    }))
+}
+
 fn parse_parent(
     metadata: &Bound<'_, PyAny>,
     source: &Bound<'_, PyAny>,
@@ -3709,16 +3872,23 @@ fn parse_parent(
         "active_layouts",
         "authority_decisions_capacity_bytes",
     ];
+    const OPTIONAL_KEYS: &[&str] = &["nonterminal_intent", "replay_append"];
     if !metadata.is_exact_instance_of::<PyDict>() {
         return Err(invalid("parent metadata requires an exact builtin dict"));
     }
     let metadata = metadata.cast::<PyDict>()?;
-    if metadata.len() != KEYS.len() {
+    if metadata.len() < KEYS.len() || metadata.len() > KEYS.len() + OPTIONAL_KEYS.len() {
         return Err(invalid("parent metadata has missing or additional fields"));
+    }
+    for required in KEYS {
+        if !metadata.contains(*required)? {
+            return Err(invalid("parent metadata has missing or additional fields"));
+        }
     }
     for key in metadata.keys().iter() {
         if !key.is_exact_instance_of::<PyString>()
-            || !KEYS.contains(&key.cast::<PyString>()?.to_str()?)
+            || !(KEYS.contains(&key.cast::<PyString>()?.to_str()?)
+                || OPTIONAL_KEYS.contains(&key.cast::<PyString>()?.to_str()?))
         {
             return Err(invalid("unknown parent metadata field"));
         }
@@ -3834,6 +4004,46 @@ fn parse_parent(
         numerical_digest_offset,
         identity_offset,
     };
+    let nonterminal_intent = metadata
+        .get_item("nonterminal_intent")?
+        .map(|value| {
+            const FIELDS: &[&str] = &[
+                "plan_digest",
+                "candidate_prefix_begin",
+                "candidate_prefix_end",
+            ];
+            if !value.is_exact_instance_of::<PyDict>() {
+                return Err(invalid("nonterminal intent requires an exact builtin dict"));
+            }
+            let value = value.cast::<PyDict>()?;
+            if value.len() != FIELDS.len() {
+                return Err(invalid(
+                    "nonterminal intent requires its complete operator binding",
+                ));
+            }
+            for key in value.keys().iter() {
+                if !key.is_exact_instance_of::<PyString>()
+                    || !FIELDS.contains(&key.cast::<PyString>()?.to_str()?)
+                {
+                    return Err(invalid("unknown nonterminal intent binding field"));
+                }
+            }
+            Ok(SemanticNonterminalIntentBinding {
+                plan_digest: identity_bytes(&metadata_item(value, "plan_digest")?)?,
+                candidate_prefix_begin: metadata_integer(
+                    value,
+                    "candidate_prefix_begin",
+                    &mut budget,
+                )?,
+                candidate_prefix_end: metadata_integer(value, "candidate_prefix_end", &mut budget)?,
+            })
+        })
+        .transpose()?;
+    let replay_append = metadata
+        .get_item("replay_append")?
+        .map(|value| read_replay_capacity(&replay_capacity_value(&value, &mut budget)?))
+        .transpose()?
+        .flatten();
     let mut parent = SemanticParentBinding {
         recovered_instance,
         source,
@@ -3850,6 +4060,8 @@ fn parse_parent(
             "final_intent_payload_bytes",
             &mut budget,
         )?,
+        nonterminal_intent,
+        replay_append,
         intent_effect: intent_effect.to_vec(),
         intent_entry_capacity: metadata_integer(metadata, "intent_entry_capacity", &mut budget)?,
         intent_payload_capacity_bytes: usize::try_from(metadata_integer(
@@ -4811,6 +5023,12 @@ impl ReplayRow {
         if actions.next().is_some() {
             return Err(invalid("replay episode has more than one action owner"));
         }
+        let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
+        if replay_json_value(replay_json_field(&envelope, "action_identity")?)? != action.identity {
+            return Err(invalid(
+                "replay episode differs from its original action owner",
+            ));
+        }
         replay_digest_identity(&action.identity)
     }
 
@@ -5057,6 +5275,111 @@ impl ReplayRow {
             material,
             original_decisions: original_decisions.into(),
         })
+    }
+
+    /// Classify the complete acquired result, not process exit status. The
+    /// trusted issuer signs this disposition together with the original row.
+    fn acquired_result_disposition(&self) -> PyResult<u64> {
+        const FAMILIES: [&str; 5] = ["build", "test", "proof", "measurement", "environment"];
+        let receipts: Vec<serde_json::Value> =
+            serde_json::from_str(replay_json_field(&self.record, "receipts")?)
+                .map_err(|_| invalid("acquired result receipts are not an array"))?;
+        let begin = receipts
+            .iter()
+            .position(|receipt| {
+                receipt
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| FAMILIES.contains(&kind))
+            })
+            .ok_or_else(|| invalid("acquired result requires all five verification families"))?;
+        let mut identities = BTreeSet::new();
+        let mut seen = [false; 5];
+        let mut previous = 0;
+        let mut disposition = 1;
+        for receipt in &receipts[begin..] {
+            let body = receipt
+                .as_object()
+                .ok_or_else(|| invalid("verification receipt is not an object"))?;
+            let family = body
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid("verification receipt family is absent"))?;
+            let ordinal = FAMILIES
+                .iter()
+                .position(|value| *value == family)
+                .ok_or_else(|| invalid("acquired verification receipt has another family"))?;
+            if ordinal < previous {
+                return Err(invalid(
+                    "acquired verification families changed their original order",
+                ));
+            }
+            seen[ordinal] = true;
+            previous = ordinal;
+            let fields = [
+                "kind",
+                "identity",
+                "outcome",
+                "refusal_scope",
+                "comparator_identity",
+                "metric_identity",
+                "tolerance_identity",
+            ];
+            if body.len() != fields.len()
+                || fields.iter().any(|field| !body.contains_key(*field))
+                || !body["refusal_scope"].is_null()
+            {
+                return Err(invalid(
+                    "acquired result changed its original typed receipt roster",
+                ));
+            }
+            let identity = body["identity"]
+                .as_str()
+                .ok_or_else(|| invalid("verification receipt identity is absent"))?;
+            replay_digest_identity(identity)?;
+            if !identities.insert(identity)
+                || !self.materials.iter().any(|material| {
+                    material.kind == "receipt"
+                        && material.identity == identity
+                        && material.bytes.is_some()
+                })
+            {
+                return Err(invalid(
+                    "verification receipt lacks its distinct complete original material",
+                ));
+            }
+            for name in [
+                "comparator_identity",
+                "metric_identity",
+                "tolerance_identity",
+            ] {
+                if family == "measurement" {
+                    replay_digest_identity(body[name].as_str().ok_or_else(|| {
+                        invalid("measurement requires its frozen comparator, metric and tolerance")
+                    })?)?;
+                } else if !body[name].is_null() {
+                    return Err(invalid(
+                        "only measurement carries comparator, metric and tolerance identities",
+                    ));
+                }
+            }
+            match (family, body["outcome"].as_str()) {
+                ("measurement", Some("REJECTED")) => disposition = 2,
+                ("measurement", Some("EXACT" | "REPRODUCIBLE_NOT_EXACT")) => {}
+                (_, Some("PASS" | "FAIL")) if family != "measurement" => {}
+                _ => {
+                    return Err(invalid(
+                        "acquired verification receipt has another typed outcome",
+                    ));
+                }
+            }
+        }
+        if !seen.into_iter().all(|present| present) {
+            return Err(invalid(
+                "acquired result requires all five verification families",
+            ));
+        }
+        Ok(disposition)
     }
 
     fn python_view(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
@@ -7048,6 +7371,7 @@ struct TaskCheckpointSeed {
     evaluation: Vec<ColdValue>,
     training_objective: ColdValue,
     training_domain: ColdValue,
+    replay_capacity: ColdValue,
     initial_sources: ColdValue,
     source_mapping: ColdValue,
     replay_selection: ColdValue,
@@ -7173,6 +7497,7 @@ impl TaskCheckpointSeed {
             ColdValue::Integer(capacity.to_string()),
             ColdValue::Integer(expense.spent.to_string()),
             checkpoint_sources,
+            self.replay_capacity.clone(),
         ])))
     }
 
@@ -7184,8 +7509,9 @@ impl TaskCheckpointSeed {
         CheckpointTaskPhase,
         TaskCheckpointBinding,
     )> {
-        let value = checkpoint_cold_value(bytes)?;
-        let fields = value.fields(14)?;
+        let value = checkpoint_cold_value(bytes, 16 * 1024 * 1024)?;
+        let fields = value.fields(15)?;
+        read_replay_capacity(&fields[14])?;
         let capacity = fields[11].unsigned()?;
         let spent = fields[12].unsigned()?;
         if spent > capacity {
@@ -7220,6 +7546,7 @@ impl TaskCheckpointSeed {
                 evaluation: fields[1].sequence()?.to_vec(),
                 training_objective: fields[2].clone(),
                 training_domain: fields[10].clone(),
+                replay_capacity: fields[14].clone(),
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
@@ -7273,7 +7600,7 @@ fn checkpoint_cold_value_bytes(value: &ColdValue) -> Vec<u8> {
     bytes
 }
 
-fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
+fn checkpoint_cold_value(bytes: &[u8], mut byte_budget: usize) -> PyResult<ColdValue> {
     fn take<'a>(remaining: &mut &'a [u8], count: usize) -> PyResult<&'a [u8]> {
         if count > remaining.len() {
             return Err(invalid("checkpoint task capsule is truncated"));
@@ -7353,8 +7680,7 @@ fn checkpoint_cold_value(bytes: &[u8]) -> PyResult<ColdValue> {
             "checkpoint task capsule has another domain or version",
         ));
     }
-    let mut budget = 16 * 1024 * 1024;
-    let value = decode(&mut remaining, &mut budget, 0)?;
+    let value = decode(&mut remaining, &mut byte_budget, 0)?;
     if !remaining.is_empty() {
         return Err(invalid("checkpoint task capsule has trailing bytes"));
     }
@@ -10362,6 +10688,33 @@ impl PySemanticPreparedStep {
             consumer_stream,
             SemanticTransitionSession::prepared_terminal,
         )
+    }
+
+    /// Return the original cold cache metadata; live extents remain on device.
+    #[pyo3(signature = (role, index, bank))]
+    fn tensor_metadata(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+        bank: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let mut budget = 128;
+        let role = SemanticStateRole::from_code(ColdValue::read(role, &mut budget, 0)?.unsigned()?)
+            .ok_or_else(|| invalid("unknown native publication tensor role"))?;
+        let index = ColdValue::read(index, &mut budget, 0)?.unsigned()?;
+        let bank = usize::try_from(ColdValue::read(bank, &mut budget, 0)?.unsigned()?)
+            .map_err(|_| invalid("prepared tensor bank exceeds native address space"))?;
+        let metadata = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            self.content_binding_with_owner(py, &owner)?;
+            owner
+                .prepared_tensor_metadata(&self.inner, role, index, bank)
+                .map_err(xlog_err)?
+        };
+        tensor_metadata_value(py, metadata)
     }
 
     #[pyo3(signature = (role, index, bank, *, consumer_stream))]
@@ -13718,6 +14071,30 @@ impl PySemanticPublishedParent {
     /// It is not a publication identity. The native owner orders producer work
     /// onto it without a host wait. Role/index must exist and have computed
     /// content; capacity does not make unused rows valid model inputs.
+    /// Return the acquired cache's retained layout and sealed logical interval.
+    #[pyo3(signature = (*, role, index))]
+    fn tensor_metadata(
+        &self,
+        py: Python<'_>,
+        role: &Bound<'_, PyAny>,
+        index: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let mut budget = 128;
+        let role = SemanticStateRole::from_code(ColdValue::read(role, &mut budget, 0)?.unsigned()?)
+            .ok_or_else(|| invalid("unknown native publication tensor role"))?;
+        let index = ColdValue::read(index, &mut budget, 0)?.unsigned()?;
+        let metadata = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            self.task_use.borrow(py).require_current(&owner)?;
+            owner
+                .published_tensor_metadata(&*self.lease()?, role, index)
+                .map_err(xlog_err)?
+        };
+        tensor_metadata_value(py, metadata)
+    }
+
     #[pyo3(signature = (*, role, index, consumer_stream))]
     fn tensor(
         &self,
@@ -14079,6 +14456,17 @@ impl PySemanticTransitionTaskUse {
             .into_pyobject(py)?
             .into_any()
             .unbind())
+    }
+
+    /// Return the original eight-field replay reservation, or explicit None.
+    /// The same retained projection survives a fresh checkpoint restore and
+    /// does not grant a row, actor eligibility, or permission to resize storage.
+    fn task_replay_capacity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        let session = self.session.borrow(py);
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        self.checkpoint.replay_capacity.python_value(py)
     }
 
     /// Read the original ex-ante actor decision from the retained native task.
@@ -15538,6 +15926,9 @@ impl PySemanticTransitionController {
     /// native binding does not authenticate external manifest ownership. None
     /// explicitly means no prospective training arena and cannot be expanded
     /// into one during later admission. It grants no actor eligibility.
+    /// ``replay_capacity`` is the complete eight-field parent replay-append
+    /// reservation, or explicit None. It is frozen during this original import;
+    /// parent binding and every private restore must retain it exactly.
     ///
     /// ``training_objective`` is None only when replay_rows is empty. Otherwise it
     /// is ``(evaluator_f64_bits, coefficient_f32_bits, cost, truth_tokens, groups,
@@ -15684,7 +16075,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, live_authorities, replay_rows, training_objective, training_domain, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -15706,6 +16097,7 @@ impl PySemanticTransitionController {
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        replay_capacity: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
         max_evidence_bytes: &Bound<'_, PyAny>,
@@ -15794,7 +16186,14 @@ impl PySemanticTransitionController {
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
+        let replay_capacity_value = replay_capacity_value(replay_capacity, &mut budget)?;
+        let replay_capacity = read_replay_capacity(&replay_capacity_value)?;
         let training_objective = read_training_objective(&training_objective_value)?;
+        if training_views.is_empty() && replay_capacity.is_some() {
+            return Err(invalid(
+                "replay append capacity requires its original training roster",
+            ));
+        }
         if training_views.is_empty() != training_objective.is_none() {
             return Err(invalid(
                 "training objective must exist exactly when replay rows exist",
@@ -15921,7 +16320,7 @@ impl PySemanticTransitionController {
             }
             if let Some(objective) = training_objective {
                 owner
-                    .bind_training_view_arena(training_views, objective)
+                    .bind_training_view_arena(training_views, objective, replay_capacity)
                     .map_err(xlog_err)?;
             }
             if let Some(material) = &selected_material {
@@ -15968,6 +16367,7 @@ impl PySemanticTransitionController {
                     evaluation,
                     training_objective: training_objective_value,
                     training_domain: training_domain_value,
+                    replay_capacity: replay_capacity_value,
                     initial_sources,
                     source_mapping,
                     replay_selection,
@@ -16371,6 +16771,7 @@ impl PySemanticTransitionController {
                         goal_witness,
                         training_views,
                         objective,
+                        read_replay_capacity(&selected_seed.replay_capacity)?,
                     )
                     .map_err(xlog_err)?;
                 let binding = TaskCheckpointBinding::from_owner(&owner)?;
@@ -16408,6 +16809,7 @@ impl PySemanticTransitionController {
                         evaluation: selected_seed.evaluation,
                         training_objective: objective_value,
                         training_domain: selected_seed.training_domain,
+                        replay_capacity: selected_seed.replay_capacity,
                         initial_sources: selected_seed.initial_sources,
                         source_mapping: selected_seed.source_mapping,
                         replay_selection: selected_seed.replay_selection,
@@ -17927,6 +18329,109 @@ impl PySemanticTransitionController {
         if verification_key.iter().all(|&byte| byte == 0) || expected_effect.is_empty() {
             return Err(invalid("trusted receiver key and effect must be nonempty"));
         }
+        if task_use
+            .delivery
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("delivery receiver binding mutex is poisoned"))?
+            .is_some()
+        {
+            return Err(invalid(
+                "task use already has its one delivery receiver binding",
+            ));
+        }
+        let mut owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        let mut lease = owner.acquire().map_err(xlog_err)?;
+        let stored = owner.replay_append_rows(&lease).map_err(xlog_err);
+        drop(owner);
+        let authentication = (|| -> PyResult<()> {
+            let stored = stored?;
+            let mut parsed = Vec::with_capacity(stored.len());
+            if !stored.is_empty() {
+                let limits = session
+                    .owner()?
+                    .replay_append_limits(&lease)
+                    .map_err(xlog_err)?;
+                let [metadata_limit, material_limit, total_material_limit, evidence_limit] = limits
+                    .map(|limit| {
+                        usize::try_from(limit)
+                            .map_err(|_| invalid("replay append limit exceeds host address space"))
+                    });
+                let metadata_limit = metadata_limit?;
+                let material_limit = material_limit?;
+                let total_material_limit = total_material_limit?;
+                let evidence_limit = evidence_limit?;
+                for bytes in stored {
+                    let value = checkpoint_cold_value(&bytes, bytes.len())?.python_value(py)?;
+                    let carrier = PyTuple::new(py, [value])?;
+                    // These limits belong to each original acquisition. The
+                    // complete archived roster has its separate frozen native
+                    // payload bound; restoring more than one row must not
+                    // shrink the allowance accepted for any original row.
+                    let mut budget = metadata_limit;
+                    let rows = read_replay_rows(
+                        carrier.as_any(),
+                        &mut budget,
+                        material_limit,
+                        total_material_limit,
+                        evidence_limit,
+                    )?;
+                    let value = &rows.fields(1)?[0];
+                    if value.canonical_bytes().len() > metadata_limit
+                        || checkpoint_cold_value_bytes(value) != bytes
+                    {
+                        return Err(invalid(
+                            "acquired replay payload differs from its complete original row",
+                        ));
+                    }
+                    let row = ReplayRow::parse_with_live(value, &task_use.authority.live)?;
+                    if !matches!(&row.basis, ReplayBasis::Episode { .. })
+                        || row.checkpoint_referent()?.is_some()
+                    {
+                        return Err(invalid(
+                            "acquired replay requires one original episode without a checkpoint referent",
+                        ));
+                    }
+                    let envelope = replay_json_object(replay_json_field(&row.record, "envelope")?)?;
+                    if replay_json_value(replay_json_field(&envelope, "actor_eligible")?)?
+                        != serde_json::Value::Bool(false)
+                    {
+                        return Err(invalid("acquired replay rows cannot carry actor authority"));
+                    }
+                    let record_digest =
+                        Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
+                    let evidence_digest =
+                        Identity256::from_bytes(Sha256::digest(&row.evidence).into());
+                    let training_row = row.training_view_row()?;
+                    let disposition = row.acquired_result_disposition()?;
+                    let action_identity = row.action_identity()?;
+                    parsed.push((
+                        row.native_replay()?.material,
+                        training_row,
+                        bytes,
+                        action_identity,
+                        record_digest,
+                        evidence_digest,
+                        disposition,
+                    ));
+                }
+            }
+            let mut owner = session.owner()?;
+            task_use.require_current(&owner)?;
+            owner
+                .authenticate_replay_appends(
+                    &lease,
+                    recipient_id,
+                    &verification_key,
+                    &expected_effect,
+                    &parsed,
+                )
+                .map_err(xlog_err)
+        })();
+        let cleanup = session
+            .owner()
+            .and_then(|mut owner| owner.release(&mut lease, &[1]).map_err(xlog_err));
+        finish_with_cleanup(py, authentication, cleanup)?;
         let mut binding = task_use
             .delivery
             .lock()
@@ -17990,6 +18495,207 @@ impl PySemanticTransitionController {
         )
             .into_pyobject(py)?
             .unbind())
+    }
+
+    /// Publish the authenticated acquired replay row and its delivery receipt
+    /// through the same native acknowledgement operation.
+    #[pyo3(signature = (task_use, *, parent, snapshot, delivery_receipt, result_receipt, replay_row))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "replay acknowledgement retains its original authority, receipts and complete row"
+    )]
+    /// Acquire and acknowledge one original replay row. An entered/unknown
+    /// result raises SemanticReplayDeliveryPending with its original owners.
+    fn acknowledge_replay_delivery(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &Bound<'_, PySemanticPublishedParent>,
+        snapshot: &Bound<'_, PyAny>,
+        delivery_receipt: &Bound<'_, PyAny>,
+        result_receipt: &Bound<'_, PyAny>,
+        replay_row: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let controller = slf.borrow();
+        let acquired = parent.borrow();
+        controller.session.borrow(py).require_creator()?;
+        controller.require_issued(task_use)?;
+        acquired.require_task(py, task_use)?;
+        if acquired.session.as_ptr() != controller.session.as_ptr() {
+            return Err(invalid("replay delivery parent belongs to another Session"));
+        }
+        if !delivery_receipt.is_exact_instance_of::<PyBytes>()
+            || !result_receipt.is_exact_instance_of::<PyBytes>()
+        {
+            return Err(invalid(
+                "replay acknowledgement requires exact delivery and result receipt bytes",
+            ));
+        }
+        let binding = task_use.delivery_binding()?;
+        let limits = {
+            let session = controller.session.borrow(py);
+            let owner = session.owner()?;
+            if owner.replay_delivery_pending() {
+                return Err(invalid(
+                    "replay delivery already entered; resolve its original parent instead of resubmitting",
+                ));
+            }
+            task_use.require_current(&owner)?;
+            owner
+                .replay_append_limits(&*acquired.lease()?)
+                .map_err(xlog_err)?
+        };
+        let [metadata_limit, material_limit, total_material_limit, evidence_limit] =
+            limits.map(|limit| {
+                usize::try_from(limit)
+                    .map_err(|_| invalid("replay append limit exceeds host address space"))
+            });
+        let metadata_limit = metadata_limit?;
+        let mut budget = metadata_limit;
+        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let carrier = PyTuple::new(py, [replay_row])?;
+        let values = read_replay_rows(
+            carrier.as_any(),
+            &mut budget,
+            material_limit?,
+            total_material_limit?,
+            evidence_limit?,
+        )?;
+        let original = &values.fields(1)?[0];
+        if original.canonical_bytes().len() > metadata_limit {
+            return Err(invalid(
+                "canonical replay row exceeds its original append metadata capacity",
+            ));
+        }
+        // Unlike the identity projection, this original checkpoint codec
+        // retains every material and evidence byte for authenticated restore.
+        let canonical_row = checkpoint_cold_value_bytes(original);
+        let row = ReplayRow::parse_with_live(original, &task_use.authority.live)?;
+        if !matches!(&row.basis, ReplayBasis::Episode { .. }) {
+            return Err(invalid(
+                "replay acknowledgement requires one original executable episode",
+            ));
+        }
+        let envelope = replay_json_object(replay_json_field(&row.record, "envelope")?)?;
+        if replay_json_value(replay_json_field(&envelope, "actor_eligible")?)?
+            != serde_json::Value::Bool(false)
+            || row.checkpoint_referent()?.is_some()
+        {
+            return Err(invalid(
+                "acquired replay delivery requires a non-actor row without a checkpoint referent",
+            ));
+        }
+        let record_digest =
+            Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
+        let evidence_digest = Identity256::from_bytes(Sha256::digest(&row.evidence).into());
+        let action_identity = row.action_identity()?;
+        let disposition = row.acquired_result_disposition()?;
+        let training_row = row.training_view_row()?;
+        let replay = row.native_replay()?;
+        // Construct all Python custody before native entry. The native pending
+        // owner independently retains the actual uploaded receipts and row.
+        let pending = replay_delivery_pending_error(py, slf, parent)?;
+        pending
+            .value(py)
+            .setattr("delivery_receipt", delivery_receipt)?;
+        pending
+            .value(py)
+            .setattr("result_receipt", result_receipt)?;
+        let session = controller.session.borrow(py);
+        let mut owner = session.owner()?;
+        task_use.require_current(&owner)?;
+        {
+            let mut state = task_use.state()?;
+            state.revalidate_activation(&task_use.authority, snapshot)?;
+            if disposition == 1 {
+                if let Err(error) = task_use
+                    .authority
+                    .check_use("training", &state.snapshot, false)
+                {
+                    state.phase = TaskUsePhase::Refused;
+                    return Err(error);
+                }
+            }
+        }
+        let result = owner.acknowledge_replay_delivery(
+            &*acquired.lease()?,
+            delivery_receipt.cast::<PyBytes>()?.as_bytes(),
+            result_receipt.cast::<PyBytes>()?.as_bytes(),
+            binding.recipient_id,
+            &binding.verification_key,
+            &binding.expected_effect,
+            &replay.material,
+            training_row,
+            &canonical_row,
+            action_identity,
+            record_digest,
+            evidence_digest,
+            disposition,
+        );
+        let entered = owner.replay_delivery_pending();
+        drop(owner);
+        drop(session);
+        let identity = match result {
+            Ok(identity) => identity,
+            Err(error) => {
+                let original = xlog_err(error);
+                if entered {
+                    pending.set_cause(py, Some(original));
+                    return Err(pending);
+                }
+                return Err(original);
+            }
+        };
+        replay_delivery_identity_result(py, slf, parent, identity, entered, pending)
+    }
+
+    /// Join the original entered replay delivery without a new authority
+    /// snapshot, replacement row, or second native submission.
+    #[pyo3(signature = (*, parent))]
+    fn resolve_replay_delivery(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        parent: &Bound<'_, PySemanticPublishedParent>,
+    ) -> PyResult<Py<PyTuple>> {
+        let controller = slf.borrow();
+        let acquired = parent.borrow();
+        controller.session.borrow(py).require_creator()?;
+        if acquired.session.as_ptr() != controller.session.as_ptr()
+            || !Arc::ptr_eq(
+                &controller.identity,
+                &acquired.task_use.borrow(py).controller,
+            )
+        {
+            return Err(invalid(
+                "replay delivery resolver requires its original controller and Session",
+            ));
+        }
+        let pending = replay_delivery_pending_error(py, slf, parent)?;
+        let session = controller.session.borrow(py);
+        let mut owner = session.owner()?;
+        let lease = acquired.lease()?;
+        // Wrong-parent errors are not uncertain execution outcomes. The same
+        // native owner validates this lease before entering the join below.
+        owner
+            .validate_replay_delivery_parent(&lease)
+            .map_err(xlog_err)?;
+        let result = owner.resolve_replay_delivery(&lease);
+        let entered = owner.replay_delivery_pending();
+        drop(lease);
+        drop(owner);
+        drop(session);
+        let identity = match result {
+            Ok(identity) => identity,
+            Err(error) => {
+                let original = xlog_err(error);
+                if entered {
+                    pending.set_cause(py, Some(original));
+                    return Err(pending);
+                }
+                return Err(original);
+            }
+        };
+        replay_delivery_identity_result(py, slf, parent, identity, entered, pending)
     }
 }
 
