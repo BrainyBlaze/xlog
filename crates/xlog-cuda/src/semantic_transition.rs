@@ -489,7 +489,11 @@ pub struct SemanticTaskObservationRoots {
     /// Query ordinal, genuine original insertion target (absent for a derived
     /// target), and original support record. Ordered by query, then insertion.
     /// A matching query value never supplies an absent original target.
-    pub contributors: Vec<(u32, Option<u32>, u32)>,
+    pub contributors: Vec<(
+        u32,
+        Option<u32>,
+        crate::semantic_hypergraph::SemanticRootSupport,
+    )>,
 }
 
 /// Native seal of the independently validated goal authority carried by the
@@ -15037,6 +15041,7 @@ pub struct SemanticTransitionSession {
     prepared_segment: Option<PreparedSegmentState>,
     prepared_resources: Vec<Arc<dyn Send + Sync>>,
     pending_replay_delivery: Option<PendingReplayDelivery>,
+    pub(super) task_observations_authenticated: bool,
     next_reader: u64,
     continuation_base: Option<u64>,
     text_binding: Option<Arc<TextBindingStorage>>,
@@ -28714,6 +28719,7 @@ impl SemanticTransitionSession {
             prepared_segment: None,
             prepared_resources: Vec::new(),
             pending_replay_delivery: None,
+            task_observations_authenticated: true,
             continuation_base: None,
             text_binding: None,
             admitted_transition: None,
