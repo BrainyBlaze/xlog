@@ -888,6 +888,10 @@ impl OriginalDeviceWrite {
         self.transfer.entered()
     }
 
+    pub(super) fn pending(&self) -> bool {
+        self.entered() && !self.completed && !self.retired
+    }
+
     pub(super) fn resolve(
         &mut self,
         domain: &ResidentExecutionDomain,

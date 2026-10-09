@@ -18861,6 +18861,80 @@ impl SemanticTransitionSession {
         self.prepared_segment.as_ref().is_some_and(|build| build.initialization_pending.load(Ordering::Acquire))
     }
 
+    /// Classify uncertainty of the original allocation or its whole-roster
+    /// cancellation. This metadata query performs no join or new device effect.
+    pub fn prepared_segment_preparation_pending(
+        &self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<bool, SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || build.submitted || build.capturing || build.completed
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)|
+                step.token != *token || build.check_retained(step, &self.publication_issuer).is_err()
+                    || !self.steps.contains_key(token))
+        {
+            return Err(publication_input_error("preparation pending changed its original unused full roster"));
+        }
+        if self.has_independent_session_native_effect()
+            || self.replay_verification_pending.load(Ordering::Acquire)
+            || self.has_pending_prepared_metadata_freeze()
+            || !self.original_session_completion_is_uncontended()
+            || self.graph.ensure_not_poisoned().is_err()
+            || self.has_pending_state_restoration_except(None, None)
+            || self.readers.values().any(|reader| reader.retirement_pending)
+            || self.steps.iter().any(|(token, step)|
+                step.consumer_completion.is_some() && !build.tokens.contains(token))
+            || {
+                #[cfg(feature = "semantic-policy")]
+                { self.has_pending_actor_refresh_context_except(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { false }
+            }
+        {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        if let Some(original) = &build.initialization {
+            let original = original.lock()
+                .map_err(|_| publication_input_error("original initialization custody is poisoned"))?;
+            if !Arc::ptr_eq(&original.issuer, &build.issuer)
+                || !Arc::ptr_eq(&original.scope, &build.scope)
+                || !Arc::ptr_eq(&original.cancelled, &build.cancelled)
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            if !original.complete && !original.retired
+                && (original.writes.iter().any(state_restoration::OriginalDeviceWrite::pending)
+                    || original.catalogue.as_ref().is_some_and(|catalogue|
+                        !catalogue.command.completed
+                            && (catalogue.command.entered || catalogue.command.completion_entered)))
+            {
+                return Ok(true);
+            }
+        }
+        for token in &build.tokens {
+            if let Some(original) = &self.steps[token].consumer_completion {
+                let original = original.lock()
+                    .map_err(|_| publication_input_error("original cancellation consumer custody is poisoned"))?;
+                if original.purpose != OriginalConsumerPurpose::Cancellation
+                    || original.identity.is_some()
+                    || !build.cancelled.load(Ordering::Acquire)
+                    || original.cancellation_scope.as_ref()
+                        .is_none_or(|scope| !Arc::ptr_eq(scope, &build.scope))
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                if !original.completed && original.poisoned
+                    && (original.cursor != 0 || original.edges.iter().any(|edge| edge.record_entered || edge.wait_entered))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn has_pending_prepared_metadata_freeze(&self) -> bool {
         self.prepared_segment.as_ref().is_some_and(|build| build.metadata_pending.load(Ordering::Acquire))
     }
@@ -32520,6 +32594,11 @@ impl SemanticTransitionSession {
     }
 
     fn has_independent_session_native_effect(&self) -> bool {
+        self.has_retired_prepared_initialization()
+            || self.has_independent_session_native_effect_except_retired_preparation()
+    }
+
+    fn has_independent_session_native_effect_except_retired_preparation(&self) -> bool {
         self.poisoned
             || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
             || {
@@ -32604,7 +32683,11 @@ impl SemanticTransitionSession {
             && !self.replay_verification_pending.load(Ordering::Acquire)
             && (initialization.is_some() || !self.has_pending_prepared_segment_preparation())
             && (metadata.is_some() || !self.has_pending_prepared_metadata_freeze())
-            && self.original_session_completion_is_uncontended()
+            && self.original_prepared_non_owner_effects_are_clear()
+    }
+
+    fn original_prepared_non_owner_effects_are_clear(&self) -> bool {
+        self.original_session_completion_is_uncontended()
             && !self.readers.values().any(|reader| reader.retirement_pending)
             && !self.steps.values().any(|step| step.consumer_completion.is_some())
             && self.graph.ensure_not_poisoned().is_ok()
@@ -32615,6 +32698,18 @@ impl SemanticTransitionSession {
                 #[cfg(not(feature = "semantic-policy"))]
                 { true }
             }
+    }
+
+    // The consuming caller separately authenticates this exact retired slot,
+    // its original cancelled scope and the completed resource/graph retirement.
+    // Exclude no pending effect: only the terminal catalogue pin is omitted.
+    fn retired_prepared_initialization_may_release(&self) -> bool {
+        self.has_retired_prepared_initialization()
+            && !self.has_independent_session_native_effect_except_retired_preparation()
+            && !self.replay_verification_pending.load(Ordering::Acquire)
+            && !self.has_pending_prepared_segment_preparation()
+            && !self.has_pending_prepared_metadata_freeze()
+            && self.original_prepared_non_owner_effects_are_clear()
     }
 
     /// Irreversibly close this owner after trusted application validation fails,
