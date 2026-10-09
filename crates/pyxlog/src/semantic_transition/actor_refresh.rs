@@ -307,6 +307,12 @@ pub(super) struct ActorRefreshCustody {
 #[derive(Default)]
 struct ActorRefreshChild {
     construction_entered: bool,
+    allocation: Option<CheckpointAllocationDomain>,
+    construction: Option<Arc<Mutex<ActorRefreshConstruction>>>,
+    constructor_retired: bool,
+    observer: Option<Arc<dyn xlog_cuda::SemanticTaskProgram>>,
+    observer_terminal_error: Option<PyErr>,
+    cold_content: Option<(xlog_cuda::SemanticTaskContentIdentity, Vec<xlog_cuda::SemanticTruth>)>,
     session: Option<Py<PySemanticTransitionSession>>,
     controller: Option<Py<PySemanticTransitionController>>,
     task: Option<Py<PySemanticTransitionTaskUse>>,
@@ -346,6 +352,12 @@ struct ActorRefreshChild {
 impl ActorRefreshChild {
     fn pristine(&self) -> bool {
         !self.construction_entered
+            && self.allocation.is_none()
+            && self.construction.is_none()
+            && !self.constructor_retired
+            && self.observer.is_none()
+            && self.observer_terminal_error.is_none()
+            && self.cold_content.is_none()
             && self.session.is_none()
             && self.controller.is_none()
             && self.task.is_none()
@@ -381,6 +393,59 @@ impl ActorRefreshChild {
             && self.retirement_streams.is_none()
             && !self.retired
     }
+
+    fn constructor_only(&self) -> bool {
+        if self.pristine() {
+            return true;
+        }
+        self.observer.is_none()
+            && self.observer_terminal_error.is_none()
+            && self.cold_content.is_none()
+            && self.controller.is_none()
+            && self.task.is_none()
+            && self.scope.is_none()
+            && self.steps.is_empty()
+            && self.producer.is_none()
+            && self.prepared.is_none()
+            && self.original_prepared.is_none()
+            && self.resources.is_none()
+            && self.retirement_work.is_none()
+            && !self.retirement_attached
+            && !self.owner_callback_entered
+            && self.native_steps.is_empty()
+            && self.checkpoint_phase.is_none()
+            && !self.preparation_entered
+            && !self.context_ready
+            && !self.successors_entered
+            && !self.successors_ready
+            && !self.recording_entered
+            && !self.recorded
+            && !self.frozen
+            && self.delivery.is_none()
+            && !self.vjp_entered
+            && !self.vjp_recorded
+            && self.completion.is_none()
+            && !self.producer_retirement_entered
+            && !self.producer_retired
+            && !self.graph_retired
+            && !self.resources_retired
+            && !self.native_released
+    }
+}
+
+struct ActorRefreshConstruction {
+    native: xlog_cuda::SemanticTransitionSessionConstruction,
+    records: SemanticAdmissionRecords,
+    parent: Py<cold_task::PySemanticTransitionFreshParent>,
+    task_ground: ColdValue,
+    editable: Option<cold_task::EditableTaskSource>,
+    capacities: (u32, u32, u32, u32),
+    limits: (u32, u32, u32, usize),
+    device: usize,
+    memory: u64,
+    proposal_expense: Arc<Mutex<ProposalExpense>>,
+    checkpoint_sources: Arc<Mutex<CheckpointSources>>,
+    canary: Option<TrainingCanaryOwner>,
 }
 
 enum ActorRefreshCompletion {
@@ -527,35 +592,16 @@ impl ActorRefreshCustody {
         outer: Option<&xlog_cuda::SemanticPreparedSegmentNonSubmission>,
         streams: &[u64],
     ) -> PyResult<()> {
+        if let Some(outer) = outer {
+            for bank in 0..2 {
+                self.retire_cancelled_constructor(py, bank, outer)?;
+            }
+            if self.children()?.iter().all(|child| child.retired) {
+                return Ok(());
+            }
+        }
         let work = self.original_retirement_work(py)?;
         for bank in 0..2 {
-            if let Some(outer) = outer {
-                if self.children()?[bank].pristine() {
-                    let absence = {
-                        let update = self.update.borrow(py);
-                        let target = update.session.borrow(py);
-                        target
-                            .owner()?
-                            .cancel_prepared_actor_refresh(
-                                &update.inner,
-                                bank,
-                                None,
-                                &self.proof,
-                                outer,
-                            )
-                            .map_err(xlog_err)?
-                    };
-                    if absence.is_some() || !self.children()?[bank].pristine() {
-                        return Err(invalid(
-                            "unused actor bank changed during original cancellation",
-                        ));
-                    }
-                    // No constructor, native child or producer ever existed.
-                    // Only unused metadata retires; no outcome is fabricated.
-                    self.children()?[bank].retired = true;
-                    continue;
-                }
-            }
             let (session, prepared) = {
                 let children = self.children()?;
                 let child = &children[bank];
@@ -737,6 +783,76 @@ impl ActorRefreshCustody {
             }
             self.children()?[bank].producer_retired = true;
         }
+        Ok(())
+    }
+
+    fn retire_cancelled_constructor(
+        &self,
+        py: Python<'_>,
+        bank: usize,
+        outer: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<()> {
+        self.require_access(py)?;
+        let (construction, retired) = {
+            let children = self.children()?;
+            let child = &children[bank];
+            if child.retired {
+                return Ok(());
+            }
+            if child.observer.is_some() {
+                return Err(SemanticRetainedFinalUsePending::new_err(
+                    "retain the entered actor observer and constructor; cancellation cannot certify its unfinished observation",
+                ));
+            }
+            if !child.constructor_only() {
+                return Ok(());
+            }
+            (child.construction.as_ref().map(Arc::clone), child.constructor_retired)
+        };
+        if !retired {
+            let update = self.update.borrow(py);
+            let target = update.session.borrow(py);
+            let target = target.owner()?;
+            if let Some(construction) = construction {
+                let mut construction = construction.lock().map_err(|_| invalid("original actor constructor mutex is poisoned"))?;
+                target.retire_actor_refresh_construction(
+                    &update.inner, bank, &self.proof, outer, &mut construction.native,
+                ).map_err(xlog_err)?;
+            } else {
+                // No native constructor claimed this bank. The original outer
+                // proof authenticates absence, including allocation-only metadata.
+                if target.cancel_prepared_actor_refresh(
+                    &update.inner, bank, None, &self.proof, outer,
+                ).map_err(xlog_err)?.is_some() {
+                    return Err(invalid("unconstructed actor bank acquired a native child proof"));
+                }
+            }
+            let owners = {
+                let mut children = self.children()?;
+                let child = &mut children[bank];
+                child.constructor_retired = true;
+                (child.session.take(), child.construction.take(), child.allocation.take(), child.cold_work.take())
+            };
+            if let Some(session) = &owners.0 {
+                let session = session.borrow(py);
+                session.issuance.fetch_add(1, Ordering::AcqRel);
+                session.actor_refresh_child.lock().map_err(|_| invalid("actor Session custody mutex is poisoned"))?.take();
+                session.training_canary_owner.lock().map_err(|_| invalid("symbolic canary owner mutex is poisoned"))?.take();
+            }
+            drop(owners);
+        }
+        let memory = self.children()?[bank].release_memory.as_ref().map(Arc::clone);
+        if let Some(memory) = memory {
+            memory.reap_pending_deallocations().map_err(xlog_err)?;
+        }
+        let original = {
+            let mut children = self.children()?;
+            std::mem::replace(&mut children[bank], ActorRefreshChild {
+                retired: true,
+                ..ActorRefreshChild::default()
+            })
+        };
+        drop(original);
         Ok(())
     }
 
@@ -1192,6 +1308,9 @@ impl ActorRefreshCustody {
         if bank > 1 {
             return Err(invalid("actor child bank must be zero or one"));
         }
+        if let Some(original) = self.children()?[bank].allocation.as_ref() {
+            return Ok(original.clone());
+        }
         let update = self.update.borrow(py);
         let session = update.session.borrow(py);
         let work = session
@@ -1230,11 +1349,181 @@ impl ActorRefreshCustody {
         children[bank].release_memory = Some(Arc::clone(provider.memory()));
         children[bank].cold_work = Some(cold_work.clone());
         children[bank].construction_entered = true;
-        Ok(CheckpointAllocationDomain {
+        let allocation = CheckpointAllocationDomain {
             provider,
             domain,
             cold_work: Some(cold_work),
-        })
+        };
+        children[bank].allocation = Some(allocation.clone());
+        Ok(allocation)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "the original constructor freezes the complete native admission and Python ownership inputs")]
+    pub(super) fn construct_session(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        bank: usize,
+        records: SemanticAdmissionRecords,
+        parent: &Py<cold_task::PySemanticTransitionFreshParent>,
+        task_ground: &ColdValue,
+        capacities: (u32, u32, u32, u32),
+        limits: (u32, u32, u32, usize),
+        device: usize,
+        memory: u64,
+        proposal_expense: Arc<Mutex<ProposalExpense>>,
+        checkpoint_sources: Arc<Mutex<CheckpointSources>>,
+        canary: Option<TrainingCanaryOwner>,
+    ) -> PyResult<(Py<PySemanticTransitionSession>, Py<cold_task::PySemanticTransitionFreshParent>)> {
+        self.require_access(py)?;
+        let original = {
+            let mut children = self.children()?;
+            let child = children.get_mut(bank).ok_or_else(|| invalid("actor child bank must be zero or one"))?;
+            if child.retired {
+                return Err(invalid("original actor constructor was retired"));
+            }
+            if child.construction.is_none() {
+                let allocation = child.allocation.as_ref().ok_or_else(|| invalid("actor construction lost its original allocation"))?;
+                if allocation.provider.device().ordinal() != device
+                    || allocation.provider.memory().budget_limit_bytes() != memory {
+                    return Err(invalid("actor constructor changed its original device or memory budget"));
+                }
+                let editable = cold_task::editable_source_from_admission(&records)?;
+                let update = self.update.borrow(py);
+                let target = update.session.borrow(py);
+                let native = target.owner()?.prepare_actor_refresh_construction(
+                    &update.inner, bank, &self.proof, records.clone(),
+                    SemanticHypergraphCapacities::try_new(capacities.0, capacities.1, capacities.2, capacities.3).map_err(val_err)?,
+                    SemanticAdmissionLimits { max_records: limits.0, max_terms: limits.1, max_references: limits.2, max_utf8_bytes: limits.3 },
+                    editable.as_ref().map(|source| Arc::clone(&source.program)),
+                    child.cold_work.clone().ok_or_else(|| invalid("actor constructor lost its original cold work"))?,
+                ).map_err(xlog_err)?;
+                child.construction = Some(Arc::new(Mutex::new(ActorRefreshConstruction {
+                    native, records: records.clone(), parent: parent.clone_ref(py),
+                    task_ground: task_ground.clone(), editable, capacities, limits, device, memory,
+                    proposal_expense: Arc::clone(&proposal_expense), checkpoint_sources: Arc::clone(&checkpoint_sources), canary: canary.clone(),
+                })));
+            }
+            Arc::clone(child.construction.as_ref().expect("original actor constructor"))
+        };
+        let (storage, original_parent, editable_program, editable_initial_source, editable_observer_source, original_canary) = {
+            let mut original = original.lock().map_err(|_| invalid("original actor constructor mutex is poisoned"))?;
+            let same_canary = match (&original.canary, &canary) {
+                (None, None) => true,
+                (Some((source, owner)), Some((other_source, other_owner))) => Arc::ptr_eq(source, other_source) && owner.as_ptr() == other_owner.as_ptr(),
+                _ => false,
+            };
+            if original.records != records || original.parent.borrow(py).ne(&*parent.borrow(py))
+                || original.task_ground != *task_ground || original.capacities != capacities
+                || original.limits != limits || original.device != device || original.memory != memory
+                || !Arc::ptr_eq(&original.proposal_expense, &proposal_expense)
+                || !Arc::ptr_eq(&original.checkpoint_sources, &checkpoint_sources) || !same_canary {
+                return Err(invalid("actor constructor changed its original admitted inputs"));
+            }
+            if let Some(session) = self.children()?[bank].session.as_ref() {
+                return Ok((session.clone_ref(py), original.parent.clone_ref(py)));
+            }
+            let update = self.update.borrow(py);
+            let target = update.session.borrow(py);
+            let storage = target.owner()?.resolve_actor_refresh_construction(
+                &update.inner, bank, &self.proof, &mut original.native,
+            ).map_err(xlog_err)?;
+            if let Some((source, _)) = &original.canary {
+                storage.lock().map_err(|_| invalid("original constructed Session mutex is poisoned"))?
+                    .as_mut().ok_or_else(|| invalid("original constructed Session was released"))?
+                    .bind_training_canary_source(Arc::clone(source)).map_err(xlog_err)?;
+            }
+            (
+                storage, original.parent.clone_ref(py),
+                original.editable.as_ref().map(|source| Arc::clone(&source.program)),
+                original.editable.as_ref().map(|source| source.initial_source.clone()),
+                original.editable.as_ref().and_then(|source| source.observer_source.clone()),
+                original.canary.clone(),
+            )
+        };
+        let mut wrapper = PySemanticTransitionSession::from_shared_native(
+            storage, None, device, capacities, limits, memory, proposal_expense, checkpoint_sources, original_canary,
+        );
+        wrapper.editable_program = editable_program;
+        wrapper.editable_initial_source = editable_initial_source;
+        wrapper.editable_observer_source = editable_observer_source;
+        let session = Py::new(py, wrapper)?;
+        self.retain_session(py, bank, &session)?;
+        Ok((session, original_parent))
+    }
+
+    pub(super) fn constructed_content(&self, bank: usize) -> PyResult<Option<(xlog_cuda::SemanticTaskContentIdentity, Vec<xlog_cuda::SemanticTruth>)>> {
+        Ok(self.children()?.get(bank).ok_or_else(|| invalid("actor child bank must be zero or one"))?.cold_content.clone())
+    }
+
+    pub(super) fn observe_constructed_content(
+        &self,
+        py: Python<'_>,
+        bank: usize,
+        program: Arc<dyn xlog_cuda::SemanticTaskProgram>,
+        statements: &[u32],
+        ground: &xlog_cuda::SemanticTaskGround,
+    ) -> PyResult<(xlog_cuda::SemanticTaskContentIdentity, Vec<xlog_cuda::SemanticTruth>)> {
+        self.require_access(py)?;
+        let session = {
+            let mut children = self.children()?;
+            let child = children.get_mut(bank).ok_or_else(|| invalid("actor child bank must be zero or one"))?;
+            if let Some(content) = &child.cold_content {
+                return Ok(content.clone());
+            }
+            if let Some(error) = &child.observer_terminal_error {
+                return Err(error.clone_ref(py));
+            }
+            if child.observer.is_some() {
+                return Err(SemanticPreparedSegmentPending::new_err(
+                    "retain the original actor observer and constructor; an entered observer cannot be called again",
+                ));
+            }
+            let session = child.session.as_ref().ok_or_else(|| invalid("actor observer lost its original Session"))?.clone_ref(py);
+            session
+        };
+        let (result, entered, completed) = {
+            let session = session.borrow(py);
+            let mut native = session.owner()?;
+            {
+                let mut children = self.children()?;
+                // Keep the executable observer alive before its one original
+                // call. Only native entry metadata classifies an error.
+                children[bank].observer = Some(Arc::clone(&program));
+            }
+            let result = native.observe_cold_task_content(
+                statements, &[], program.as_ref(), ground,
+            );
+            (result, native.cold_task_observer_entered(), native.cold_task_observer_completed())
+        };
+        let content = match result {
+            Ok(content) => content,
+            Err(error) if !entered => {
+                self.children()?[bank].observer = None;
+                return Err(xlog_err(error));
+            }
+            Err(error) if completed => {
+                let error = xlog_err(error);
+                self.children()?[bank].observer_terminal_error = Some(error.clone_ref(py));
+                return Err(error);
+            }
+            Err(error) => {
+                let pending = SemanticPreparedSegmentPending::new_err(
+                    "retain the original actor observer and constructor; do not replay the observer or retire it as unentered construction",
+                );
+                pending.set_cause(py, Some(xlog_err(error)));
+                return Err(pending);
+            }
+        };
+        let mut children = self.children()?;
+        let child = &mut children[bank];
+        child.cold_content = Some(content.clone());
+        child.observer = None;
+        Ok(content)
+    }
+
+    pub(super) fn constructed_controller(&self, py: Python<'_>, bank: usize) -> PyResult<Option<Py<PySemanticTransitionController>>> {
+        Ok(self.children()?.get(bank).ok_or_else(|| invalid("actor child bank must be zero or one"))?
+            .controller.as_ref().map(|controller| controller.clone_ref(py)))
     }
 
     pub(super) fn shared_import_owners(
@@ -1287,7 +1576,7 @@ impl ActorRefreshCustody {
         let child = children
             .get_mut(bank)
             .ok_or_else(|| invalid("actor child bank must be zero or one"))?;
-        if child.session.is_none() || child.controller.is_some() {
+        if child.session.is_none() || child.controller.as_ref().is_some_and(|original| original.as_ptr() != controller.as_ptr()) {
             return Err(invalid(
                 "actor child cannot replace its original Controller",
             ));

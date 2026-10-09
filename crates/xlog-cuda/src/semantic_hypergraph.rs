@@ -1247,6 +1247,42 @@ pub struct SemanticAdmission {
     pub(crate) encoded_records: Vec<SemanticRecordEncoding>,
 }
 
+struct PreparedSemanticAdmission {
+    records: SemanticAdmissionRecords,
+    symbols: symbol::SymbolSnapshot,
+    schema_bytes: Vec<u8>,
+    schema_generation: Identity256,
+    base: SemanticRootHandle,
+    statement_keys: Vec<Option<SemanticStatementKey>>,
+    support_events: Vec<SemanticSupportEvent>,
+    encoded_records: Vec<SemanticRecordEncoding>,
+}
+
+impl PreparedSemanticAdmission {
+    fn finish(self, base_snapshot: SemanticRootSnapshot) -> SemanticAdmission {
+        let identity = derive_admission_identity(
+            &self.records,
+            self.schema_generation,
+            &self.encoded_records,
+            &self.statement_keys,
+            &self.support_events,
+            &base_snapshot,
+        );
+        SemanticAdmission {
+            records: self.records,
+            symbols: self.symbols,
+            schema_bytes: self.schema_bytes,
+            schema_generation: self.schema_generation,
+            identity,
+            base: self.base,
+            base_snapshot,
+            statement_keys: self.statement_keys,
+            support_events: self.support_events,
+            encoded_records: self.encoded_records,
+        }
+    }
+}
+
 /// The exact admitted atom preimage and its typed argument ranges. Derived device
 /// views borrow these bytes; symbols are never looked up a second time.
 pub(crate) struct SemanticRecordEncoding {
@@ -1346,6 +1382,15 @@ fn admit_semantic_records(
     base: SemanticRootHandle,
     observe_base: impl FnOnce() -> Result<SemanticRootSnapshot, SemanticHypergraphError>,
 ) -> Result<SemanticAdmission, SemanticHypergraphError> {
+    let prepared = prepare_semantic_records(records, limits, base)?;
+    Ok(prepared.finish(observe_base()?))
+}
+
+fn prepare_semantic_records(
+    records: SemanticAdmissionRecords,
+    limits: SemanticAdmissionLimits,
+    base: SemanticRootHandle,
+) -> Result<PreparedSemanticAdmission, SemanticHypergraphError> {
     let mut record_budget = limits.max_records as usize;
     for count in [
         records.predicates.len(),
@@ -1546,23 +1591,12 @@ fn admit_semantic_records(
             scope: Identity256::from_bytes(atoms[record.scope as usize]),
         })
         .collect();
-    let base_snapshot = observe_base()?;
-    let identity = derive_admission_identity(
-        &records,
-        schema_generation,
-        &encoded_records,
-        &statement_keys,
-        &support_events,
-        &base_snapshot,
-    );
-    Ok(SemanticAdmission {
+    Ok(PreparedSemanticAdmission {
         records,
         symbols,
         schema_bytes,
         schema_generation,
-        identity,
         base,
-        base_snapshot,
         statement_keys,
         support_events,
         encoded_records,
@@ -2685,6 +2719,143 @@ struct OriginalSemanticCommand {
     poisoned: bool,
 }
 
+/// Actual allocated graph storage retained before either original constructor
+/// command. Neither a failed receipt nor a cancelled constructor is replayed.
+pub(crate) struct OriginalSemanticGraphConstruction {
+    graph: Option<SemanticHypergraph>,
+    scope: Arc<()>,
+    initialization: Option<DeviceReceipt>,
+    admission: Option<PreparedSemanticAdmission>,
+    snapshot: Option<DeviceReceipt>,
+    initialized: bool,
+    complete: bool,
+    retired: bool,
+}
+
+thread_local! {
+    static UNRELEASED_SEMANTIC_CONSTRUCTIONS: std::cell::RefCell<Vec<std::mem::ManuallyDrop<SemanticHypergraph>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl OriginalSemanticGraphConstruction {
+    fn new(
+        graph: SemanticHypergraph,
+        records: Option<(SemanticAdmissionRecords, SemanticAdmissionLimits)>,
+    ) -> Result<Self, SemanticHypergraphError> {
+        let admission = records.map(|(records, limits)| {
+            prepare_semantic_records(records, limits, graph.empty_root)
+        }).transpose()?;
+        Ok(Self {
+            graph: Some(graph),
+            scope: Arc::new(()),
+            initialization: None,
+            admission,
+            snapshot: None,
+            initialized: false,
+            complete: false,
+            retired: false,
+        })
+    }
+
+    pub(crate) fn resolve(&mut self, may_submit: bool) -> Result<(), SemanticHypergraphError> {
+        if self.retired {
+            return Err(admission_error("original semantic constructor was retired"));
+        }
+        if self.complete {
+            return Ok(());
+        }
+        let graph = self.graph.as_mut().ok_or_else(|| admission_error("original semantic storage is absent"))?;
+        if self.initialization.is_none() {
+            let command = graph.command_for(OP_INITIALIZE);
+            self.initialization = Some(graph.run_original_with_submission(
+                command, ArenaAccess::ReadWrite, Some(&self.scope), may_submit,
+            )?);
+        }
+        if !self.initialized {
+            let receipt = self.initialization.as_ref().expect("original initialization receipt");
+            graph.expect_success(receipt)?;
+            if receipt.words[3] != 0 || receipt.words[4] != 1 {
+                return Err(SemanticHypergraphError::CorruptLineage {
+                    detail: "CUDA initialization did not publish empty root slot 0 generation 1".into(),
+                });
+            }
+            graph.roots[0].live = true;
+            self.initialized = true;
+        }
+        if self.admission.is_some() {
+            if self.snapshot.is_none() {
+                let mut command = graph.command_for(OP_SNAPSHOT);
+                write_view(&mut command, SemanticView::Root(graph.empty_root));
+                self.snapshot = Some(graph.run_original_with_submission(
+                    command, ArenaAccess::Read, Some(&self.scope), may_submit,
+                )?);
+            }
+            let receipt = self.snapshot.as_ref().expect("original admission snapshot receipt");
+            graph.expect_success(receipt)?;
+            let snapshot = SemanticRootSnapshot::new(
+                SemanticRootDigest(receipt_identity(receipt, 16)), receipt_extents(receipt)?,
+            );
+            graph.admission = Some(self.admission.take().expect("original prepared admission").finish(snapshot));
+        }
+        self.complete = true;
+        Ok(())
+    }
+
+    pub(crate) fn take_graph(&mut self) -> Result<SemanticHypergraph, SemanticHypergraphError> {
+        if !self.complete || self.retired {
+            return Err(admission_error("original semantic constructor is not complete"));
+        }
+        self.graph.take().ok_or_else(|| admission_error("original semantic storage was already consumed"))
+    }
+
+    fn entered(&self) -> bool {
+        self.initialization.is_some() || self.snapshot.is_some()
+            || self.graph.as_ref().is_some_and(|graph| {
+                graph.original_command.as_ref().is_some_and(|(_, command)| {
+                    command.lock().map_or(true, |command| command.upload.entered()
+                        || command.completion_entered || command.kernel_entered || command.receipt.entered())
+                })
+            })
+    }
+
+    pub(crate) fn retire(&mut self) -> Result<(), SemanticHypergraphError> {
+        if self.retired {
+            return Ok(());
+        }
+        if self.entered() {
+            let graph = self.graph.as_ref().ok_or_else(|| admission_error("original semantic storage is absent"))?;
+            {
+                let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&graph.stream)
+                    .map_err(|error| runtime_error("semantic constructor retirement capture exclusion", error))?;
+                graph.stream.synchronize()
+                    .map_err(|error| runtime_error("original semantic constructor retirement", error))?;
+            }
+            if let Some((_, original)) = &graph.original_command {
+                let mut original = original.lock()
+                    .map_err(|_| admission_error("original semantic command lock is poisoned"))?;
+                original.upload.retire_without_result(&graph.stream)
+                    .map_err(|error| runtime_error("original semantic constructor upload retirement", error))?;
+                original.receipt.retire_without_result(&graph.stream)
+                    .map_err(|error| runtime_error("original semantic constructor receipt retirement", error))?;
+            }
+        }
+        self.graph = None;
+        self.admission = None;
+        self.retired = true;
+        Ok(())
+    }
+}
+
+impl Drop for OriginalSemanticGraphConstruction {
+    fn drop(&mut self) {
+        if !self.complete && !self.retired && self.entered() {
+            if let Some(graph) = self.graph.take() {
+                let graph = std::mem::ManuallyDrop::new(graph);
+                let _ = UNRELEASED_SEMANTIC_CONSTRUCTIONS.try_with(|owners| owners.borrow_mut().push(graph));
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RootRestoreStage {
     Fork,
@@ -3133,6 +3304,33 @@ impl CudaKernelProvider {
         capacities: SemanticHypergraphCapacities,
         cold_work: Option<(DeviceMemoryView<u64>, Arc<()>, ColdWorkAllowance)>,
     ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
+        let graph = self.allocate_semantic_hypergraph_storage(domain, capacities, cold_work)?;
+        let mut original = OriginalSemanticGraphConstruction::new(graph, None)?;
+        original.resolve(true)?;
+        original.take_graph()
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn prepare_semantic_graph_construction(
+        self: &Arc<Self>,
+        domain: &ResidentExecutionDomain,
+        capacities: SemanticHypergraphCapacities,
+        records: SemanticAdmissionRecords,
+        limits: SemanticAdmissionLimits,
+        work: crate::SemanticColdNativeWork,
+    ) -> Result<OriginalSemanticGraphConstruction, SemanticHypergraphError> {
+        let custody = work.graph_custody(self, domain)
+            .map_err(|error| runtime_error("cold graph custody", error))?;
+        let graph = self.allocate_semantic_hypergraph_storage(domain, capacities, Some(custody))?;
+        OriginalSemanticGraphConstruction::new(graph, Some((records, limits)))
+    }
+
+    fn allocate_semantic_hypergraph_storage(
+        self: &Arc<Self>,
+        domain: &ResidentExecutionDomain,
+        capacities: SemanticHypergraphCapacities,
+        cold_work: Option<(DeviceMemoryView<u64>, Arc<()>, ColdWorkAllowance)>,
+    ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
         validate_execution_domain(self, domain)
             .map_err(|error| runtime_error("domain validation", error))?;
         let execute = self
@@ -3204,7 +3402,7 @@ impl CudaKernelProvider {
             Some((work, custody, allowance)) => (Some(work), Some(custody), Some(allowance)),
             None => (None, None, None),
         };
-        let mut graph = SemanticHypergraph {
+        let graph = SemanticHypergraph {
             provider: Arc::clone(self),
             domain: domain.clone(),
             stream,
@@ -3235,15 +3433,6 @@ impl CudaKernelProvider {
             root_restoration: None,
             root_restore_submission_allowed: true,
         };
-        let command = graph.command_for(OP_INITIALIZE);
-        let receipt = graph.run(command, ArenaAccess::ReadWrite)?;
-        graph.expect_success(&receipt)?;
-        if receipt.words[3] != 0 || receipt.words[4] != 1 {
-            return Err(SemanticHypergraphError::CorruptLineage {
-                detail: "CUDA initialization did not publish empty root slot 0 generation 1".into(),
-            });
-        }
-        graph.roots[0].live = true;
         Ok(graph)
     }
 }
@@ -4449,6 +4638,16 @@ impl SemanticHypergraph {
         access: ArenaAccess,
         scope: Option<&Arc<()>>,
     ) -> Result<DeviceReceipt, SemanticHypergraphError> {
+        self.run_original_with_submission(command, access, scope, true)
+    }
+
+    fn run_original_with_submission(
+        &mut self,
+        command: DeviceCommand,
+        access: ArenaAccess,
+        scope: Option<&Arc<()>>,
+        may_submit: bool,
+    ) -> Result<DeviceReceipt, SemanticHypergraphError> {
         if let Some((original_scope, original)) = &self.original_command {
             if !same_optional_scope(original_scope.as_ref(), scope) {
                 return Err(admission_error("another original semantic command is pending"));
@@ -4459,7 +4658,7 @@ impl SemanticHypergraph {
                 return Err(admission_error("semantic continuation changed its original command"));
             }
         } else {
-            if self.poisoned || self.root_export.is_some()
+            if !may_submit || self.poisoned || self.root_export.is_some()
                 || (scope.is_some() && !self.root_restore_submission_allowed) {
                 return Err(SemanticHypergraphError::Poisoned);
             }
@@ -4470,7 +4669,7 @@ impl SemanticHypergraph {
         let receipt = {
             let mut original = original.lock()
                 .map_err(|_| admission_error("original semantic command lock is poisoned"))?;
-            self.resolve_original_command(&mut original, !self.poisoned && self.root_export.is_none()
+            self.resolve_original_command(&mut original, may_submit && !self.poisoned && self.root_export.is_none()
                 && (scope.is_none() || self.root_restore_submission_allowed))?
         };
         self.original_command = None;
