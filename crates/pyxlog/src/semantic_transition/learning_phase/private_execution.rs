@@ -12,7 +12,14 @@ enum PrivateColdRole {
     Adoption,
 }
 
+#[derive(Clone, Copy)]
+enum PrivateCallbackPending {
+    Prepared,
+    Completed,
+}
+
 pub(super) struct PrivateExecutionGroup {
+    issuance: Arc<()>,
     previous: Option<Box<PrivateExecutionGroup>>,
     branch: &'static str,
     entries: Py<PyTuple>,
@@ -32,6 +39,7 @@ pub(super) struct PrivateExecutionGroup {
     preparation_detached: bool,
     build_entered: bool,
     build_scope: Option<Arc<()>>,
+    build_scope_linked: bool,
     native_steps: Vec<SemanticPreparedStep>,
     replay_children: Vec<Arc<PrivateReplayChildCustody>>,
     replay_model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
@@ -51,6 +59,8 @@ pub(super) struct PrivateExecutionGroup {
     adoption_report: Option<SemanticColdModelWorkResult>,
     callback_entered: bool,
     callback_pending: bool,
+    callback_pending_kind: Option<PrivateCallbackPending>,
+    continuation: Option<Py<PySemanticPrivateExecutionContinuation>>,
     callback_result: Option<Py<PyAny>>,
     callback_error: Option<PyErr>,
     observer_finish_entered: bool,
@@ -59,6 +69,109 @@ pub(super) struct PrivateExecutionGroup {
     records_completed: usize,
     records_released: bool,
     budget_exceeded: bool,
+}
+
+/// One original callback's continuation, issued before its numerical effects.
+/// It cannot be constructed, rebound or invoked directly from Python.
+#[pyclass(name = "SemanticPrivateExecutionContinuation", module = "pyxlog._native", frozen)]
+pub(crate) struct PySemanticPrivateExecutionContinuation {
+    issuance: Arc<()>,
+    inputs: [usize; 5],
+    ordinal: u64,
+    instruction: Vec<u8>,
+    materials: Vec<Vec<u8>>,
+    resolver: Mutex<Option<Py<PyAny>>>,
+}
+
+impl PySemanticPrivateExecutionContinuation {
+    fn require_original(&self, py: Python<'_>, group: &PrivateExecutionGroup) -> PyResult<()> {
+        let child = group.restored.borrow(py);
+        let inputs = [
+            child.controller.as_ptr() as usize,
+            child.task_use.as_ptr() as usize,
+            child.parent.as_ptr() as usize,
+            child.model.as_ptr() as usize,
+            group.entries.as_ptr() as usize,
+        ];
+        if !Arc::ptr_eq(&self.issuance, &group.issuance)
+            || self.inputs != inputs
+            || self.ordinal != group.ordinal
+            || self.instruction != group.instruction
+            || self.materials != group.materials
+        {
+            return Err(invalid("private continuation changed its original callback owners or frozen group"));
+        }
+        PySemanticLearningPhaseTransition::require_private_group_entries(py, group)
+    }
+
+    fn resolver(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.resolver.lock()
+            .map_err(|_| invalid("private continuation resolver mutex is poisoned"))?
+            .as_ref().map(|resolver| resolver.clone_ref(py))
+            .ok_or_else(|| invalid("completed private continuation cannot be invoked again"))
+    }
+}
+
+#[pymethods]
+impl PySemanticLearningPhaseTransition {
+    /// Retain the original zero-argument resolver before this callback builds
+    /// or executes its segment. Only native preparation continuation invokes it.
+    #[pyo3(signature = (controller, task_use, parent, model, original_entries, *, resolve))]
+    fn bind_private_execution_continuation(
+        &self,
+        py: Python<'_>,
+        controller: Py<PySemanticTransitionController>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        parent: Py<PySemanticPublishedParent>,
+        model: Py<PyAny>,
+        original_entries: Py<PyTuple>,
+        resolve: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticPrivateExecutionContinuation>> {
+        let issued = task_use.borrow(py);
+        let session = issued.session.borrow(py);
+        session.require_creator()?;
+        controller.borrow(py).require_read_issued(&issued)?;
+        {
+            let owner = session.owner()?;
+            issued.require_identity(&owner)?;
+        }
+        self.require_private_group_identity(py, &session, &issued)?;
+        if !resolve.is_callable() || !original_entries.bind(py).is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("private continuation requires its original tuple and callable resolver"));
+        }
+        let mut retained = self.private_group()?;
+        let group = retained.as_mut().expect("validated original private group");
+        let child = group.restored.borrow(py);
+        let inputs = [
+            controller.as_ptr() as usize, task_use.as_ptr() as usize,
+            parent.as_ptr() as usize, model.as_ptr() as usize,
+            original_entries.as_ptr() as usize,
+        ];
+        if inputs != [
+            child.controller.as_ptr() as usize, child.task_use.as_ptr() as usize,
+            child.parent.as_ptr() as usize, child.model.as_ptr() as usize,
+            group.entries.as_ptr() as usize,
+        ] || !group.callback_entered || group.continuation.is_some() || group.callback_pending
+            || group.callback_error.is_some() || group.build_entered
+            || group.build_scope.is_some() || !group.native_steps.is_empty()
+            || group.preparation_role != PrivateColdRole::Prefix
+            || group.preparation_report.is_some() || group.native_retired
+            || session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?.is_some()
+            || session.segment_instruction.lock()
+                .map_err(|_| invalid("original instruction owner mutex is poisoned"))?.is_some()
+        {
+            return Err(invalid("private continuation must be bound once before the original callback's segment effects"));
+        }
+        drop(child);
+        let continuation = Py::new(py, PySemanticPrivateExecutionContinuation {
+            issuance: Arc::clone(&group.issuance), inputs, ordinal: group.ordinal,
+            instruction: group.instruction.clone(), materials: group.materials.clone(),
+            resolver: Mutex::new(Some(resolve.clone().unbind())),
+        })?;
+        group.continuation = Some(continuation.clone_ref(py));
+        Ok(continuation)
+    }
 }
 
 /// One original replay construction, issued before the target steps exist.
@@ -1676,6 +1789,20 @@ impl PySemanticLearningPhaseTransition {
         session: &PySemanticTransitionSession,
         task: &PySemanticTransitionTaskUse,
     ) -> PyResult<()> {
+        self.require_private_group_identity(py, session, task)?;
+        let retained = self.private_group()?;
+        let group = retained.as_ref().expect("validated original private group");
+        group.continuation.as_ref()
+            .ok_or_else(|| invalid("private segment effects require the original registered continuation"))?
+            .borrow(py).require_original(py, group)
+    }
+
+    fn require_private_group_identity(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task: &PySemanticTransitionTaskUse,
+    ) -> PyResult<()> {
         if !self.private_execution_active.load(Ordering::Acquire) {
             return Err(invalid(
                 "private operation belongs only to its original active callback",
@@ -1701,6 +1828,183 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn original_build_cancellation_pending(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+        scope: &Arc<()>,
+        handles: &[SemanticPreparedStep],
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<bool> {
+        let (ordinal, stream) = {
+            let retained = self.private_group()?;
+            let group = retained.as_ref()
+                .ok_or_else(|| invalid("original cancellation lost its private group"))?;
+            Self::require_private_group_entries(py, group)?;
+            group.continuation.as_ref()
+                .ok_or_else(|| invalid("original cancellation lost its registered continuation"))?
+                .borrow(py).require_original(py, group)?;
+            let child = group.restored.borrow(py);
+            if !std::ptr::eq(session, &*child.session.borrow(py))
+                || task_use.as_ptr() != child.task_use.as_ptr()
+                || group.build_scope.as_ref().is_none_or(|original| !Arc::ptr_eq(original, scope))
+                || handles.is_empty() || handles.len() != group.native_steps.len()
+                || group.native_steps.iter().zip(handles)
+                    .any(|(original, actual)| !original.same_handle(actual))
+                || !proof.matches(handles)
+                || group.non_submission.as_ref().is_none_or(|original| !original.matches(handles))
+                || !group.non_submission_observer_entered || group.non_submission_confirmed
+                || group.callback_result.is_some() || group.selected_parent.is_some()
+                || group.native_retired || group.preparation_report.is_none()
+            {
+                return Err(invalid("original cancellation changed its private scope, proof or full roster"));
+            }
+            session.require_creator()?;
+            let task = task_use.borrow(py);
+            child.controller.borrow(py).require_read_issued(&task)?;
+            let owner = session.owner()?;
+            task.require_original_identity(&owner)?;
+            let state = task.state()?;
+            let phase = match &state.phase {
+                TaskUsePhase::ArenaPreparing(original) => &**original,
+                phase => phase,
+            };
+            if !matches!(phase, TaskUsePhase::Recording { scope: actual, .. }
+                | TaskUsePhase::ExecutionPending { scope: actual, .. }
+                if Arc::ptr_eq(actual, scope))
+                || owner.prepared_segment_preparation_pending(handles).map_err(xlog_err)?
+            {
+                return Err(invalid("original cancellation has no known native disposition for its observer"));
+            }
+            let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
+            (group.ordinal, stream)
+        };
+        self.preparation_inputs.resource_observer.step_cancellation_pending(
+            py, ordinal, handles, stream.cu_stream() as u64, proof,
+        )
+    }
+
+    fn require_private_callback_pending(&self, py: Python<'_>, kind: PrivateCallbackPending) -> PyResult<()> {
+        let prepared_pending = matches!(kind, PrivateCallbackPending::Prepared);
+        let completed_pending = matches!(kind, PrivateCallbackPending::Completed);
+        let restored = {
+            let retained = self.private_group()?;
+            let group = retained.as_ref().ok_or_else(|| invalid("private continuation lost its original group"))?;
+            group.continuation.as_ref()
+                .ok_or_else(|| invalid("pending private callback has no registered original continuation"))?
+                .borrow(py).require_original(py, group)?;
+            if !group.callback_entered || !group.build_entered || group.callback_result.is_some() {
+                return Err(invalid("private pending has no entered original build callback"));
+            }
+            group.restored.clone_ref(py)
+        };
+        let child = restored.borrow(py);
+        let session = child.session.borrow(py);
+        let task = child.task_use.borrow(py);
+        session.require_creator()?;
+        let controller = child.controller.borrow(py);
+        controller.require_read_issued(&task)?;
+        if controller.original_prepared_construction_pending(py, &session, &child.task_use)? {
+            if !prepared_pending {
+                return Err(invalid("original construction is not a completed segment"));
+            }
+            let stored = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let construction = stored.as_ref()
+                .and_then(|stored| stored.construction.as_ref())
+                .ok_or_else(|| invalid("private construction lost its original owner"))?
+                .lock().map_err(|_| invalid("original construction custody is poisoned"))?;
+            if construction.private.as_ref()
+                .is_none_or(|phase| !std::ptr::eq(self, &*phase.borrow(py)))
+            {
+                return Err(invalid("private construction belongs to another phase"));
+            }
+            return Ok(());
+        }
+        let owner = session.owner()?;
+        task.require_original_identity(&owner)?;
+        let retained = self.private_group()?;
+        let group = retained.as_ref().ok_or_else(|| invalid("private continuation lost its original group"))?;
+        let stored = session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+        let stored = stored.as_ref().ok_or_else(|| invalid("private pending lost its actual prepared owner"))?;
+        let scope = group.build_scope.as_ref()
+            .ok_or_else(|| invalid("private pending lost its original native build scope"))?;
+        if !Arc::ptr_eq(scope, &stored.scope)
+            || stored.task_use.as_ptr() != child.task_use.as_ptr()
+            || stored.steps.len() != group.native_steps.len()
+            || stored.steps.iter().zip(&group.native_steps)
+                .any(|(step, native)| !step.borrow(py).inner.same_handle(native))
+        {
+            return Err(invalid("private pending changed its original prepared step roster"));
+        }
+        let execution = stored.execution.as_ref()
+            .ok_or_else(|| invalid("private pending has no original native attempt"))?
+            .lock().map_err(|_| invalid("original execution mutex is poisoned"))?;
+        if !execution.native_attempt || !Arc::ptr_eq(&execution.scope, scope)
+            || execution.native_steps.len() != group.native_steps.len()
+            || execution.native_steps.iter().zip(&group.native_steps)
+                .any(|(actual, original)| !actual.same_handle(original))
+            || execution.controller.as_ptr() != child.controller.as_ptr()
+            || execution.private.as_ref().is_none_or(|phase| !std::ptr::eq(self, &*phase.borrow(py)))
+            || execution.private_parent.as_ref().is_none_or(|parent| parent.as_ptr() != child.parent.as_ptr())
+        {
+            return Err(invalid("private pending changed its original controller, phase or native attempt"));
+        }
+        let state = task.state()?;
+        let phase = match &state.phase {
+            TaskUsePhase::ArenaPreparing(original) => &**original,
+            phase => phase,
+        };
+        let original_phase = match phase {
+            TaskUsePhase::ExecutionPending { scope: actual, operation }
+            | TaskUsePhase::CompletedPending { scope: actual, operation } =>
+                Arc::ptr_eq(actual, scope) && operation == &execution.operation,
+            _ => false,
+        };
+        // Completed Worker delivery or entered model adoption is not a
+        // suspended native segment. In particular, adoption is never replayed
+        // by invoking this resolver after an arbitrary cold callback failure.
+        if !original_phase {
+            return Err(invalid("private pending lost its original suspended task phase"));
+        }
+        if stored.outcomes.is_none() {
+            if !prepared_pending || state.snapshot.canonical != execution.admission_snapshot {
+                return Err(invalid("private pending changed its original execution admission"));
+            }
+            let actual = owner.prepared_segment_continuation(&group.native_steps).map_err(xlog_err)?;
+            if execution.route.is_some_and(|original| original != actual) {
+                return Err(invalid("private pending changed its actual entered disposition"));
+            }
+            return Ok(());
+        }
+        if !owner.prepared_segment_completion_known()
+            || !matches!(phase, TaskUsePhase::CompletedPending { .. })
+            || (completed_pending && stored.completion.is_none())
+        {
+            return Err(invalid("private pending has no fully reconciled original completion"));
+        }
+        if !owner.is_poisoned() {
+            return Ok(());
+        }
+        if let Some(acquisition) = &execution.acquisition {
+            if owner.published_acquisition_pending(acquisition).map_err(xlog_err)? {
+                return Ok(());
+            }
+        }
+        if let Some(parent) = &execution.private_parent {
+            let parent = parent.borrow(py);
+            let lease = parent.lease()?;
+            if owner.published_consumer_completion_pending(&lease).map_err(xlog_err)?
+                || owner.published_reader_release_pending(&lease).map_err(xlog_err)?
+            {
+                return Ok(());
+            }
+        }
+        Err(invalid("private pending cannot exclude an independent native failure"))
     }
 
     pub(in crate::semantic_transition) fn require_private_group_build(
@@ -1783,13 +2087,26 @@ impl PySemanticLearningPhaseTransition {
         self.require_private_group_owner(py, session, task)?;
         let mut retained = self.private_group()?;
         let group = retained.as_mut().expect("retained original group");
-        if !group.build_entered || group.build_scope.is_some() || steps.len() != group.kinds.len() {
+        if !group.build_entered || steps.len() != group.kinds.len() {
             return Err(invalid(
                 "private build cannot replace its original recording scope",
             ));
         }
-        group.build_scope = Some(Arc::clone(scope));
-        group.native_steps = steps.to_vec();
+        if let Some(original) = &group.build_scope {
+            if !Arc::ptr_eq(original, scope)
+                || group.native_steps.len() != steps.len()
+                || group.native_steps.iter().zip(steps)
+                    .any(|(original, actual)| !original.same_handle(actual))
+            {
+                return Err(invalid("private build changed its original scope or ordered native roster"));
+            }
+            if group.build_scope_linked {
+                return Ok(());
+            }
+        } else {
+            group.build_scope = Some(Arc::clone(scope));
+            group.native_steps = steps.to_vec();
+        }
         let parent = group.restored.borrow(py).parent.clone_ref(py);
         drop(retained);
         let instruction = session
@@ -1805,6 +2122,8 @@ impl PySemanticLearningPhaseTransition {
                 .bind_prepared_segment_parent(&*parent.borrow(py).lease()?)
                 .map_err(xlog_err)?;
         }
+        self.private_group()?.as_mut().expect("retained original group")
+            .build_scope_linked = true;
         Ok(())
     }
 
@@ -2749,6 +3068,7 @@ impl PySemanticLearningPhaseTransition {
             // interval and shared native tally cover destruction of its owners.
             let previous = self.private_group()?.take().map(Box::new);
             *self.private_group()? = Some(PrivateExecutionGroup {
+                issuance: Arc::new(()),
                 previous,
                 branch,
                 entries: entries.clone().unbind(),
@@ -2768,6 +3088,7 @@ impl PySemanticLearningPhaseTransition {
                 preparation_detached: false,
                 build_entered: false,
                 build_scope: None,
+                build_scope_linked: false,
                 native_steps: Vec::new(),
                 replay_children: Vec::new(),
                 replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
@@ -2787,6 +3108,8 @@ impl PySemanticLearningPhaseTransition {
                 retirement_children_ready: false,
                 callback_entered: false,
                 callback_pending: false,
+                callback_pending_kind: None,
+                continuation: None,
                 callback_result: None,
                 callback_error: None,
                 observer_finish_entered: false,
@@ -2898,6 +3221,21 @@ impl PySemanticLearningPhaseTransition {
                         "unknown private numeric callback cannot repeat its original invocation",
                     ));
                 }
+                let continuation = if entered {
+                    let (continuation, kind) = {
+                        let retained = self.private_group()?;
+                        let group = retained.as_ref().expect("retained original group");
+                        let continuation = group.continuation.as_ref()
+                            .ok_or_else(|| invalid("private suspension lost its original continuation"))?;
+                        continuation.borrow(py).require_original(py, group)?;
+                        (continuation.clone_ref(py), group.callback_pending_kind
+                            .ok_or_else(|| invalid("private suspension lost its actual pending disposition"))?)
+                    };
+                    self.require_private_callback_pending(py, kind)?;
+                    Some(continuation)
+                } else {
+                    None
+                };
                 let fresh = self.refresh_snapshot.bind(py).call0()?;
                 let fresh = AuthoritySnapshot::parse(&ColdValue::read(
                     &fresh,
@@ -2906,7 +3244,11 @@ impl PySemanticLearningPhaseTransition {
                 )?)?;
                 fresh.newer_than(&task.state()?.snapshot)?;
                 check_learning_grant(&task, &self.grant_reference, &fresh)?;
-                task.state()?.snapshot = fresh;
+                // The original segment resolver owns delivery of a newer
+                // snapshot. Do not overwrite its retained admission snapshot.
+                if !entered {
+                    task.state()?.snapshot = fresh;
+                }
                 let _scope = PrivateTaskCallbackScope::enter(
                     &self.private_execution_active,
                     &task,
@@ -2934,26 +3276,78 @@ impl PySemanticLearningPhaseTransition {
                         invalid("private cold callback custody mutex is poisoned")
                     })? = Some(work);
                 }
-                let callback = self.model_owner(py, PhaseModelOwner::Execute)?;
-                let result = callback.bind(py).call1((
-                    child.controller.clone_ref(py),
-                    child.task_use.clone_ref(py),
-                    child.parent.clone_ref(py),
-                    child.model.clone_ref(py),
-                    entries,
-                ));
-                let mut retained = self.private_group()?;
-                let group = retained.as_mut().expect("retained original group");
+                let result = if let Some(continuation) = continuation {
+                    let resolver = continuation.borrow(py).resolver(py)?;
+                    resolver.bind(py).call0()
+                } else {
+                    let callback = self.model_owner(py, PhaseModelOwner::Execute)?;
+                    callback.bind(py).call1((
+                        child.controller.clone_ref(py),
+                        child.task_use.clone_ref(py),
+                        child.parent.clone_ref(py),
+                        child.model.clone_ref(py),
+                        entries,
+                    ))
+                };
                 match result {
                     Ok(result) => {
-                        group.callback_pending = false;
-                        group.callback_result = Some(result.clone().unbind());
+                        let continuation = {
+                            let mut retained = self.private_group()?;
+                            let group = retained.as_mut().expect("retained original group");
+                            let continuation = group.continuation.as_ref()
+                                .ok_or_else(|| invalid("private callback returned without its original registered continuation"))?;
+                            continuation.borrow(py).require_original(py, group)?;
+                            let continuation = continuation.clone_ref(py);
+                            // Preserve the positive return before any receipt
+                            // processing or resolver-owner finalization.
+                            group.callback_pending = false;
+                            group.callback_pending_kind = None;
+                            group.callback_result = Some(result.clone().unbind());
+                            continuation
+                        };
+                        let resolver = continuation.borrow(py).resolver.lock()
+                            .map_err(|_| invalid("private continuation resolver mutex is poisoned"))?.take();
+                        drop(resolver);
                         result.unbind()
                     }
                     Err(error) => {
-                        group.callback_pending =
-                            error.is_instance_of::<SemanticCompletedSegmentPending>(py);
-                        if !group.callback_pending {
+                        let kind = if error.is_instance_of::<SemanticPreparedSegmentPending>(py) {
+                            Some(PrivateCallbackPending::Prepared)
+                        } else if error.is_instance_of::<SemanticCompletedSegmentPending>(py) {
+                            Some(PrivateCallbackPending::Completed)
+                        } else {
+                            None
+                        };
+                        let classification = kind.map(|kind| self.require_private_callback_pending(py, kind))
+                            .transpose();
+                        let (kind, error) = match classification {
+                            Ok(_) => (kind, error),
+                            Err(cause) => (None, finish_with_cleanup::<()>(py, Err(error), Err(cause))
+                                .expect_err("private pending authentication failed")),
+                        };
+                        let mut retained = self.private_group()?;
+                        let group = retained.as_mut().expect("retained original group");
+                        if let Some(kind) = kind {
+                            group.callback_pending = true;
+                            group.callback_pending_kind = Some(kind);
+                        } else {
+                            // A terminal resolver error cannot erase the prior
+                            // original pending attempt or its physical custody.
+                            let known_cancelled = error
+                                .is_instance_of::<SemanticPreparedSegmentCancelled>(py)
+                                && group.non_submission_confirmed
+                                && group.non_submission.as_ref()
+                                    .is_some_and(|proof| proof.matches(&group.native_steps))
+                                && group.build_scope.as_ref().is_some_and(|scope|
+                                    matches!(&task.state().map(|state| state.phase.clone()),
+                                        Ok(TaskUsePhase::CancelledPrivate { scope: actual, .. })
+                                            if Arc::ptr_eq(scope, actual)));
+                            if !entered || known_cancelled {
+                                group.callback_pending = false;
+                                if !entered {
+                                    group.callback_pending_kind = None;
+                                }
+                            }
                             group.callback_error = Some(error.clone_ref(py));
                         }
                         return Err(error);
