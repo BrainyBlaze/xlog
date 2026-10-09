@@ -193,6 +193,61 @@ impl PySemanticColdModelWork {
         )
     }
 
+    fn prepare_operations(
+        slf: Py<Self>,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let work = slf.borrow(py);
+        work.check(py)?;
+        if !operations.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("model operations require an exact immutable tuple"));
+        }
+        let mut parsed = Vec::new();
+        for operation in operations.cast::<PyTuple>()?.iter() {
+            if !operation.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "model operation requires its exact geometry and production triple",
+                ));
+            }
+            let operation = operation.cast::<PyTuple>()?;
+            if operation.len() != 3
+                || !operation.get_item(1)?.is_exact_instance_of::<PyTuple>()
+                || !operation.get_item(2)?.is_exact_instance_of::<PyBool>()
+            {
+                return Err(invalid(
+                    "model operation requires kind, immutable dimensions and exact bool",
+                ));
+            }
+            let (kind, values, rank) =
+                parse_model_work(&operation.get_item(0)?, &operation.get_item(1)?)?;
+            parsed.push((
+                kind,
+                values[..rank].to_vec(),
+                operation.get_item(2)?.extract::<bool>()?,
+            ));
+        }
+        let reader = work.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let handles = session
+            .owner()?
+            .prepare_cold_model_work_operations(&work.inner, work.region.as_ref(), &parsed)
+            .map_err(xlog_err)?;
+        let handles = handles
+            .into_iter()
+            .map(|inner| {
+                Py::new(
+                    py,
+                    PySemanticColdModelWorkOperation {
+                        work: slf.clone_ref(py),
+                        inner,
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, handles)?.unbind())
+    }
+
     /// Original native plan state, not a Python callback invocation count.
     #[getter]
     fn plan_admitted(&self, py: Python<'_>) -> PyResult<bool> {

@@ -1637,6 +1637,16 @@ returns its original slot without another charge. For a device-produced actual
 count, use `device_produced=True` and the permit's `slot`: native initializes this
 slot before entry and never resets it after the actual producer may have written.
 
+For an original effect whose registered work contains multiple operations, use
+`prepare_operations(((kind, dimensions, device_produced), ...))` before that effect.
+The outer tuple, each triple and each dimensions tuple must be exact immutable
+tuples; `device_produced` is an exact bool. Native admits the complete ordered
+group at once and returns the same individual operation handles. Enter each
+issued operation once; nested effects may enter an issued later handle, but
+completion consumes the original order. An unknown operation blocks the whole
+group. No new group or original next operation is admitted while that group
+remains outstanding, and no entered effect may be repeated on continuation.
+
 If an entered call raises or its outcome is unknown, call `unknown()` and retain
 the original invocation, operation and physical owners. The unresolved attempt
 blocks later operations, legacy registration, region closure and finalization;

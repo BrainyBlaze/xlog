@@ -299,13 +299,27 @@ impl ModelWorkPlan {
         dimensions: &[u64],
         region: Option<usize>,
     ) -> Result<(), &'static str> {
+        self.require_next_at(0, kind, dimensions, region)
+    }
+
+    pub(crate) fn require_next_at(
+        &self,
+        offset: usize,
+        kind: ModelWorkKind,
+        dimensions: &[u64],
+        region: Option<usize>,
+    ) -> Result<(), &'static str> {
+        let index = self
+            .next
+            .checked_add(offset)
+            .ok_or("model operation group exceeds its original plan extent")?;
         if let Some(region) = region {
             let (start, end) = self.region(region)?;
-            if self.next < start || self.next >= end {
+            if index < start || index >= end {
                 return Err("cold model registration crossed its original region span");
             }
         }
-        if !self.events.get(self.next).is_some_and(|event| {
+        if !self.events.get(index).is_some_and(|event| {
             event.kind == kind && &event.dimensions[..event.rank] == dimensions
         }) {
             return Err("model registration changed its admitted operation order or geometry");

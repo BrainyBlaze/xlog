@@ -188,6 +188,7 @@ pub(super) struct ColdModelWorkStorage {
     streams: Option<Vec<u64>>,
     operations: Vec<ColdOperationAttempt>,
     pending_operation: Option<usize>,
+    pending_operation_end: usize,
     stopped_before_entry: bool,
 }
 
@@ -617,6 +618,7 @@ impl SemanticTransitionSession {
             streams: None,
             operations: Vec::new(),
             pending_operation: None,
+            pending_operation_end: 0,
             stopped_before_entry: false,
         });
         self.steps[&token]
@@ -1273,6 +1275,22 @@ impl SemanticTransitionSession {
         dimensions: &[u64],
         device_produced: bool,
     ) -> Result<SemanticColdModelWorkOperation, SemanticTransitionError> {
+        let mut operations = self.prepare_cold_model_work_operations(
+            handle,
+            region,
+            &[(kind, dimensions.to_vec(), device_produced)],
+        )?;
+        Ok(operations.remove(0))
+    }
+
+    /// Reserve one original helper or nested operator's exact plan prefix.
+    /// Each issued occurrence still needs its own entry and actual completion.
+    pub fn prepare_cold_model_work_operations(
+        &mut self,
+        handle: &SemanticColdModelWork,
+        region: Option<&SemanticColdModelWorkRegion>,
+        operations: &[(ModelWorkKind, Vec<u64>, bool)],
+    ) -> Result<Vec<SemanticColdModelWorkOperation>, SemanticTransitionError> {
         if let Some(region) = region {
             if !region.work.same_invocation(handle) {
                 return Err(publication_input_error(
@@ -1295,30 +1313,63 @@ impl SemanticTransitionSession {
                 "operation requires its original active recorder without an unresolved attempt",
             ));
         }
-        storage
-            .plan()?
-            .require_next(kind, dimensions, region.map(|region| region.index))
-            .map_err(publication_input_error)?;
-        let slot = storage.work.next_slot().map_err(publication_input_error)?;
-        if slot >= storage.work.actual.len() / 3
-            || storage.operations.len() >= storage.work.actual.len() / 3
+        let first_slot = storage.work.next_slot().map_err(publication_input_error)?;
+        if operations.is_empty()
+            || first_slot
+                .checked_add(operations.len())
+                .is_none_or(|end| end > storage.work.actual.len() / 3)
+            || storage
+                .operations
+                .len()
+                .checked_add(operations.len())
+                .is_none_or(|end| end > storage.work.actual.len() / 3)
         {
             return Err(publication_input_error(
                 "operation exceeds its original finite event capacity",
             ));
         }
-        let event = if device_produced {
-            let address = storage
-                .work
-                .actual
-                .device_ptr_value()
-                .checked_add((slot * 3 * size_of::<u64>()) as u64)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            ModelWorkEvent::device_operation(kind, dimensions, address)
-        } else {
-            ModelWorkEvent::operation(kind, dimensions)
+        let mut attempts = Vec::new();
+        let mut issued = Vec::new();
+        attempts
+            .try_reserve_exact(operations.len())
+            .map_err(|error| {
+                runtime_error("original operation group custody reservation", error)
+            })?;
+        issued
+            .try_reserve_exact(operations.len())
+            .map_err(|error| runtime_error("original operation group handle reservation", error))?;
+        for (offset, (kind, dimensions, device_produced)) in operations.iter().enumerate() {
+            storage
+                .plan()?
+                .require_next_at(offset, *kind, dimensions, region.map(|region| region.index))
+                .map_err(publication_input_error)?;
+            let slot = first_slot + offset;
+            let event = if *device_produced {
+                let address = storage
+                    .work
+                    .actual
+                    .device_ptr_value()
+                    .checked_add((slot * 3 * size_of::<u64>()) as u64)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                ModelWorkEvent::device_operation(*kind, dimensions, address)
+            } else {
+                ModelWorkEvent::operation(*kind, dimensions)
+            }
+            .map_err(publication_input_error)?;
+            let issuance = Arc::new(());
+            issued.push(SemanticColdModelWorkOperation {
+                work: handle.clone(),
+                index: storage.operations.len() + offset,
+                issuance: Arc::clone(&issuance),
+            });
+            attempts.push(ColdOperationAttempt {
+                issuance,
+                region: region.map(|region| region.index),
+                event,
+                slot,
+                state: OperationState::Prepared,
+            });
         }
-        .map_err(publication_input_error)?;
         let storage = self
             .steps
             .get_mut(&handle.token)
@@ -1328,34 +1379,31 @@ impl SemanticTransitionSession {
             .expect("checked original recorder");
         storage
             .operations
-            .try_reserve(1)
+            .try_reserve(operations.len())
             .map_err(|error| runtime_error("original operation custody reservation", error))?;
         let index = storage.operations.len();
-        let issuance = Arc::new(());
-        storage.operations.push(ColdOperationAttempt {
-            issuance: Arc::clone(&issuance),
-            region: region.map(|region| region.index),
-            event,
-            slot,
-            state: OperationState::Prepared,
-        });
+        storage.operations.extend(attempts);
         storage.pending_operation = Some(index);
+        storage.pending_operation_end = storage.operations.len();
         // Instrumentation is prepared before the real effect. Never reset this
         // slot after the actual producer may have written its reached usage.
-        if device_produced {
-            if let Err(error) = storage
-                .work
-                .reset_slots(&self.domain, &mut self.poisoned, slot, 1)
-            {
-                storage.operations[index].state = OperationState::Unknown;
+        if operations
+            .iter()
+            .any(|(_, _, device_produced)| *device_produced)
+        {
+            if let Err(error) = storage.work.reset_slots(
+                &self.domain,
+                &mut self.poisoned,
+                first_slot,
+                operations.len(),
+            ) {
+                for attempt in &mut storage.operations[index..] {
+                    attempt.state = OperationState::Unknown;
+                }
                 return Err(error);
             }
         }
-        Ok(SemanticColdModelWorkOperation {
-            work: handle.clone(),
-            index,
-            issuance,
-        })
+        Ok(issued)
     }
 
     fn original_cold_operation(
@@ -1387,7 +1435,18 @@ impl SemanticTransitionSession {
         let storage = self.cold_model_work(&operation.work)?;
         if attempt.state != OperationState::Prepared
             || storage.state != RecordingState::Recording
-            || storage.pending_operation != Some(operation.index)
+            || storage.pending_operation.is_none_or(|start| {
+                operation.index < start
+                    || operation.index >= storage.pending_operation_end
+                    || storage.operations[start..storage.pending_operation_end]
+                        .iter()
+                        .any(|attempt| {
+                            matches!(
+                                attempt.state,
+                                OperationState::Unknown | OperationState::Completing
+                            )
+                        })
+            })
             || attempt.region.is_some_and(|region| {
                 storage.regions.get(region) != Some(&RecordingState::Recording)
             })
@@ -1421,6 +1480,14 @@ impl SemanticTransitionSession {
         if attempt.state != OperationState::Entered
             || storage.state != RecordingState::Recording
             || storage.pending_operation != Some(operation.index)
+            || storage.operations[operation.index..storage.pending_operation_end]
+                .iter()
+                .any(|attempt| {
+                    matches!(
+                        attempt.state,
+                        OperationState::Unknown | OperationState::Completing
+                    )
+                })
             || attempt.region.is_some_and(|region| {
                 storage.regions.get(region) != Some(&RecordingState::Recording)
             })
@@ -1449,7 +1516,8 @@ impl SemanticTransitionSession {
         debug_assert_eq!(recorded, slot);
         storage.plan_mut()?.consume();
         storage.operations[operation.index].state = OperationState::Complete;
-        storage.pending_operation = None;
+        let next = operation.index + 1;
+        storage.pending_operation = (next < storage.pending_operation_end).then_some(next);
         Ok(slot)
     }
 
@@ -1483,7 +1551,16 @@ impl SemanticTransitionSession {
         operation: &SemanticColdModelWorkOperation,
     ) -> Result<(), SemanticTransitionError> {
         let attempt = self.original_cold_operation(operation)?;
-        if attempt.state != OperationState::Prepared {
+        let storage = self.cold_model_work(&operation.work)?;
+        if attempt.state != OperationState::Prepared
+            || storage.pending_operation.is_none_or(|start| {
+                operation.index < start
+                    || operation.index >= storage.pending_operation_end
+                    || storage.operations[start..storage.pending_operation_end]
+                        .iter()
+                        .any(|attempt| attempt.state != OperationState::Prepared)
+            })
+        {
             return Err(publication_input_error(
                 "non-entry cannot revoke an entered original operation",
             ));
@@ -1495,7 +1572,12 @@ impl SemanticTransitionSession {
             .cold_model_work
             .as_mut()
             .expect("checked original recorder");
-        storage.operations[operation.index].state = OperationState::NotEntered;
+        let start = storage
+            .pending_operation
+            .expect("checked pending original group");
+        for attempt in &mut storage.operations[start..storage.pending_operation_end] {
+            attempt.state = OperationState::NotEntered;
+        }
         storage.pending_operation = None;
         storage.stopped_before_entry = true;
         Ok(())
