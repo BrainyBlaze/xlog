@@ -7149,6 +7149,8 @@ pub struct SemanticOutputIntent {
     pub stable_identity: Identity256,
     pub effect: Vec<u8>,
     pub payload: Vec<u8>,
+    pub action_base_logical: Identity256,
+    pub action_successor_logical: Identity256,
 }
 
 fn acknowledgement_receipts(
@@ -7404,6 +7406,8 @@ fn output_intents_from_ranges(
             stable_identity,
             effect: effect.to_vec(),
             payload: content.to_vec(),
+            action_base_logical: entry.base_logical,
+            action_successor_logical: entry.result_logical,
         });
         cursor = end;
     }
