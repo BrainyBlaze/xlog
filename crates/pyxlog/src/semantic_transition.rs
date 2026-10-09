@@ -2251,7 +2251,7 @@ impl PySemanticTransitionSession {
         if canary_projection != seed.training_canary_source {
             return Err(invalid("checkpoint symbolic canary source differs from its original native observation"));
         }
-        seed.training_canary_owner = canary_owner;
+        seed.training_canary_owner = canary_owner.clone();
         if let Some(shared) = shared_proposal_expense {
             let saved = seed.proposal_expense()?;
             let current = *shared
