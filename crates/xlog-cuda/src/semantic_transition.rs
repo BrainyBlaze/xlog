@@ -12429,7 +12429,7 @@ impl TensorContentBuffers {
             .lock()
             .map_err(|_| publication_input_error("original cold content custody is poisoned"))?;
         #[cfg(feature = "semantic-policy")]
-        if cold_work.is_some() && !capture {
+        if (cold_work.is_some() || original_cold.as_ref().is_some_and(|original| original.retirement)) && !capture {
             if original_cold.is_none() {
                 let count = self
                     .tensors
@@ -12712,6 +12712,28 @@ impl TensorContentBuffers {
                 .map_err(|e| XlogError::Kernel(e.to_string()))
             })?;
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn retain_original_retirement_content(
+        &self,
+        domain: &ResidentExecutionDomain,
+    ) -> Result<(), SemanticTransitionError> {
+        let mut original = self.original_cold.lock().map_err(|_| {
+            publication_input_error("original content retirement custody is poisoned")
+        })?;
+        if let Some(original) = original.as_ref() {
+            if !original.retirement || !original.verify {
+                return Err(publication_input_error("original content has another unresolved producer"));
+            }
+            return Ok(());
+        }
+        let count = self.tensors.len().checked_add(usize::from(matches!(self.seals, TensorContentSeals::Model(_))))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let mut batch = native_work_bound::OriginalContentBatch::new(domain, true, count)?;
+        batch.retirement = true;
+        *original = Some(batch);
         Ok(())
     }
 
@@ -15098,6 +15120,124 @@ struct PolicyTape {
     // invocation tapes; no later binding overwrites their bytes.
     components: DeviceMemoryView<SemanticComponent>,
     codebooks: DeviceMemoryView<u64>,
+    retirement: Option<PolicyTapeRetirement>,
+    retirement_parent: Option<PolicyRetirementParent>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyRetirementParent {
+    issuer: Arc<()>,
+    token: u64,
+    identity: SemanticPublishedIdentity,
+    header: PublicationHeader,
+    directory: Vec<PublicationRange>,
+    active: bool,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PolicyRetirementParent {
+    fn matches(&self, lease: &SemanticPublishedLease) -> bool {
+        Arc::ptr_eq(&self.issuer, &lease.issuer) && self.token == lease.token
+            && self.identity == lease.identity && self.header == lease.header
+            && self.active == lease.active && self.directory.len() == lease.directory.len()
+            && self.directory.iter().zip(&lease.directory).all(|(original, current)| {
+                original.role == current.role && original.index == current.index
+                    && original.storage_slot == current.storage_slot && original.generation == current.generation
+                    && original.offset_bytes == current.offset_bytes && original.length_bytes == current.length_bytes
+                    && original.logical_begin == current.logical_begin && original.logical_end == current.logical_end
+                    && original.digest == current.digest && original.backing_digest == current.backing_digest
+            })
+    }
+}
+
+struct OriginalConsumerEdge {
+    event: cudarc::driver::CudaEvent,
+    context: Arc<cudarc::driver::CudaContext>,
+    source: u64,
+    destination: u64,
+    record_entered: bool,
+    recorded: bool,
+    source_completed: bool,
+    wait_entered: bool,
+    waited: bool,
+}
+
+impl OriginalConsumerEdge {
+    fn new(stream: &CudaStream, source: sys::CUstream, destination: sys::CUstream) -> Result<Self, SemanticTransitionError> {
+        Ok(Self {
+            event: stream.context().new_event(None).map_err(|error| runtime_error("original consumer event", error))?,
+            context: Arc::clone(stream.context()),
+            source: source as u64, destination: destination as u64, record_entered: false, recorded: false,
+            source_completed: false, wait_entered: false, waited: false,
+        })
+    }
+
+    fn join(&mut self) -> Result<(), SemanticTransitionError> {
+        if self.waited { return Ok(()); }
+        if self.source_completed { self.waited = true; return Ok(()); }
+        self.context.bind_to_thread().map_err(|error| runtime_error("original consumer context", error))?;
+        if !self.recorded {
+            if self.record_entered {
+                self.resolve_entered()?;
+                return Ok(());
+            }
+            self.record_entered = true;
+            // SAFETY: both streams and this exact event belong to the retained
+            // original retirement owner. An entered record is never replayed.
+            unsafe { cudarc::driver::result::event::record(self.event.cu_event(), self.source as sys::CUstream) }
+                .map_err(|error| runtime_error("original consumer event record", error))?;
+            self.recorded = true;
+        }
+        if !self.waited {
+            if self.wait_entered {
+                // A failed stream wait may have entered. Joining its original
+                // successfully recorded event proves that same producer is
+                // complete without recording an event on future writes.
+                self.event.synchronize().map_err(|error| runtime_error("original consumer event completion", error))?;
+                self.source_completed = true;
+            } else {
+                self.wait_entered = true;
+                // SAFETY: the event is the original successful producer record;
+                // the destination is the original admitted same-context stream.
+                unsafe { sys::cuStreamWaitEvent(self.destination as sys::CUstream, self.event.cu_event(), 0) }.result()
+                    .map_err(|error| runtime_error("original consumer stream join", error))?;
+            }
+            self.waited = true;
+        }
+        Ok(())
+    }
+
+    fn resolve_entered(&mut self) -> Result<bool, SemanticTransitionError> {
+        if !self.record_entered { return Ok(false); }
+        if self.source_completed { return Ok(true); }
+        self.context.bind_to_thread().map_err(|error| runtime_error("original consumer context", error))?;
+        if self.recorded {
+            self.event.synchronize().map_err(|error| runtime_error("original consumer event completion", error))?;
+        } else {
+            // SAFETY: this is the immutable original source stream under its
+            // retained owning context and original capture exclusion. Positive
+            // completion proves its last use without claiming the failed event
+            // record was submitted or recording a fence on future writes.
+            unsafe { sys::cuStreamSynchronize(self.source as sys::CUstream) }.result()
+                .map_err(|error| runtime_error("original consumer source completion", error))?;
+        }
+        self.source_completed = true;
+        self.waited = true;
+        Ok(true)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyTapeRetirement {
+    binding: Arc<TextBindingStorage>,
+    consumer_stream: u64,
+    inputs: [OriginalConsumerEdge; 4],
+    outputs: [OriginalConsumerEdge; 2],
+    cursor: usize,
+    poisoned: bool,
+    execute: CudaFunction,
+    cold_work: Option<DeviceMemoryView<u64>>,
+    allowance: Option<Arc<Mutex<native_work_bound::ColdNativeAllowance>>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -27484,6 +27624,14 @@ impl SemanticTransitionSession {
         &mut self,
         binding: &TextBindingStorage,
     ) -> Result<(), SemanticTransitionError> {
+        self.check_continuation_content(binding)?;
+        self.enqueue_content_witness(&binding._witness, binding.consumer_stream, true)
+    }
+
+    fn check_continuation_content(
+        &self,
+        binding: &TextBindingStorage,
+    ) -> Result<(), SemanticTransitionError> {
         let witness = &binding._witness;
         let reader = self.steps.get(&witness.reader_token).ok_or_else(|| {
             publication_input_error("original continuation step has been released")
@@ -27517,7 +27665,7 @@ impl SemanticTransitionSession {
                 "continuation no longer owns its original captured content",
             ));
         }
-        self.enqueue_content_witness(witness, binding.consumer_stream, true)
+        Ok(())
     }
 
     fn enqueue_content_witness(
@@ -30497,6 +30645,12 @@ impl SemanticTransitionSession {
 
     pub fn is_poisoned(&self) -> bool {
         self.poisoned || self.graph.ensure_not_poisoned().is_err()
+            || {
+                #[cfg(feature = "semantic-policy")]
+                { self.policy_tapes.iter().any(|tape| tape.retirement.is_some()) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { false }
+            }
     }
 
     /// Irreversibly close this owner after trusted application validation fails,
@@ -32642,6 +32796,8 @@ impl SemanticTransitionSession {
             origin_task_ground: None,
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
+            retirement: None,
+            retirement_parent: None,
         });
         Ok(())
     }
@@ -34088,7 +34244,24 @@ impl SemanticTransitionSession {
         invocation: SemanticRngBinding,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
-        let index = self.checked_prepared_policy_tape(step, invocation)?;
+        let original = self.policy_tapes.iter().position(|tape| {
+            tape.invocation == invocation
+                && tape.policy.text_binding._witness.reader_token == step.token
+        });
+        let continuing = original.is_some_and(|index| self.policy_tapes[index].retirement.is_some());
+        let index = if continuing || self.actor_refresh.is_some() {
+            let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+            build.check_retained(step, &self.publication_issuer)?;
+            if !build.completed || !self.steps.get(&step.token)
+                .and_then(|owner| owner.prepared.as_ref()).is_some_and(|prepared| prepared.observed)
+            {
+                return Err(publication_input_error("policy retirement requires its actual completed original outcome"));
+            }
+            if self.actor_refresh.is_some() { self.require_actor_refresh_parent_completion()?; }
+            original.ok_or(SemanticTransitionError::NotBound)?
+        } else {
+            self.checked_prepared_policy_tape(step, invocation)?
+        };
         self.finish_policy_tape(index, consumer_stream)
     }
 
@@ -34220,8 +34393,6 @@ impl SemanticTransitionSession {
         invocation: SemanticRngBinding,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
-        self.checked_step(lease)?;
         dlpack_consumer_stream(consumer_stream)?;
         let index = self
             .policy_tapes
@@ -34229,7 +34400,40 @@ impl SemanticTransitionSession {
             .position(|tape| tape.invocation == invocation)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let original = Arc::clone(&self.policy_tapes[index].policy.text_binding);
-        self.checked_content_witness(lease, &original._witness)?;
+        if self.policy_tapes[index].retirement.is_some() {
+            // Only this local retirement owner permits continuation. Historical
+            // Session/graph poison does not authorize a new guard or suffix.
+            if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            if self.pending || self.pending_replay_delivery.is_some()
+                || self.pending_training_materialization.is_some()
+            {
+                return Err(SemanticTransitionError::OverlappingLaunch);
+            }
+            let step = self.steps.get(&lease.token).ok_or(SemanticTransitionError::NotBound)?;
+            if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+                || step.identity != Some(lease.identity)
+                || lease.active != self.readers.contains_key(&lease.token)
+                || !self.policy_tapes[index].retirement_parent.as_ref().is_some_and(|parent| parent.matches(lease))
+                || original._witness.reader_token != lease.token
+                || !Arc::ptr_eq(&original._witness.issuer, &self.publication_issuer)
+                || !Arc::ptr_eq(&original._witness._witness, &step.content_witnesses)
+                || original._witness.index >= step.content.len()
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+        } else {
+            self.ensure_quiescent()?;
+            self.checked_content_witness(lease, &original._witness)?;
+            if self.policy_tapes[index].retirement_parent.as_ref().is_some_and(|parent| !parent.matches(lease)) {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            self.policy_tapes[index].retirement_parent = Some(PolicyRetirementParent {
+                issuer: Arc::clone(&lease.issuer), token: lease.token, identity: lease.identity,
+                header: lease.header, directory: lease.directory.clone(), active: lease.active,
+            });
+        }
         self.finish_policy_tape(index, consumer_stream)
     }
 
@@ -34239,18 +34443,89 @@ impl SemanticTransitionSession {
         index: usize,
         consumer_stream: u64,
     ) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
-        dlpack_consumer_stream(consumer_stream)?;
         let original = Arc::clone(&self.policy_tapes[index].policy.text_binding);
+        self.check_continuation_content(&original)?;
+        if self.policy_tapes[index].retirement.is_none() {
+            if self.actor_refresh.is_some() {
+                self.require_actor_refresh_parent_completion()?;
+                if self.pending || self.pending_replay_delivery.is_some()
+                    || self.pending_training_materialization.is_some()
+                    || !self.prepared_segment.as_ref().is_some_and(|build| build.completed)
+                    || !self.steps.get(&original._witness.reader_token)
+                        .and_then(|owner| owner.prepared.as_ref()).is_some_and(|prepared| prepared.observed)
+                {
+                    return Err(publication_input_error("actor tape retirement requires its known original completed operation"));
+                }
+            } else {
+                self.ensure_quiescent()?;
+            }
+            let consumer = dlpack_consumer_stream(consumer_stream)?;
+            let binding_consumer = dlpack_consumer_stream(original.consumer_stream)?;
+            let native = self.stream.cu_stream();
+            let inputs = [
+                OriginalConsumerEdge::new(&self.stream, std::ptr::null_mut(), native)?,
+                OriginalConsumerEdge::new(&self.stream, consumer, native)?,
+                OriginalConsumerEdge::new(&self.stream, std::ptr::null_mut(), native)?,
+                OriginalConsumerEdge::new(&self.stream, binding_consumer, native)?,
+            ];
+            let outputs = [
+                OriginalConsumerEdge::new(&self.stream, native, binding_consumer)?,
+                OriginalConsumerEdge::new(&self.stream, native, consumer)?,
+            ];
+            let execute = self.provider.device().inner()
+                .get_func("xlog_semantic_transition", "semantic_tensor_content_witness")
+                .ok_or_else(|| runtime_error("kernel lookup", "tensor content witness unavailable"))?;
+            let cold_work = self.cold_native_work(original._witness.reader_token)?;
+            let allowance = self.cold_native_allowance(original._witness.reader_token)?;
+            self.steps[&original._witness.reader_token].content[original._witness.index]
+                .retain_original_retirement_content(&self.domain)?;
+            self.policy_tapes[index].retirement = Some(PolicyTapeRetirement {
+                binding: Arc::clone(&original), consumer_stream, inputs, outputs,
+                cursor: 0, poisoned: false, execute, cold_work, allowance,
+            });
+            self.steps.get_mut(&original._witness.reader_token).expect("retained original policy step")
+                .consumer_streams.insert(consumer_stream);
+            self.steps.get_mut(&original._witness.reader_token).expect("retained original policy step")
+                .consumer_streams.insert(original.consumer_stream);
+        }
+        let retirement = self.policy_tapes[index].retirement.as_mut().expect("retained original policy retirement");
+        if retirement.consumer_stream != consumer_stream || !Arc::ptr_eq(&retirement.binding, &original) {
+            return Err(publication_input_error("original policy retirement changed its binding or consumer stream"));
+        }
         let result = (|| {
-            self.order_step_content_inputs(original._witness.reader_token, consumer_stream)?;
-            self.guard_continuation_content(&original)?;
-            self.order_content_consumers(consumer_stream)
+            self.stream.context().bind_to_thread()
+                .map_err(|error| runtime_error("original policy retirement context", error))?;
+            let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+                .map_err(|error| runtime_error("original policy retirement stream admission", error))?;
+            while retirement.cursor < 7 {
+                match retirement.cursor {
+                    0..=3 => retirement.inputs[retirement.cursor].join()?,
+                    4 => {
+                        let owner = &self.steps[&original._witness.reader_token];
+                        let retained = owner.prepared.as_ref().is_some_and(|prepared| prepared.observed)
+                            && self.prepared_segment.as_ref().is_some_and(|build| build.completed);
+                        let custody = if retained { owner.prepared.as_ref().and_then(|prepared| prepared.replay_custody.as_ref()) } else { None };
+                        owner.content[original._witness.index].enqueue_with_custody(
+                            &self.domain, &mut retirement.poisoned, &retirement.execute,
+                            true, custody, retained, retirement.cold_work.as_ref(), false,
+                            retirement.allowance.as_ref(),
+                        )?;
+                    }
+                    5 | 6 => retirement.outputs[retirement.cursor - 5].join()?,
+                    _ => unreachable!("bounded original retirement cursor"),
+                }
+                retirement.cursor += 1;
+            }
+            self.steps[&original._witness.reader_token].content[original._witness.index]
+                .complete_original_cold_content()
         })();
         if let Err(error) = result {
-            self.poisoned = true;
+            retirement.poisoned = true;
             return Err(error);
         }
+        let retirement = self.policy_tapes[index].retirement.take().expect("completed original policy retirement");
+        self.release_events.extend(retirement.inputs.into_iter().map(|edge| edge.event));
+        self.release_events.extend(retirement.outputs.into_iter().map(|edge| edge.event));
         self.policy_tapes.remove(index);
         Ok(())
     }
@@ -34885,6 +35160,8 @@ impl SemanticTransitionSession {
             origin_task_ground: std::mem::replace(&mut self.task_ground, replacement.task_ground),
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
+            retirement: None,
+            retirement_parent: None,
         });
         Ok(())
     }

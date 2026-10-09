@@ -183,6 +183,7 @@ impl OriginalNativeCommand {
 
 pub(super) struct OriginalContentBatch {
     pub(super) verify: bool,
+    pub(super) retirement: bool,
     pub(super) cursor: usize,
     pub(super) commands: Vec<OriginalNativeCommand>,
     // The original report and child graph retain the strong owner. Keeping
@@ -201,6 +202,7 @@ impl OriginalContentBatch {
             .collect::<Result<_, _>>()?;
         Ok(Self {
             verify,
+            retirement: false,
             cursor: 0,
             commands,
             allowance: None,
