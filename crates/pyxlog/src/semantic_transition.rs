@@ -14389,11 +14389,13 @@ struct RetainedReplayFinalUse {
     target: Option<SemanticPreparedStep>,
     started: bool,
     native_finished: bool,
+    native_pending: bool,
     completion: ReplayImportFinalization,
 }
 
 #[derive(Default)]
 struct ReplayImportFinalization {
+    native_pending: bool,
     cleanup_entered: bool,
     cleanup_result: Option<Py<PyAny>>,
     streams: Option<Vec<u64>>,
@@ -14904,15 +14906,23 @@ impl PySemanticRetainedReplayMember {
             drop(lease);
             drop(owner);
             if pending {
+                original.native_pending = true;
                 import.native_pending.set(true);
                 return Err(retained_final_use_pending(py, xlog_err(result.expect_err("original final use is pending"))));
             }
             result.map_err(xlog_err)?;
+            original.native_pending = false;
             original.native_finished = true;
             Ok(())
         })();
         if import.native_pending.get() {
             return completion;
+        }
+        if original.native_pending {
+            if let Err(error) = completion {
+                import.native_pending.set(true);
+                return Err(retained_final_use_pending(py, error));
+            }
         }
         let result = controller.finalize_replay_import(
             py,
@@ -17939,6 +17949,7 @@ impl PySemanticTransitionController {
             producers_retired,
             producer_entered,
             instruction,
+            actor_refreshes,
             mut quiesced,
             graph_retired,
         ) = {
@@ -17975,6 +17986,7 @@ impl PySemanticTransitionController {
                     .as_ref()
                     .filter(|_| private.is_none())
                     .map(Arc::clone),
+                stored.actor_refreshes.clone(),
                 stored.retirement_steps_quiesced,
                 stored.graph_retired,
             )
@@ -18117,6 +18129,7 @@ impl PySemanticTransitionController {
             if let Some(private) = &private {
                 private.borrow(py).finish_private_retained_sources(py, &session, &task_use.borrow(py))?;
             }
+            actor_refresh::finish_actor_refresh_children(py, &actor_refreshes)?;
             session
                 .prepared_segment
                 .lock()
@@ -18152,6 +18165,7 @@ impl PySemanticTransitionController {
                 .ok_or_else(|| invalid("original segment was removed during producer retirement"))?
                 .producers_retired = true;
         }
+        actor_refresh::retire_actor_refresh_children(py, &actor_refreshes, &streams)?;
         for step in &steps {
             let step = step.borrow(py);
             step.release_recorded_producer_aliases(py)?;
@@ -22153,7 +22167,7 @@ impl PySemanticTransitionController {
                     && owner.published_consumer_completion_pending(&lease).map_err(xlog_err)?;
                 drop(lease);
                 drop(owner);
-                Self::finish_import_native_stage(py, import, result, pending)?;
+                Self::finish_import_native_stage(py, import, result, pending, &mut progress.native_pending)?;
                 progress.reader_quiesced = true;
             }
             if progress.successor.is_none() {
@@ -22167,7 +22181,7 @@ impl PySemanticTransitionController {
                 let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
                     && owner.published_acquisition_pending(progress.acquisition.as_ref().expect("original successor acquisition")).map_err(xlog_err)?;
                 drop(owner);
-                progress.successor = Some(Self::finish_import_native_stage(py, import, result, pending)?);
+                progress.successor = Some(Self::finish_import_native_stage(py, import, result, pending, &mut progress.native_pending)?);
             }
             if !progress.comparison_finished {
                 let mut owner = import.session.owner()?;
@@ -22184,7 +22198,7 @@ impl PySemanticTransitionController {
                     && owner.replay_publication_verification_pending(comparison, &predecessor, successor).map_err(xlog_err)?;
                 drop(predecessor);
                 drop(owner);
-                Self::finish_import_native_stage(py, import, result, pending)?;
+                Self::finish_import_native_stage(py, import, result, pending, &mut progress.native_pending)?;
                 progress.comparison_finished = true;
             }
             if !progress.successor_released {
@@ -22194,7 +22208,7 @@ impl PySemanticTransitionController {
                 let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
                     && owner.published_reader_release_pending(successor).map_err(xlog_err)?;
                 drop(owner);
-                Self::finish_import_native_stage(py, import, result, pending)?;
+                Self::finish_import_native_stage(py, import, result, pending, &mut progress.native_pending)?;
                 progress.successor_released = true;
             }
             if !progress.predecessor_released {
@@ -22205,7 +22219,7 @@ impl PySemanticTransitionController {
                     && owner.published_reader_release_pending(&predecessor).map_err(xlog_err)?;
                 drop(predecessor);
                 drop(owner);
-                Self::finish_import_native_stage(py, import, result, pending)?;
+                Self::finish_import_native_stage(py, import, result, pending, &mut progress.native_pending)?;
                 acquired.release_continuation_producers();
                 progress.predecessor_released = true;
             }
@@ -22217,6 +22231,18 @@ impl PySemanticTransitionController {
             }
             Ok(())
         })();
+        // A foreign failure blocks every join and new effect, but cannot erase
+        // custody of an earlier entered native stage. Its original owner remains
+        // pending until that exact stage obtains a positive completion.
+        if progress.native_pending && import.retained_final_use && !import.native_pending.get() {
+            if let Err(error) = final_result {
+                import.native_pending.set(true);
+                #[cfg(feature = "semantic-policy")]
+                return Err(retained_final_use_pending(py, error));
+                #[cfg(not(feature = "semantic-policy"))]
+                return Err(error);
+            }
+        }
         final_result
     }
 
@@ -22225,16 +22251,22 @@ impl PySemanticTransitionController {
         import: &ColdImportGuard<'_>,
         result: Result<T, xlog_cuda::SemanticTransitionError>,
         pending: bool,
+        original_pending: &mut bool,
     ) -> PyResult<T> {
         match result {
-            Err(error) if pending && import.retained_final_use => {
+            Err(error) if (pending || *original_pending) && import.retained_final_use => {
+                *original_pending = true;
                 import.native_pending.set(true);
                 #[cfg(feature = "semantic-policy")]
                 return Err(retained_final_use_pending(py, xlog_err(error)));
                 #[cfg(not(feature = "semantic-policy"))]
                 return Err(xlog_err(error));
             }
-            result => result.map_err(xlog_err),
+            Ok(value) => {
+                *original_pending = false;
+                Ok(value)
+            }
+            Err(error) => Err(xlog_err(error)),
         }
     }
 
