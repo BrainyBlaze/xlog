@@ -215,7 +215,7 @@ pub(super) struct EvaluationStorage {
     launch_markers: Option<Vec<u64>>,
     report_read: Option<PublicationRead<u64>>,
     report_words: Option<[u64; 12]>,
-    source_observation: Option<SemanticPublishedStateObservation>,
+    source_observation: Option<Arc<Mutex<SemanticPublishedStateObservation>>>,
     resolved_source_material: Option<Identity256>,
 }
 
@@ -297,13 +297,39 @@ impl SemanticTransitionSession {
         let [output, objective] = inputs;
         let output = prepare_semantic_tensors(&self.provider, output)?;
         let objective = prepare_semantic_tensors(&self.provider, objective)?;
+        // The initial source observation and the mutually exclusive completed
+        // or cancelled source check each own one retained graph snapshot. A
+        // fresh cohort additionally selects/gathers its original reserved arena.
+        // This covers these actual producers, not the remaining phase lifecycle.
+        let mut preparation_ceiling = self.graph.snapshot_native_work_ceiling();
+        native_work_bound::add_native_work_ceiling(
+            &mut preparation_ceiling,
+            self.graph.snapshot_native_work_ceiling(),
+        )?;
+        let preparation = self.steps[&lease.token]
+            .evaluation_preparation
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .lock()
+            .map_err(|_| publication_input_error("original preparation owner is poisoned"))?;
+        if preparation.requested_cohort.is_none() {
+            let selection = self
+                .training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .selection_native_work_ceiling(self.training_origins.as_deref())?;
+            native_work_bound::add_native_work_ceiling(&mut preparation_ceiling, selection)?;
+        }
+        drop(preparation);
         Ok(SemanticColdEvaluationContent {
             allowance,
             content: native_work_bound::FrozenColdEvaluationContent::new(
+                Arc::clone(&evaluation.invocation),
                 Arc::clone(&evaluation.cohort),
                 output,
                 objective,
                 model_ceiling,
+                preparation_ceiling,
             )?,
         })
     }
@@ -479,14 +505,18 @@ impl SemanticTransitionSession {
             .0
             .content_identity();
         let device = self.provider.device().ordinal();
-        if submit {
+        if submit && !original.started {
             if let Some(allowance) = self.cold_native_allowance(lease.token)? {
+                let handle = original
+                    .handle
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
                 allowance
                     .lock()
                     .map_err(|_| {
                         publication_input_error("original cold native allowance is poisoned")
                     })?
-                    .content_ceiling()?;
+                    .claim_evaluation_preparation(&handle.invocation)?;
             }
             original.started = true;
         }
@@ -861,6 +891,59 @@ impl SemanticTransitionSession {
             allowance.as_ref(),
         )?;
         cohort.content.complete_original_cold_content()
+    }
+
+    /// Complete the one original terminal source observation, shared by the
+    /// mutually exclusive completed and cancelled evaluation paths. The owner
+    /// stays installed during every potentially entered stage, including unwind.
+    fn resolve_evaluation_source_observation(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<Identity256, SemanticTransitionError> {
+        self.checked_original_evaluation_reader(lease, handle)?;
+        if let Some(material) = self.original_evaluation(handle)?.resolved_source_material {
+            return Ok(material);
+        }
+        if self
+            .original_evaluation(handle)?
+            .source_observation
+            .is_none()
+        {
+            let original = self.prepare_published_state_observation(lease, false)?;
+            self.steps
+                .get_mut(&handle.token)
+                .expect("original evaluation reader")
+                .evaluation
+                .as_mut()
+                .expect("original evaluation")
+                .source_observation = Some(Arc::new(Mutex::new(original)));
+        }
+        let original = Arc::clone(
+            self.original_evaluation(handle)?
+                .source_observation
+                .as_ref()
+                .expect("retained original terminal source observation"),
+        );
+        let material = {
+            let mut original = original.lock().map_err(|_| {
+                publication_input_error("original terminal source observation is poisoned")
+            })?;
+            Identity256::from_bytes(
+                Sha256::digest(self.resolve_published_state_observation(lease, &mut original)?)
+                    .into(),
+            )
+        };
+        let evaluation = self
+            .steps
+            .get_mut(&handle.token)
+            .expect("original evaluation reader")
+            .evaluation
+            .as_mut()
+            .expect("original evaluation");
+        evaluation.resolved_source_material = Some(material);
+        evaluation.source_observation = None;
+        Ok(material)
     }
 
     pub fn evaluation_stream(
@@ -1683,7 +1766,7 @@ impl SemanticTransitionSession {
                     .as_mut()
                     .expect("retained evaluation");
                 evaluation.report_read = Some(read);
-                evaluation.source_observation = Some(observation);
+                evaluation.source_observation = Some(Arc::new(Mutex::new(observation)));
             }
             if self.original_evaluation(handle)?.report_words.is_none() {
                 let mut read = self
@@ -1720,40 +1803,7 @@ impl SemanticTransitionSession {
                     .expect("retained evaluation")
                     .report_words = Some(words);
             }
-            if self
-                .original_evaluation(handle)?
-                .resolved_source_material
-                .is_none()
-            {
-                let mut observation = self
-                    .steps
-                    .get_mut(&handle.token)
-                    .expect("retained invocation")
-                    .evaluation
-                    .as_mut()
-                    .expect("retained evaluation")
-                    .source_observation
-                    .take()
-                    .expect("retained original source observation");
-                let result = self.resolve_published_state_observation(lease, &mut observation);
-                self.steps
-                    .get_mut(&handle.token)
-                    .expect("retained invocation")
-                    .evaluation
-                    .as_mut()
-                    .expect("retained evaluation")
-                    .source_observation = Some(observation);
-                let material = Identity256::from_bytes(Sha256::digest(result?).into());
-                let evaluation = self
-                    .steps
-                    .get_mut(&handle.token)
-                    .expect("retained invocation")
-                    .evaluation
-                    .as_mut()
-                    .expect("retained evaluation");
-                evaluation.resolved_source_material = Some(material);
-                evaluation.source_observation = None;
-            }
+            self.resolve_evaluation_source_observation(lease, handle)?;
             let evaluation = self
                 .steps
                 .get_mut(&handle.token)
@@ -1881,8 +1931,7 @@ impl SemanticTransitionSession {
             .map_err(|error| runtime_error("evaluation non-submission admission", error))?;
         self.complete_step_consumers(lease, &streams)?;
         self.guard_evaluation_cohort(handle)?;
-        let material =
-            Identity256::from_bytes(Sha256::digest(self.published_state_material(lease)?).into());
+        let material = self.resolve_evaluation_source_observation(lease, handle)?;
         if Some(material) != self.evaluation(handle)?.source_material {
             self.poisoned = true;
             return Err(publication_input_error(
