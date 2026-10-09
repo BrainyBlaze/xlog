@@ -11798,8 +11798,11 @@ impl PySemanticGradientDelivery {
         }
         let zero = self.accumulation.bind(py).call_method1("eq", (0,))?;
         let keep = zero.call_method0("logical_not")?;
-        for (gradient, presence) in self.gradients.iter().zip(&self.presences) {
+        for gradient in &self.gradients {
             gradient.bind(py).call_method1("mul_", (&keep,))?;
+        }
+        // Frozen leaves retain presence storage even without a gradient slot.
+        for presence in &self.presences {
             presence.bind(py).call_method1("logical_and_", (&keep,))?;
         }
         Ok(())
