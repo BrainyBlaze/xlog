@@ -422,6 +422,7 @@ fn visit_expected_values(
     Ok(())
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct FoldAssignment {
     key: (u64, u64),
     mode: u64,
@@ -431,6 +432,7 @@ struct FoldAssignment {
 
 /// Derived only from the complete original ModelContract and native memory map.
 /// This is an ephemeral launch plan, not a new producer roster or wire format.
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct LearningFoldPlan {
     assignments: Vec<FoldAssignment>,
     scale_bits: u32,
@@ -937,6 +939,7 @@ impl SemanticTransitionSession {
     pub(super) fn apply_learning_fold(
         &mut self,
         plan: &LearningFoldPlan,
+        preparation: &Arc<state_restoration::OriginalPublicationPreparation>,
     ) -> Result<(), SemanticTransitionError> {
         let storage = Arc::clone(
             self.publication
@@ -1135,7 +1138,7 @@ impl SemanticTransitionSession {
             "cold adapter absorption and physical alias check",
             CudaStream::synchronize,
         )?;
-        if self.publication_read(status.view())?[0] != 0 {
+        if self.publication_preparation_read(preparation, status.view())?[0] != 0 {
             return Err(publication_input_error("adapter absorption encountered nonfinite numerics or conflicting physical alias bytes"));
         }
         let mut recorder = self.domain.new_strict_recorder();

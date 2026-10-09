@@ -2010,11 +2010,7 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
-        self.transfer_tracker.record_htod(bytes as u64);
-        record_resident_transfer(self.provider_identity, |stats| {
-            stats.tracked_htod_calls += 1;
-            stats.tracked_htod_bytes += bytes as u64;
-        });
+        self.admit_tracked_htod(bytes);
         self.device
             .inner()
             .htod_sync_copy_into(src, dst)
@@ -2066,6 +2062,14 @@ impl CudaKernelProvider {
     pub(crate) fn admit_launch_metadata_htod(&self, bytes: usize) {
         self.transfer_tracker
             .record_htod_launch_metadata(bytes as u64);
+    }
+
+    pub(crate) fn admit_tracked_htod(&self, bytes: usize) {
+        self.transfer_tracker.record_htod(bytes as u64);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_htod_calls += 1;
+            stats.tracked_htod_bytes += bytes as u64;
+        });
     }
 
     /// Initialize device metadata within its admitted write. Capture stores

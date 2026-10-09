@@ -955,15 +955,18 @@ impl SemanticTransitionSession {
 
     /// Reconstitute only original committed append slots from the complete archived queue.
     /// No new result, authority, selection, or publication is produced by restoration.
-    pub(super) fn restore_replay_append_rows(&mut self) -> Result<(), SemanticTransitionError> {
+    pub(super) fn stage_restored_replay_append_rows(
+        &self,
+        restoration: &Arc<state_restoration::OriginalStateMaterialRestore>,
+        material: &state_restoration::RestoredReplayAppendMaterial,
+    ) -> Result<Vec<state_restoration::OriginalDeviceWrite>, SemanticTransitionError> {
+        self.require_restored_replay_append_material(restoration, material)?;
+        let (entries, payload) = material.records();
         let arena = Arc::clone(
             self.training_views
                 .as_ref()
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
-        let mut lease = self.acquire()?;
-        let entries = self.read_published_control_record(&lease, 56)?;
-        let payload = self.read_published_control_record(&lease, 57)?;
         let header = append_header(&entries.bytes)?;
         if header.capacity != (arena.row_capacity() - arena.original_slot_boundary()) as u64
             || header.original_stage != u64::from(arena.is_materialized())
@@ -974,12 +977,13 @@ impl SemanticTransitionSession {
                 "restored replay queue differs from its original cold arena",
             ));
         }
-        let rows = append_rows_from_ranges(&entries, &payload)?;
+        let rows = append_rows_from_ranges(entries, payload)?;
         if !rows.is_empty() {
             arena.require_append_authentication();
         }
         let (descriptors, raw) = arena.append_storage();
         let mut eligible_count = 0;
+        let mut writes = Vec::new();
         for row in &rows {
             if row.entry.disposition == 2 {
                 continue;
@@ -1006,56 +1010,19 @@ impl SemanticTransitionSession {
                     "restored append row exceeds its original reserved storage",
                 ));
             }
-            let source = Arc::new(allocate_publication::<u8>(&self.provider, raw_len)?);
-            upload_publication(&self.provider, row.raw, source.as_ref())?;
-            let source_descriptor = Arc::new(allocate_publication::<TrainingViewRowDescriptor>(
-                &self.provider,
-                1,
-            )?);
-            upload_publication(&self.provider, &[descriptor], source_descriptor.as_ref())?;
-            let target =
-                raw.slice(descriptor.raw_offset as usize..descriptor.raw_offset as usize + raw_len);
+            let target = raw.slice(
+                descriptor.raw_offset as usize..descriptor.raw_offset as usize + raw_len,
+            );
             let physical = arena.physical_ordinal(expected_ordinal)?;
             let target_descriptor = descriptors.slice(physical..physical + 1);
-            let mut recorder = self.domain.new_strict_recorder();
-            recorder.read(source.as_ref());
-            recorder.read(source_descriptor.as_ref());
-            recorder.write(&target);
-            recorder.write(&target_descriptor);
-            let retained_begin = self.prepared_resources.len();
-            self.prepared_resources.push(source.clone());
-            self.prepared_resources.push(source_descriptor.clone());
-            enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
-                // SAFETY: sealed sources and exact destinations remain retained through the terminal join.
-                unsafe {
-                    sys::cuMemcpyDtoDAsync_v2(
-                        target.device_ptr_value(),
-                        source.device_ptr_value(),
-                        raw_len,
-                        stream.stream().cu_stream(),
-                    )
-                    .result()
-                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
-                    sys::cuMemcpyDtoDAsync_v2(
-                        target_descriptor.device_ptr_value(),
-                        source_descriptor.device_ptr_value(),
-                        size_of::<TrainingViewRowDescriptor>(),
-                        stream.stream().cu_stream(),
-                    )
-                    .result()
-                }
-                .map_err(|error| XlogError::Kernel(error.to_string()))
-            })?;
-            wait_on_stream(
-                &self.stream,
-                &mut self.poisoned,
-                &mut self.stream_waits,
-                "restored replay row completion",
-                CudaStream::synchronize,
-            )?;
-            self.prepared_resources.truncate(retained_begin);
+            writes.push(state_restoration::OriginalDeviceWrite::new(
+                &self.stream, row.raw, target, false,
+            )?);
+            writes.push(state_restoration::OriginalDeviceWrite::new(
+                &self.stream, &[descriptor], target_descriptor, false,
+            )?);
         }
-        self.release(&mut lease, &[])
+        Ok(writes)
     }
 
     /// Original finite transport limits, sealed before any publication or result acquisition.
