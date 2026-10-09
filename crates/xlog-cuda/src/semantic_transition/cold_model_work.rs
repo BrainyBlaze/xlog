@@ -906,22 +906,33 @@ impl SemanticTransitionSession {
             .model_work_capacity;
         let instruction = Arc::clone(&self.instruction_admission(admission)?.instruction);
         let original = self.instruction_admission(admission)?;
-        if original
+        if let Some((_, result)) = original
             .prepared_cold_results
             .iter()
-            .any(|(address, _)| *address == ordinal)
+            .find(|(address, _)| *address == ordinal)
         {
-            let storage = self
-                .steps
-                .get(&step.token)
-                .and_then(|step| step.cold_model_work.as_ref())
-                .filter(|storage| {
-                    storage.operation_ordinal == ordinal
-                        && Arc::ptr_eq(&storage.admission, &instruction)
-                })
-                .ok_or_else(|| {
-                    publication_input_error("retain the original prepared cold allocation attempt")
-                })?;
+            let owner = self.steps.get(&step.token).ok_or_else(|| {
+                publication_input_error("retain the original prepared cold allocation attempt")
+            })?;
+            let Some(storage) = owner.cold_model_work.as_ref() else {
+                if result.is_some() {
+                    return Err(publication_input_error(
+                        "completed prepared cold work lost its original storage",
+                    ));
+                }
+                // Canonical installation retains storage before its first
+                // reset or transfer. Resume only this unentered allocation
+                // prefix, preserving the original ordinal and report claim.
+                return self
+                    .prepare_prepared_cold_model_work(step, parent, capacity, ordinal, instruction);
+            };
+            if storage.operation_ordinal != ordinal
+                || !Arc::ptr_eq(&storage.admission, &instruction)
+            {
+                return Err(publication_input_error(
+                    "retain the original prepared cold allocation attempt",
+                ));
+            }
             let handle = SemanticColdModelWork {
                 issuer: Arc::clone(&self.publication_issuer),
                 invocation: Arc::clone(&storage.invocation),
