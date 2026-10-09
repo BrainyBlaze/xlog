@@ -10796,6 +10796,9 @@ struct PreparedStepCompletionObservations {
     components: Option<Arc<Mutex<PublicationRead<SemanticTransitionReceipt>>>>,
     canary_results: Option<Arc<Mutex<PublicationRead<SemanticTrainingCanaryResultRecord>>>>,
     canary_refusal: Option<Arc<Mutex<PublicationRead<SemanticTrainingCanaryRefusalRecord>>>>,
+    task_ground: Option<Arc<Mutex<PublicationRead<u8>>>>,
+    base_directory: Option<Arc<Mutex<PublicationRead<PublicationRange>>>>,
+    base_task_ground: Option<Arc<Mutex<PublicationRead<u8>>>>,
     #[cfg(feature = "semantic-policy")]
     model_calls: BTreeMap<usize, Option<Arc<Mutex<PublicationRead<u64>>>>>,
 }
@@ -10830,6 +10833,8 @@ struct PreparedSegmentState {
     capturing: bool,
     submitted: bool,
     completed: bool,
+    execution_poisoned: bool,
+    graph_call_entered: bool,
     cancelled: Arc<AtomicBool>,
     construction: Arc<Mutex<()>>,
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
@@ -10885,6 +10890,8 @@ impl PreparedSegmentState {
             capturing: false,
             submitted: false,
             completed: false,
+            execution_poisoned: false,
+            graph_call_entered: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             construction: Arc::new(Mutex::new(())),
             graph_retirement: None,
@@ -16633,6 +16640,9 @@ impl SemanticTransitionSession {
         });
         let build = self.prepared_segment.as_mut().expect("checked segment");
         build.submit()?;
+        // This original submission owns uncertainty separately from an abort
+        // or a semantic graph integrity failure. Arm before its first effect.
+        build.execution_poisoned = true;
         build.transfers = Some(transfers);
         self.publication_uploads = vec![(slot, PublicationPayload::Metadata(authority_decisions))];
         let result = (|| {
@@ -16652,18 +16662,25 @@ impl SemanticTransitionSession {
                 .captured
                 .as_ref()
                 .expect("checked original captured graph");
-            #[cfg(feature = "semantic-policy")]
-            {
-                *self.prepared_segment.as_ref().expect("original segment").actor_refresh_execution
-                    .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
-                    = actor_refresh::ActorRefreshParentExecution::LaunchEntered;
-            }
-            enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
+            let build = self.prepared_segment.as_mut().expect("original segment");
+            let mut submission_poison = false;
+            enqueue_recorded(&self.domain, &mut submission_poison, recorder, |enqueue| {
+                // Enqueue admission can fail before invoking this callback.
+                // Only this exact original call admits later observation; it
+                // never authorizes replay of a failed executable.
+                #[cfg(feature = "semantic-policy")]
+                {
+                    *build.actor_refresh_execution.lock().map_err(|_| {
+                        XlogError::Kernel("original parent execution owner poisoned".into())
+                    })? = actor_refresh::ActorRefreshParentExecution::LaunchEntered;
+                }
+                build.graph_call_entered = true;
                 graph.launch_in(enqueue)
             })
         })();
         if result.is_err() {
-            self.poisoned = true;
+            self.pending = self.prepared_segment.as_ref()
+                .is_some_and(|build| build.graph_call_entered);
             return result;
         }
         self.pending = true;
@@ -16787,13 +16804,29 @@ impl SemanticTransitionSession {
     ) -> Result<Vec<SemanticPreparedStepOutcome>, SemanticTransitionError> {
         #[cfg(feature = "semantic-policy")]
         if self.actor_refresh.is_some() {
-            return self.complete_embedded_actor_segment();
+            // A premature public join is not a failed observation of an
+            // admitted child. Only the actual outer completion admits it.
+            self.require_actor_refresh_parent_completion()?;
+            let result = self.complete_embedded_actor_segment();
+            match &result {
+                Ok(_) => {
+                    self.prepared_segment.as_mut().expect("original embedded actor")
+                        .execution_poisoned = false;
+                }
+                Err(SemanticTransitionError::Runtime { .. }) => {
+                    self.prepared_segment.as_mut().expect("original embedded actor")
+                        .execution_poisoned = true;
+                }
+                // The retained native marker is an authenticated reached
+                // refusal, not an integrity failure or permission to replay.
+                Err(SemanticTransitionError::PublicationRefused { .. }) => {}
+                Err(_) => self.poisoned = true,
+            }
+            return result;
         }
-        if !self.pending
-            || !self
-                .prepared_segment
-                .as_ref()
-                .is_some_and(|build| build.submitted && !build.completed)
+        if !self.prepared_segment.as_ref().is_some_and(|build| {
+            build.submitted && build.graph_call_entered && !build.completed
+        })
         {
             if self.is_poisoned() {
                 return Err(SemanticTransitionError::Poisoned);
@@ -16803,8 +16836,12 @@ impl SemanticTransitionSession {
         // Continuation joins and observes this original submitted graph only.
         // Historical poison grants no new submission and is not cleared here.
         let result = self.complete_prepared_segment_inner();
-        if result.is_err() {
-            self.poisoned = true;
+        if let Err(error) = &result {
+            self.prepared_segment.as_mut().expect("original submitted segment")
+                .execution_poisoned = true;
+            if !matches!(error, SemanticTransitionError::Runtime { .. }) {
+                self.poisoned = true;
+            }
         } else {
             self.pending = false;
             self.publication_uploads.clear();
@@ -16820,19 +16857,24 @@ impl SemanticTransitionSession {
     ) -> Result<Vec<SemanticPreparedStepOutcome>, SemanticTransitionError> {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared completion stream admission", error))?;
-        self.prepared_segment_transfers_mut()?.terminal_wait =
-            SemanticSegmentTerminalWait::CompletionUnknown;
-        wait_on_stream(
-            &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "prepared graph terminal wait",
-            CudaStream::synchronize,
-        )?;
-        let after_terminal_wait = self.host_io_stats();
-        let transfers = self.prepared_segment_transfers_mut()?;
-        transfers.after_terminal_wait = Some(after_terminal_wait);
-        transfers.terminal_wait = SemanticSegmentTerminalWait::Complete;
+        if self.prepared_segment_transfers_mut()?.terminal_wait
+            != SemanticSegmentTerminalWait::Complete
+        {
+            self.prepared_segment_transfers_mut()?.terminal_wait =
+                SemanticSegmentTerminalWait::CompletionUnknown;
+            let mut wait_poison = false;
+            wait_on_stream(
+                &self.stream,
+                &mut wait_poison,
+                &mut self.stream_waits,
+                "prepared graph terminal wait",
+                CudaStream::synchronize,
+            )?;
+            let after_terminal_wait = self.host_io_stats();
+            let transfers = self.prepared_segment_transfers_mut()?;
+            transfers.after_terminal_wait = Some(after_terminal_wait);
+            transfers.terminal_wait = SemanticSegmentTerminalWait::Complete;
+        }
         self.observe_prepared_segment_results(None)
     }
 
@@ -17279,6 +17321,7 @@ impl SemanticTransitionSession {
                 Some(outcome) => outcome,
                 None => {
                     let outcome = self.reconcile_prepared_transition(
+                        &step,
                         &parent,
                         &result,
                         state,
@@ -17375,21 +17418,23 @@ impl SemanticTransitionSession {
             self.prepared_segment_transfers_mut()?
                 .after_completion_export = Some(after_completion_export);
         }
-        self.prepared_segment
-            .as_mut()
-            .expect("submitted segment")
-            .completed = true;
         #[cfg(feature = "semantic-policy")]
         {
-            *self.prepared_segment.as_ref().expect("submitted segment").actor_refresh_execution
-                .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
-                = actor_refresh::ActorRefreshParentExecution::Completed;
+            let execution = Arc::clone(&self.prepared_segment.as_ref()
+                .expect("submitted segment").actor_refresh_execution);
+            let mut execution = execution.lock().map_err(|_| {
+                publication_input_error("original parent execution owner poisoned")
+            })?;
             if outcomes.iter().all(|outcome| matches!(outcome, SemanticPreparedStepOutcome::Completed {
                 outcome: SemanticTransitionOutcome::Published(_), ..
             })) {
                 self.complete_segment_instruction()?;
             }
+            *execution = actor_refresh::ActorRefreshParentExecution::Completed;
         }
+        let build = self.prepared_segment.as_mut().expect("submitted segment");
+        build.completed = true;
+        build.execution_poisoned = false;
         Ok(outcomes)
     }
 
@@ -17411,6 +17456,9 @@ impl SemanticTransitionSession {
         let original = match retained {
             Some(original) => original,
             None => {
+                if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
                 let original = Arc::new(Mutex::new(self.stage_publication_read(source.clone())?));
                 *field(
                     &mut self
@@ -17430,7 +17478,18 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        self.resolve_publication_read(&mut original)
+        if !original.read.entered()
+            && (self.poisoned || self.graph.ensure_not_poisoned().is_err())
+        {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        // Install and arm the original scope before any copy or wait. A stack
+        // flag is sufficient for the common helper because the retained owner
+        // stays armed through errors and unwinding until full reconciliation.
+        self.prepared_segment.as_mut().expect("original completion owner")
+            .execution_poisoned = true;
+        let mut read_poison = false;
+        self.resolve_publication_read_with_poison(&mut original, &mut read_poison)
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -17484,7 +17543,7 @@ impl SemanticTransitionSession {
         }
         let device = Arc::clone(&staged.device);
         if build.actor_refresh_observation.is_none() {
-            if self.is_poisoned() {
+            if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
                 return Err(SemanticTransitionError::Poisoned);
             }
             let original = Arc::new(Mutex::new(self.stage_publication_read(device.view())?));
@@ -17505,7 +17564,20 @@ impl SemanticTransitionSession {
             let mut original = original.lock().map_err(|_| {
                 publication_input_error("original actor observation custody lock is poisoned")
             })?;
-            self.resolve_publication_read(&mut original)?[0]
+            if original.read.source().len() != 1
+                || original.read.source().device_ptr() != device.view().device_ptr()
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            if !original.read.entered()
+                && (self.poisoned || self.graph.ensure_not_poisoned().is_err())
+            {
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            self.prepared_segment.as_mut().expect("original embedded actor")
+                .execution_poisoned = true;
+            let mut read_poison = false;
+            self.resolve_publication_read_with_poison(&mut original, &mut read_poison)?[0]
         };
         if actual.abi != 1 {
             return Err(SemanticTransitionError::ObservationMismatch);
@@ -17538,9 +17610,16 @@ impl SemanticTransitionSession {
                     .completed = true;
                 Ok(outcomes)
             }
-            2 => Err(SemanticTransitionError::PublicationRefused {
-                status: actual.status,
-            }),
+            2 => {
+                // The same outer completion already authenticated this marker
+                // and its reached native tally. Only observation uncertainty
+                // is resolved; no child outcome or retirement proof is issued.
+                self.prepared_segment.as_mut().expect("original embedded actor")
+                    .execution_poisoned = false;
+                Err(SemanticTransitionError::PublicationRefused {
+                    status: actual.status,
+                })
+            }
             0 if actual.acquired_generation != 0 => {
                 let generation = u32::try_from(actual.acquired_generation)
                     .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
@@ -17568,6 +17647,7 @@ impl SemanticTransitionSession {
 
     fn reconcile_prepared_transition(
         &mut self,
+        step: &SemanticPreparedStep,
         parent: &PublicationHeader,
         result: &PreparedStepResult,
         state: DeviceState,
@@ -17649,6 +17729,7 @@ impl SemanticTransitionSession {
             invocation,
             Some((result.header, root, transition)),
             true,
+            Some((step, (parent.publication_word & 1) as usize)),
         )
     }
 }
@@ -36194,7 +36275,7 @@ impl SemanticTransitionSession {
         let policy_text = false;
         #[cfg(feature = "semantic-policy")]
         let policy_text = self.policy.is_some() || policy_text;
-        self.finish_observed_transition(state, components, rng, published, policy_text)
+        self.finish_observed_transition(state, components, rng, published, policy_text, None)
     }
 
     fn finish_observed_transition(
@@ -36208,6 +36289,7 @@ impl SemanticTransitionSession {
             SemanticTransitionKind,
         )>,
         policy_text: bool,
+        prepared_step: Option<(&SemanticPreparedStep, usize)>,
     ) -> Result<SemanticTransitionOutcome, SemanticTransitionError> {
         let proposal = u64::from(rng.proposal);
         if state.model_generation != rng.model_generation
@@ -36306,10 +36388,25 @@ impl SemanticTransitionSession {
             }
         }
         let mut integrity_error = None;
-        let query_ground = if let Some(storage) = &self.task_ground {
-            let layout = storage.layout;
-            let view = storage.device.view();
-            let bytes = self.publication_read(view)?;
+        let query_ground_source = if let Some((step, bank)) = prepared_step {
+            self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotCaptured)?
+                .check_retained(step, &self.publication_issuer)?;
+            self.steps.get(&step.token)
+                .and_then(|owner| owner.prepared.as_ref())
+                .and_then(|prepared| prepared.branches.get(bank))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+                .task_ground.as_ref().map(|storage| (storage.layout, storage.device.view()))
+        } else {
+            self.task_ground.as_ref().map(|storage| (storage.layout, storage.device.view()))
+        };
+        let query_ground = if let Some((layout, view)) = query_ground_source {
+            let bytes = if let Some((step, _)) = prepared_step {
+                self.prepared_completion_read(view, |observations| {
+                    &mut observations.steps.entry(step.token).or_default().task_ground
+                })?
+            } else {
+                self.publication_read(view)?
+            };
             layout.validate(&bytes)?;
             Some((layout, bytes))
         } else { None };
@@ -36351,7 +36448,14 @@ impl SemanticTransitionSession {
         {
             let initial = program.initial_rules.len() as u64;
             if let (Some(storage), Some((_, base_word, _))) = (self.publication.clone(), self.admitted_transition) {
-                let directory = self.publication_read(storage.directories[(base_word & 1) as usize].view())?;
+                let directory_view = storage.directories[(base_word & 1) as usize].view();
+                let directory = if let Some((step, _)) = prepared_step {
+                    self.prepared_completion_read(directory_view, |observations| {
+                        &mut observations.steps.entry(step.token).or_default().base_directory
+                    })?
+                } else {
+                    self.publication_read(directory_view)?
+                };
                 let range = *directory.iter().find(|range| range.role == SemanticStateRole::TaskGround as u64 && range.index == 0)
                     .ok_or(SemanticTransitionError::ObservationMismatch)?;
                 let allocation = storage.allocations.get(range.storage_slot as usize)
@@ -36359,15 +36463,23 @@ impl SemanticTransitionSession {
                 let begin = usize::try_from(range.offset_bytes).map_err(|_| SemanticTransitionError::ObservationMismatch)?;
                 let end = usize::try_from(range.length_bytes).ok().and_then(|length| begin.checked_add(length))
                     .filter(|&end| end <= allocation.len()).ok_or(SemanticTransitionError::ObservationMismatch)?;
-                let original = self.publication_read(allocation.slice()?.view().slice(begin..end))?;
+                let original_view = allocation.slice()?.view().slice(begin..end);
+                let original = if let Some((step, _)) = prepared_step {
+                    self.prepared_completion_read(original_view, |observations| {
+                        &mut observations.steps.entry(step.token).or_default().base_task_ground
+                    })?
+                } else {
+                    self.publication_read(original_view)?
+                };
                 layout.validate(&original)?;
                 let material = PublicationMaterialRange { range, capacity: allocation.len() - begin, bytes: original };
                 if material.original_record_digest() != range.digest { return Err(SemanticTransitionError::ObservationMismatch); }
                 initial.checked_add(u64::from_le_bytes(material.bytes[48..56].try_into().expect("selected rule count")))
                     .ok_or(SemanticTransitionError::GenerationExhausted)?
             } else {
-                // The uncaptured owner has no publication predecessor. Its
-                // actual native receipt binds the retained selected-rule prefix.
+                // Without a separately retained publication predecessor, the
+                // actual baseline receipt binds its original selected-rule
+                // prefix. Never reread a reused bank as an earlier step's base.
                 let count = layout.query(bytes, 0, 0)?.receipt[40];
                 let selected = u64::from_le_bytes(bytes[48..56].try_into().expect("selected rule count"));
                 if count < initial || count > initial + selected { return Err(SemanticTransitionError::ObservationMismatch); }
