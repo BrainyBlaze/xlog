@@ -94,6 +94,19 @@ impl PySemanticColdModelWork {
             .map_err(xlog_err)
     }
 
+    /// Fixed native report geometry, not a callback invocation counter.
+    #[getter]
+    fn region_count(&self, py: Python<'_>) -> PyResult<usize> {
+        self.check(py)?;
+        self.reader
+            .borrow(py)
+            .session
+            .borrow(py)
+            .owner()?
+            .cold_model_work_region_count(&self.inner)
+            .map_err(xlog_err)
+    }
+
     /// Seventeen original source-port layouts; no device export or selection.
     fn evaluation_source_geometry(
         &self,

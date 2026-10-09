@@ -520,6 +520,14 @@ impl SemanticTransitionSession {
         Ok(self.cold_model_work(handle)?.plan.is_some())
     }
 
+    /// Fixed registration-region roster of this exact original report.
+    pub fn cold_model_work_region_count(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<usize, SemanticTransitionError> {
+        Ok(self.cold_model_work(handle)?.regions.len())
+    }
+
     /// Admit the complete ordered model recipe before its first actual recorder
     /// begins. An enclosing region report may already be open without any model
     /// event. Returned quantities are (work bound, event count, call upper).
