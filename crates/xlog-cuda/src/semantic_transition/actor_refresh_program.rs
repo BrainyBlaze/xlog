@@ -64,7 +64,7 @@ pub(super) struct ProgramStep {
     pub(super) actor_slot: Option<u64>,
     pub(super) before_proposals: u64,
     pub(super) phase: Identity256,
-    instruction: Vec<u8>,
+    pub(super) instruction: Vec<u8>,
 }
 
 pub(super) struct ActorRefreshProgram {
