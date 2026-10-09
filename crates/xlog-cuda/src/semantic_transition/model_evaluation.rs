@@ -136,7 +136,11 @@ impl SemanticCancelledModelEvaluation {
         session: &SemanticTransitionSession,
         original: &SemanticModelEvaluation,
     ) -> bool {
-        Arc::ptr_eq(&self.issuer, &session.publication_issuer)
+        Arc::ptr_eq(&self.issuer, &session.publication_issuer) && self.belongs_to_original(original)
+    }
+
+    pub(super) fn belongs_to_original(&self, original: &SemanticModelEvaluation) -> bool {
+        Arc::ptr_eq(&self.issuer, &original.issuer)
             && Arc::ptr_eq(&self.invocation, &original.invocation)
     }
 
@@ -158,6 +162,7 @@ pub(super) struct EvaluationStorage {
     work: PreparedModelWork,
     report: TrackedCudaSlice<u64>,
     source_material: Identity256,
+    cold_work: Option<DeviceMemoryView<u64>>,
     stream: u64,
     submitted: bool,
     report_submitted: bool,
@@ -211,6 +216,7 @@ impl SemanticTransitionSession {
         let source_bytes = self.published_state_material(lease)?;
         PublicationMaterial::decode(&source_bytes)?.require_current_model_caches()?;
         let source_material = Identity256::from_bytes(Sha256::digest(&source_bytes).into());
+        let cold_work = self.cold_native_work(lease.token)?;
         let cohort = if let Some(original) = cohort {
             if original.domain != domain || original.task != task || original.device != device {
                 return Err(publication_input_error("evaluation cohort differs from the original admitted task, domain or CUDA device"));
@@ -273,7 +279,6 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     runtime_error("kernel lookup", "tensor content witness unavailable")
                 })?;
-            let cold_work = self.cold_native_work(lease.token)?;
             content.enqueue_with_custody(
                 &self.domain,
                 &mut self.poisoned,
@@ -322,6 +327,7 @@ impl SemanticTransitionSession {
             work,
             report,
             source_material,
+            cold_work,
             stream: self.stream.cu_stream() as u64,
             submitted: false,
             report_submitted: false,
@@ -342,6 +348,35 @@ impl SemanticTransitionSession {
             .work;
         work.reset_slots(&self.domain, &mut self.poisoned, 0, event_capacity)?;
         Ok(handle)
+    }
+
+    pub(super) fn require_evaluation_cold_work_origin(
+        &self,
+        original: &SemanticModelEvaluation,
+        reader_token: Option<u64>,
+        expected_work: &DeviceMemoryView<u64>,
+    ) -> Result<(), SemanticTransitionError> {
+        let evaluation = self.evaluation(original)?;
+        let actual = evaluation.cold_work.as_ref().ok_or_else(|| {
+            publication_input_error("evaluation has no original cold operation allocation")
+        })?;
+        let actual_owner = actual
+            .allocation_provenance()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let expected_owner = expected_work
+            .allocation_provenance()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if reader_token.is_some_and(|token| token != original.token)
+            || evaluation.execution != EvaluationExecution::Prepared
+            || !actual_owner.same_allocation(&expected_owner)
+            || actual.device_ptr() != expected_work.device_ptr()
+            || actual.len() != expected_work.len()
+        {
+            return Err(publication_input_error(
+                "evaluation cleanup changed its original reader or cold operation allocation",
+            ));
+        }
+        Ok(())
     }
 
     fn evaluation(

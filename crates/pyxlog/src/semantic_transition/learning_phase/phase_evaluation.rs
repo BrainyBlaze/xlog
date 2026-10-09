@@ -1801,6 +1801,22 @@ impl PySemanticLearningPhaseTransition {
                 2,
             )
             .map_err(xlog_err)?;
+        let cleanup = current
+            .regions
+            .get(2)
+            .ok_or_else(|| invalid("cancelled evaluation lost its original cleanup region"))?
+            .borrow(py);
+        self.source
+            .borrow(py)
+            .owner()?
+            .cancel_cold_model_work_evaluation_cleanup(
+                cleanup
+                    .region
+                    .as_ref()
+                    .expect("original evaluation cleanup"),
+                cancelled,
+            )
+            .map_err(xlog_err)?;
         current.cold_stage = EvaluationColdStage::Cleanup;
         Self::clear_evaluation_cold_visibility(py, &session);
         Ok(())
@@ -1810,6 +1826,7 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
         original: &Py<PySemanticModelEvaluation>,
+        native: &SemanticModelEvaluation,
     ) -> PyResult<()> {
         let mut retained = self.phase_evaluations()?;
         let current = retained
@@ -1823,6 +1840,30 @@ impl PySemanticLearningPhaseTransition {
             return Err(invalid(
                 "phase evaluation cannot replace its original native invocation",
             ));
+        }
+        let cleanup = current
+            .regions
+            .get(2)
+            .ok_or_else(|| invalid("phase evaluation lost its original cleanup region"))?
+            .borrow(py);
+        let source = self.source.borrow(py);
+        let parent = current.owners()?.parent.borrow(py);
+        let region = cleanup
+            .region
+            .as_ref()
+            .expect("original evaluation cleanup");
+        if parent.session.as_ptr() == self.source.as_ptr() {
+            source
+                .owner()?
+                .bind_cold_model_work_evaluation_cleanup(region, native, None)
+                .map_err(xlog_err)?;
+        } else {
+            let session = parent.session.borrow(py);
+            let owner = session.owner()?;
+            source
+                .owner()?
+                .bind_cold_model_work_evaluation_cleanup(region, native, Some(&owner))
+                .map_err(xlog_err)?;
         }
         current.native_evaluation = Some(original.clone_ref(py));
         Ok(())

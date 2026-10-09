@@ -830,7 +830,9 @@ impl PySemanticTransitionController {
             },
         )?;
         if let Some(pending) = private_execution_owner(py, &session)? {
-            pending.borrow(py).bind_phase_evaluation(py, &original)?;
+            pending
+                .borrow(py)
+                .bind_phase_evaluation(py, &original, &original.borrow(py).inner)?;
         }
         Ok(original)
     }

@@ -351,6 +351,22 @@ impl ModelWorkPlan {
         Ok(())
     }
 
+    pub(crate) fn require_evaluation_result_copy_suffix(
+        &self,
+        index: usize,
+    ) -> Result<(), &'static str> {
+        self.require_region_start(index)?;
+        let (start, end) = self.region(index)?;
+        if end != self.events.len()
+            || self.events[start..end]
+                .iter()
+                .any(|event| event.kind != ModelWorkKind::CopyBytes)
+        {
+            return Err("cancelled evaluation can skip only its unentered final result-copy span");
+        }
+        Ok(())
+    }
+
     pub(crate) fn complete(&self) -> bool {
         self.next == self.events.len()
     }
