@@ -292,6 +292,82 @@ pub(super) struct ActorRefreshSession {
     pub(super) bank: usize,
 }
 
+fn require_actor_refresh_cold_callback(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+    step: &PySemanticPreparedStep,
+    work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+) -> PyResult<()> {
+    let private = {
+        let stored = session
+            .prepared_segment
+            .lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+        let stored = stored
+            .as_ref()
+            .ok_or_else(|| invalid("actor callback lost its original segment"))?;
+        if !Arc::ptr_eq(&stored.scope, &step.scope)
+            || !stored
+                .steps
+                .iter()
+                .any(|original| std::ptr::eq(&*original.borrow(py), step))
+        {
+            return Err(invalid("actor callback changed its original issued Update"));
+        }
+        let mut private = None;
+        for callback in &stored.cold_callbacks {
+            let callback = callback
+                .lock()
+                .map_err(|_| invalid("prepared cold callback custody is poisoned"))?;
+            if std::ptr::eq(&*callback.step.borrow(py), step)
+                && callback
+                    .work
+                    .as_ref()
+                    .is_some_and(|original| std::ptr::eq(&*original.borrow(py), work))
+            {
+                if callback.failed || callback.result.is_some() || !callback.callback_entered {
+                    return Err(invalid(
+                        "actor preparation is outside its original entered callback",
+                    ));
+                }
+                private = callback
+                    .private_phase
+                    .as_ref()
+                    .map(|phase| phase.clone_ref(py));
+                break;
+            }
+        }
+        private
+    };
+    if let Some(private) = private {
+        if !session.recording.load(Ordering::Acquire)
+            || !work.active.load(Ordering::Acquire)
+            || session
+                .active_cold_model_work
+                .lock()
+                .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?
+                .as_ref()
+                .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+        {
+            return Err(invalid(
+                "actor preparation changed its original active cold scope",
+            ));
+        }
+        private
+            .borrow(py)
+            .require_private_actor_cold_callback(py, session, step, work)
+    } else {
+        let original = prepared_cold_callback_step(py, session, work)?
+            .ok_or_else(|| invalid("actor preparation lost its original cold callback"))?;
+        if !std::ptr::eq(&*original.borrow(py), step) {
+            return Err(invalid(
+                "actor preparation changed its original Update cold work",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct ActorRefreshCustody {
     update: Py<PySemanticPreparedStep>,
     instruction: Arc<SegmentInstructionCustody>,
@@ -1323,13 +1399,7 @@ impl ActorRefreshCustody {
                 invalid("actor construction requires its original Update cold callback")
             })?;
         let work = work.borrow(py);
-        let original = prepared_cold_callback_step(py, &session, &work)?
-            .ok_or_else(|| invalid("actor construction lost its original prepared cold work"))?;
-        if original.as_ptr() != self.update.as_ptr() {
-            return Err(invalid(
-                "actor construction changed its original Update cold work",
-            ));
-        }
+        require_actor_refresh_cold_callback(py, &session, &update, &work)?;
         let mut children = self.children()?;
         if children[bank].construction_entered {
             return Err(invalid(
@@ -2104,13 +2174,7 @@ impl PySemanticPreparedStep {
             .as_ref()
             .map(|work| work.clone_ref(py))
             .ok_or_else(|| invalid("actor refresh requires its original Update cold callback"))?;
-        let original = prepared_cold_callback_step(py, &session, &work.borrow(py))?
-            .ok_or_else(|| invalid("actor refresh lost its original prepared cold work"))?;
-        if original.as_ptr() != slf.as_ptr() {
-            return Err(invalid(
-                "actor refresh changed its original Update cold work",
-            ));
-        }
+        require_actor_refresh_cold_callback(py, &session, &update, &work.borrow(py))?;
         let instruction = {
             let stored = session
                 .prepared_segment
