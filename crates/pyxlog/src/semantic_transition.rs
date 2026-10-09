@@ -18224,7 +18224,7 @@ impl PySemanticTransitionController {
             if let Some(private) = &private {
                 private.borrow(py).finish_private_retained_sources(py, &session, &task_use.borrow(py))?;
             }
-            actor_refresh::finish_actor_refresh_children(py, &actor_refreshes)?;
+            actor_refresh::finish_actor_refresh_children(py, &actor_refreshes, cancellation.as_ref(), &streams)?;
             if let Some(prepared) = &prepared {
                 session
                     .prepared_segment
