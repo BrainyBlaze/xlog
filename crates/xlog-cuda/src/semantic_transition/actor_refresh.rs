@@ -103,9 +103,23 @@ pub(super) struct StagedActorRefresh {
     pub(super) state: ActorRefreshCaptureState,
     pub(super) device: Arc<TrackedCudaSlice<PreparedActorRefreshDevice>>,
     pub(super) native_work: Arc<TrackedCudaSlice<u64>>,
+    retirement_complete: bool,
+    context: Arc<Mutex<ActorRefreshContextPreparation>>,
+    context_issuance: Arc<()>,
+    context_pending: Arc<AtomicBool>,
     native_ceiling: [u64; 9],
     initializer_observation: Arc<Mutex<Option<ActorRefreshInitializerObservation>>>,
     initializer_refusal: Option<SemanticActorRefreshInitializerRefusal>,
+}
+
+struct ActorRefreshContextPreparation {
+    material: Vec<u8>,
+    zero: crate::device::RetainedDeviceWrite<u64>,
+    marker: Option<crate::device::RetainedDeviceWrite<PreparedActorRefreshDevice>>,
+    admitted: [bool; 2],
+    zero_done: bool,
+    restore_done: bool,
+    ready: bool,
 }
 
 #[repr(C)]
@@ -908,7 +922,6 @@ impl SemanticTransitionSession {
         target_bank: usize,
     ) -> Result<(), SemanticTransitionError> {
         if target_bank > 1
-            || self.actor_refresh.is_some()
             || material.kind != SemanticTransitionKind::Proposal
             || !Arc::ptr_eq(&self.provider, &proof.inner.provider)
             || crate::semantic_training_view::origin_record(material.training_view_origin()?)
@@ -918,11 +931,34 @@ impl SemanticTransitionSession {
                 "actor context requires its exact original row and current model owner",
             ));
         }
+        let material_bytes = material.predecessor.encode()?;
+        if let Some(original) = &self.actor_refresh {
+            if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
+                || original.target_bank != target_bank
+                || original.context.lock().map_err(|_| publication_input_error("actor context custody is poisoned"))?.material != material_bytes
+            {
+                return Err(publication_input_error("actor context changed its original restoration"));
+            }
+            return self.resolve_actor_refresh_context(proof, target_bank);
+        }
+        self.ensure_quiescent()?;
+        let device = Arc::new(allocate_publication(&self.provider, 1)?);
+        let native_work = Arc::new(allocate_publication(&self.provider, 11)?);
+        let stream = Arc::clone(proof.inner.domain.execution_stream());
+        let zero = crate::device::RetainedDeviceWrite::new(&stream, &[0u64; 11], native_work.view())
+            .map_err(|error| runtime_error("original actor work staging", error))?;
+        let context = Arc::new(Mutex::new(ActorRefreshContextPreparation {
+            material: material_bytes,
+            zero,
+            marker: None,
+            admitted: [false; 2],
+            zero_done: false,
+            restore_done: false,
+            ready: false,
+        }));
         {
-            let mut children =
-                proof.inner.children.lock().map_err(|_| {
-                    publication_input_error("actor context custody lock is poisoned")
-                })?;
+            let mut children = proof.inner.children.lock()
+                .map_err(|_| publication_input_error("actor context custody lock is poisoned"))?;
             if children[target_bank].is_some() {
                 return Err(publication_input_error(
                     "actor context is staged once per original conditional bank",
@@ -930,48 +966,77 @@ impl SemanticTransitionSession {
             }
             children[target_bank] = Some(Arc::clone(&self.publication_issuer));
         }
-        // Keep the proof even when original staging enters an uncertain CUDA
-        // operation. A failed attempt cannot be replaced with a fresh child.
         self.domain = proof.inner.domain.clone();
-        self.stream = Arc::clone(self.domain.execution_stream());
-        let device = Arc::new(allocate_publication(&self.provider, 1)?);
-        let native_work = Arc::new(allocate_publication(&self.provider, 11)?);
+        self.stream = stream;
         self.actor_refresh = Some(StagedActorRefresh {
             proof: proof.clone(),
             target_bank,
             state: ActorRefreshCaptureState::Staged,
-            device: Arc::clone(&device),
-            native_work: Arc::clone(&native_work),
+            device,
+            native_work,
+            retirement_complete: false,
+            context,
+            context_issuance: Arc::new(()),
+            context_pending: Arc::new(AtomicBool::new(true)),
             native_ceiling: [0; 9],
             initializer_observation: Arc::new(Mutex::new(None)),
             initializer_refusal: None,
         });
-        upload_publication(&self.provider, &[0u64; 11], &native_work)?;
-        let staged = self.restore_state_material_inner(
-            &material.predecessor.encode()?,
-            None,
-            Some(RestoredModelOwners::Current {
-                owners: &proof.inner.models,
-                minimum_generation: proof.inner.minimum_generation,
-            }),
-        )?;
-        if staged.is_some() {
-            return Err(SemanticTransitionError::ObservationMismatch);
+        self.resolve_actor_refresh_context(proof, target_bank)
+    }
+
+    /// Continue only the original child context and its retained restoration.
+    pub fn resolve_actor_refresh_context(
+        &mut self,
+        proof: &SemanticPreparedActorRefresh,
+        target_bank: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
+            || original.target_bank != target_bank
+            || original.state != ActorRefreshCaptureState::Staged
+        {
+            return Err(publication_input_error("actor context continuation changed its original child"));
         }
-        let native_ceiling = actor_initialize_native_work_ceiling(self)?;
-        self.actor_refresh
-            .as_mut()
-            .expect("retained original actor context")
-            .native_ceiling = native_ceiling;
-        let child = self
-            .publication
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        upload_publication(
-            &self.provider,
-            &[PreparedActorRefreshDevice {
-                abi: 1,
-                status: 1,
+        let context = Arc::clone(&original.context);
+        let issuance = Arc::clone(&original.context_issuance);
+        let pending = Arc::clone(&original.context_pending);
+        let device = Arc::clone(&original.device);
+        let mut retained = context.lock().map_err(|_| publication_input_error("actor context custody is poisoned"))?;
+        if retained.ready { return Ok(()); }
+        if !retained.zero_done {
+            if !retained.admitted[0] {
+                self.provider.admit_launch_metadata_htod(11 * size_of::<u64>());
+                retained.admitted[0] = true;
+            }
+            if !retained.zero.entered() {
+                self.ensure_quiescent_except_actor_context(&issuance)?;
+                retained.zero.enqueue(&self.stream).map_err(|error| runtime_error("original actor work initialization", error))?;
+            }
+            retained.zero.resolve().map_err(|error| runtime_error("original actor work completion", error))?;
+            retained.zero_done = true;
+        }
+        if !retained.restore_done {
+            let restored = if self.state_material_restore_started() {
+                self.resolve_state_material_restore()?
+            } else {
+                self.ensure_quiescent_except_actor_context(&issuance)?;
+                self.restore_state_material_inner(&retained.material, None,
+                    Some(RestoredModelOwners::Current {
+                        owners: &proof.inner.models,
+                        minimum_generation: proof.inner.minimum_generation,
+                    }))?
+            };
+            if restored.is_some() { return Err(SemanticTransitionError::ObservationMismatch); }
+            retained.restore_done = true;
+        }
+        if retained.marker.is_none() {
+            self.ensure_quiescent_except_actor_context(&issuance)?;
+            let native_ceiling = actor_initialize_native_work_ceiling(self)?;
+            self.actor_refresh.as_mut().expect("retained original actor").native_ceiling = native_ceiling;
+            let child = self.publication.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+            let marker = PreparedActorRefreshDevice {
+                abi: 1, status: 1,
                 target_control: proof.inner.target.control.device_ptr_value(),
                 target_lease: proof.inner.inputs.reader.device_ptr_value(),
                 target_header: proof.inner.inputs.header.device_ptr_value(),
@@ -982,24 +1047,59 @@ impl SemanticTransitionSession {
                 stream_serial: proof.inner.rng.stream_serial,
                 family_id: u64::from(proof.inner.rng.family_id),
                 proposal: u64::from(proof.inner.rng.proposal),
-                program: proof.inner.program,
-                phase: proof.inner.phase,
-                original_origin: proof.inner.member.origin,
-                acquired_generation: 0,
+                program: proof.inner.program, phase: proof.inner.phase,
+                original_origin: proof.inner.member.origin, acquired_generation: 0,
                 model_geometry_digest: Identity256::default(),
                 model_numerical_digest: Identity256::default(),
-            }],
-            &device,
-        )?;
-        // This is cold scheduling metadata, not a claim about the pending
-        // model. The bridge replaces the device generation from the acquired
-        // target before either numerical operation can execute.
+            };
+            retained.marker = Some(crate::device::RetainedDeviceWrite::new(&self.stream, &[marker], device.view())
+                .map_err(|error| runtime_error("original actor marker staging", error))?);
+        }
+        if !retained.admitted[1] {
+            self.provider.admit_launch_metadata_htod(size_of::<PreparedActorRefreshDevice>());
+            retained.admitted[1] = true;
+        }
+        let marker = retained.marker.as_mut().expect("original actor marker");
+        if !marker.entered() {
+            self.ensure_quiescent_except_actor_context(&issuance)?;
+            marker.enqueue(&self.stream).map_err(|error| runtime_error("original actor marker initialization", error))?;
+        }
+        marker.resolve().map_err(|error| runtime_error("original actor marker completion", error))?;
         let mut rng = proof.inner.rng;
         rng.model_generation = u32::try_from(proof.inner.minimum_generation)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         self.rng = Some(rng);
         self.next_proposal = u64::from(rng.proposal);
+        retained.ready = true;
+        pending.store(false, Ordering::Release);
         Ok(())
+    }
+
+    pub(super) fn actor_refresh_context_issuance(&self) -> Option<Arc<()>> {
+        self.actor_refresh.as_ref().map(|original| Arc::clone(&original.context_issuance))
+    }
+
+    pub(super) fn has_pending_actor_refresh_context_except(&self, except: Option<&Arc<()>>) -> bool {
+        self.actor_refresh.as_ref().is_some_and(|original| {
+            original.context_pending.load(Ordering::Acquire)
+                && except.is_none_or(|issuer| !Arc::ptr_eq(issuer, &original.context_issuance))
+        })
+    }
+
+    pub fn actor_refresh_context_started(
+        &self,
+        proof: &SemanticPreparedActorRefresh,
+        bank: usize,
+    ) -> Result<bool, SemanticTransitionError> {
+        if bank > 1 || !Arc::ptr_eq(&self.provider, &proof.inner.provider) {
+            return Err(publication_input_error("actor context changed its original provider or bank"));
+        }
+        match &self.actor_refresh {
+            None => Ok(false),
+            Some(original) if Arc::ptr_eq(&original.proof.inner, &proof.inner)
+                && original.target_bank == bank => Ok(true),
+            Some(_) => Err(publication_input_error("actor context changed its original child")),
+        }
     }
 
     /// Record the CURRENT basis bridge inside the original target bank, after
@@ -1616,6 +1716,75 @@ impl SemanticTransitionSession {
             }
         }
         Ok(())
+    }
+
+    /// Attach the same outer final-use report, never an invented child reader.
+    pub fn attach_actor_refresh_retirement_work(
+        &mut self,
+        proof: &SemanticPreparedActorRefresh,
+        bank: usize,
+        work: SemanticColdNativeWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.require_actor_refresh_parent_completion()?;
+        let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
+            || original.target_bank != bank
+            || original.retirement_complete
+        {
+            return Err(publication_input_error("actor retirement changed its original child"));
+        }
+        self.attach_cold_native_work(work)
+    }
+
+    /// Preserve the actual child-completion proof after the original build is
+    /// removed by the common resource-retirement implementation.
+    pub fn take_actor_refresh_resources_for_retirement(
+        &mut self,
+        proof: &SemanticPreparedActorRefresh,
+        bank: usize,
+    ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
+        self.require_actor_refresh_parent_completion()?;
+        let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
+            || original.target_bank != bank
+            || original.retirement_complete
+        {
+            return Err(publication_input_error("actor resource retirement changed its original child"));
+        }
+        let resources = self.take_prepared_resources_for_retirement()?;
+        self.actor_refresh.as_mut().expect("authenticated original actor").retirement_complete = true;
+        Ok(resources)
+    }
+
+    /// Join only a genuinely retired CURRENT child before the common terminal
+    /// allocation release. This path never constructs a publication lease.
+    pub fn join_actor_refresh_release(
+        &mut self,
+        proof: &SemanticPreparedActorRefresh,
+        bank: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.require_actor_refresh_parent_completion()?;
+        self.require_closed_evaluations()?;
+        self.require_completed_graph_retirements()?;
+        let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
+            || original.target_bank != bank
+            || !original.retirement_complete
+            || self.training_canary_source_borrowed()
+            || self.graph.borrowed_cold_work().is_some()
+            || !self.readers.is_empty()
+            || !self.steps.is_empty()
+            || self.captured.is_some()
+            || self.prepared_segment.is_some()
+            || !self.prepared_resources.is_empty()
+        {
+            return Err(publication_input_error("actor Session retains unfinished original final use"));
+        }
+        self.stream.context().bind_to_thread()
+            .and_then(|_| self.stream.context().synchronize())
+            .map_err(|error| runtime_error("original actor allocation completion", error))
     }
 
     pub(super) fn require_actor_refresh_parent_completion(

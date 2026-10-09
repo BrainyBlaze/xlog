@@ -192,92 +192,16 @@ impl PySemanticPrivateReplayChild {
         refresh_snapshot: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
         self.inner.require_preparation(py)?;
-        if !refresh_snapshot.is_callable() {
-            return Err(invalid(
-                "original replay source requires current authority refresh",
-            ));
-        }
         let target = self.inner.task.borrow(py);
-        let mut snapshot = target.state()?.snapshot.clone();
-        let refreshed = refresh_checkpoint_authority(
-            &target.authority,
-            &mut snapshot,
-            refresh_snapshot,
-            "training",
-            true,
-        );
-        target.state()?.snapshot = snapshot;
-        refreshed?;
+        let source = super::super::actor_refresh::replay_source_checkpoint(
+            py, &target, self.inner.replay_ordinal, refresh_snapshot,
+        )?;
         if self.inner.state()?.source.is_none() {
-            let roster = target.checkpoint.original_training_roster()?;
-            let roster = roster.fields(2)?;
-            let ordinal = usize::try_from(self.inner.replay_ordinal)
-                .map_err(|_| invalid("original replay source ordinal exceeds this host"))?;
-            let row = roster[0]
-                .sequence()?
-                .get(ordinal)
-                .ok_or_else(|| invalid("original replay source row is absent"))?;
-            let row = ReplayRow::parse_with_live(row, &target.authority.live)?;
-            let referent = row
-                .checkpoint_referent()?
-                .or(row.pre_action_checkpoint_referent()?)
-                .or(row.recovered_prefill_referent()?)
-                .ok_or_else(|| {
-                    invalid("original replay source has no complete checkpoint referent")
-                })?;
-            let checkpoint = target
-                .checkpoint
-                .checkpoint_sources
-                .lock()
-                .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?
-                .verified
-                .get(&referent.checkpoint_digest)
-                .map(Arc::clone)
-                .ok_or_else(|| {
-                    invalid("original replay source was not retained by canonical admission")
-                })?;
-            referent.verify_source(&checkpoint)?;
-            if checkpoint.cold.is_none() {
-                return Err(invalid(
-                    "original replay source has no canonical executable task admission",
-                ));
-            }
-            self.inner.state()?.source = Some(checkpoint);
+            self.inner.state()?.source = Some(source);
         }
         let state = self.inner.state()?;
         let source = state.source.as_ref().expect("retained original source");
-        let cold = source
-            .cold
-            .as_ref()
-            .expect("checked canonical cold task source");
-        let cold = (
-            cold.initial_theory.as_str(),
-            cold.input_facts.as_str(),
-            cold.observer_source.as_deref(),
-            PyTuple::new(py, &cold.statements)?,
-            PyTuple::new(py, &cold.query_records)?,
-        )
-            .into_pyobject(py)?
-            .unbind()
-            .into_any();
-        let source_fields = ColdValue::Sequence(vec![
-            ColdValue::Sequence(source.seed.authority.clone()),
-            ColdValue::Sequence(source.seed.evaluation.clone()),
-            source.seed.training_domain.clone(),
-            source.seed.initial_sources.clone(),
-            source.seed.source_mapping.clone(),
-            source.seed.replay_capacity.clone(),
-        ])
-        .python_value(py)?;
-        Ok(PyTuple::new(
-            py,
-            [
-                PyBytes::new(py, &source.bytes).unbind().into_any(),
-                cold,
-                source_fields,
-            ],
-        )?
-        .unbind())
+        super::super::actor_refresh::replay_source_projection(py, source)
     }
 }
 

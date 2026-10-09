@@ -23,6 +23,8 @@ from pyxlog._native import (
     SemanticTransitionController as SemanticTransitionController,
     SemanticPreparedSegmentPending as SemanticPreparedSegmentPending,
     SemanticPreparedSegmentCancelled as SemanticPreparedSegmentCancelled,
+    SemanticPreparedActorRefresh as SemanticPreparedActorRefresh,
+    SemanticRetainedFinalUsePending as SemanticRetainedFinalUsePending,
     SemanticTransitionColdTask as SemanticTransitionColdTask,
     SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
     CarrierRefused as CarrierRefused,

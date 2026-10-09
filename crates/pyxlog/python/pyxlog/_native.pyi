@@ -139,7 +139,19 @@ class SemanticCompletedExecutionObservation:
     @property
     def model_calls(self) -> int: ...
 
+class SemanticPreparedActorRefresh:
+    """Native-issued CURRENT actor member with two original embedded children.
+
+    Create it only through the original Update's prepare_actor_refresh method.
+    Both bank producers borrow the sole outer memory_scope and never submit a
+    graph independently. Retain this owner through native final-use retirement.
+    """
+    def source_task(self, *, refresh_snapshot: Any) -> tuple[Any, ...]: ...
+    def prepare_bank(self, bank: int, task_use: SemanticTransitionTaskUse, producer: Any) -> Any: ...
+    def group_update_vjp(self, update_step: SemanticPreparedStep, bank: int, *, consumer_stream: int) -> tuple[Any, ...]: ...
+
 class SemanticPreparedStep:
+    def prepare_actor_refresh(self, member_ordinal: int, *, refresh_snapshot: Any) -> SemanticPreparedActorRefresh: ...
     """Session-issued original step; construction is not public."""
 
     @property
@@ -401,6 +413,13 @@ class SemanticPreparedSegmentCancelled(RuntimeError):
 
     This is not an executed or skipped result roster and does not refund its
     original attempt, Program progression or nominal proposal expense.
+    """
+
+class SemanticRetainedFinalUsePending(RuntimeError):
+    """Retain the original target retirement and members until final use joins.
+
+    Retry only the original native final-use owner. Do not repeat cleanup,
+    historical import, or numerical work after this exception.
     """
 
 class SemanticPublishedParent:

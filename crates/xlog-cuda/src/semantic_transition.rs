@@ -10133,9 +10133,15 @@ impl PreparedStepInputs {
 
     // Session installs this owner before uploading fixed pointer/layout metadata.
     // No numerical values or expected digests travel through the host.
-    fn initialize(&self, provider: &CudaKernelProvider) -> Result<(), SemanticTransitionError> {
+    fn initialize(
+        &self,
+        stream: &CudaStream,
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
+    ) -> Result<(), SemanticTransitionError> {
         for bank in 0..2 {
-            upload_publication(provider, &self.binding_values[bank], &self.bindings[bank])?;
+            writes.push(state_restoration::OriginalDeviceWrite::new(
+                stream, &self.binding_values[bank], self.bindings[bank].view(), false,
+            )?);
         }
         Ok(())
     }
@@ -11096,6 +11102,22 @@ struct PreparedNeverGraphCalled {
     attempt: Arc<PreparedLaunchAttempt>,
 }
 
+struct PreparedModelCatalogueInitialization {
+    original: Arc<PublicationStorage>,
+    expanded: Arc<PublicationStorage>,
+    execute: CudaFunction,
+    command: OriginalNativeCommand,
+}
+
+struct PreparedSegmentInitialization {
+    writes: Vec<state_restoration::OriginalDeviceWrite>,
+    cursor: usize,
+    catalogue: Option<PreparedModelCatalogueInitialization>,
+    poisoned: bool,
+    complete: bool,
+    retired: bool,
+}
+
 struct PreparedSegmentState {
     issuer: Arc<()>,
     scope: Arc<()>,
@@ -11103,6 +11125,8 @@ struct PreparedSegmentState {
     transitions: Vec<SemanticTransitionKind>,
     cold_capacity: SemanticSegmentColdCapacity,
     cold_reservation: Option<GpuMemoryReservation>,
+    initialization: Option<Arc<Mutex<PreparedSegmentInitialization>>>,
+    initialization_pending: AtomicBool,
     next: usize,
     active: bool,
     finished: bool,
@@ -11164,6 +11188,8 @@ impl PreparedSegmentState {
             transitions: owned,
             cold_capacity,
             cold_reservation: None,
+            initialization: None,
+            initialization_pending: AtomicBool::new(false),
             next: 0,
             active: false,
             finished: false,
@@ -17088,7 +17114,7 @@ impl SemanticTransitionSession {
     /// reservation must first retire its original authority DMA and close the
     /// original launch frame; a false pending flag alone cannot admit this join.
     /// No reader decrement, result row, allocation release or rights is issued.
-    pub fn cancel_prepared_segment_before_submission(
+pub fn cancel_prepared_segment_before_submission(
         &mut self,
         steps: &[SemanticPreparedStep],
     ) -> Result<SemanticPreparedSegmentNonSubmission, SemanticTransitionError> {
@@ -17139,11 +17165,22 @@ impl SemanticTransitionSession {
         };
         #[cfg(not(feature = "semantic-policy"))]
         let embedded = false;
+        let initialization_pending = self.has_pending_prepared_segment_preparation();
+        if initialization_pending {
+            self.retire_original_prepared_initialization(steps)?;
+        }
+        let build = self.prepared_segment.as_ref().expect("original cancellation scope");
         let resuming = steps.iter().any(|step| {
             self.steps[&step.token].consumer_completion.is_some()
         });
         if !resuming {
-            self.ensure_quiescent()?;
+            if initialization_pending {
+                if !self.original_prepared_initialization_may_submit() {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
+            } else {
+                self.ensure_quiescent()?;
+            }
             if !embedded {
                 build.require_cancellable(steps)?;
             }
@@ -17208,6 +17245,7 @@ impl SemanticTransitionSession {
             steps: steps.to_vec(),
         };
         build.require_non_submission(&proof)?;
+        build.initialization_pending.store(false, Ordering::Release);
         for step in steps {
             let streams = self.steps[&step.token]
                 .consumer_streams
@@ -18733,87 +18771,161 @@ impl SemanticTransitionSession {
         })
     }
 
-    fn install_model_generation_catalogue(
-        &mut self,
-        original: &PublicationStorage,
-        expanded: &PublicationStorage,
+    fn prepare_model_generation_catalogue(
+        &self,
+        original: &Arc<PublicationStorage>,
+        expanded: &Arc<PublicationStorage>,
         retired_model_slots: &BTreeSet<usize>,
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
+    ) -> Result<PreparedModelCatalogueInitialization, SemanticTransitionError> {
+        let values = expanded.allocations.iter().enumerate().map(|(slot, allocation)| {
+            let entry = allocation.entry();
+            if retired_model_slots.contains(&slot) {
+                PublicationStorageEntry { pointer: 0, bytes: 0, ..entry }
+            } else { entry }
+        }).collect::<Vec<_>>();
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            &self.stream, &values, expanded.storage.view(), false,
+        )?);
+        let execute = self.provider.device().inner()
+            .get_func("xlog_semantic_transition", "semantic_publication_replace_model_storage")
+            .ok_or_else(|| runtime_error("kernel lookup", "model generation catalogue admission unavailable"))?;
+        Ok(PreparedModelCatalogueInitialization {
+            original: Arc::clone(original), expanded: Arc::clone(expanded), execute,
+            command: OriginalNativeCommand::new(&self.domain)?,
+        })
+    }
+
+    /// Whether the original full allocation and initialization roster exists.
+    /// This is metadata only; it grants no effect or completion authority.
+    pub fn prepared_segment_preparation_started(&self) -> bool {
+        self.prepared_segment.as_ref().is_some_and(|build| build.initialization.is_some())
+    }
+
+    /// Recover only the issued handles of the original allocation roster.
+    /// Cancellation still requires its canonical whole-roster proof and joins.
+    pub fn prepared_segment_preparation_handles(
+        &self,
+    ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotCaptured)?;
+        if !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || build.initialization.is_none()
+            || build.completed
+            || build.tokens.iter().any(|token| self.steps.get(token)
+                .is_none_or(|owner| owner.prepared.is_none() || owner.identity.is_some()))
+        {
+            return Err(publication_input_error("original initialization handles lost their retained allocation scope"));
+        }
+        build.handles()
+    }
+
+    fn has_pending_prepared_segment_preparation(&self) -> bool {
+        self.prepared_segment.as_ref().is_some_and(|build| build.initialization_pending.load(Ordering::Acquire))
+    }
+
+    fn retire_original_prepared_initialization(
+        &mut self,
+        steps: &[SemanticPreparedStep],
     ) -> Result<(), SemanticTransitionError> {
-        let values = expanded
-            .allocations
-            .iter()
-            .enumerate()
-            .map(|(slot, allocation)| {
-                let entry = allocation.entry();
-                if retired_model_slots.contains(&slot) {
-                    PublicationStorageEntry {
-                        pointer: 0,
-                        bytes: 0,
-                        ..entry
-                    }
-                } else {
-                    entry
-                }
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotCaptured)?;
+        if build.submitted || build.capturing || build.completed
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)| {
+                step.token != *token || build.check_retained(step, &self.publication_issuer).is_err()
             })
-            .collect::<Vec<_>>();
-        upload_publication(&self.provider, &values, &expanded.storage)?;
-        let kernel = self
-            .provider
-            .device()
-            .inner()
-            .get_func(
-                "xlog_semantic_transition",
-                "semantic_publication_replace_model_storage",
-            )
-            .ok_or_else(|| {
-                runtime_error(
-                    "kernel lookup",
-                    "model generation catalogue admission unavailable",
-                )
-            })?;
-        let mut recorder = self.domain.new_strict_recorder();
-        recorder.read_write(&expanded.control);
-        recorder.read(&original.storage);
-        recorder.read(&expanded.storage);
-        recorder.read(&expanded.contract);
-        for bank in &expanded.banks {
-            recorder.read(bank);
+        {
+            return Err(publication_input_error("initialization retirement changed its original unused roster"));
         }
-        for directory in &expanded.directories {
-            recorder.read_write(directory);
+        let Some(owner) = &build.initialization else { return Ok(()); };
+        let owner = Arc::clone(owner);
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("initialization retirement capture exclusion", error))?;
+        let mut retained = owner.lock().map_err(|_| publication_input_error("original segment initialization custody is poisoned"))?;
+        if retained.retired || retained.complete { return Ok(()); }
+        for original in &mut retained.writes {
+            original.retire_without_result(&self.stream)?;
         }
-        let args = (
-            expanded.control.device_ptr_value(),
-            original.storage.device_ptr_value(),
-            original.allocations.len() as u64,
-            expanded.storage.device_ptr_value(),
-            expanded.allocations.len() as u64,
-        );
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
-            // SAFETY: both catalogues and the sole idle publication control
-            // retain their genuine native owners before this launch. The
-            // kernel preserves every live entry and rejects clearing any
-            // selected range. It changes no word or numerical generation.
-            unsafe {
-                kernel.launch_in(
-                    stream,
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    args,
-                )
+        if let Some(original) = &mut retained.catalogue {
+            if original.command.completion_entered && !original.command.completed {
+                original.command.completion.wait().or_else(|_| {
+                    self.stream.context().bind_to_thread()?;
+                    self.stream.synchronize()
+                }).map_err(|error| runtime_error("original catalogue retirement", error))?;
             }
-            .map_err(|error| XlogError::Kernel(error.to_string()))
-        })?;
-        wait_on_stream(
-            &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "cold model generation catalogue admission",
-            CudaStream::synchronize,
-        )
+        }
+        // Retirement proves only that the entered prefix no longer uses its
+        // owners. It never certifies initialization or permits its suffix.
+        retained.retired = true;
+        Ok(())
+    }
+
+    /// Join the original initialization prefix and advance only its untouched
+    /// suffix under the same native scope. Allocations and handles never recur.
+    pub fn resolve_prepared_segment_preparation(
+        &mut self,
+    ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || build.submitted || build.capturing || build.completed
+            || build.cancelled.load(Ordering::Acquire)
+        {
+            return Err(publication_input_error("original segment preparation lost its construction scope"));
+        }
+        let owner = Arc::clone(build.initialization.as_ref().ok_or(SemanticTransitionError::NotBound)?);
+        let handles = build.handles()?;
+        // The common guard excludes no reader, consumer or report. Only this
+        // authenticated initialization owner is omitted from the new-effect gate.
+        let may_submit = self.original_prepared_initialization_may_submit();
+        let mut retained = owner.lock().map_err(|_| publication_input_error("original segment initialization custody is poisoned"))?;
+        if retained.retired {
+            return Err(publication_input_error("original segment initialization was retired without execution"));
+        }
+        if retained.complete { return Ok(handles); }
+        {
+            let PreparedSegmentInitialization { writes, cursor, poisoned, .. } = &mut *retained;
+            while *cursor < writes.len() {
+                writes[*cursor].resolve(&self.domain, &self.stream, &self.provider, poisoned, may_submit)?;
+                *cursor += 1;
+            }
+        }
+        let PreparedSegmentInitialization { catalogue, poisoned, .. } = &mut *retained;
+        if let Some(original) = catalogue {
+            if !may_submit && !original.command.entered {
+                if original.command.completion_entered {
+                    original.command.completion.wait()
+                        .map_err(|error| runtime_error("original catalogue prelaunch completion", error))?;
+                }
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            let storage = &original.expanded;
+            let mut recorder = self.domain.new_strict_recorder();
+            recorder.read_write(&storage.control);
+            recorder.read(&original.original.storage);
+            recorder.read(&storage.storage);
+            recorder.read(&storage.contract);
+            for bank in &storage.banks { recorder.read(bank); }
+            for directory in &storage.directories { recorder.read_write(directory); }
+            let args = (
+                storage.control.device_ptr_value(),
+                original.original.storage.device_ptr_value(),
+                original.original.allocations.len() as u64,
+                storage.storage.device_ptr_value(),
+                storage.allocations.len() as u64,
+            );
+            let execute = original.execute.clone();
+            original.command.run(&self.domain, poisoned, recorder, |enqueue, entered, submitted| {
+                // SAFETY: the original roster owns both catalogues, the idle
+                // control and all banks before this one driver boundary.
+                unsafe { execute.launch_raw_in_original(enqueue, LaunchConfig {
+                    grid_dim: (1, 1, 1), block_dim: (1, 1, 1), shared_mem_bytes: 0,
+                }, args, entered, submitted) }
+                    .map_err(|error| XlogError::Kernel(error.to_string()))
+            })?;
+        }
+        retained.complete = true;
+        self.prepared_segment.as_ref().expect("original initialized build")
+            .initialization_pending.store(false, Ordering::Release);
+        Ok(handles)
     }
 
     /// Allocate every native step owner before the first capture begins.
@@ -19181,22 +19293,13 @@ impl SemanticTransitionSession {
             .memory()
             .reserve_bytes(bytes)
             .map_err(|error| runtime_error("prepared segment reservation", error))?;
-        let (storage, pending_generations) = if !replace_catalogue {
-            (storage, Vec::new())
+        let original_storage = Arc::clone(&storage);
+        let (storage, pending_generations, model_owners) = if !replace_catalogue {
+            (storage, Vec::new(), BTreeMap::new())
         } else {
-            let (expanded, pending, model_owners) =
+            let (expanded, pending, owners) =
                 storage.allocate_model_generations(update_count, &mut reservation)?;
-            let expanded = Arc::new(expanded);
-            // Install actual owners before the first may-enqueue boundary.
-            self.publication = Some(Arc::clone(&expanded));
-            self.model_owners.extend(model_owners);
-            if let Err(error) =
-                self.install_model_generation_catalogue(&storage, &expanded, &retired_model_slots)
-            {
-                self.poisoned = true;
-                return Err(error);
-            }
-            (expanded, pending)
+            (Arc::new(expanded), pending, owners)
         };
         let training_origins = if training_origin_bytes == 0 {
             None
@@ -19244,16 +19347,22 @@ impl SemanticTransitionSession {
             kernel("semantic_publication_prepare_model_update_admissibility")?;
         let model_update_forward_receipt =
             kernel("semantic_publication_record_model_forward_receipts")?;
-        self.prepared_segment = Some(build);
-        self.next_reader = end;
-        self.training_origins = training_origins.clone();
+        let mut writes = Vec::new();
+        let catalogue = if replace_catalogue {
+            Some(self.prepare_model_generation_catalogue(
+                &original_storage, &storage, &retired_model_slots, &mut writes,
+            )?)
+        } else { None };
+        // Allocation and pinned staging are metadata-only. No transfer may
+        // enter until the full reservation, exact handles and every write owner
+        // have been installed on this original build.
         let result = (|| {
             if let Some(origins) = &training_origins {
-                upload_publication(
-                    &self.provider,
+                writes.push(state_restoration::OriginalDeviceWrite::new(
+                    &self.stream,
                     &vec![SemanticTrainingViewOriginRecord::default(); transition_bound],
-                    origins,
-                )?;
+                    origins.view(), false,
+                )?);
             }
             let mut update_ordinal = 0;
             for (ordinal, (handle, kind)) in handles.iter().zip(&transitions).enumerate() {
@@ -19316,7 +19425,9 @@ impl SemanticTransitionSession {
                         .map_err(|error| {
                             runtime_error("model update evidence allocation", error)
                         })?;
-                    upload_publication(&self.provider, &values, &evidence)?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &values, evidence.view(), false,
+                    )?);
                     (Some(Arc::new(evidence)), Some(Arc::new(owners)))
                 } else {
                     (None, None)
@@ -19328,52 +19439,44 @@ impl SemanticTransitionSession {
                     let bindings = reservation
                         .alloc::<ModelUpdateBinding>(storage.model_slots.len())
                         .map_err(|error| runtime_error("model update binding allocation", error))?;
-                    upload_publication(
-                        &self.provider,
-                        &vec![ModelUpdateBinding::default(); storage.model_slots.len()],
-                        &bindings,
-                    )?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &vec![ModelUpdateBinding::default(); storage.model_slots.len()], bindings.view(), false,
+                    )?);
                     let forward_seals = reservation
                         .alloc::<ModelForwardSealInput>(model_forward_seal_count)
                         .map_err(|error| runtime_error("model forward seal allocation", error))?;
-                    upload_publication(
-                        &self.provider,
-                        &vec![ModelForwardSealInput::default(); model_forward_seal_count],
-                        &forward_seals,
-                    )?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &vec![ModelForwardSealInput::default(); model_forward_seal_count], forward_seals.view(), false,
+                    )?);
                     let forward_receipts =
                         reservation
                             .alloc::<ModelForwardReceipt>(2)
                             .map_err(|error| {
                                 runtime_error("model forward receipt allocation", error)
                             })?;
-                    upload_publication(
-                        &self.provider,
-                        &[ModelForwardReceipt::default(); 2],
-                        &forward_receipts,
-                    )?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &[ModelForwardReceipt::default(); 2], forward_receipts.view(), false,
+                    )?);
                     let admissibility = reservation.alloc::<u8>(1).map_err(|error| {
                         runtime_error("model update admissibility allocation", error)
                     })?;
-                    upload_publication(&self.provider, &[0u8], &admissibility)?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &[0u8], admissibility.view(), false,
+                    )?);
                     let canary_results = reservation
                         .alloc::<SemanticTrainingCanaryResultRecord>(5)
                         .map_err(|error| {
                             runtime_error("model update canary result allocation", error)
                         })?;
-                    upload_publication(
-                        &self.provider,
-                        &[SemanticTrainingCanaryResultRecord::default(); 5],
-                        &canary_results,
-                    )?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &[SemanticTrainingCanaryResultRecord::default(); 5], canary_results.view(), false,
+                    )?);
                     let refusal = reservation
                         .alloc::<SemanticTrainingCanaryRefusalRecord>(1)
                         .map_err(|error| runtime_error("model update refusal allocation", error))?;
-                    upload_publication(
-                        &self.provider,
-                        &[SemanticTrainingCanaryRefusalRecord::default()],
-                        &refusal,
-                    )?;
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream, &[SemanticTrainingCanaryRefusalRecord::default()], refusal.view(), false,
+                    )?);
                     Ok(Some(PreparedModelUpdate {
                         pending_slots: pending_generations[update_ordinal].clone(),
                         _model_owners: pending_generations[update_ordinal]
@@ -19506,11 +19609,13 @@ impl SemanticTransitionSession {
                     // acquired inputs after later transitions reuse either bank.
                     replay_custody: Some(PreparedReplayCustody::allocate(
                         &self.provider,
+                        &self.stream,
                         &storage,
                         &inputs,
                         self.graph.transition_arena_view().len(),
                         &mut reservation,
                         &self.learning_phases,
+                        &mut writes,
                     )?),
                     branches,
                     digests: None,
@@ -19576,47 +19681,52 @@ impl SemanticTransitionSession {
                 #[cfg(feature = "semantic-policy")]
                 for branch in &prepared.branches {
                     if let Some(ground) = &branch.task_ground {
-                        upload_publication(&self.provider, &ground.layout.initial_bytes(), &ground.device)?;
+                        writes.push(state_restoration::OriginalDeviceWrite::new(
+                            &self.stream, &ground.layout.initial_bytes(), ground.device.view(), false,
+                        )?);
                     }
-                    upload_publication(
-                        &self.provider,
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream,
                         &[DeviceState {
                             catalogue_generation: self.binding().generation,
                             catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),
                             binding_digest: self.binding().digest,
                             ..DeviceState::default()
                         }],
-                        &branch.state,
-                    )?;
+                        branch.state.view(), false,
+                    )?);
                 }
-                upload_publication(
-                    &self.provider,
-                    &[PublicationLease::default()],
-                    &prepared.reader,
-                )?;
-                upload_publication(
-                    &self.provider,
-                    &[PreparedStepResult::default()],
-                    &prepared.result,
-                )?;
-                inputs.initialize(&self.provider)?;
+                writes.push(state_restoration::OriginalDeviceWrite::new(
+                    &self.stream, &[PublicationLease::default()], prepared.reader.view(), false,
+                )?);
+                writes.push(state_restoration::OriginalDeviceWrite::new(
+                    &self.stream, &[PreparedStepResult::default()], prepared.result.view(), false,
+                )?);
+                inputs.initialize(&self.stream, &mut writes)?;
             }
             if reservation.remaining_bytes() != bytes - base_bytes - generation_bytes {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            self.training_origins = training_origins;
-            Ok(handles)
+            Ok(())
         })();
         match result {
-            Ok(handles) => {
-                self.prepared_segment
-                    .as_mut()
-                    .expect("installed prepared segment")
-                    .cold_reservation = Some(reservation);
-                Ok(handles)
+            Ok(()) => {
+                build.cold_reservation = Some(reservation);
+                build.initialization = Some(Arc::new(Mutex::new(PreparedSegmentInitialization {
+                    writes, cursor: 0, catalogue, poisoned: false, complete: false, retired: false,
+                })));
+                build.initialization_pending.store(true, Ordering::Release);
+                self.prepared_segment = Some(build);
+                self.next_reader = end;
+                self.training_origins = training_origins;
+                self.publication = Some(storage);
+                self.model_owners.extend(model_owners);
+                self.resolve_prepared_segment_preparation()
             }
             Err(error) => {
-                self.poisoned = true;
+                // No write or kernel has entered. Remove only this original
+                // metadata allocation attempt; all unrelated owners survive.
+                for handle in &handles { self.steps.remove(&handle.token); }
                 Err(error)
             }
         }
@@ -23694,6 +23804,65 @@ impl SemanticTransitionSession {
             .expect("checked prepared owner")
             .group_gradient_members[bank]
             .insert(member_ordinal);
+        Ok(binding)
+    }
+
+    /// Bind the fresh actor child's physical leaves to its original Update.
+    #[cfg(feature = "semantic-policy")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "retain the original Update, child Proposal, proof and physical delivery independently"
+    )]
+    pub fn bind_prepared_actor_gradient_delivery(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        source: &SemanticTransitionSession,
+        proposal: &SemanticPreparedStep,
+        proof: &SemanticPreparedActorRefresh,
+        member_row: &SemanticTrainingViewRow,
+        tensors: Vec<SemanticTensorInput>,
+        consumer_stream: u64,
+    ) -> Result<SemanticGradientDeliveryBinding, SemanticTransitionError> {
+        self.check_prepared_cold(step)?;
+        source.check_prepared_cold(proposal)?;
+        let staged = source.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let build = source.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let target = self.steps[&step.token].prepared.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if bank > 1
+            || !Arc::ptr_eq(&step.issuer, &proof.inner.issuer)
+            || !Arc::ptr_eq(&step.scope, &proof.inner.scope)
+            || step.token != proof.inner.step
+            || !Arc::ptr_eq(&staged.proof.inner, &proof.inner)
+            || staged.target_bank != bank
+            || staged.state != actor_refresh::ActorRefreshCaptureState::Staged
+            || !Arc::ptr_eq(&source.provider, &proof.inner.provider)
+            || !Arc::ptr_eq(&self.provider, &source.provider)
+            || !Arc::ptr_eq(&build.actor_refresh_execution, &proof.inner.execution)
+            || build.tokens.get(1) != Some(&proposal.token)
+            || build.transitions != [SemanticTransitionKind::Recompute, SemanticTransitionKind::Proposal]
+            || !Arc::ptr_eq(self.steps[&step.token].inputs.as_ref().ok_or(SemanticTransitionError::NotBound)?, &proof.inner.inputs)
+            || target.group_gradient_members[bank].contains(&proof.inner.member.ordinal)
+        {
+            return Err(publication_input_error("actor gradient delivery requires its original staged child and unused Update bank"));
+        }
+        let training = target.training_view.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        training.actor_group_member_index(proof.inner.member.ordinal, member_row)?;
+        let model = source.steps[&proposal.token].content.iter().filter(|content| {
+            matches!(&content.seals, TensorContentSeals::Model(model)
+                if model.prepared.as_ref().is_some_and(|prepared| prepared.bank == 1))
+        }).collect::<Vec<_>>();
+        let [model] = model.as_slice() else {
+            return Err(publication_input_error("actor gradient delivery requires its fresh Proposal's unique authenticated physical model roster"));
+        };
+        let parameters = source.publication.as_ref()
+            .and_then(|storage| storage.physical_parameter_coordinates.as_ref())
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let binding = self.bind_gradient_delivery(step, bank, tensors, consumer_stream,
+            Some((&model.tensors, parameters)))?;
+        self.steps.get_mut(&step.token).expect("retained actor Update").prepared.as_mut()
+            .expect("retained actor Update owner").group_gradient_members[bank]
+            .insert(proof.inner.member.ordinal);
         Ok(binding)
     }
 
