@@ -752,26 +752,9 @@ impl ResourceObserver {
         let interval = retained
             .as_mut()
             .ok_or_else(|| invalid("capture cancellation lost its original interval"))?;
-        let count = u64::try_from(steps.len())
-            .map_err(|_| invalid("original planned roster exceeds u64"))?;
-        if !proof.matches(steps)
-            || !interval.begun
-            || count == 0
-            || capture_stream == 0
-            || interval.ordinal != ordinal
-            || !interval.cancellation_attempted
-            || interval.cancellation_arguments != Some((ordinal, count, capture_stream))
-            || interval.finish_attempted
-            || interval.release_attempted
-            || interval.steps.len() > steps.len()
-            || interval.steps.iter().any(|step| {
-                !step.start_confirmed
-                    || (step.end_attempted && !step.capture_finished)
-                    || step.capture_stream != capture_stream
-            })
-        {
-            return Err(invalid("cancellation resolution requires the exact original handoff, native proof and known capture prefix"));
-        }
+        let count = Self::require_original_step_cancellation(
+            interval, ordinal, steps, capture_stream, proof,
+        )?;
         if interval.cancelled_roster && interval.cancellation_status == COMPLETE {
             return Ok(());
         }
@@ -795,6 +778,58 @@ impl ResourceObserver {
         }
         interval.cancelled_roster = true;
         Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn step_cancellation_pending(
+        &self,
+        py: Python<'_>,
+        ordinal: u64,
+        steps: &[SemanticPreparedStep],
+        capture_stream: u64,
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<bool> {
+        self.require_original(py)?;
+        let retained = self.interval()?;
+        let interval = retained.as_ref()
+            .ok_or_else(|| invalid("capture cancellation lost its original interval"))?;
+        Self::require_original_step_cancellation(interval, ordinal, steps, capture_stream, proof)?;
+        match interval.cancellation_status {
+            COMPLETE if interval.cancelled_roster => Ok(false),
+            INCOMPLETE | UNKNOWN if !interval.cancelled_roster => Ok(true),
+            _ => Err(invalid("capture cancellation has no genuine pending original result")),
+        }
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_original_step_cancellation(
+        interval: &Interval,
+        ordinal: u64,
+        steps: &[SemanticPreparedStep],
+        capture_stream: u64,
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<u64> {
+        let count = u64::try_from(steps.len())
+            .map_err(|_| invalid("original planned roster exceeds u64"))?;
+        if !proof.matches(steps)
+            || !interval.begun
+            || count == 0
+            || capture_stream == 0
+            || interval.ordinal != ordinal
+            || !interval.cancellation_attempted
+            || interval.cancellation_arguments != Some((ordinal, count, capture_stream))
+            || interval.finish_attempted
+            || interval.release_attempted
+            || interval.steps.len() > steps.len()
+            || interval.steps.iter().any(|step| {
+                !step.start_confirmed
+                    || (step.end_attempted && !step.capture_finished)
+                    || step.capture_stream != capture_stream
+            })
+        {
+            return Err(invalid("cancellation resolution requires the exact original handoff, native proof and known capture prefix"));
+        }
+        Ok(count)
     }
 
     /// Called once, after actual source native/model joins, never by readback.
