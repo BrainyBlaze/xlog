@@ -160,7 +160,18 @@ enum RecordingState {
 #[derive(Clone, Copy)]
 enum ColdWorkReader<'a> {
     Published(&'a SemanticPublishedLease),
+    Admitted(
+        &'a SemanticSegmentInstructionAdmission,
+        &'a SemanticPublishedLease,
+    ),
+    AdmittedRetirement(&'a SemanticSegmentInstructionAdmission),
     Prepared(&'a SemanticPreparedStep, &'a SemanticPublishedLease),
+}
+
+#[derive(Clone, Copy)]
+enum InstructionColdRole {
+    Preparation,
+    Retirement,
 }
 
 struct EvaluationCleanup {
@@ -178,6 +189,10 @@ pub(super) struct ColdModelWorkStorage {
     allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
     work: PreparedModelWork,
     native_work: TrackedCudaSlice<u64>,
+    initialization_reset: native_work_bound::OriginalNativeCommand,
+    initialization_write: crate::device::RetainedDeviceWrite<u64>,
+    initialization_poisoned: bool,
+    initialized: bool,
     report: TrackedCudaSlice<u64>,
     state: RecordingState,
     regions: Vec<RecordingState>,
@@ -320,6 +335,33 @@ impl SemanticTransitionSession {
         work: SemanticColdNativeWork,
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
+        self.attach_cold_native_work(work)
+    }
+
+    pub fn attach_shared_admitted_cold_native_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: SemanticColdNativeWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        if !matches!(
+            self.instruction_admission(admission)?.state,
+            actor_refresh_program::InstructionState::Released
+                | actor_refresh_program::InstructionState::BuildEntered
+                | actor_refresh_program::InstructionState::Bound
+        ) {
+            return Err(publication_input_error(
+                "shared prepared work requires its original handed-off instruction parent",
+            ));
+        }
+        self.attach_cold_native_work(work)
+    }
+
+    fn attach_cold_native_work(
+        &mut self,
+        work: SemanticColdNativeWork,
+    ) -> Result<(), SemanticTransitionError> {
         let (view, custody, allowance) = work.graph_custody(&self.provider, &self.domain)?;
         self.graph
             .begin_borrowed_cold_work(view, custody, allowance)
@@ -486,6 +528,267 @@ impl SemanticTransitionSession {
         admission: Arc<[u8]>,
         purpose: SemanticColdModelWorkPurpose,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.prepare_cold_model_work_inner(
+            lease,
+            capacity,
+            operation_ordinal,
+            admission,
+            purpose,
+            None,
+        )
+    }
+
+    pub fn prepare_admitted_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let original = self.instruction_admission(admission)?;
+        if original.state != actor_refresh_program::InstructionState::Admitted {
+            return Err(publication_input_error(
+                "instruction preparation must retain its single original cold attempt",
+            ));
+        }
+        if let Some(handle) = original.cold_work.clone() {
+            self.continue_cold_model_work_initialization(&handle)?;
+            return Ok(handle);
+        }
+        let instruction = Arc::clone(&original.instruction);
+        let capacity = self
+            .admitted_segment_cold_capacity(admission)?
+            .model_work_capacity;
+        let ordinal = self.admitted_segment_first_program_ordinal(admission)?;
+        self.prepare_cold_model_work_inner(
+            parent,
+            capacity,
+            ordinal,
+            instruction,
+            SemanticColdModelWorkPurpose::PrivatePrefix,
+            Some((admission, InstructionColdRole::Preparation)),
+        )
+    }
+
+    pub fn require_admitted_cold_model_work(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let original = self.instruction_admission(admission)?;
+        if original.state != actor_refresh_program::InstructionState::Admitted
+            || original
+                .cold_work
+                .as_ref()
+                .is_none_or(|retained| !retained.same_invocation(work))
+        {
+            return Err(publication_input_error(
+                "cold callback does not own this original instruction invocation",
+            ));
+        }
+        self.check_cold_work_reader(ColdWorkReader::Published(parent), work)?;
+        Ok(())
+    }
+
+    pub fn bind_shared_admitted_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        source: &Self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let storage = source.cold_model_work(handle)?;
+        let allowance = self.graph.cold_work_allowance().ok_or_else(|| {
+            publication_input_error("instruction preparation lost its original shared tally")
+        })?;
+        let original = self.instruction_admission_mut(admission)?;
+        if original.state != actor_refresh_program::InstructionState::Admitted
+            || !Arc::ptr_eq(&allowance, &storage.allowance)
+            || !matches!(
+                storage.state,
+                RecordingState::Waiting | RecordingState::Recording
+            )
+            || original
+                .cold_work
+                .as_ref()
+                .is_some_and(|work| !work.same_invocation(handle))
+        {
+            return Err(publication_input_error(
+                "shared preparation changed its original native invocation or allowance",
+            ));
+        }
+        original.cold_work = Some(handle.clone());
+        Ok(())
+    }
+
+    pub fn adopt_shared_admitted_cold_model_work_result(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        source: &Self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let storage = source.cold_model_work(handle)?;
+        let result = storage.result.ok_or_else(|| {
+            publication_input_error("retain the original unfinished shared preparation report")
+        })?;
+        let original = self.instruction_admission_mut(admission)?;
+        if original.state != actor_refresh_program::InstructionState::Released
+            || storage.state != RecordingState::Completed
+            || original
+                .cold_work
+                .as_ref()
+                .is_none_or(|work| !work.same_invocation(handle))
+        {
+            return Err(publication_input_error(
+                "shared preparation report changed its original handed-off invocation",
+            ));
+        }
+        original.cold_result = Some(result);
+        Ok(result)
+    }
+
+    pub fn finish_admitted_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        let result = self.finish_cold_model_work_for_reader(
+            ColdWorkReader::Admitted(admission, parent),
+            work,
+            streams,
+            SemanticColdModelWorkDisposition::Complete,
+        )?;
+        self.instruction_admission_mut(admission)?.cold_result = Some(result);
+        Ok(result)
+    }
+
+    pub fn admitted_segment_cold_result(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<Option<SemanticColdModelWorkResult>, SemanticTransitionError> {
+        let original = self.instruction_admission(admission)?;
+        let Some(mut total) = original.cold_result else {
+            return Ok(None);
+        };
+        for (_, report) in &original.prepared_cold_results {
+            let Some(report) = report else {
+                return Ok(None);
+            };
+            let add = |left: u64, right: u64| {
+                left.checked_add(right)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)
+            };
+            total.model_work = add(total.model_work, report.model_work)?;
+            total.operation_count = add(total.operation_count, report.operation_count)?;
+            total.work_bound = add(total.work_bound, report.work_bound)?;
+            total.model_calls = add(total.model_calls, report.model_calls)?;
+            total.native_work = add(total.native_work, report.native_work)?;
+            for (total, actual) in total.native_events.iter_mut().zip(report.native_events) {
+                *total = add(*total, actual)?;
+            }
+        }
+        Ok(Some(total))
+    }
+
+    pub fn prepare_admitted_retirement_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        let original = self.instruction_admission(admission)?;
+        if let Some(handle) = original.retirement_work.clone() {
+            self.continue_cold_model_work_initialization(&handle)?;
+            return Ok(handle);
+        }
+        self.ensure_quiescent()?;
+        self.require_completed_cold_model_work()?;
+        let original = self.instruction_admission(admission)?;
+        let instruction = Arc::clone(&original.instruction);
+        let build = self.prepared_segment.as_ref().ok_or_else(|| {
+            publication_input_error("instruction retirement lost its original prepared owner")
+        })?;
+        if !build.completed
+            || build
+                .program_admission
+                .as_ref()
+                .is_none_or(|original| !original.same_handle(admission))
+        {
+            return Err(publication_input_error(
+                "cold retirement requires the same completed original segment",
+            ));
+        }
+        let token = *build.tokens.first().ok_or_else(|| {
+            publication_input_error("instruction retirement lost its original storage token")
+        })?;
+        let scope = Arc::clone(&build.scope);
+        let capacity = self
+            .admitted_segment_cold_capacity(admission)?
+            .model_work_capacity;
+        let ordinal = self.admitted_segment_first_program_ordinal(admission)?;
+        self.install_cold_model_work(
+            token,
+            capacity,
+            ordinal,
+            instruction,
+            SemanticColdModelWorkPurpose::PrivateRetirement,
+            Some(scope),
+            Some((admission, InstructionColdRole::Retirement)),
+        )
+    }
+
+    pub fn require_admitted_retirement_cold_model_work(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+        work: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.check_cold_work_reader(ColdWorkReader::AdmittedRetirement(admission), work)?;
+        Ok(())
+    }
+
+    pub fn admitted_retirement_cold_model_work_buffer(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        work: &SemanticColdModelWork,
+        stream: u64,
+    ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.cold_model_work_buffer_for_reader(
+            ColdWorkReader::AdmittedRetirement(admission),
+            work,
+            stream,
+            None,
+        )
+    }
+
+    pub fn finish_admitted_retirement_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        let result = self.finish_cold_model_work_for_reader(
+            ColdWorkReader::AdmittedRetirement(admission),
+            work,
+            streams,
+            SemanticColdModelWorkDisposition::Complete,
+        )?;
+        self.instruction_admission_mut(admission)?.retirement_result = Some(result);
+        Ok(result)
+    }
+
+    fn prepare_cold_model_work_inner(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        capacity: usize,
+        operation_ordinal: u64,
+        admission: Arc<[u8]>,
+        purpose: SemanticColdModelWorkPurpose,
+        instruction: Option<(&SemanticSegmentInstructionAdmission, InstructionColdRole)>,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         self.ensure_quiescent()?;
         self.require_completed_cold_model_work()?;
         self.checked_reader(lease)?;
@@ -520,6 +823,7 @@ impl SemanticTransitionSession {
             admission,
             purpose,
             None,
+            instruction,
         )
     }
 
@@ -558,7 +862,143 @@ impl SemanticTransitionSession {
             admission,
             SemanticColdModelWorkPurpose::PreparedActorRefresh,
             Some(Arc::clone(&step.scope)),
+            None,
         )
+    }
+
+    pub fn prepare_admitted_prepared_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        step: &SemanticPreparedStep,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(|| {
+            publication_input_error("prepared cold work lost its original segment owner")
+        })?;
+        if build
+            .program_admission
+            .as_ref()
+            .is_none_or(|original| !original.same_handle(admission))
+            || build.requested_kind(step, &self.publication_issuer)?
+                != SemanticTransitionKind::Update
+        {
+            return Err(publication_input_error(
+                "prepared cold work changed its admitted Update",
+            ));
+        }
+        let position = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or_else(|| {
+                publication_input_error("prepared cold work lost its original step position")
+            })?;
+        let ordinal = self
+            .admitted_segment_first_program_ordinal(admission)?
+            .checked_add(
+                u64::try_from(position)
+                    .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            )
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let capacity = self
+            .admitted_segment_cold_capacity(admission)?
+            .model_work_capacity;
+        let instruction = Arc::clone(&self.instruction_admission(admission)?.instruction);
+        let original = self.instruction_admission(admission)?;
+        if original
+            .prepared_cold_results
+            .iter()
+            .any(|(address, _)| *address == ordinal)
+        {
+            let storage = self
+                .steps
+                .get(&step.token)
+                .and_then(|step| step.cold_model_work.as_ref())
+                .filter(|storage| {
+                    storage.operation_ordinal == ordinal
+                        && Arc::ptr_eq(&storage.admission, &instruction)
+                })
+                .ok_or_else(|| {
+                    publication_input_error("retain the original prepared cold allocation attempt")
+                })?;
+            let handle = SemanticColdModelWork {
+                issuer: Arc::clone(&self.publication_issuer),
+                invocation: Arc::clone(&storage.invocation),
+                token: step.token,
+                operation_ordinal: ordinal,
+                admission: Arc::clone(&storage.admission),
+            };
+            self.continue_cold_model_work_initialization(&handle)?;
+            return Ok(handle);
+        }
+        let original = self.instruction_admission_mut(admission)?;
+        original.prepared_cold_results.push((ordinal, None));
+        self.prepare_prepared_cold_model_work(step, parent, capacity, ordinal, instruction)
+    }
+
+    pub fn finish_admitted_prepared_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        step: &SemanticPreparedStep,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.require_segment_instruction_admission(admission, parent)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(|| {
+            publication_input_error("prepared cold completion lost its original segment")
+        })?;
+        if build
+            .program_admission
+            .as_ref()
+            .is_none_or(|original| !original.same_handle(admission))
+        {
+            return Err(publication_input_error(
+                "prepared cold completion changed its instruction",
+            ));
+        }
+        let position = build
+            .tokens
+            .iter()
+            .position(|token| *token == step.token)
+            .ok_or_else(|| {
+                publication_input_error("prepared cold completion lost its original position")
+            })?;
+        let ordinal = self
+            .admitted_segment_first_program_ordinal(admission)?
+            .checked_add(
+                u64::try_from(position)
+                    .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            )
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let original = self.instruction_admission(admission)?;
+        if work.operation_ordinal != ordinal
+            || !Arc::ptr_eq(&work.admission, &original.instruction)
+            || !original
+                .prepared_cold_results
+                .iter()
+                .any(|(address, _)| *address == ordinal)
+        {
+            return Err(publication_input_error(
+                "prepared cold completion has no original attempt",
+            ));
+        }
+        let result = self.finish_prepared_cold_model_work(
+            step,
+            parent,
+            work,
+            streams,
+            SemanticColdModelWorkDisposition::Complete,
+        )?;
+        let original = self.instruction_admission_mut(admission)?;
+        original
+            .prepared_cold_results
+            .iter_mut()
+            .find(|(address, _)| *address == ordinal)
+            .expect("retained original prepared report")
+            .1 = Some(result);
+        Ok(result)
     }
 
     fn install_cold_model_work(
@@ -569,6 +1009,7 @@ impl SemanticTransitionSession {
         admission: Arc<[u8]>,
         purpose: SemanticColdModelWorkPurpose,
         prepared_scope: Option<Arc<()>>,
+        instruction: Option<(&SemanticSegmentInstructionAdmission, InstructionColdRole)>,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         let bytes = SemanticColdModelWork::allocation_bytes(capacity)?;
         let mut reservation = self
@@ -583,6 +1024,13 @@ impl SemanticTransitionSession {
         let report = reservation
             .alloc(15)
             .map_err(|error| runtime_error("cold model work report allocation", error))?;
+        let initialization_reset = native_work_bound::OriginalNativeCommand::new(&self.domain)?;
+        let initialization_write = crate::device::RetainedDeviceWrite::new(
+            self.domain.execution_stream(),
+            &[0u64; 11],
+            native_work.view(),
+        )
+        .map_err(|error| runtime_error("cold semantic work staging", error))?;
         let invocation = Arc::new(());
         let handle = SemanticColdModelWork {
             issuer: Arc::clone(&self.publication_issuer),
@@ -608,6 +1056,10 @@ impl SemanticTransitionSession {
             ))),
             work,
             native_work,
+            initialization_reset,
+            initialization_write,
+            initialization_poisoned: false,
+            initialized: false,
             report,
             state: RecordingState::Waiting,
             regions: Vec::new(),
@@ -621,28 +1073,104 @@ impl SemanticTransitionSession {
             pending_operation_end: 0,
             stopped_before_entry: false,
         });
-        self.steps[&token]
-            .cold_model_work
-            .as_ref()
-            .expect("retained cold work")
-            .work
-            .reset_slots(&self.domain, &mut self.poisoned, 0, capacity)?;
+        if let Some((instruction, role)) = instruction {
+            // Admission owns this exact invocation before the first reset or
+            // transfer. An uncertain initialization never grants another attempt.
+            let original = self.instruction_admission_mut(instruction)?;
+            match role {
+                InstructionColdRole::Preparation => original.cold_work = Some(handle.clone()),
+                InstructionColdRole::Retirement => original.retirement_work = Some(handle.clone()),
+            }
+        }
+        self.continue_cold_model_work_initialization(&handle)?;
+        Ok(handle)
+    }
+
+    fn continue_cold_model_work_initialization(
+        &mut self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        // Authenticate the exact retained allocation without a healthy-session
+        // precondition: joining its entered prefix grants no unrelated work.
+        let another_initializer = self.steps.iter().any(|(token, step)| {
+            *token != handle.token
+                && step
+                    .cold_model_work
+                    .as_ref()
+                    .is_some_and(|storage| !storage.initialized)
+        });
         let storage = self
             .steps
-            .get_mut(&token)
-            .expect("retained original step owner")
-            .cold_model_work
-            .as_mut()
-            .expect("retained cold work");
-        // Initialize the actual tally once, before the original semantic commands.
-        // This fixed instrumentation metadata is not a fabricated work occurrence.
-        self.provider
-            .htod_launch_metadata_sync_copy_into(&[0u64; 11], &mut storage.native_work)
-            .map_err(|error| runtime_error("cold semantic work initialization", error))?;
+            .get_mut(&handle.token)
+            .and_then(|step| step.cold_model_work.as_mut())
+            .ok_or_else(|| {
+                publication_input_error("cold initialization lost its original owner")
+            })?;
+        if !Arc::ptr_eq(&handle.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&handle.invocation, &storage.invocation)
+            || !Arc::ptr_eq(&handle.admission, &storage.admission)
+            || handle.operation_ordinal != storage.operation_ordinal
+        {
+            return Err(publication_input_error(
+                "cold initialization belongs to another original invocation",
+            ));
+        }
+        if storage.initialized {
+            return Ok(());
+        }
+        let historical_poison = self.poisoned || self.graph.ensure_not_poisoned().is_err();
+        if historical_poison || another_initializer {
+            // A different owner or abort may have poisoned the Session while
+            // this initializer was unresolved. Join only its entered work;
+            // never submit an unentered suffix or grant callback entry.
+            storage
+                .initialization_reset
+                .resolve_entered(&mut storage.initialization_poisoned)?;
+            if storage.initialization_write.entered() {
+                storage.initialization_write.resolve().map_err(|error| {
+                    storage.initialization_poisoned = true;
+                    runtime_error("cold semantic work initialization", error)
+                })?;
+            }
+            return Err(if historical_poison {
+                SemanticTransitionError::Poisoned
+            } else {
+                SemanticTransitionError::OverlappingLaunch
+            });
+        }
+        storage.work.reset_slots_with_original(
+            &self.domain,
+            &mut storage.initialization_poisoned,
+            0,
+            storage.work.actual.len() / 3,
+            Some(&mut storage.initialization_reset),
+        )?;
+        if !storage.initialization_write.entered() {
+            if let Err(error) = storage
+                .initialization_write
+                .enqueue(self.domain.execution_stream())
+            {
+                storage.initialization_poisoned |= storage.initialization_write.entered();
+                return Err(runtime_error("cold semantic work initialization", error));
+            }
+        }
+        storage.initialization_write.resolve().map_err(|error| {
+            storage.initialization_poisoned |= storage.initialization_write.entered();
+            runtime_error("cold semantic work initialization", error)
+        })?;
         self.graph
             .begin_cold_work(storage.native_work.view(), Arc::clone(&storage.allowance))
             .map_err(SemanticTransitionError::Semantic)?;
-        Ok(handle)
+        storage.initialized = true;
+        Ok(())
+    }
+
+    pub(super) fn has_uninitialized_cold_model_work(&self) -> bool {
+        self.steps.values().any(|step| {
+            step.cold_model_work
+                .as_ref()
+                .is_some_and(|storage| !storage.initialized)
+        })
     }
 
     fn cold_model_work(
@@ -684,6 +1212,51 @@ impl SemanticTransitionSession {
                     ));
                 }
                 lease.token
+            }
+            ColdWorkReader::Admitted(admission, parent) => {
+                self.require_segment_instruction_admission(admission, parent)?;
+                let original = self.instruction_admission(admission)?;
+                if original.state != actor_refresh_program::InstructionState::Released
+                    || original
+                        .cold_work
+                        .as_ref()
+                        .is_none_or(|work| !work.same_invocation(handle))
+                    || storage.prepared_scope.is_some()
+                {
+                    return Err(publication_input_error(
+                        "cold completion requires its same handed-off instruction and original invocation",
+                    ));
+                }
+                self.checked_step(parent)?;
+                parent.token
+            }
+            ColdWorkReader::AdmittedRetirement(admission) => {
+                let original = self.instruction_admission(admission)?;
+                let build = self.prepared_segment.as_ref().ok_or_else(|| {
+                    publication_input_error(
+                        "instruction retirement lost its original prepared owner",
+                    )
+                })?;
+                if !build.completed
+                    || build
+                        .program_admission
+                        .as_ref()
+                        .is_none_or(|original| !original.same_handle(admission))
+                    || original
+                        .retirement_work
+                        .as_ref()
+                        .is_none_or(|work| !work.same_invocation(handle))
+                    || storage
+                        .prepared_scope
+                        .as_ref()
+                        .is_none_or(|scope| !Arc::ptr_eq(scope, &build.scope))
+                    || !build.tokens.contains(&handle.token)
+                {
+                    return Err(publication_input_error(
+                        "cold retirement changed its same completed segment or invocation",
+                    ));
+                }
+                handle.token
             }
             ColdWorkReader::Prepared(step, parent) => {
                 self.require_prepared_replay_parent(step, parent)?;
@@ -1835,7 +2408,9 @@ impl SemanticTransitionSession {
         }
         match reader {
             ColdWorkReader::Published(lease) => self.quiesce_published_reader(lease, streams)?,
-            ColdWorkReader::Prepared(_, _) => {
+            ColdWorkReader::Prepared(_, _)
+            | ColdWorkReader::Admitted(_, _)
+            | ColdWorkReader::AdmittedRetirement(_) => {
                 let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
                     .map_err(|error| {
                         runtime_error("prepared cold completion stream admission", error)
