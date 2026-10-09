@@ -731,6 +731,222 @@ fn native_work_ceiling_overflow() -> SemanticTransitionError {
     publication_input_error("native producer work ceiling overflowed")
 }
 
+fn ceiling_sum(values: impl IntoIterator<Item = u64>) -> Result<u64, SemanticTransitionError> {
+    values.into_iter().try_fold(0u64, |sum, value| {
+        sum.checked_add(value).ok_or_else(native_work_ceiling_overflow)
+    })
+}
+
+fn ceiling_product(a: u64, b: u64) -> Result<u64, SemanticTransitionError> {
+    a.checked_mul(b).ok_or_else(native_work_ceiling_overflow)
+}
+
+fn repeat_native_ceiling(
+    total: &mut [u64; 9],
+    occurrence: [u64; 9],
+    count: u64,
+) -> Result<(), SemanticTransitionError> {
+    let mut addition = [0; 9];
+    for (destination, value) in addition.iter_mut().zip(occurrence) {
+        *destination = ceiling_product(value, count)?;
+    }
+    add_native_work_ceiling(total, addition)
+}
+
+/// Enclose the reached event counters of the original embedded transitions.
+/// These are capacity bounds, not observed work or structural selection cost.
+/// The initializer has its own separate finite occurrence and is not included.
+pub(super) fn actor_refresh_transition_native_work_ceilings(
+    child: &SemanticTransitionSession,
+) -> Result<[[u64; 9]; 2], SemanticTransitionError> {
+    let build = child.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotCaptured)?;
+    let handles = build.handles()?;
+    if build.transitions != [SemanticTransitionKind::Recompute, SemanticTransitionKind::Proposal]
+        || handles.len() != 2
+    {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    let storage = child.publication.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+    let task = child.task.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+    let queries = u64::try_from(task.0.spec.statement_records.len())
+        .map_err(|_| native_work_ceiling_overflow())?;
+    let editable = task.0.spec.program.editable_program().is_some();
+    let components = &child.codebooks.components;
+    if components.len() != COMPONENT_COUNT {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    let targets = *child.codebooks.words.get(1).ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let operands = *child.codebooks.words.get(3).ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let qualifier = components.get(32 + 11).ok_or(SemanticTransitionError::ObservationMismatch)?.cardinality as u64;
+    let leaf = components.get(32 + 17).ok_or(SemanticTransitionError::ObservationMismatch)?.cardinality as u64;
+    // An acquisition refusal can reach viability even for Recompute before
+    // its successful non-Proposal early return. Enclose both actual branches.
+    let viability = ceiling_product(4, ceiling_sum([
+        ceiling_product(targets, ceiling_sum([1, ceiling_product(8, operands)?])?)?,
+        18, ceiling_sum([20, qualifier, leaf, targets])?, 2,
+    ])?)?;
+    let arena = child.graph.transition_arena();
+    let roots = arena[2];
+    let statements = arena[3];
+    let supports = arena[4];
+    let versions = arena[5];
+    let records = ceiling_sum([statements, supports, versions])?;
+    let receipt_bytes = std::mem::size_of_val(&task_ground::TaskQueryRecord::default().receipt) as u64;
+    // execute clears the output, can copy one source receipt, and emits its
+    // bounded command/handle/refusal words. Three receipts plus a whole command
+    // also cover every fixed fill_view/fill_statement/fill_version field.
+    let fixed_bytes = ceiling_sum([ceiling_product(3, receipt_bytes)?, 32 * 8])?;
+    let snapshot = [1, 2, 0, 0, 0, 0, 0, 0, fixed_bytes];
+    let truth = [1, ceiling_sum([ceiling_product(4, statements)?, 8])?, 0, 0, 0, 0, 0, 0, fixed_bytes];
+    // retire_root validates and then marks each original root/candidate chain.
+    // Each chain link visits version, statement, support, version and support;
+    // the three complete record scans follow those two traces.
+    let views = ceiling_sum([roots, 1])?;
+    let chains = ceiling_product(ceiling_product(views, statements)?, versions)?;
+    let trace_tables = ceiling_sum([
+        ceiling_product(2, roots)?, 2,
+        ceiling_product(views, ceiling_sum([
+            ceiling_product(2, statements)?,
+            ceiling_product(5, ceiling_product(statements, versions)?)?,
+        ])?)?,
+    ])?;
+    let retirement = [
+        1,
+        ceiling_sum([ceiling_product(2, trace_tables)?, ceiling_product(3, records)?, 3])?,
+        ceiling_product(2, chains)?, 0, 0, 0, 0, 0,
+        ceiling_sum([
+            fixed_bytes,
+            ceiling_product(16, ceiling_product(ceiling_product(views, statements)?, ceiling_sum([versions, 1])?)?)?,
+            ceiling_product(24, records)?, ceiling_product(8, statements)?,
+        ])?,
+    ];
+    let mut result = [[0; 9]; 2];
+    for index in 0..2 {
+        let io = child.prepared_kernel_io(&handles[index], index)?;
+        let descriptor = child.descriptor_with(&io);
+        let ceiling = &mut result[index];
+        // A numerical refusal snapshots the original root; an admitted slot
+        // snapshots/preflights it instead. Keeping both covers either outcome.
+        repeat_native_ceiling(ceiling, snapshot, 2)?;
+        // One inactive-bank retirement and up to two freshly sealed roots.
+        // Successful retirements are masked, so final refusal cleanup cannot
+        // repeat them; a failed retirement stops that pass immediately.
+        repeat_native_ceiling(ceiling, retirement, 4)?;
+
+        let ground_bytes = descriptor.task_ground_bytes;
+        let mut ground_digest = content_digest_ceiling(ground_bytes, 21, false)?;
+        ground_digest[0] = 0; // Inline digest, not another native command.
+        add_native_work_ceiling(ceiling, ground_digest)?;
+        add_native_work_ceiling(ceiling, [0, storage.bank_templates[0].len() as u64, 0, 0, 0, 0, 0, 0,
+            ceiling_product(2, ground_bytes)?])?;
+        // apply_continuation preserves these exact original non-tensor roles,
+        // including their unused backing. Both publication banks are possible;
+        // select the larger retained physical extent per canonical role/index.
+        for original in storage.bank_templates[0].iter().filter(|range| {
+            matches!(range.role, 32 | 44 | 56 | 57) || range.role == SemanticStateRole::TaskGround as u64
+        }) {
+            let mut bytes = 0;
+            for bank in &storage.bank_templates {
+                let range = bank.iter().find(|range| range.role == original.role && range.index == original.index)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let slot = usize::try_from(range.storage_slot).map_err(|_| native_work_ceiling_overflow())?;
+                let extent = storage.allocations.get(slot).ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .entry().bytes.checked_sub(range.offset_bytes).ok_or_else(native_work_ceiling_overflow)?;
+                bytes = bytes.max(extent);
+            }
+            let mut digest = content_digest_ceiling(bytes, 21, false)?;
+            digest[0] = 0;
+            add_native_work_ceiling(ceiling, digest)?;
+            add_native_work_ceiling(ceiling, [0, 0, 0, 0, 0, 0, 0, 0, bytes])?;
+        }
+        if io.replay_custody.is_some() {
+            // The original snapshot allocator reserves every copied backing,
+            // header, directory and parent arena. Its allocation bound includes
+            // both copy occurrences plus metadata which is not copied at all.
+            let bytes = PreparedReplayCustody::allocation_bytes(storage, usize::try_from(arena[6])
+                .map_err(|_| native_work_ceiling_overflow())?)?;
+            add_native_work_ceiling(ceiling, [0, 0, 0, 0, 0, 0, 0, 0, bytes])?;
+        }
+        if index == 0 {
+            if io.policy.is_some() {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            add_native_work_ceiling(ceiling, [0, 0, 0, viability, 0, 0, 0, 0, 0])?;
+            native_work_ceiling_units(*ceiling)?;
+            continue;
+        }
+        let cells = ceiling_sum(components.iter().map(|component| u64::from(component.cardinality)))?;
+        let edit_cells = ceiling_sum(components.iter().filter(|component| !component.is_text())
+            .map(|component| u64::from(component.cardinality)))?;
+        let text_cells = ceiling_sum(components.iter().filter(|component| component.is_text())
+            .map(|component| u64::from(component.cardinality)))?;
+        let policy = io.policy.ok_or(SemanticTransitionError::NotBound)?;
+        let parameter_cells = policy.buffers.parameters.len() as u64;
+        // The same uniform-domain producer contributes its retained Category
+        // tally: parameter initialization/export, recurrent initialization,
+        // support scan, 128 alternatives in each forward and reverse edit,
+        // two-lane text alternatives and public text-domain export. The hot
+        // alias check and primal/critic admission then visit their own cells.
+        let uniform = ceiling_sum([
+            ceiling_product(2, parameter_cells)?, 2 * 37 * 128,
+            ceiling_product(3, COMPONENT_COUNT as u64)?, cells,
+            ceiling_product(257, edit_cells)?, ceiling_product(128, TEXT_CARDINALITY as u64)?,
+        ])?;
+        let alias = ceiling_sum([parameter_cells, 32 * TEXT_CARDINALITY as u64, COMPONENT_COUNT as u64])?;
+        let primal = ceiling_sum([cells, text_cells, parameter_cells, 32 * TEXT_CARDINALITY as u64,
+            ceiling_product(2, COMPONENT_COUNT as u64)?])?;
+        // Four edit viability banks: target_completes visits at most four full
+        // operand banks with supported+operand_matches; all three opcodes are
+        // checked once. Each category has two legal-category visits and each
+        // visit can perform one additional operand_matches.
+        let categories = ceiling_sum([uniform, alias, primal, viability, ceiling_product(4, cells)?])?;
+        let mut comparisons = 0;
+        for component in components {
+            let width = u64::from(component.cardinality).checked_next_power_of_two()
+                .ok_or_else(native_work_ceiling_overflow)?;
+            let levels = u64::from(width.trailing_zeros());
+            let stages = ceiling_product(levels, ceiling_sum([levels, 1])?)? / 2;
+            comparisons = ceiling_sum([comparisons, ceiling_product(width / 2, stages)?])?;
+        }
+        add_native_work_ceiling(ceiling, [0, 0, 0, categories, comparisons,
+            ceiling_product(2, cells)?, ceiling_product(10, COMPONENT_COUNT as u64)?, 0,
+            ceiling_product(COMPONENT_COUNT as u64, size_of::<SemanticTransitionReceipt>() as u64)?])?;
+
+        // One preflight, two forks, four insertions, two terminals and one
+        // live-candidate cleanup. Each seal also reserves its internal discard.
+        let preflight = [1, ceiling_sum([3, roots, records, ceiling_product(4, statements)?])?,
+            0, 0, 0, 0, 0, 0, fixed_bytes];
+        let fork = [1, 2, 0, 0, 0, 0, 0, 0, ceiling_sum([fixed_bytes, ceiling_product(8, statements)?])?];
+        let insertion = [1, ceiling_sum([20, ceiling_product(5, statements)?, supports, ceiling_product(10, versions)?])?,
+            versions, 0, 0, 0, 0, ceiling_sum([8, ceiling_product(2, versions)?])?,
+            ceiling_sum([fixed_bytes, 2048, ceiling_product(288, versions)?])?];
+        let terminal = [2, ceiling_sum([12, roots, ceiling_product(3, records)?, ceiling_product(2, statements)?])?,
+            0, 0, 0, 0, 0, 0, ceiling_sum([ceiling_product(2, fixed_bytes)?,
+                ceiling_product(32, records)?, ceiling_product(24, statements)?])?];
+        add_native_work_ceiling(ceiling, preflight)?;
+        repeat_native_ceiling(ceiling, fork, 2)?;
+        repeat_native_ceiling(ceiling, insertion, 4)?;
+        repeat_native_ceiling(ceiling, terminal, 3)?;
+        if editable {
+            // materialize checks charged==fuel before every increment, including
+            // failure. Exactly three task_program_queries can reach the owner.
+            add_native_work_ceiling(ceiling, [0, 3 * 1_000_000, 0, 0, 0, 0, 0, 0,
+                ceiling_product(ceiling_product(3, queries)?, receipt_bytes)?])?;
+            let rules = crate::semantic_program::RESIDENT_PROGRAM_RULE_CAPACITY as u64;
+            add_native_work_ceiling(ceiling, [0, ceiling_product(2, ceiling_sum([rules, 2])?)?,
+                0, 0, 0, 0, 0, 0, 2 * 40 + 8])?;
+        } else {
+            // Baseline, two candidates and final feedback use the same truth owner.
+            repeat_native_ceiling(ceiling, truth, ceiling_product(4, queries)?)?;
+        }
+        // Original query rows are zeroed once before sampling.
+        add_native_work_ceiling(ceiling, [0, 0, 0, 0, 0, 0, 0, 0,
+            ceiling_product(ceiling_product(3, queries)?, size_of::<task_ground::TaskQueryRecord>() as u64)?])?;
+        native_work_ceiling_units(*ceiling)?;
+    }
+    Ok(result)
+}
+
 pub(super) fn tensor_layout_native_work_ceiling(
     layout: &SemanticTensorLayout,
     logical_begin: u64,

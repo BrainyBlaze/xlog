@@ -12,6 +12,8 @@ mod actor_refresh_program;
 #[cfg(feature = "semantic-policy")]
 pub use actor_refresh::SemanticPreparedActorRefresh;
 #[cfg(feature = "semantic-policy")]
+pub use actor_refresh_program::SemanticSegmentInstructionAdmission;
+#[cfg(feature = "semantic-policy")]
 mod cold_model_work;
 mod late_replay;
 mod learning_phase;
@@ -10796,6 +10798,10 @@ struct PreparedSegmentState {
     original_parent: Option<(PublicationControl, Vec<PublicationRange>)>,
     #[cfg(feature = "semantic-policy")]
     program_steps: BTreeMap<u64, actor_refresh_program::ProgramStep>,
+    #[cfg(feature = "semantic-policy")]
+    program_admission: Option<SemanticSegmentInstructionAdmission>,
+    #[cfg(feature = "semantic-policy")]
+    actor_refresh_execution: Arc<Mutex<actor_refresh::ActorRefreshParentExecution>>,
     parent_quiescent: bool,
     transfers: Option<Arc<SemanticPreparedSegmentTransfers>>,
 }
@@ -10843,6 +10849,10 @@ impl PreparedSegmentState {
             original_parent: None,
             #[cfg(feature = "semantic-policy")]
             program_steps: BTreeMap::new(),
+            #[cfg(feature = "semantic-policy")]
+            program_admission: None,
+            #[cfg(feature = "semantic-policy")]
+            actor_refresh_execution: Arc::new(Mutex::new(actor_refresh::ActorRefreshParentExecution::Constructing)),
             parent_quiescent: false,
             transfers: None,
         })
@@ -14285,6 +14295,7 @@ struct PolicyBackward {
     member_ordinal: u64,
     critic_term: u64,
     target_header: u64,
+    derived_origin: u64,
     numerical: PolicyAdjointNumericalDescriptor,
 }
 
@@ -15164,6 +15175,15 @@ enum PolicyVjpInput<'a> {
         origin_lease: &'a TrackedCudaSlice<PublicationLease>,
         origin_bank: usize,
     },
+    PreparedActorRefresh {
+        training: &'a SemanticSelectedTrainingView,
+        member_ordinal: u64,
+        origin_lease: &'a TrackedCudaSlice<PublicationLease>,
+        origin_bank: usize,
+        critic_term: &'a DeviceMemoryView<f32>,
+        derived_origin: &'a TrackedCudaSlice<actor_refresh::PreparedActorRefreshDevice>,
+        origin_publication: &'a PublicationStorage,
+    },
 }
 
 impl crate::cuda_compat::KernelParamStorage for Descriptor {
@@ -15213,8 +15233,8 @@ const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
-const _: () = assert!(size_of::<PolicyBackward>() == 264);
-const _: () = assert!(size_of::<Descriptor>() == 1424);
+const _: () = assert!(size_of::<PolicyBackward>() == 272);
+const _: () = assert!(size_of::<Descriptor>() == 1432);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -15954,6 +15974,8 @@ pub struct SemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     actor_refresh: Option<actor_refresh::StagedActorRefresh>,
     #[cfg(feature = "semantic-policy")]
+    actor_refresh_work: BTreeMap<u64, Arc<actor_refresh::ActorRefreshWork>>,
+    #[cfg(feature = "semantic-policy")]
     actor_refresh_initial: Option<actor_refresh::ActorRefreshInitialEpisodes>,
     #[cfg(feature = "semantic-policy")]
     actor_refresh_program: Option<actor_refresh_program::ActorRefreshProgram>,
@@ -16360,6 +16382,8 @@ impl SemanticTransitionSession {
                 "prepared submission requires one unused graph and fresh canonical authority bytes",
             ));
         }
+        #[cfg(feature = "semantic-policy")]
+        self.require_prepared_actor_refresh_work_frozen()?;
         for token in &build.tokens {
             let prepared = self
                 .steps
@@ -16434,6 +16458,12 @@ impl SemanticTransitionSession {
                 .captured
                 .as_ref()
                 .expect("checked original captured graph");
+            #[cfg(feature = "semantic-policy")]
+            {
+                *self.prepared_segment.as_ref().expect("original segment").actor_refresh_execution
+                    .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
+                    = actor_refresh::ActorRefreshParentExecution::LaunchEntered;
+            }
             enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
                 graph.launch_in(enqueue)
             })
@@ -16495,6 +16525,12 @@ impl SemanticTransitionSession {
                 .copied()
                 .collect::<Vec<_>>();
             self.complete_step_consumers_by_token(step.token, &streams)?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            *self.prepared_segment.as_ref().expect("original cancelled construction").actor_refresh_execution
+                .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
+                = actor_refresh::ActorRefreshParentExecution::NeverSubmitted;
         }
         Ok(proof)
     }
@@ -16764,6 +16800,17 @@ impl SemanticTransitionSession {
             .as_mut()
             .expect("submitted segment")
             .completed = true;
+        #[cfg(feature = "semantic-policy")]
+        {
+            *self.prepared_segment.as_ref().expect("submitted segment").actor_refresh_execution
+                .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
+                = actor_refresh::ActorRefreshParentExecution::Completed;
+            if outcomes.iter().all(|outcome| matches!(outcome, SemanticPreparedStepOutcome::Completed {
+                outcome: SemanticTransitionOutcome::Published(_), ..
+            })) {
+                self.complete_segment_instruction()?;
+            }
+        }
         Ok(outcomes)
     }
 
@@ -23939,6 +23986,12 @@ impl SemanticTransitionSession {
         let graph = executable.take().expect("checked authentic executable").graph;
         self.retain_graph_retirement(&graph);
         self.captured = Some(graph);
+        #[cfg(feature = "semantic-policy")]
+        {
+            *self.prepared_segment.as_ref().expect("original segment").actor_refresh_execution
+                .lock().map_err(|_| publication_input_error("original parent execution owner poisoned"))?
+                = actor_refresh::ActorRefreshParentExecution::Frozen;
+        }
         Ok(())
     }
 
@@ -24162,6 +24215,10 @@ impl SemanticTransitionSession {
                 "original prepared resources still own an executable or retained step",
             ));
         }
+        #[cfg(feature = "semantic-policy")]
+        self.retire_instruction_resources()?;
+        #[cfg(feature = "semantic-policy")]
+        self.actor_refresh_work.clear();
         self.reclaim_model_generations()?;
         let resources = std::mem::take(&mut self.prepared_resources);
         self.prepared_segment = None;
@@ -29863,8 +29920,10 @@ impl SemanticTransitionSession {
                 self.retire_published_reader(lease)?;
             }
         }
-        self.reclaim_model_generations()?;
         self.steps.remove(&lease.token);
+        #[cfg(feature = "semantic-policy")]
+        self.note_instruction_parent_retirement(lease.token);
+        self.reclaim_model_generations()?;
         self.release_events.clear();
         Ok(())
     }
@@ -30460,6 +30519,8 @@ impl SemanticTransitionSession {
             pending_training_materialization: None,
             #[cfg(feature = "semantic-policy")]
             actor_refresh: None,
+            #[cfg(feature = "semantic-policy")]
+            actor_refresh_work: BTreeMap::new(),
             #[cfg(feature = "semantic-policy")]
             actor_refresh_initial: None,
             #[cfg(feature = "semantic-policy")]
@@ -32474,8 +32535,11 @@ impl SemanticTransitionSession {
             }
             let io = self.prepared_kernel_io(step, bank)?;
             self.validate_ranges_with(&io)?;
-            let descriptor = self.descriptor_with(&io);
-            let recorder = self.kernel_recorder_with(&io);
+            let mut descriptor = self.descriptor_with(&io);
+            let mut recorder = self.kernel_recorder_with(&io);
+            if kind == SemanticTransitionKind::Update {
+                self.attach_prepared_actor_refresh_work(step, bank, &mut descriptor, &mut recorder)?;
+            }
             let execute = self.execute.clone();
             enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
                 // SAFETY: the same selected original buffers define both the
@@ -34081,6 +34145,109 @@ impl SemanticTransitionSession {
         })
     }
 
+    /// Differentiate the fresh Proposal recorded after the CURRENT-basis
+    /// bridge and Recompute in this exact Update's original executable.
+    #[cfg(feature = "semantic-policy")]
+    #[expect(clippy::too_many_arguments, reason = "retain the original target, child, proof and frozen row independently")]
+    pub fn record_imported_prepared_actor_policy_vjp(
+        &mut self,
+        update_step: &SemanticPreparedStep,
+        bank: usize,
+        source: &mut SemanticTransitionSession,
+        proposal_step: &SemanticPreparedStep,
+        proof: &SemanticPreparedActorRefresh,
+        member_row: &SemanticTrainingViewRow,
+        consumer_stream: u64,
+    ) -> Result<SemanticPreparedPolicyGradients, SemanticTransitionError> {
+        dlpack_consumer_stream(consumer_stream)?;
+        self.check_prepared_content_stream(update_step, consumer_stream)?;
+        self.require_prepared_actor_refresh(update_step, bank, proof)?;
+        let derived = source.prepared_actor_refresh_device(proof)?;
+        let target_task = &self.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0;
+        let source_task = &source.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0;
+        if source.poisoned
+            || Arc::ptr_eq(&self.publication_issuer, &source.publication_issuer)
+            || self.provider.device().ordinal() != source.provider.device().ordinal()
+            || self.stream.cu_stream() != source.stream.cu_stream()
+            || target_task.spec.scoring != source_task.spec.scoring
+            || target_task.objective_law != source_task.objective_law
+            || target_task.spec.training_domain.is_none()
+            || target_task.spec.training_domain != source_task.spec.training_domain
+            || !source_task.spec.actor_eligible
+        {
+            return Err(publication_input_error("prepared actor backward requires the original task, common objective and capture stream"));
+        }
+        let source_build = source.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if source_build.tokens.get(1) != Some(&proposal_step.token)
+            || source_build.requested_kind(proposal_step, &source.publication_issuer)? != SemanticTransitionKind::Proposal
+            || !Arc::ptr_eq(&source_build.actor_refresh_execution, &proof.inner.execution)
+        {
+            return Err(publication_input_error("prepared actor backward requires its exact new Proposal"));
+        }
+        let member_ordinal = proof.inner.member.ordinal;
+        let update = self.steps[&update_step.token].prepared.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if update.model_work.as_ref().and_then(|work| work.capture_bank) != Some(bank)
+            || update.group_critic_recorded & (1 << bank) != 0
+            || update.group_vjp_members[bank].contains(&member_ordinal)
+        {
+            return Err(publication_input_error("prepared actor backward requires an unused original Update bank slot"));
+        }
+        let training = update.training_view.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let member_index = training.actor_group_member_index(member_ordinal, member_row)?;
+        let edit_member = training.edit_group_member_index(member_ordinal, member_row)?.is_some();
+        let critic_term = training.critic_term(member_index);
+        let proposal = source.steps.get(&proposal_step.token).and_then(|step| step.prepared.as_ref())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let origin_bank = 1;
+        if proposal.transition_recorded & (1 << origin_bank) == 0 {
+            return Err(publication_input_error("prepared actor backward requires its recorded fresh Proposal branch"));
+        }
+        let branch = &proposal.branches[origin_bank];
+        let policy = branch.policy.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let update_capture = (update_step.token, bank);
+        if policy.temporal_vjp_recorded.contains(&update_capture) {
+            return Err(publication_input_error("prepared actor Proposal already contributed to this Update bank"));
+        }
+        let support = branch.support.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let receipts = branch.receipts.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let publication = Arc::clone(source.publication.as_ref().ok_or(SemanticTransitionError::NotBound)?);
+        let owner = Arc::clone(&policy.buffers.temporal_adjoints);
+        let components = source.device_components.view();
+        let codebooks = source.device_codebooks.view();
+        let PolicyVjpRecording { mut descriptor, mut recorder } = source.prepare_policy_vjp_recording(
+            &self.domain, Some(&proof.inner.inputs.header), policy, &owner, support, receipts,
+            &branch.state, branch.task_ground.as_ref(), &components, &codebooks,
+            PolicyVjpInput::PreparedActorRefresh {
+                training, member_ordinal, origin_lease: &proposal.reader, origin_bank,
+                critic_term: &critic_term, derived_origin: &derived, origin_publication: &publication,
+            },
+        )?;
+        descriptor.publication.native_work =
+            self.record_prepared_actor_refresh_work_entry(proof, &mut recorder)?;
+        proof.inner.target.record(&mut recorder);
+        recorder.read(&proof.inner.inputs.reader);
+        let baseline_snapshot = policy.component_baselines.view();
+        let layout = policy.layout.clone();
+        let continuation = Arc::clone(&policy.text_binding);
+        let support_cells = support.len();
+        let parameters = owner.parameters.view();
+        let text_logits = owner.text_logits.view();
+        let component_baselines = owner.component_baselines.view();
+        let step_aliases = Arc::clone(&source.steps[&proposal_step.token].aliases);
+        record_policy_vjp(&self.domain, &mut self.poisoned, recorder, self.execute.clone(), descriptor,
+            &owner.coefficients, None, Some(&baseline_snapshot))?;
+        source.steps.get_mut(&proposal_step.token).expect("retained actor Proposal").prepared.as_mut()
+            .expect("retained prepared actor").branches[origin_bank].policy.as_mut()
+            .expect("retained actor tape").temporal_vjp_recorded.insert(update_capture);
+        let update = self.steps.get_mut(&update_step.token).expect("retained Update").prepared.as_mut()
+            .expect("retained prepared Update");
+        update.group_vjp_members[bank].insert(member_ordinal);
+        update.group_imported_vjp_members[bank].insert(member_ordinal);
+        if edit_member { update.group_edit_members[bank].insert(member_ordinal); }
+        Ok(SemanticPreparedPolicyGradients { layout, parameters, text_logits, component_baselines,
+            provider: Arc::clone(&source.provider), step_aliases, publication, continuation, owner, support_cells })
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub fn finish_prepared_policy_invocation(
         &mut self,
@@ -34315,7 +34482,8 @@ impl SemanticTransitionSession {
             PolicyVjpInput::External(_) => None,
             PolicyVjpInput::UpdateObjective { training, .. }
             | PolicyVjpInput::GroupMember { training, .. }
-            | PolicyVjpInput::EditMember { training, .. } => {
+            | PolicyVjpInput::EditMember { training, .. }
+            | PolicyVjpInput::PreparedActorRefresh { training, .. } => {
                 if matches!(input, PolicyVjpInput::UpdateObjective { .. })
                     && training.actor_group_member_count() != 1
                 {
@@ -34411,6 +34579,28 @@ impl SemanticTransitionSession {
                 member_ordinal,
                 0,
             ),
+            PolicyVjpInput::PreparedActorRefresh {
+                training,
+                member_ordinal,
+                origin_lease,
+                origin_bank,
+                critic_term,
+                ..
+            } => (
+                *training.selection().device_ptr(),
+                *training.objective().device_ptr(),
+                *training.objective_groups().device_ptr(),
+                *training.objective_group_members().device_ptr(),
+                *training.roster_rows().device_ptr(),
+                // The native selected row supplies its original candidate;
+                // the derived child is authenticated by its separate proof.
+                0,
+                origin_lease.device_ptr_value(),
+                origin_bank as u64,
+                4,
+                member_ordinal,
+                *critic_term.device_ptr(),
+            ),
         };
         descriptor.backward = PolicyBackward {
             numerical: numerical.descriptor(),
@@ -34435,6 +34625,10 @@ impl SemanticTransitionSession {
             member_ordinal,
             critic_term,
             target_header: target_header.map_or(0, |header| header.device_ptr_value()),
+            derived_origin: match input {
+                PolicyVjpInput::PreparedActorRefresh { derived_origin, .. } => derived_origin.device_ptr_value(),
+                _ => 0,
+            },
         };
         self.validate_ranges_with(&io)?;
         let mut recorder = recording_domain.new_strict_recorder();
@@ -34469,6 +34663,11 @@ impl SemanticTransitionSession {
                 training,
                 origin_lease,
                 ..
+            }
+            | PolicyVjpInput::PreparedActorRefresh {
+                training,
+                origin_lease,
+                ..
             } => {
                 recorder.read(&training.selection());
                 recorder.read(&training.objective());
@@ -34483,7 +34682,15 @@ impl SemanticTransitionSession {
                 }
             }
         }
-        if let PolicyVjpInput::GroupMember { critic_term, .. } = input {
+        if let PolicyVjpInput::PreparedActorRefresh { derived_origin, origin_publication, .. } = input {
+            recorder.read_write(derived_origin);
+            recorder.read(&origin_publication.control);
+            for bank in &origin_publication.banks {
+                recorder.read(bank);
+            }
+        }
+        if let PolicyVjpInput::GroupMember { critic_term, .. }
+            | PolicyVjpInput::PreparedActorRefresh { critic_term, .. } = input {
             recorder.write(critic_term);
         }
         recorder.write(&self.scratch);
