@@ -1291,7 +1291,8 @@ impl SemanticTransitionSession {
                 "evaluation outputs changed their original complete typed geometry",
             ));
         }
-        let external_bytes = accounted_tensor_allocations(&[&losses, &admissible], slab)?;
+        let (slab_base, slab_allocation_bytes) =
+            accounted_tensor_allocations(&[&losses, &admissible], slab)?;
         let slab_bytes = tensor_layout_bytes(&slab.layout)?;
         for allocation in &self
             .publication
@@ -1317,10 +1318,18 @@ impl SemanticTransitionSession {
         self.enqueue_tensor_content(lease, witness, stream, true)?;
         self.guard_evaluation_cohort(handle)?;
         let cohort_provider = &self.evaluation(handle)?.cohort.provider;
-        let retained_source_bytes = if Arc::ptr_eq(cohort_provider, &self.provider) {
+        let retained_source_bytes = if Arc::ptr_eq(cohort_provider.memory(), self.provider.memory()) {
             0
         } else {
             cohort_provider.memory().allocated_bytes()
+        };
+        let external_bytes = if slab.native_allocation.as_ref().is_some_and(|owner| {
+            owner.accounts_backing(self.provider.memory(), slab_base, slab_allocation_bytes)
+                || owner.accounts_backing(cohort_provider.memory(), slab_base, slab_allocation_bytes)
+        }) {
+            0
+        } else {
+            slab_allocation_bytes
         };
         let peak = self
             .provider
