@@ -522,17 +522,31 @@ impl PySemanticTransitionColdTask {
                 records,
             },
         )?;
+        let import_owners = || {
+            (
+                Arc::new(Mutex::new(ProposalExpense {
+                    capacity: None,
+                    spent: 0,
+                })),
+                Arc::new(Mutex::new(CheckpointSources::default())),
+            )
+        };
+        #[cfg(feature = "semantic-policy")]
+        let (proposal_expense, checkpoint_sources) = replay_custody
+            .as_ref()
+            .map(|child| child.shared_import_owners(py))
+            .transpose()?
+            .unwrap_or_else(import_owners);
+        #[cfg(not(feature = "semantic-policy"))]
+        let (proposal_expense, checkpoint_sources) = import_owners();
         let native_session = PySemanticTransitionSession::from_admission(
             admission,
             capacities,
             admission_limits,
             device_ordinal,
             memory_bytes,
-            Arc::new(Mutex::new(ProposalExpense {
-                capacity: None,
-                spent: 0,
-            })),
-            Arc::new(Mutex::new(CheckpointSources::default())),
+            proposal_expense,
+            checkpoint_sources,
             allocation,
             canary_source.zip(canary_owner),
         );

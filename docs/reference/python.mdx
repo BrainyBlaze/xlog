@@ -181,21 +181,35 @@ and `task_priority_levels`. `evaluation` has the original eight-field order:
 `task_query_ordinals`, `task_scoring`, `admissible_truth_masks`, `actor_eligible`,
 and `task_ground`.
 
-Use the original source task's constructor, evaluation and authority values,
-while retaining the target's complete frozen replay roster, objective and
-selected ordinal. Other retained rows keep their own authenticated task
-identities; they need not describe the selected source task. The getter checks
-fresh target read rights, but its content projection grants no source execution
-authority. The ordinary child import must validate the source's current grants
-and snapshot before numerical work.
+Use the original source task's constructor, evaluation and all ten authority
+values unchanged, including its own `replay_rows`. Pass the target's original
+`training_objective` and selected target ordinal to the same child import.
+Native child custody authenticates that target row and objective separately;
+it does not splice the target roster into the source task's lineage or goal.
+The source checkpoint supplies its own retained training arena and reservation.
+The target retains its complete frozen roster and original objective for the
+Update. Other retained rows keep their own authenticated task identities; they
+need not describe the selected source task.
+
+The getter checks fresh target read rights, but its content projection grants
+no source execution authority. The ordinary child import validates the source's
+current grants with its own fresh snapshot. The retained original phase refreshes
+the target's separate snapshot and training grants before numerical work and
+final verification; neither owner reconstructs or unions the other's grants.
 
 Canonical checkpoint resolution retains the verified full sources and decoded
 admissions once under the original item and aggregate byte limits. Children
-share those same native owners; the getter neither calls a second resolver nor
-loads another checkpoint. These retained host bytes and metadata are not CUDA
+share the target's same verified checkpoint-source and Proposal expense owners
+before construction; the getter neither calls a second resolver nor loads
+another checkpoint. These retained host bytes and metadata are not CUDA
 backing allocations. Historical reconstruction still uses the original model
 realization: this source projection does not produce a new actor execution
 under a different policy.
+
+For a private child, omit all three optional checkpoint-registration arguments
+to inherit the original resolver and byte limits. If you supply them, the existing
+registration must match exactly; the child cannot substitute another resolver
+or enlarge either limit.
 
 The child uses the original provider, allocation budget, serial stream and cold
 native-work owner. The phase retains its actual Session before the observer runs,

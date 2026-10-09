@@ -16911,7 +16911,9 @@ impl PySemanticTransitionController {
         self.session.borrow(py).require_creator()?;
         let session = self.session.borrow(py);
         #[cfg(feature = "semantic-policy")]
-        if let Some(child) = session.private_replay_custody()? {
+        let private_child = session.private_replay_custody()?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &private_child {
             child.require_controller(&self.identity)?;
         }
         let mut import = ColdImportGuard::begin(&session, None)?;
@@ -16966,12 +16968,31 @@ impl PySemanticTransitionController {
         })
         .collect::<PyResult<Vec<_>>>()?;
         let mut authority = TaskAuthority::parse(&values)?;
-        let training_views = authority
+        let mut training_views = authority
             .replay
             .iter()
             .map(ReplayRow::training_view_row)
             .collect::<PyResult<Vec<_>>>()?;
-        let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        let target_training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
+        #[cfg(feature = "semantic-policy")]
+        let source_checkpoint = private_child
+            .as_ref()
+            .map(|child| child.source_checkpoint(py))
+            .transpose()?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let source_checkpoint: Option<Arc<VerifiedCheckpointSource>> = None;
+        let training_objective_value = if let Some(source) = &source_checkpoint {
+            let roster = source.seed.original_training_roster()?;
+            let roster = roster.fields(2)?;
+            training_views = roster[0]
+                .sequence()?
+                .iter()
+                .map(|row| ReplayRow::parse_with_live(row, &authority.live)?.training_view_row())
+                .collect::<PyResult<Vec<_>>>()?;
+            roster[1].clone()
+        } else {
+            target_training_objective_value.clone()
+        };
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
         let (canary_source, canary_owner, canary_projection) =
             read_training_canary_source(py, Some(training_canary_source))?;
@@ -16999,6 +17020,19 @@ impl PySemanticTransitionController {
             task_ground,
             &mut budget,
         )?;
+        if let Some(source) = &source_checkpoint {
+            if values != source.seed.authority
+                || evaluation != source.seed.evaluation
+                || training_domain_value != source.seed.training_domain
+                || replay_capacity_value != source.seed.replay_capacity
+                || initial_sources != source.seed.initial_sources
+                || source_mapping != source.seed.source_mapping
+                || (source.seed.training_canary_source != ColdValue::None
+                    && canary_projection != source.seed.training_canary_source)
+            {
+                return Err(invalid("private replay import changed its retained original source checkpoint projection"));
+            }
+        }
         if let Some(source) = &session.editable_observer_source {
             if evaluation[2].text()? != source {
                 return Err(invalid("task observer source differs from its admission"));
@@ -17013,6 +17047,31 @@ impl PySemanticTransitionController {
             &training_domain_value,
             session.editable_initial_source.as_deref(),
         )?;
+        let inherited_checkpoint_registration = if source_checkpoint.is_some()
+            && resolve_checkpoint.is_none()
+            && max_checkpoint_bytes.is_none()
+            && max_total_checkpoint_bytes.is_none()
+        {
+            let sources = session.checkpoint_sources.lock()
+                .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?;
+            let limits = sources.limits
+                .ok_or_else(|| invalid("private replay lost its original checkpoint source limits"))?;
+            let resolver = sources.resolver.as_ref()
+                .ok_or_else(|| invalid("private replay lost its original checkpoint source resolver"))?;
+            Some((
+                resolver.clone_ref(py),
+                limits.item_bytes.into_pyobject(py)?.into_any(),
+                limits.total_bytes.into_pyobject(py)?.into_any(),
+            ))
+        } else {
+            None
+        };
+        let (resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes) =
+            if let Some((resolver, item_limit, total_limit)) = &inherited_checkpoint_registration {
+                (Some(resolver.bind(py)), Some(item_limit), Some(total_limit))
+            } else {
+                (resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes)
+            };
         let checkpoint_referents = resolve_replay_checkpoint_referents(
             py,
             &authority,
@@ -17024,17 +17083,26 @@ impl PySemanticTransitionController {
             &session.checkpoint_sources,
         )?;
         let replay_selection = ColdValue::read(replay_selection, &mut budget, 0)?;
-        let (selection, selected_material) =
-            decode_selected_replay(&authority.replay, &replay_selection)?;
         #[cfg(feature = "semantic-policy")]
-        if let Some(child) = session.private_replay_custody()? {
+        let selected = if let Some(child) = &private_child {
             if !retain_policy {
                 return Err(invalid(
                     "private replay must retain its original policy invocation",
                 ));
             }
-            child.require_projection(py, selection, &training_objective_value, &values[3])?;
-        }
+            let (ordinal, material) = child.require_projection(
+                py,
+                &replay_selection,
+                &target_training_objective_value,
+                &values,
+            )?;
+            (Some(ordinal), Some(material))
+        } else {
+            decode_selected_replay(&authority.replay, &replay_selection)?
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let selected = decode_selected_replay(&authority.replay, &replay_selection)?;
+        let (selection, selected_material) = selected;
         let observations = session
             .owner()?
             .task_observation_roots(
@@ -17102,8 +17170,23 @@ impl PySemanticTransitionController {
             owner
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
-            if !checkpoint_referents.is_empty() {
+            if !checkpoint_referents.is_empty() || source_checkpoint.is_some() {
                 let native_task = TaskCheckpointBinding::from_owner(&owner)?;
+                #[cfg(feature = "semantic-policy")]
+                if let Some(child) = &private_child {
+                    require_selected_checkpoint_referent_task(
+                        &[child.original_replay_row(py)?],
+                        Some(0),
+                        native_task,
+                    )?;
+                } else {
+                    require_selected_checkpoint_referent_task(
+                        &authority.replay,
+                        selection,
+                        native_task,
+                    )?;
+                }
+                #[cfg(not(feature = "semantic-policy"))]
                 require_selected_checkpoint_referent_task(
                     &authority.replay,
                     selection,
@@ -17146,6 +17229,31 @@ impl PySemanticTransitionController {
                 owner.task_evaluation_epoch(),
             )
         };
+        let mut checkpoint = if let Some(source) = source_checkpoint {
+            source.seed.clone()
+        } else {
+            TaskCheckpointSeed {
+                original_training_roster: Arc::new(Mutex::new(OriginalTrainingRoster::new(
+                    values[3].clone(),
+                    training_objective_value.clone(),
+                ))),
+                authority: values,
+                evaluation,
+                training_objective: training_objective_value,
+                training_domain: training_domain_value,
+                training_canary_source: canary_projection,
+                training_canary_owner: canary_owner.clone(),
+                replay_capacity: replay_capacity_value,
+                initial_sources,
+                source_mapping,
+                replay_selection,
+                proposal_expense: Arc::clone(&session.proposal_expense),
+                checkpoint_sources: Arc::clone(&session.checkpoint_sources),
+            }
+        };
+        checkpoint.training_canary_owner = canary_owner;
+        checkpoint.proposal_expense = Arc::clone(&session.proposal_expense);
+        checkpoint.checkpoint_sources = Arc::clone(&session.checkpoint_sources);
         let task_use = Py::new(
             py,
             PySemanticTransitionTaskUse {
@@ -17156,24 +17264,7 @@ impl PySemanticTransitionController {
                 task_identity: identity,
                 task_epoch,
                 authority,
-                checkpoint: TaskCheckpointSeed {
-                    original_training_roster: Arc::new(Mutex::new(OriginalTrainingRoster::new(
-                        values[3].clone(),
-                        training_objective_value.clone(),
-                    ))),
-                    authority: values,
-                    evaluation,
-                    training_objective: training_objective_value,
-                    training_domain: training_domain_value,
-                    training_canary_source: canary_projection,
-                    training_canary_owner: canary_owner,
-                    replay_capacity: replay_capacity_value,
-                    initial_sources,
-                    source_mapping,
-                    replay_selection,
-                    proposal_expense: Arc::clone(&session.proposal_expense),
-                    checkpoint_sources: Arc::clone(&session.checkpoint_sources),
-                },
+                checkpoint,
                 state: Mutex::new(TaskUseState { phase, snapshot }),
                 delivery: Mutex::new(None),
                 pending_delivery_receiver: Mutex::new(None),
@@ -19583,6 +19674,24 @@ impl PySemanticTransitionController {
         let original_decisions = Arc::clone(&material.original_decisions);
         let material = Arc::new(material.material);
         let issued = task_use.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        let replay_row = if let Some(child) = import.session.private_replay_custody()? {
+            child.original_replay_row(py)?
+        } else {
+            issued
+                .authority
+                .replay
+                .get(ordinal)
+                .cloned()
+                .ok_or_else(|| invalid("selected replay row is absent"))?
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let replay_row = issued
+            .authority
+            .replay
+            .get(ordinal)
+            .cloned()
+            .ok_or_else(|| invalid("selected replay row is absent"))?;
         let lease = {
             let mut owner = import.session.owner()?;
             issued.require_identity(&owner)?;
@@ -19612,7 +19721,7 @@ impl PySemanticTransitionController {
         // All temporary original outputs and policy invocation owners leave this
         // block before the Runtime is asked to retire its remaining aliases.
         let replay_result = (|| -> PyResult<Option<Py<PySemanticRetainedReplayMember>>> {
-            let row = issued.authority.replay[ordinal].python_view(py)?;
+            let row = replay_row.python_view(py)?;
             let transition = match kind {
                 SemanticTransitionKind::Proposal => "proposal",
                 SemanticTransitionKind::Recompute => "recompute",
@@ -19757,7 +19866,7 @@ impl PySemanticTransitionController {
                                 parent: parent.clone_ref(py),
                                 controller_identity: Arc::clone(&self.identity),
                                 replay_ordinal: ordinal as u64,
-                                replay_row: issued.authority.replay[ordinal].training_view_row()?,
+                                replay_row: replay_row.training_view_row()?,
                                 invocation,
                                 original_decisions,
                                 material: Arc::clone(&material),
@@ -19888,6 +19997,10 @@ impl PySemanticTransitionController {
             let snapshot = refresh_snapshot.call0()?;
             let mut budget = 16 * 1024 * 1024;
             let snapshot = AuthoritySnapshot::parse(&ColdValue::read(&snapshot, &mut budget, 0)?)?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(child) = import.session.private_replay_custody()? {
+                child.refresh_current_authority(py)?;
+            }
             {
                 let mut owner = import.session.owner()?;
                 let state = self.execution_state(py, issued, acquired, &owner, Some(import))?;
@@ -19951,6 +20064,10 @@ impl PySemanticTransitionController {
     ) -> PyResult<()> {
         let owner = import.session.owner()?;
         let state = self.execution_state(py, task_use, parent, &owner, Some(import))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = import.session.private_replay_custody()? {
+            child.require_current_authority(py)?;
+        }
         if Self::execution_binding(&state, true)? != *expected {
             return Err(invalid(
                 "import callback changed the task's original current authority",

@@ -198,6 +198,47 @@ impl PySemanticPrivateReplayChild {
 }
 
 impl PrivateReplayChildCustody {
+    pub(in crate::semantic_transition) fn source_checkpoint(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Arc<VerifiedCheckpointSource>> {
+        self.require_preparation(py)?;
+        self.state()?
+            .source
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                invalid("private replay requires its retained original source checkpoint")
+            })
+    }
+
+    pub(in crate::semantic_transition) fn shared_import_owners(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Arc<Mutex<ProposalExpense>>, Arc<Mutex<CheckpointSources>>)> {
+        self.require_preparation(py)?;
+        let target = self.task.borrow(py);
+        Ok((
+            Arc::clone(&target.checkpoint.proposal_expense),
+            Arc::clone(&target.checkpoint.checkpoint_sources),
+        ))
+    }
+
+    pub(in crate::semantic_transition) fn original_replay_row(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<ReplayRow> {
+        let target = self.task.borrow(py);
+        let roster = target.checkpoint.original_training_roster()?;
+        let ordinal = usize::try_from(self.replay_ordinal)
+            .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
+        let row = roster.fields(2)?[0]
+            .sequence()?
+            .get(ordinal)
+            .ok_or_else(|| invalid("private replay lost its original target row"))?;
+        ReplayRow::parse_with_live(row, &target.authority.live)
+    }
+
     pub(in crate::semantic_transition) fn model_backings(
         &self,
         py: Python<'_>,
@@ -473,21 +514,58 @@ impl PrivateReplayChildCustody {
     pub(in crate::semantic_transition) fn require_projection(
         &self,
         py: Python<'_>,
-        selection: Option<usize>,
+        selection: &ColdValue,
         objective: &ColdValue,
-        rows: &ColdValue,
-    ) -> PyResult<()> {
+        source_authority: &[ColdValue],
+    ) -> PyResult<(usize, NativeReplayBinding)> {
+        self.require_preparation(py)?;
+        let source = self.source_checkpoint(py)?;
+        self.refresh_current_authority(py)?;
         let task = self.task.borrow(py);
         let roster = task.checkpoint.original_training_roster()?;
         let roster = roster.fields(2)?;
         let ordinal = usize::try_from(self.replay_ordinal)
             .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
-        if selection != Some(ordinal) || *objective != roster[1] || *rows != roster[0] {
+        let selected = selection.fields(2)?;
+        let row = self.original_replay_row(py)?;
+        if selected[0].unsigned()? != self.replay_ordinal
+            || selected[1] != row.identity
+            || *objective != roster[1]
+            || source_authority != source.seed.authority.as_slice()
+        {
             return Err(invalid(
-                "private replay changed its frozen objective or original replay row",
+                "private replay changed its source authority or original target objective and row",
             ));
         }
-        Ok(())
+        Ok((ordinal, row.native_replay()?))
+    }
+
+    pub(in crate::semantic_transition) fn require_current_authority(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<()> {
+        let task = self.task.borrow(py);
+        let state = task.state()?;
+        task.authority.check_use("training", &state.snapshot, true)
+    }
+
+    pub(in crate::semantic_transition) fn refresh_current_authority(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<()> {
+        let phase = self.phase(py)?;
+        let refresh = phase.borrow(py).refresh_snapshot.clone_ref(py);
+        let task = self.task.borrow(py);
+        let mut snapshot = task.state()?.snapshot.clone();
+        let refreshed = refresh_checkpoint_authority(
+            &task.authority,
+            &mut snapshot,
+            refresh.bind(py),
+            "training",
+            true,
+        );
+        task.state()?.snapshot = snapshot;
+        refreshed
     }
 
     pub(in crate::semantic_transition) fn require_target(
