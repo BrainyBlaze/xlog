@@ -1569,6 +1569,23 @@ impl DeviceAllocationProvenance {
         Arc::ptr_eq(&self.allocation, &other.allocation)
     }
 
+    /// Whether this exact backing is already charged to the supplied manager.
+    pub(crate) fn accounts_backing(
+        &self,
+        manager: &Arc<GpuMemoryManager>,
+        base: u64,
+        bytes: u64,
+    ) -> bool {
+        self.allocation.payload.as_ref().is_some_and(|payload| {
+            payload.ptr == base
+                && payload.bytes as u64 == bytes
+                && payload
+                    .manager
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, manager))
+        })
+    }
+
     /// Complete byte extent of the actual allocation, including padding.
     pub fn allocation_bytes(&self) -> u64 {
         self.allocation.len() as u64

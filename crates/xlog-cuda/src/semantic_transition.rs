@@ -12077,7 +12077,7 @@ fn cuda_backing_allocation(
 fn accounted_tensor_allocations(
     tensors: &[&PreparedSemanticTensor],
     slab: &PreparedSemanticTensor,
-) -> Result<u64, SemanticTransitionError> {
+) -> Result<(u64, u64), SemanticTransitionError> {
     let slab_bytes = tensor_layout_bytes(&slab.layout)?;
     let slab_end = slab
         .data
@@ -12103,7 +12103,7 @@ fn accounted_tensor_allocations(
             ));
         }
     }
-    Ok(slab_allocation_bytes)
+    Ok((slab_base, slab_allocation_bytes))
 }
 
 fn same_tensor_content_owner(
@@ -22881,14 +22881,16 @@ impl SemanticTransitionSession {
             ));
         }
         #[cfg(feature = "semantic-policy")]
-        let slab_allocation_bytes = accounted_tensor_allocations(
+        let (slab_base, slab_allocation_bytes) = accounted_tensor_allocations(
             &[admissibility, &baseline_logits, &candidate_logits],
             &slab,
         )?;
         #[cfg(feature = "semantic-policy")]
-        let accounted_external_bytes = if slab.native_allocation.is_some() {
-            // Native slab ownership is already in the original allocator's
-            // live charge. Only a genuine external slab is additive.
+        let accounted_external_bytes = if slab.native_allocation.as_ref().is_some_and(|owner| {
+            owner.accounts_backing(self.provider.memory(), slab_base, slab_allocation_bytes)
+        }) {
+            // Only this exact backing in the original allocator's live charge
+            // is non-additive. Foreign native ownership is not that proof.
             0
         } else {
             slab_allocation_bytes
