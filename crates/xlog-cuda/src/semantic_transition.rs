@@ -11118,6 +11118,14 @@ struct PreparedSegmentInitialization {
     retired: bool,
 }
 
+struct PreparedSegmentMetadataFreeze {
+    writes: Vec<state_restoration::OriginalDeviceWrite>,
+    cursor: usize,
+    poisoned: bool,
+    complete: bool,
+    retired: bool,
+}
+
 struct PreparedSegmentState {
     issuer: Arc<()>,
     scope: Arc<()>,
@@ -11127,6 +11135,8 @@ struct PreparedSegmentState {
     cold_reservation: Option<GpuMemoryReservation>,
     initialization: Option<Arc<Mutex<PreparedSegmentInitialization>>>,
     initialization_pending: AtomicBool,
+    metadata_freeze: Option<Arc<Mutex<PreparedSegmentMetadataFreeze>>>,
+    metadata_pending: AtomicBool,
     next: usize,
     active: bool,
     finished: bool,
@@ -11190,6 +11200,8 @@ impl PreparedSegmentState {
             cold_reservation: None,
             initialization: None,
             initialization_pending: AtomicBool::new(false),
+            metadata_freeze: None,
+            metadata_pending: AtomicBool::new(false),
             next: 0,
             active: false,
             finished: false,
@@ -11311,7 +11323,7 @@ impl PreparedSegmentState {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<(), SemanticTransitionError> {
+    fn require_finish(&self) -> Result<(), SemanticTransitionError> {
         if self.finished
             || self.cancelled.load(Ordering::Acquire)
             || self.active
@@ -11321,6 +11333,11 @@ impl PreparedSegmentState {
                 "prepared segment has unrecorded or unfinished steps",
             ));
         }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), SemanticTransitionError> {
+        self.require_finish()?;
         self.finished = true;
         Ok(())
     }
@@ -17169,6 +17186,10 @@ pub fn cancel_prepared_segment_before_submission(
         if initialization_pending {
             self.retire_original_prepared_initialization(steps)?;
         }
+        let metadata_pending = self.has_pending_prepared_metadata_freeze();
+        if metadata_pending {
+            self.retire_original_prepared_metadata(steps)?;
+        }
         let build = self.prepared_segment.as_ref().expect("original cancellation scope");
         let resuming = steps.iter().any(|step| {
             self.steps[&step.token].consumer_completion.is_some()
@@ -17176,6 +17197,10 @@ pub fn cancel_prepared_segment_before_submission(
         if !resuming {
             if initialization_pending {
                 if !self.original_prepared_initialization_may_submit() {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
+            } else if metadata_pending {
+                if !self.original_prepared_metadata_may_submit() {
                     return Err(SemanticTransitionError::Poisoned);
                 }
             } else {
@@ -17246,6 +17271,7 @@ pub fn cancel_prepared_segment_before_submission(
         };
         build.require_non_submission(&proof)?;
         build.initialization_pending.store(false, Ordering::Release);
+        build.metadata_pending.store(false, Ordering::Release);
         for step in steps {
             let streams = self.steps[&step.token]
                 .consumer_streams
@@ -18823,6 +18849,52 @@ impl SemanticTransitionSession {
         self.prepared_segment.as_ref().is_some_and(|build| build.initialization_pending.load(Ordering::Acquire))
     }
 
+    fn has_pending_prepared_metadata_freeze(&self) -> bool {
+        self.prepared_segment.as_ref().is_some_and(|build| build.metadata_pending.load(Ordering::Acquire))
+    }
+
+    fn retire_original_prepared_metadata(
+        &mut self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<(), SemanticTransitionError> {
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if build.submitted
+            || build.completed
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)| {
+                step.token != *token
+                    || build
+                        .check_retained(step, &self.publication_issuer)
+                        .is_err()
+            })
+        {
+            return Err(publication_input_error(
+                "metadata retirement changed its original unused roster",
+            ));
+        }
+        let Some(owner) = &build.metadata_freeze else {
+            return Ok(());
+        };
+        let owner = Arc::clone(owner);
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
+            .map_err(|error| runtime_error("metadata retirement capture exclusion", error))?;
+        let mut retained = owner
+            .lock()
+            .map_err(|_| publication_input_error("original frozen metadata custody is poisoned"))?;
+        if retained.retired || retained.complete {
+            return Ok(());
+        }
+        for original in &mut retained.writes {
+            original.retire_without_result(&self.stream)?;
+        }
+        retained.writes.clear();
+        retained.retired = true;
+        Ok(())
+    }
+
     fn retire_original_prepared_initialization(
         &mut self,
         steps: &[SemanticPreparedStep],
@@ -18855,6 +18927,7 @@ impl SemanticTransitionSession {
         }
         // Retirement proves only that the entered prefix no longer uses its
         // owners. It never certifies initialization or permits its suffix.
+        retained.writes.clear();
         retained.retired = true;
         Ok(())
     }
@@ -18922,6 +18995,8 @@ impl SemanticTransitionSession {
                     .map_err(|error| XlogError::Kernel(error.to_string()))
             })?;
         }
+        retained.writes.clear();
+        retained.catalogue = None;
         retained.complete = true;
         self.prepared_segment.as_ref().expect("original initialized build")
             .initialization_pending.store(false, Ordering::Release);
@@ -25575,7 +25650,9 @@ impl SemanticTransitionSession {
         &mut self,
         executable: &mut Option<SemanticPreparedExecutable>,
     ) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
+        if !self.has_pending_prepared_metadata_freeze() {
+            self.ensure_quiescent()?;
+        }
         let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
         if executable.as_ref().is_none_or(|executable| !Arc::ptr_eq(&executable.scope, &build.scope)) {
             return Err(publication_input_error("executable differs from the original native segment construction"));
@@ -25597,93 +25674,170 @@ impl SemanticTransitionSession {
     }
 
     fn freeze_prepared_segment_metadata(&mut self) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
         let build = self
             .prepared_segment
-            .as_mut()
+            .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        if build.cancelled.load(Ordering::Acquire)
+        if !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || build.cancelled.load(Ordering::Acquire)
+            || build.submitted
             || self.captured.is_some()
         {
             return Err(publication_input_error(
                 "executable differs from the original native segment construction",
             ));
         }
-        #[cfg(feature = "semantic-policy")]
-        for token in &build.tokens {
-            let prepared = self.steps[token]
-                .prepared
+        if build.metadata_freeze.is_none() {
+            self.ensure_quiescent()?;
+            let build = self
+                .prepared_segment
                 .as_ref()
-                .expect("original prepared owner");
-            if prepared
-                .training_view
-                .as_ref()
-                .is_some_and(|view| view.actor_group_member_count() > 1)
-                && prepared.group_critic_recorded != 0b11
-            {
-                return Err(publication_input_error(
-                    "multi-member Update requires the complete frozen group critic in both banks",
-                ));
-            }
-            if (0..2).any(|bank| {
-                prepared.group_imported_vjp_members[bank] != prepared.group_gradient_members[bank]
-            }) {
-                return Err(publication_input_error(
-                    "every imported group VJP requires its original physical gradient delivery in the same bank",
-                ));
-            }
-        }
-        build.finish()?;
-        // Upload only immutable first-recording geometry, after capture and
-        // before any graph launch. The original step retains this allocation.
-        for token in &build.tokens {
-            let prepared = self.steps[token]
-                .prepared
-                .as_ref()
-                .expect("original prepared owner");
-            let work = prepared.model_work.as_ref().ok_or_else(|| {
-                publication_input_error("prepared body has no frozen original model work")
-            })?;
-            if work.recording.frozen_bound().is_none() {
-                return Err(publication_input_error(
-                    "original model work was not frozen by its transition",
-                ));
-            }
-            if let Some(custody) = &prepared.replay_custody {
-                work.recording
-                    .frozen_bound()
-                    .expect("checked frozen original work")
-                    .checked_add(custody.copy_work_bound()?)
-                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            }
-            let mut destination = work.device.view().slice(..work.recording.events().len());
-            self.provider
-                .htod_launch_metadata_sync_copy_into(work.recording.events(), &mut destination)
-                .map_err(|error| runtime_error("original model work cold upload", error))?;
-            for branch in &prepared.branches {
-                if let Some(update) = &branch.model_update {
-                    let output = update.output.as_ref().ok_or_else(|| {
-                        publication_input_error(
-                            "prepared update has no branch-owned model output binding",
-                        )
-                    })?;
-                    let mut destination = update.bindings.view();
-                    self.provider
-                        .htod_launch_metadata_sync_copy_into(&output.values, &mut destination)
-                        .map_err(|error| {
-                            runtime_error("model update binding cold upload", error)
-                        })?;
-                    let mut forward_seals = update.forward_seals.view();
-                    self.provider
-                        .htod_launch_metadata_sync_copy_into(
-                            &output.forward_seal_values,
-                            &mut forward_seals,
-                        )
-                        .map_err(|error| runtime_error("model forward seal cold upload", error))?;
+                .expect("original metadata scope");
+            build.require_finish()?;
+            #[cfg(feature = "semantic-policy")]
+            for token in &build.tokens {
+                let prepared = self.steps[token]
+                    .prepared
+                    .as_ref()
+                    .expect("original prepared owner");
+                if prepared
+                    .training_view
+                    .as_ref()
+                    .is_some_and(|view| view.actor_group_member_count() > 1)
+                    && prepared.group_critic_recorded != 0b11
+                {
+                    return Err(publication_input_error(
+                        "multi-member Update requires the complete frozen group critic in both banks",
+                    ));
+                }
+                if (0..2).any(|bank| {
+                    prepared.group_imported_vjp_members[bank]
+                        != prepared.group_gradient_members[bank]
+                }) {
+                    return Err(publication_input_error(
+                        "every imported group VJP requires its original physical gradient delivery in the same bank",
+                    ));
                 }
             }
+
+            let mut writes = Vec::new();
+            for token in &build.tokens {
+                let prepared = self.steps[token]
+                    .prepared
+                    .as_ref()
+                    .expect("original prepared owner");
+                let work = prepared.model_work.as_ref().ok_or_else(|| {
+                    publication_input_error("prepared body has no frozen original model work")
+                })?;
+                if work.recording.frozen_bound().is_none() {
+                    return Err(publication_input_error(
+                        "original model work was not frozen by its transition",
+                    ));
+                }
+                if let Some(custody) = &prepared.replay_custody {
+                    work.recording
+                        .frozen_bound()
+                        .expect("checked frozen original work")
+                        .checked_add(custody.copy_work_bound()?)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                }
+                writes.push(state_restoration::OriginalDeviceWrite::new(
+                    &self.stream,
+                    work.recording.events(),
+                    work.device.view().slice(..work.recording.events().len()),
+                    false,
+                )?);
+                for branch in &prepared.branches {
+                    if let Some(update) = &branch.model_update {
+                        let output = update.output.as_ref().ok_or_else(|| {
+                            publication_input_error(
+                                "prepared update has no branch-owned model output binding",
+                            )
+                        })?;
+                        writes.push(state_restoration::OriginalDeviceWrite::new(
+                            &self.stream,
+                            &output.values,
+                            update.bindings.view(),
+                            false,
+                        )?);
+                        writes.push(state_restoration::OriginalDeviceWrite::new(
+                            &self.stream,
+                            &output.forward_seal_values,
+                            update.forward_seals.view(),
+                            false,
+                        )?);
+                    }
+                }
+            }
+
+            let owner = Arc::new(Mutex::new(PreparedSegmentMetadataFreeze {
+                writes,
+                cursor: 0,
+                poisoned: false,
+                complete: false,
+                retired: false,
+            }));
+            let build = self
+                .prepared_segment
+                .as_mut()
+                .expect("original metadata scope");
+            // The full original write roster remains installed across every
+            // completion error, before either host freeze or device effect.
+            build.metadata_freeze = Some(owner);
+            build.metadata_pending.store(true, Ordering::Release);
+            build.finish()?;
         }
-        Ok(())
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .expect("original metadata scope");
+        if !build.finished {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let owner = Arc::clone(
+            build
+                .metadata_freeze
+                .as_ref()
+                .expect("original frozen metadata"),
+        );
+        let may_submit = self.original_prepared_metadata_may_submit();
+        let mut retained = owner
+            .lock()
+            .map_err(|_| publication_input_error("original frozen metadata custody is poisoned"))?;
+        if retained.retired {
+            return Err(publication_input_error(
+                "original frozen metadata was retired without submission",
+            ));
+        }
+        if !retained.complete {
+            let PreparedSegmentMetadataFreeze {
+                writes,
+                cursor,
+                poisoned,
+                ..
+            } = &mut *retained;
+            while *cursor < writes.len() {
+                writes[*cursor].resolve(
+                    &self.domain,
+                    &self.stream,
+                    &self.provider,
+                    poisoned,
+                    may_submit,
+                )?;
+                *cursor += 1;
+            }
+            retained.writes.clear();
+            retained.complete = true;
+            self.prepared_segment
+                .as_ref()
+                .expect("original frozen metadata")
+                .metadata_pending
+                .store(false, Ordering::Release);
+        }
+        drop(retained);
+        // Completing an entered original prefix grants no permission to
+        // enqueue later effects under an independent unresolved owner.
+        self.ensure_quiescent()
     }
 
     /// Detach the completed executable so the caller can destroy it outside its
