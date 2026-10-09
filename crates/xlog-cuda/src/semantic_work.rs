@@ -417,7 +417,74 @@ pub(crate) struct ModelWorkRecording {
     frozen: bool,
 }
 
+/// Immutable quantities issued only by an original frozen native recording.
+/// Combining certificates adds existing work; it never prices another plan.
+#[derive(Clone, Copy, Debug)]
+#[cfg(any(test, feature = "semantic-policy"))]
+pub(crate) struct FrozenModelWorkRecording {
+    bound: u64,
+    minimum: u64,
+    event_count: u64,
+    model_call_count: u64,
+}
+
+#[cfg(any(test, feature = "semantic-policy"))]
+impl FrozenModelWorkRecording {
+    pub(crate) fn bound(self) -> u64 {
+        self.bound
+    }
+
+    pub(crate) fn event_count(self) -> u64 {
+        self.event_count
+    }
+
+    pub(crate) fn model_call_count(self) -> u64 {
+        self.model_call_count
+    }
+
+    pub(crate) fn checked_sum(certificates: impl IntoIterator<Item = Self>) -> Option<Self> {
+        certificates.into_iter().try_fold(
+            Self {
+                bound: 0,
+                minimum: 0,
+                event_count: 0,
+                model_call_count: 0,
+            },
+            |sum, next| {
+                Some(Self {
+                    bound: sum.bound.checked_add(next.bound)?,
+                    minimum: sum.minimum.checked_add(next.minimum)?,
+                    event_count: sum.event_count.checked_add(next.event_count)?,
+                    model_call_count: sum.model_call_count.checked_add(next.model_call_count)?,
+                })
+            },
+        )
+    }
+}
+
 impl ModelWorkRecording {
+    #[cfg(any(test, feature = "semantic-policy"))]
+    pub(crate) fn frozen_certificate(&self) -> Result<FrozenModelWorkRecording, &'static str> {
+        if !self.frozen {
+            return Err("model work certificate requires its original frozen recording");
+        }
+        Ok(FrozenModelWorkRecording {
+            bound: self.bound,
+            minimum: self.minimum,
+            event_count: u64::try_from(self.events.len())
+                .map_err(|_| "model event count overflow")?,
+            model_call_count: self
+                .events
+                .iter()
+                .try_fold(0u64, |count, event| {
+                    count.checked_add(u64::from(
+                        event.kind == ModelWorkKind::ModelInvocation as u64,
+                    ))
+                })
+                .ok_or("model invocation count overflow")?,
+        })
+    }
+
     pub(crate) fn new(capacity: usize) -> Result<Self, &'static str> {
         if capacity == 0 {
             return Err("model work requires a positive cold event capacity");
@@ -532,7 +599,21 @@ impl ExecutionWork {
         recording: &ModelWorkRecording,
         refused_overflow: bool,
     ) -> bool {
-        recording.frozen_bound() == Some(self.model_bound)
+        recording.frozen_certificate().is_ok_and(|certificate| {
+            self.validate_model_certificates([certificate], refused_overflow)
+        })
+    }
+
+    #[cfg(any(test, feature = "semantic-policy"))]
+    pub(crate) fn validate_model_certificates(
+        &self,
+        certificates: impl IntoIterator<Item = FrozenModelWorkRecording>,
+        refused_overflow: bool,
+    ) -> bool {
+        let Some(recording) = FrozenModelWorkRecording::checked_sum(certificates) else {
+            return false;
+        };
+        recording.bound == self.model_bound
             && self.model_once.checked_add(self.native_attempt) == Some(self.raw)
             && self
                 .native_events
@@ -546,10 +627,10 @@ impl ExecutionWork {
                 .is_some_and(|sum| sum <= self.native_attempt)
             && self.active_candidate == 0
             && if refused_overflow {
-                self.overflow == 1 && self.model_events <= recording.events().len() as u64
+                self.overflow == 1 && self.model_events <= recording.event_count
             } else {
                 self.overflow == 0
-                    && self.model_events == recording.events().len() as u64
+                    && self.model_events == recording.event_count
                     && (recording.minimum..=self.model_bound).contains(&self.model_once)
             }
     }
