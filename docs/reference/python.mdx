@@ -118,6 +118,41 @@ row in another Update has separate custody. Pass the returned
 `SemanticTransitionColdTask` constructor before construction begins. Ordinary
 fresh-task callers omit this keyword.
 
+Before constructing the child, call
+`child.source_task(refresh_snapshot=...)`. It returns
+`(checkpoint_bytes, cold_source, import_source)` for the selected original row,
+not the task receiving the Update. The immutable `cold_source` tuple contains
+`(initial_theory, input_facts, observer_program, statements)`, where `statements`
+is the original ordered tuple of `(text, truth_mask)` pairs. Pass these source
+values to the existing cold-task constructor. `observer_program` remains `None`
+when the original typed admission has no reference observer.
+
+The immutable `import_source` tuple contains
+`(authority, evaluation, training_domain, initial_sources, source_mapping,
+replay_capacity)`. `authority` has the existing ten-field import order:
+`task_ref`, `task_scope`, `live_authorities`, `replay_rows`, `dependencies`,
+`feedback_roots`, `publication_grants`, `inference_grants`, `training_grants`,
+and `task_priority_levels`. `evaluation` has the original eight-field order:
+`statement_records`, `allowed_support_records`, `task_program_source`,
+`task_query_ordinals`, `task_scoring`, `admissible_truth_masks`, `actor_eligible`,
+and `task_ground`.
+
+Use the original source task's constructor, evaluation and authority values,
+while retaining the target's complete frozen replay roster, objective and
+selected ordinal. Other retained rows keep their own authenticated task
+identities; they need not describe the selected source task. The getter checks
+fresh target read rights, but its content projection grants no source execution
+authority. The ordinary child import must validate the source's current grants
+and snapshot before numerical work.
+
+Canonical checkpoint resolution retains the verified full sources and decoded
+admissions once under the original item and aggregate byte limits. Children
+share those same native owners; the getter neither calls a second resolver nor
+loads another checkpoint. These retained host bytes and metadata are not CUDA
+backing allocations. Historical reconstruction still uses the original model
+realization: this source projection does not produce a new actor execution
+under a different policy.
+
 The child uses the original provider, allocation budget, serial stream and cold
 native-work owner. The phase retains its actual Session before the observer runs,
 then the original Controller, import callbacks, issued task, acquired reader,
@@ -147,6 +182,15 @@ nodes into the receiving Update's gradient/presence/accumulation destinations an
 restores the historical gradient reference after the single GraphTask. It must
 not accumulate into the historical allocation. Unknown restoration or final use
 retains the original owner; the registry itself cannot release live readers.
+
+After every original segment, executable and external alias has retired, first
+release the acquired parent through `parent.release(consumer_streams=...)`,
+then call `controller.close(parent)`. Close joins the actual native full
+retirement and deallocates that Session; abort or dropping Python objects is not
+a substitute. Retain an owner with unknown completion instead of releasing it,
+and record the single successful close in its original caller. An observed cold
+source may close only after all Sessions depending on its native source proof
+have closed.
 
 Gradient delivery authenticates the complete original parameter-leaf roster
 from the retained model schema, including frozen Parameters with no gradient
