@@ -879,8 +879,6 @@ impl PrivateReplayChildCustody {
         py: Python<'_>,
         member: &PySemanticRetainedReplayMember,
     ) -> PyResult<()> {
-        let phase = self.phase(py)?;
-        let phase = phase.borrow(py);
         let state = self.state()?;
         if self.failed.load(Ordering::Acquire)
             || !state.import_returned
@@ -890,7 +888,6 @@ impl PrivateReplayChildCustody {
                 .member
                 .as_ref()
                 .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), member))
-            || !phase.phase_evaluation_active.load(Ordering::Acquire)
         {
             return Err(invalid(
                 "cancelled replay final use requires its original active native retirement",
@@ -902,6 +899,52 @@ impl PrivateReplayChildCustody {
             return Err(invalid(
                 "cancelled replay final use is outside original graph retirement",
             ));
+        }
+        let phase = self.phase
+            .lock()
+            .map_err(|_| invalid("original replay phase custody is poisoned"))?
+            .as_ref().map(|phase| phase.clone_ref(py));
+        if phase.is_none() {
+            let instruction = self.instruction.upgrade()
+                .ok_or_else(|| invalid("cancelled replay lost its original instruction"))?;
+            instruction.require_owner(py)?;
+            if instruction.session.as_ptr() != self.session.as_ptr()
+                || instruction.task_use.as_ptr() != self.task.as_ptr()
+                || !instruction.preparation()?.replay_children.iter()
+                    .any(|original| std::ptr::eq(self, original.as_ref()))
+            {
+                return Err(invalid("cancelled replay changed its original instruction membership"));
+            }
+            let (target, graph_retired) = {
+                let retained = session.prepared_segment.lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+                let retained = retained.as_ref()
+                    .ok_or_else(|| invalid("cancelled replay lost its original segment"))?;
+                if retained.instruction.as_ref().is_none_or(|original| !Arc::ptr_eq(original, &instruction))
+                    || retained.task_use.as_ptr() != self.task.as_ptr()
+                {
+                    return Err(invalid("cancelled replay changed its original prepared segment"));
+                }
+                (retained.steps.get(self.step_index)
+                    .ok_or_else(|| invalid("cancelled replay lost its original Update"))?
+                    .borrow(py).inner.clone(), retained.graph_retired)
+            };
+            if !graph_retired {
+                return Err(invalid("cancelled replay requires actual original graph destruction"));
+            }
+            let controller = PySemanticTransitionController {
+                session: self.session.clone_ref(py),
+                identity: Arc::clone(&self.task.borrow(py).controller),
+            };
+            let proof = controller.original_segment_cancellation(py, &session, &self.task)?
+                .ok_or_else(|| invalid("cancelled replay lost its original instruction non-submission proof"))?;
+            return session.owner()?.require_cancelled_prepared_step_final_use(&target, &proof)
+                .map_err(xlog_err);
+        }
+        let phase = phase.expect("original private replay phase");
+        let phase = phase.borrow(py);
+        if !phase.phase_evaluation_active.load(Ordering::Acquire) {
+            return Err(invalid("cancelled replay requires its original active phase retirement"));
         }
         let retained = phase.private_group()?;
         let group = retained
