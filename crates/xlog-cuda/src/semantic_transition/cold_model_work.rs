@@ -512,6 +512,14 @@ impl SemanticTransitionSession {
         Ok(self.stream.cu_stream() as u64)
     }
 
+    /// Whether this original report has retained its sole complete plan.
+    pub fn cold_model_work_plan_is_admitted(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<bool, SemanticTransitionError> {
+        Ok(self.cold_model_work(handle)?.plan.is_some())
+    }
+
     /// Admit the complete ordered model recipe before its first actual recorder
     /// begins. An enclosing region report may already be open without any model
     /// event. Returned quantities are (work bound, event count, call upper).

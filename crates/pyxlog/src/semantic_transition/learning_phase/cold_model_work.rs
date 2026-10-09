@@ -81,6 +81,34 @@ impl PySemanticColdModelWork {
 
 #[pymethods]
 impl PySemanticColdModelWork {
+    /// Original native plan state, not a Python callback invocation count.
+    #[getter]
+    fn plan_admitted(&self, py: Python<'_>) -> PyResult<bool> {
+        self.check(py)?;
+        self.reader
+            .borrow(py)
+            .session
+            .borrow(py)
+            .owner()?
+            .cold_model_work_plan_is_admitted(&self.inner)
+            .map_err(xlog_err)
+    }
+
+    /// Seventeen original source-port layouts; no device export or selection.
+    fn evaluation_source_geometry(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Vec<(Vec<i64>, Vec<i64>, (u8, u8))>> {
+        self.check(py)?;
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        let result = session
+            .owner()?
+            .evaluation_source_geometry(&*parent.lease()?)
+            .map_err(xlog_err);
+        result
+    }
+
     /// Retain the complete physical operation recipe before original recording.
     /// Native returns (work bound, event count, call upper), not a Python estimate.
     #[pyo3(

@@ -183,6 +183,24 @@ pub(super) struct EvaluationStorage {
 }
 
 impl SemanticTransitionSession {
+    /// Original immutable port metadata, without selecting, exporting, or
+    /// reading device extents. Numerical owners can reserve their empty outputs
+    /// before the original cold operation plan is admitted.
+    pub fn evaluation_source_geometry(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<Vec<(Vec<i64>, Vec<i64>, (u8, u8))>, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let arena = self
+            .training_views
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        SemanticTrainingViewPort::ALL
+            .into_iter()
+            .map(|port| arena.port_layout(port))
+            .collect()
+    }
+
     /// Select only for the source observation. Supplying its issued cohort
     /// reuses all seventeen ports, never final-model RNG or a caller ordinal.
     pub fn prepare_model_evaluation(
