@@ -1478,15 +1478,38 @@ capacity without introducing another instruction decoder.
 Inside the original source serializer, before preparation returns,
 `task_use.active_cold_model_work()` or
 `controller.active_cold_model_work()` returns the same native-issued
-`SemanticColdModelWork`. Obtain its `consumer_stream` and
-`model_work_buffer(consumer_stream=...)`, an original CUDA UInt64
-`[capacity, 3]` buffer, before calling `begin()`. The existing model-work recorder
+`SemanticColdModelWork`. Before exporting scratch or beginning the first region,
+call `admit_plan(operations, region_ends=...)` with the complete original report's immutable tuple
+of `(kind, dimensions_tuple)` pairs. The serializer and comparison producer must
+execute that same physical recipe; it is not a separate cost estimator. Native
+returns `(work_bound, operation_count, model_calls)` using the existing geometry
+tariff. A model invocation has kind `16` and empty dimensions; only the native
+registrar supplies its actual device slot. Admission occurs once, including when
+the report spans several callback regions, and later regions cannot substitute a
+new plan or a remaining budget.
+For a region-scoped report, `region_ends` is an immutable tuple of cumulative
+operation counts, one for every original region, including empty regions. The
+counts are nondecreasing and the final count equals the complete operation count.
+A report without regions uses the default empty tuple. Region boundaries belong
+to the same admitted plan; entering or closing a region cannot replace them.
+
+Obtain its `consumer_stream` and `model_work_buffer(consumer_stream=...)`, an
+original CUDA UInt64 `[capacity, 3]` buffer, before calling `begin()`.
+The existing model-work recorder
 uses `record_model_work`, `record_model_device_work` and
 `record_model_invocation`, then calls `end()` on normal exit or `fail()` on an
 exception. Registration begins once; overflow cannot grow the buffer or restart
 the operation. Drop temporary tensor aliases before returning the serializer.
 `end()` only closes registration: the enclosing native operation joins actual
 consumers and completes its report before ending the original backing interval.
+Each registration must match the next original kind and geometry. Successful
+completion requires every operation in each entered region. Only the enclosing
+native owner's authenticated no-entry decision may skip a region; later cleanup
+regions still consume their own original spans. Skipped spans create no work
+events and incur no model charge. A known refusal may retain the actually reached
+ordered subtrace, including a prefix of its entered region; a callback exception, unknown
+completion or Python flag cannot declare that disposition. The original stream
+roster and disposition remain fixed across report resolution.
 An explicitly attached, completed CPU/meta-only recorder may have no model events;
 an absent recorder, overflow or unknown completion is not a zero result.
 This owner grants no evaluation, backward-tape or content-admission rights.
@@ -4103,13 +4126,30 @@ draw randomness, update an optimizer, or publish a successor.
 
 The returned `SemanticModelEvaluation` owns one recording. Export its
 `training_view(consumer_stream=...)` and `model_work_buffer(consumer_stream=...)`
-before `begin()`, then use the existing model content scope on the same parent
-and the existing numerical/work registrar on the evaluation's `consumer_stream`.
+while the invocation is still prepared. Bind the output tensors and their native
+content witness before capture. Then call
+`capture(enqueue, memory_scope=..., output_witness=..., consumer_streams=...)`.
+The callback uses the existing model content scope on the same parent and the
+existing numerical/work registrar on the evaluation's `consumer_stream`; it
+retains the original output tensors and returns `None`.
+Capture returns `(work_bound, operation_count, model_calls)` and freezes the
+original graph without launching it. A failed capture finalization cannot be
+launched, and ports or recording geometry cannot be rebound after capture.
 `record_model_work(kind, dimensions)` and
 `record_model_device_work(kind, upper_dimensions)` use the same native recording,
 geometry rules, scratch layout, and device work consumer as prepared execution.
 Saved-autograd-copy recording is intentionally unavailable: this invocation is
 forward/objective-only.
+
+`launch()` admits the frozen original model and captured native producers, plus
+the complete original cold-model plan, against the unchanged signed phase work
+and call budget. This known subtotal does not yet bound every later cold native
+producer or the whole-system memory peak. Launch submits the graph once and joins
+its actual consumers. If submission was entered but completion is unknown,
+`SemanticModelEvaluationPending` retains the original owners; call
+`resolve_launch()` to join that same submission, never capture or launch again.
+Both methods return `None` on known numerical completion. Only then may the
+consumer project its cold objective and call the existing `finish` method.
 
 An acquired parent may issue a distinct next evaluation only after the previous
 invocation completed and all aliases of its model-work scratch were released.
@@ -4173,9 +4213,11 @@ peak measurement remain necessary. Preparation and completion export full native
 material and metadata cold; neither belongs inside a claimed zero-transfer loop.
 
 Successful completion restores the original task phase without changing its
-authority snapshot. Before output submission, `cancel(consumer_streams=...)` does
-so only after joining actual consumers and revalidating the original full
-publication. Cancellation is forbidden after output submission. Unknown
+authority snapshot. Before numerical launch, `cancel(consumer_streams=...)` does
+so only after proving no captured submission entered, joining actual consumers,
+revalidating the original full publication and retiring the original graph.
+Cancellation is forbidden once numerical submission entered, even before output
+report submission. Unknown
 completion keeps native buffers retained and blocks mutation/release. Dropping an unfinished owner
 quarantines its Session; it is not cancellation or proof of completion. Keep all
 Python producers and aliases alive until known completion and creator-thread cleanup.

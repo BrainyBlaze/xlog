@@ -91,20 +91,20 @@ pub use semantic_transition::{
     SemanticPreparedSegmentNonSubmission, SemanticPreparedSegmentTransfers, SemanticPreparedStep,
     SemanticPreparedStepOutcome, SemanticPublicationInputProjection,
     SemanticPublicationTensorProjection, SemanticPublishedIdentity, SemanticPublishedLease,
-    SemanticReplayAppendBinding, SemanticReplayMaterial, SemanticReplayModelBackings,
-    SemanticResidentModelMemory, SemanticRngBinding, SemanticSegmentColdCapacity,
-    SemanticSegmentTerminalWait, SemanticSourceMapping, SemanticStateRecord, SemanticStateRole,
-    SemanticStructuralCostDescriptor, SemanticTaskContentIdentity, SemanticTaskEvaluation,
-    SemanticTaskEvaluationSpec, SemanticTaskFacts, SemanticTaskGoalWitness,
-    SemanticTaskObjectiveLaw, SemanticTaskObservation, SemanticTaskObservationRoots,
-    SemanticTaskPriorityGoal, SemanticTaskPriorityLevel, SemanticTaskProgram, SemanticTaskRefusal,
-    SemanticTaskScoring, SemanticTensorContentWitness, SemanticTensorInput, SemanticTensorLayout,
-    SemanticTextRow, SemanticTextSlot, SemanticTokenProvenance, SemanticTransitionError,
-    SemanticTransitionHostIoStats, SemanticTransitionKind, SemanticTransitionLane,
-    SemanticTransitionObservation, SemanticTransitionOutcome, SemanticTransitionReceipt,
-    SemanticTransitionRefusal, SemanticTransitionSession, SemanticTransitionWork,
-    SEMANTIC_FEEDBACK_SUPPORT_FIELDS, SEMANTIC_TRANSITION_COMPONENT_COUNT,
-    SEMANTIC_TRANSITION_GENERATION,
+    SemanticPublishedStateObservation, SemanticReplayAppendBinding, SemanticReplayMaterial,
+    SemanticReplayModelBackings, SemanticResidentModelMemory, SemanticRngBinding,
+    SemanticSegmentColdCapacity, SemanticSegmentTerminalWait, SemanticSourceMapping,
+    SemanticStateRecord, SemanticStateRole, SemanticStructuralCostDescriptor,
+    SemanticTaskContentIdentity, SemanticTaskEvaluation, SemanticTaskEvaluationSpec,
+    SemanticTaskFacts, SemanticTaskGoalWitness, SemanticTaskObjectiveLaw, SemanticTaskObservation,
+    SemanticTaskObservationRoots, SemanticTaskPriorityGoal, SemanticTaskPriorityLevel,
+    SemanticTaskProgram, SemanticTaskRefusal, SemanticTaskScoring, SemanticTensorContentWitness,
+    SemanticTensorInput, SemanticTensorLayout, SemanticTextRow, SemanticTextSlot,
+    SemanticTokenProvenance, SemanticTransitionError, SemanticTransitionHostIoStats,
+    SemanticTransitionKind, SemanticTransitionLane, SemanticTransitionObservation,
+    SemanticTransitionOutcome, SemanticTransitionReceipt, SemanticTransitionRefusal,
+    SemanticTransitionSession, SemanticTransitionWork, SEMANTIC_FEEDBACK_SUPPORT_FIELDS,
+    SEMANTIC_TRANSITION_COMPONENT_COUNT, SEMANTIC_TRANSITION_GENERATION,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
@@ -113,8 +113,8 @@ pub use semantic_transition::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
-    SemanticColdModelWork, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
-    SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkRegion,
+    SemanticColdModelWorkResult, SemanticColdNativeWork,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{

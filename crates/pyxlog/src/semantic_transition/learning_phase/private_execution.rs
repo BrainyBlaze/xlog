@@ -1436,6 +1436,7 @@ impl PySemanticLearningPhaseTransition {
                 &*self.parent.borrow(py).lease()?,
                 &work.borrow(py).inner,
                 &streams,
+                xlog_cuda::SemanticColdModelWorkDisposition::Complete,
             )
             .map_err(xlog_err)?;
         work.borrow(py).active.store(false, Ordering::Release);
