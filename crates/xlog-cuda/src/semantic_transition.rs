@@ -7590,11 +7590,23 @@ fn publication_material_runtime() -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"xlog.publication.material-runtime.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
+        hash.update(include_bytes!("semantic_transition/cold_model_work.rs"));
+        hash.update(include_bytes!("semantic_transition/late_replay.rs"));
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
+        hash.update(include_bytes!("semantic_transition/native_work_bound.rs"));
         hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
+        hash.update(include_bytes!(
+            "semantic_transition/replay_model_backing.rs"
+        ));
+        hash.update(include_bytes!(
+            "semantic_transition/verification_receipts.rs"
+        ));
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
+        hash.update(include_bytes!("../kernels/semantic_program.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_rule_action.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_feedback_encoding.cuh"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
         hash.update(policy_identity);
