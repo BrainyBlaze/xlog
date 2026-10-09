@@ -1766,6 +1766,57 @@ or uncertain execution cannot return a binding. When the semantic-policy feature
 is disabled, the method raises its typed feature-required error instead of
 returning a six-field tuple with a fabricated `None` carrier.
 
+### Completed-segment transfer snapshots
+
+`step.execution_measurements` returns a frozen
+`SemanticCompletedExecutionObservation` for the original completed step. Its
+`device_work`, `model_work`, `native_work`, and `model_calls` properties retain
+the original native quantities. Its CPU-only `segment_transfers` property
+returns the same immutable segment receipt for every step in that submission:
+
+```text
+(identity_and_roster, terminal_wait_status, before_ingress,
+ before_launch_or_None, after_terminal_wait_or_None,
+ after_completion_export_or_None)
+```
+
+`identity_and_roster` contains nine values in this order: `provider_identity`,
+`session_instance`, `domain_stream_id`, `cuda_stream_id`, `graph_handle`,
+`graph_exec_handle`, `first_step_token`, `last_step_token`, and `step_count`.
+The session instance is the complete 256-bit identity as a 64-character lowercase
+hexadecimal string; the other eight values are integers. Graph handles and
+provider/stream identities correlate the original process's graph submission
+with profiler records; they are not persistent identities.
+
+Each available snapshot is a ten-integer tuple in the exact `host_io_stats()`
+order: `htod_bytes`, `dtoh_bytes`, `htod_calls`, `dtoh_calls`,
+`launch_metadata_bytes`, `launch_metadata_calls`, `metadata_dtoh_calls`,
+`observation_bytes`, `observation_calls`, and `session_stream_waits`. These are
+cumulative native counters, not per-step values. The snapshots bracket the
+original launch metadata ingress, the whole graph submission through its
+terminal wait, and the subsequent completion-outcome export. The graph includes
+the entire recorded roster from first admission through last release, including
+recorded backward, publication, and subsequent forward operations.
+
+`terminal_wait_status` is `not_started`, `completion_unknown`, or `complete`.
+`None` means that the original stage did not return known completion, never
+zero transfers. An unfinished or uncertain step cannot issue a completed
+observation. Reading the property adds no device copy or synchronization.
+
+The final snapshot ends after native completion-outcome export, before later
+completed-step measurement reads, model binding/projection exports, and other
+cold exports. Those later transfers are not included in this receipt. Launch
+metadata counters are separate from ordinary host-to-device counters; neither
+may be omitted from transfer accounting. Native counters also do not replace
+independent whole-run profiling of external model operations and graph copies.
+The receipt alone does not establish zero transfer for the resident interval
+or the complete run.
+
+Private execution reports must return exactly the four work quantities above
+and `segment_transfers` in `execution_measurements`. Native adoption validates
+the exact immutable tuple structure and compares every value with the original
+native observation; caller-authored measurements cannot replace it.
+
 ### Original Update measurements
 
 Before retirement, read `step.update_measurements` on the original completed

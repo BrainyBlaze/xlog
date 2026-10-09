@@ -9629,6 +9629,64 @@ impl PySemanticCompletedExecutionObservation {
     fn model_calls(&self) -> u64 {
         self.inner.quantities()[3]
     }
+
+    #[getter]
+    fn segment_transfers(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let transfers = self.inner.transfers();
+        let snapshot = |stats: xlog_cuda::SemanticTransitionHostIoStats| {
+            PyTuple::new(
+                py,
+                [
+                    stats.htod_bytes,
+                    stats.dtoh_bytes,
+                    stats.htod_calls,
+                    stats.dtoh_calls,
+                    stats.launch_metadata_bytes,
+                    stats.launch_metadata_calls,
+                    stats.metadata_dtoh_calls,
+                    stats.observation_bytes,
+                    stats.observation_calls,
+                    stats.session_stream_waits,
+                ],
+            )
+            .map(|tuple| tuple.unbind())
+        };
+        let instance = transfers
+            .session_instance
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let identity = (
+            transfers.provider_identity,
+            instance,
+            transfers.domain_stream_id.0,
+            transfers.cuda_stream_id,
+            transfers.graph_handle,
+            transfers.graph_exec_handle,
+            transfers.first_step_token,
+            transfers.last_step_token,
+            transfers.step_count,
+        );
+        let terminal_wait = match transfers.terminal_wait {
+            xlog_cuda::SemanticSegmentTerminalWait::NotStarted => "not_started",
+            xlog_cuda::SemanticSegmentTerminalWait::CompletionUnknown => "completion_unknown",
+            xlog_cuda::SemanticSegmentTerminalWait::Complete => "complete",
+        };
+        Ok((
+            identity,
+            terminal_wait,
+            snapshot(transfers.before_ingress)?,
+            transfers.before_launch.map(&snapshot).transpose()?,
+            transfers.after_terminal_wait.map(&snapshot).transpose()?,
+            transfers
+                .after_completion_export
+                .map(&snapshot)
+                .transpose()?,
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
 }
 
 /// Session-issued storage for one bounded recorded step, not an acquired parent.
