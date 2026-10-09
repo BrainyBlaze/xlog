@@ -2835,6 +2835,42 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    pub(in crate::semantic_transition) fn require_private_actor_cold_callback(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        step: &PySemanticPreparedStep,
+        work: &PySemanticColdModelWork,
+    ) -> PyResult<()> {
+        self.require_private_group_owner(py, session, &step.task_use.borrow(py))?;
+        self.require_private_numeric_cold_callback(py, work)?;
+        let retained = self.private_group()?;
+        let group = retained.as_ref().expect("validated original private group");
+        let position = group
+            .native_steps
+            .iter()
+            .position(|original| original.same_handle(&step.inner));
+        if group.preparation_role != PrivateColdRole::ModelPreparation
+            || group.preparation_report.is_some()
+            || group.preparation_detached
+            || group
+                .preparation_work
+                .as_ref()
+                .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+            || group
+                .build_scope
+                .as_ref()
+                .is_none_or(|scope| !Arc::ptr_eq(scope, &step.scope))
+            || position
+                .is_none_or(|index| group.kinds.get(index) != Some(&SemanticTransitionKind::Update))
+        {
+            return Err(invalid(
+                "actor preparation changed its original private Update and model callback",
+            ));
+        }
+        Ok(())
+    }
+
     pub(in crate::semantic_transition) fn private_numeric_feedback_projection(
         &self,
         py: Python<'_>,
