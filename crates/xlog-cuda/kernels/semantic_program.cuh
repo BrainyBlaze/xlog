@@ -313,7 +313,7 @@ __device__ Result materialize_bank(const Bank& bank, const Rule* inserted,
         rules[bank.rule_count + selected_count + index] = inserted[index];
     return materialize(input, bank.initial_count, rules,
                        bank.rule_count + selected_count + inserted_count, bank.predicate_count,
-                       output, output_capacity, fuel,support,observations,bank.rule_count+selected_count);
+                       output, output_capacity, fuel,support,observations,bank.rule_count);
 }
 
 __device__ Result materialize_bank(const Bank& bank,const Rule* inserted,uint32_t inserted_count,
