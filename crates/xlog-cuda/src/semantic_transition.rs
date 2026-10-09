@@ -10029,12 +10029,18 @@ pub struct SemanticCompletedExecutionObservation {
     successor: Option<SemanticPublishedIdentity>,
     model_binding: Option<(u64, Identity256, Identity256)>,
     quantities: [u64; 4],
+    transfers: Arc<SemanticPreparedSegmentTransfers>,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticCompletedExecutionObservation {
     pub fn quantities(&self) -> [u64; 4] {
         self.quantities
+    }
+
+    /// Original whole-segment snapshots, shared by every step in its roster.
+    pub fn transfers(&self) -> &SemanticPreparedSegmentTransfers {
+        &self.transfers
     }
 
     pub fn same_execution(&self, other: &Self) -> bool {
@@ -10172,6 +10178,7 @@ struct PreparedSegmentState {
     graph_retirement: Option<crate::cuda_graph::CudaGraphRetirement>,
     parent_reader: Option<u64>,
     parent_quiescent: bool,
+    transfers: Option<Arc<SemanticPreparedSegmentTransfers>>,
 }
 
 impl PreparedSegmentState {
@@ -10215,6 +10222,7 @@ impl PreparedSegmentState {
             graph_retirement: None,
             parent_reader: None,
             parent_quiescent: false,
+            transfers: None,
         })
     }
 
@@ -14527,8 +14535,8 @@ impl SemanticTransitionWork {
     }
 }
 
-/// Provider counters and explicit session stream waits. Compare snapshots around
-/// launch only: cold binding/capture and terminal observation are outside it.
+/// Cumulative provider counters and explicit session stream waits. Launch metadata
+/// and terminal observations remain separate counters, never implied zeros.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticTransitionHostIoStats {
     pub htod_bytes: u64,
@@ -14541,6 +14549,40 @@ pub struct SemanticTransitionHostIoStats {
     pub observation_bytes: u64,
     pub observation_calls: u64,
     pub session_stream_waits: u64,
+}
+
+/// Disposition of the original terminal wait, never inferred from an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticSegmentTerminalWait {
+    NotStarted,
+    CompletionUnknown,
+    Complete,
+}
+
+/// Original submission snapshots around ingress, whole-graph execution and
+/// completion-outcome export, before subsequent completed-step observations.
+///
+/// Handles and provider/stream identities are process-local profiler correlation
+/// values, not persistent identities or evidence of transfer-free execution. The
+/// graph interval covers its first admission through its last release; no step,
+/// backward, publication or subsequent forward is removed from that interval.
+/// Absent snapshots mean the original stage did not return known completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticPreparedSegmentTransfers {
+    pub provider_identity: u64,
+    pub session_instance: Identity256,
+    pub domain_stream_id: crate::device_runtime::StreamId,
+    pub cuda_stream_id: u64,
+    pub graph_handle: u64,
+    pub graph_exec_handle: u64,
+    pub first_step_token: u64,
+    pub last_step_token: u64,
+    pub step_count: usize,
+    pub before_ingress: SemanticTransitionHostIoStats,
+    pub before_launch: Option<SemanticTransitionHostIoStats>,
+    pub after_terminal_wait: Option<SemanticTransitionHostIoStats>,
+    pub after_completion_export: Option<SemanticTransitionHostIoStats>,
+    pub terminal_wait: SemanticSegmentTerminalWait,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15142,10 +15184,27 @@ impl SemanticTransitionSession {
             ));
         }
         let recorder = self.prepared_segment_recorder()?;
-        self.prepared_segment
-            .as_mut()
-            .expect("checked segment")
-            .submit()?;
+        let graph = self.captured.as_ref().expect("checked captured graph");
+        let transfers = Arc::new(SemanticPreparedSegmentTransfers {
+            provider_identity: self.provider.provider_identity(),
+            session_instance: storage.instance,
+            domain_stream_id: self.domain.stream_id(),
+            cuda_stream_id: crate::cuda_graph::stream_execution_id(&self.stream)
+                .map_err(|error| runtime_error("prepared execution stream identity", error))?,
+            graph_handle: graph.graph() as u64,
+            graph_exec_handle: graph.exec() as u64,
+            first_step_token: *build.tokens.first().expect("original nonempty roster"),
+            last_step_token: *build.tokens.last().expect("original nonempty roster"),
+            step_count: build.tokens.len(),
+            before_ingress: self.host_io_stats(),
+            before_launch: None,
+            after_terminal_wait: None,
+            after_completion_export: None,
+            terminal_wait: SemanticSegmentTerminalWait::NotStarted,
+        });
+        let build = self.prepared_segment.as_mut().expect("checked segment");
+        build.submit()?;
+        build.transfers = Some(transfers);
         self.publication_uploads = vec![(slot, PublicationPayload::Metadata(authority_decisions))];
         let result = (|| {
             let PublicationPayload::Metadata(bytes) = &self.publication_uploads[0].1 else {
@@ -15158,6 +15217,8 @@ impl SemanticTransitionSession {
             self.provider
                 .htod_launch_metadata_sync_copy_into(bytes, &mut destination)
                 .map_err(|error| runtime_error("prepared fresh authority upload", error))?;
+            let before_launch = self.host_io_stats();
+            self.prepared_segment_transfers_mut()?.before_launch = Some(before_launch);
             let graph = self
                 .captured
                 .as_ref()
@@ -15259,6 +15320,8 @@ impl SemanticTransitionSession {
     ) -> Result<Vec<SemanticPreparedStepOutcome>, SemanticTransitionError> {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared completion stream admission", error))?;
+        self.prepared_segment_transfers_mut()?.terminal_wait =
+            SemanticSegmentTerminalWait::CompletionUnknown;
         wait_on_stream(
             &self.stream,
             &mut self.poisoned,
@@ -15266,6 +15329,10 @@ impl SemanticTransitionSession {
             "prepared graph terminal wait",
             CudaStream::synchronize,
         )?;
+        let after_terminal_wait = self.host_io_stats();
+        let transfers = self.prepared_segment_transfers_mut()?;
+        transfers.after_terminal_wait = Some(after_terminal_wait);
+        transfers.terminal_wait = SemanticSegmentTerminalWait::Complete;
         if let Some(token) = self
             .prepared_segment
             .as_ref()
@@ -15479,11 +15546,24 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        let after_completion_export = self.host_io_stats();
+        self.prepared_segment_transfers_mut()?
+            .after_completion_export = Some(after_completion_export);
         self.prepared_segment
             .as_mut()
             .expect("submitted segment")
             .completed = true;
         Ok(outcomes)
+    }
+
+    fn prepared_segment_transfers_mut(
+        &mut self,
+    ) -> Result<&mut SemanticPreparedSegmentTransfers, SemanticTransitionError> {
+        self.prepared_segment
+            .as_mut()
+            .and_then(|build| build.transfers.as_mut())
+            .and_then(Arc::get_mut)
+            .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 
     fn reconcile_prepared_transition(
@@ -17845,6 +17925,18 @@ impl SemanticTransitionSession {
                 "execution measurements require the original segment's known completion",
             ));
         }
+        let transfers = self
+            .prepared_segment
+            .as_ref()
+            .and_then(|build| build.transfers.as_ref())
+            .filter(|transfers| {
+                transfers.terminal_wait == SemanticSegmentTerminalWait::Complete
+                    && transfers.before_launch.is_some()
+                    && transfers.after_terminal_wait.is_some()
+                    && transfers.after_completion_export.is_some()
+            })
+            .cloned()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let prepared = original.prepared.as_ref().expect("checked original step");
         let requested_transition = self
             .prepared_segment
@@ -17910,6 +18002,7 @@ impl SemanticTransitionSession {
                     successor: None,
                     model_binding: None,
                     quantities: [0; 4],
+                    transfers,
                 });
             }
             let parent = self.steps[&step.token]
@@ -17993,6 +18086,7 @@ impl SemanticTransitionSession {
                     parent.model_numerical_digest,
                 )),
                 quantities: [work.raw, work.model_once, work.native_attempt, calls],
+                transfers,
             })
         })();
         if observation.is_err() {

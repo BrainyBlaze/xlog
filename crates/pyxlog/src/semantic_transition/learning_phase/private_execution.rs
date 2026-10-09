@@ -2613,7 +2613,7 @@ impl PySemanticLearningPhaseTransition {
             let measured = step
                 .get_item("execution_measurements")?
                 .ok_or_else(|| invalid("private step lost its actual native measurements"))?;
-            if !measured.is_exact_instance_of::<PyDict>() || measured.cast::<PyDict>()?.len() != 4 {
+            if !measured.is_exact_instance_of::<PyDict>() || measured.cast::<PyDict>()?.len() != 5 {
                 return Err(invalid(
                     "private step changed its complete native measurement fields",
                 ));
@@ -2632,6 +2632,38 @@ impl PySemanticLearningPhaseTransition {
                         "private step substituted its issued native expenditure",
                     ));
                 }
+            }
+            let transfers = measured
+                .get_item("segment_transfers")?
+                .ok_or_else(|| invalid("private step lost its original segment transfers"))?;
+            if !transfers.is_exact_instance_of::<PyTuple>()
+                || transfers.cast::<PyTuple>()?.len() != 6
+            {
+                return Err(invalid(
+                    "private step changed its immutable segment transfers",
+                ));
+            }
+            let transfers = transfers.cast::<PyTuple>()?;
+            for (index, width) in [(0, 9), (2, 10), (3, 10), (4, 10), (5, 10)] {
+                let field = transfers.get_item(index)?;
+                if index >= 3 && field.is_none() {
+                    continue;
+                }
+                if !field.is_exact_instance_of::<PyTuple>()
+                    || field.cast::<PyTuple>()?.len() != width
+                {
+                    return Err(invalid(
+                        "private step changed its immutable segment transfer fields",
+                    ));
+                }
+            }
+            let original = observation.segment_transfers(py)?;
+            if ColdValue::read(transfers.as_any(), &mut 4096, 0)?
+                != ColdValue::read(original.bind(py).as_any(), &mut 4096, 0)?
+            {
+                return Err(invalid(
+                    "private step substituted its original segment transfers",
+                ));
             }
             drop(observation);
             receipts.push(receipt);
