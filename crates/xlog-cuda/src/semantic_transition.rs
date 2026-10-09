@@ -11114,6 +11114,7 @@ struct PreparedSegmentState {
     parent_quiescent: bool,
     transfers: Option<Arc<SemanticPreparedSegmentTransfers>>,
     completion_observations: PreparedSegmentCompletionObservations,
+    final_consumers: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 impl PreparedSegmentState {
@@ -11175,6 +11176,7 @@ impl PreparedSegmentState {
             parent_quiescent: false,
             transfers: None,
             completion_observations: PreparedSegmentCompletionObservations::default(),
+            final_consumers: BTreeMap::new(),
         })
     }
 
@@ -31708,9 +31710,23 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::UnconsumedPolicyTape);
         }
+        let final_streams = self.step_consumer_streams(step.token, consumer_streams)?;
+        if let Some(original) = self.prepared_segment.as_ref()
+            .expect("checked prepared scope").final_consumers.get(&step.token)
+        {
+            if original != &final_streams {
+                return Err(publication_input_error(
+                    "prepared final use changed its original consumer roster",
+                ));
+            }
+            return self.ensure_quiescent();
+        }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared step quiescence stream admission", error))?;
-        self.complete_step_consumers_by_token(step.token, consumer_streams)
+        self.complete_step_consumers_by_token(step.token, consumer_streams)?;
+        self.prepared_segment.as_mut().expect("joined prepared scope")
+            .final_consumers.insert(step.token, final_streams);
+        Ok(())
     }
 
     pub fn admit_transition(
@@ -35453,27 +35469,32 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    /// Prove that the target executable and every prepared step owner have
-    /// retired. A retained source graph cannot be released merely because the
-    /// target's one-shot launch completed: the executable still holds its
-    /// captured pointers until full segment retirement.
+    /// Authenticate this exact target's final device use while retaining its
+    /// storage for the original source cleanup and retirement report. Actual
+    /// completion, the joined final consumer roster, and destruction of the
+    /// original executable are all required; launch completion alone is not.
     #[cfg(feature = "semantic-policy")]
-    pub fn require_retired_prepared_step(
+    pub fn require_prepared_step_final_use(
         &self,
         step: &SemanticPreparedStep,
     ) -> Result<(), SemanticTransitionError> {
-        if self.is_poisoned() {
-            return Err(SemanticTransitionError::Poisoned);
-        }
-        if !Arc::ptr_eq(&step.issuer, &self.publication_issuer)
-            || self.prepared_segment.is_some()
-            || self.captured.is_some()
-            || self.pending
-            || !self.prepared_resources.is_empty()
-            || self.steps.contains_key(&step.token)
+        self.require_completed_prepared_graph_retirement()?;
+        let build = self.prepared_segment.as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        build.check_retained(step, &self.publication_issuer)?;
+        let owner = self.steps.get(&step.token)
+            .filter(|owner| owner.prepared.is_some() && owner.identity.is_none())
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let original = build.final_consumers.get(&step.token)
+            .ok_or_else(|| publication_input_error("target final consumers have not joined"))?;
+        if !build.completed
+            || owner.consumer_completion.is_some()
+            || !owner.consumer_streams.is_subset(original)
+            || self.step_consumer_streams(step.token, &original.iter().copied().collect::<Vec<_>>())?
+                != *original
         {
             return Err(publication_input_error(
-                "retained source requires completed retirement of its target segment",
+                "retained source requires its original target final-use proof",
             ));
         }
         Ok(())
