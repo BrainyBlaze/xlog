@@ -34,9 +34,24 @@ impl PySemanticColdModelWork {
         let parent = self.parent.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;
-        if !self.active.load(Ordering::Acquire)
-            || !source.learning_preparing.load(Ordering::Acquire)
-        {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(invalid(
+                "cold model work is accessible only inside its original admitted callback",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if require_admitted_cold_callback(py, &source, self)? {
+            return Ok(());
+        }
+        #[cfg(feature = "semantic-policy")]
+        if prepared_cold_callback_step(py, &source, self)?.is_some() {
+            return Ok(());
+        }
+        #[cfg(feature = "semantic-policy")]
+        if admitted_retirement_cold_callback(py, &source, self)?.is_some() {
+            return Ok(());
+        }
+        if !source.learning_preparing.load(Ordering::Acquire) {
             return Err(invalid(
                 "cold model work is accessible only inside its original admitted callback",
             ));
@@ -400,7 +415,33 @@ impl PySemanticColdModelWork {
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let parent = self.reader.borrow(py);
         let source = parent.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        let prepared = prepared_cold_callback_step(py, &source, self)?;
+        #[cfg(feature = "semantic-policy")]
+        let retirement = admitted_retirement_cold_callback(py, &source, self)?;
         let mut owner = source.owner()?;
+        #[cfg(feature = "semantic-policy")]
+        let tensor = if let Some(instruction) = retirement {
+            owner.admitted_retirement_cold_model_work_buffer(
+                &instruction.inner,
+                &self.inner,
+                stream,
+            )
+        } else if let Some(step) = prepared {
+            owner.prepared_cold_model_work_buffer(
+                &step.borrow(py).inner,
+                &*parent.lease()?,
+                &self.inner,
+                stream,
+                self.region.as_ref(),
+            )
+        } else if let Some(region) = &self.region {
+            owner.cold_model_work_region_buffer(&*parent.lease()?, region, stream)
+        } else {
+            owner.cold_model_work_buffer(&*parent.lease()?, &self.inner, stream)
+        }
+        .map_err(xlog_err)?;
+        #[cfg(not(feature = "semantic-policy"))]
         let tensor = if let Some(region) = &self.region {
             owner.cold_model_work_region_buffer(&*parent.lease()?, region, stream)
         } else {

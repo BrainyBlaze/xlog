@@ -148,15 +148,17 @@ owner. Only after all dependent native borrows have ended may the source's own
 `close()` release it. Aborting, poisoning or dropping a Python object is not a
 confirmed release.
 
-An original private Update can issue a one-shot historical child with
-`controller.prepare_private_replay_child(task_use, step_index=..., replay_ordinal=...)`.
-`step_index` is the zero-based position in that private group's unchanged roster,
+An original Update can issue a one-shot historical child with
+`controller.prepare_private_replay_child(task_use, instruction_admission=admission, step_index=..., replay_ordinal=...)`
+inside that same admission's early `prepare` callback. This applies to ordinary
+and private segments; it does not create a private phase for an ordinary task.
+`step_index` is the zero-based position in the original unchanged segment roster,
 not a replacement schedule or an execution result. The native owner requires an
 original Update and an episode row in its frozen actor/edit membership; the same
 row in another Update has separate custody. Pass the returned
 `SemanticPrivateReplayChild` unchanged as `private_replay_child=` to the same
-`SemanticTransitionColdTask` constructor before construction begins. Ordinary
-fresh-task callers omit this keyword.
+`SemanticTransitionColdTask` constructor before construction begins. Fresh-task
+construction that is not an original replay child omits this keyword.
 
 Before constructing the child, call
 `child.source_task(refresh_snapshot=...)`. It returns
@@ -851,14 +853,66 @@ or enter training. Private children inherit the same original admission owner;
 ordinary restore compares the caller's expected Program before rebinding its
 exact saved bytes. Neither restore nor materialization creates a new allowance.
 
-For a Program-bound task, the existing `build_segment` additionally requires
-`parent=original_parent`, `instruction_bytes=original_instruction` and
-`first_program_ordinal=original_ordinal`. Forward the complete finalized bytes
-from the original instruction decoder and its Program-wide first step address,
-not a local ordinal or a new serialization. Native authenticates the same
-released parent as immutable provenance and compares the complete contiguous
-prepared roster and instruction against the frozen Program before calling
-`producer.prepare_segment`. Only the original reset recipe's physical
+For a Program-bound task, first call
+`admission = controller.admit_segment_instruction(task_use, parent=original_parent, instruction_bytes=original_instruction, first_program_ordinal=original_ordinal)`
+while the same parent is still active, before historical imports, native step
+allocation or Recording. Forward the complete finalized bytes from the original
+instruction decoder and its Program-wide first step address, not a local ordinal
+or a new serialization. The opaque admission retains that task, parent, complete
+instruction and native claim before returning to Python.
+
+Call `admission.prepare(original_prepare_callback)` around the existing early
+cold/historical preparation body. It returns and retains that callback's original
+result. The ordinary path exposes its actual cold registrar through
+`task_use.active_cold_model_work`; the private path reuses its original phase
+registrar. Neither path invents a Preparing phase, repeats an entered callback,
+or allocates a second report for the same preparation. A failed or unknown
+callback retains its original owners and cannot be replaced by another callback.
+
+The existing `build_segment` then requires `instruction_admission=admission` and
+the actual `consumer_streams`, replacing its late parent/instruction/ordinal
+keywords. It validates the actual complete roster and all four capacities before
+Recording, joins the original cold consumers, and hands off that same native
+reader once while retaining model allocations, witnesses, continuation and
+autograd owners. The original tally includes that reader release; its report
+finishes after handoff and before step allocation. Build consumes the already
+admitted instruction, not a second admission. Do not move application-level
+model/export cleanup before the last cold use. Private graph submission does not
+decrement the handed-off reader again.
+
+Use `admission.parent_identity()` for the original parent identity after handoff,
+including cancellation and unknown-completion guards. If handoff completion is
+unknown, `admission.resolve_parent_handoff()` joins only that same original
+attempt; it does not release another reader or repeat preparation. The immutable
+`admission.preparation_result` is `None` while an issued ordinary preparation
+report is unknown. Otherwise it is the native checked sum of the original prefix
+and every issued prepared-Update report:
+`(model_work, event_count, model_bound, model_calls, native_work, native_event_units)`,
+where `native_event_units` is the original nine-value tuple. No hot work is added
+to this cold receipt. Private preparation remains in its existing phase report;
+do not charge its prefix or model-preparation reports again. A missing result
+never denotes zero work.
+
+An issued Update may prepare its actual model resources with
+`step.prepare_cold_model_work(original_callback, consumer_streams=...)` before
+capture. The same prepared segment retains the exact Update, callback, report and
+result; ordinary callbacks receive their actual native registrar without a fake
+private phase. This preparation grants no current-policy numerical result or
+permission to replay an unknown callback.
+
+The same ordinary `retire_segment` call exposes the original final-use registrar
+during `finish_segment`, joins actual replay-child release, and completes a
+distinct report before its target storage token retires. Its read-only
+`admission.retirement_result` has the same six-field layout or is `None` while
+unknown. The admission and original prepared owner remain retained through this
+terminal boundary; private custody remains held through its actual phase
+adoption and Session close. `admission.budgets` is the exact native tuple of
+original per-step `(work, peak_bytes, model_calls)` limits. Preparation, hot
+execution and retirement consume those original budgets together; reporting
+another actual phase does not renew a limit.
+
+Native compares the complete contiguous prepared roster and instruction against
+the frozen Program. Only the original reset recipe's physical
 `phase_index`, `completed_updates_index` and `views` fields are excluded from
 that comparison. This structural binding alone does not certify the producer's
 numerical parameters, original Program progress or paired random consumption;

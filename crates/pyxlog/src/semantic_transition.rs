@@ -21,8 +21,6 @@ use xlog_core::{RelId, ScalarType, Schema};
 use xlog_cuda::memory::DeviceAllocationProvenance;
 use xlog_cuda::provider::resident_schedule::ResidentExecutionDomain;
 use xlog_cuda::CudaKernelProvider;
-#[cfg(feature = "semantic-policy")]
-use xlog_cuda::SemanticSegmentColdCapacity;
 use xlog_cuda::{
     DlpackManagedTensor, Identity256, SemanticAdmissionLimits, SemanticAdmissionRecords,
     SemanticArgument, SemanticContinuationInput, SemanticGradientDeliveryBinding,
@@ -42,6 +40,8 @@ use xlog_cuda::{
 use xlog_cuda::{
     SemanticModelContractLayout, SemanticModelMemory, SemanticModelStorage, SemanticModelView,
 };
+#[cfg(feature = "semantic-policy")]
+use xlog_cuda::{SemanticSegmentColdCapacity, SemanticSegmentInstructionAdmission};
 use xlog_prob::exact::GpuConfig;
 
 use crate::guarded_python_callback as recording_callback;
@@ -336,6 +336,8 @@ pub(crate) struct PySemanticTransitionSession {
     recording: AtomicBool,
     retiring: AtomicBool,
     prepared_segment: Mutex<Option<PreparedPythonSegment>>,
+    #[cfg(feature = "semantic-policy")]
+    segment_instruction: Mutex<Option<Arc<SegmentInstructionCustody>>>,
     learning_preparing: AtomicBool,
     learning_transition: Mutex<Option<Py<learning_phase::PySemanticLearningPhaseTransition>>>,
     checkpoint_custody: Mutex<Option<learning_phase::cold_restore::CheckpointCustody>>,
@@ -461,6 +463,15 @@ impl PySemanticTransitionSession {
             .lock()
             .map_err(|_| invalid("symbolic canary owner mutex is poisoned"))?
             .take();
+        #[cfg(feature = "semantic-policy")]
+        {
+            let instruction = self
+                .segment_instruction
+                .lock()
+                .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+                .take();
+            drop(instruction);
+        }
         drain_export_owners();
         Ok(())
     }
@@ -617,6 +628,8 @@ impl PySemanticTransitionSession {
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            segment_instruction: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
             checkpoint_custody: Mutex::new(None),
@@ -3200,8 +3213,529 @@ impl Drop for PreparedProducerResources {
     }
 }
 
+#[cfg(feature = "semantic-policy")]
+struct SegmentInstructionCustody {
+    session: Py<PySemanticTransitionSession>,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    parent: Py<PySemanticPublishedParent>,
+    inner: SemanticSegmentInstructionAdmission,
+    instruction: Arc<[u8]>,
+    transitions: Vec<SemanticTransitionKind>,
+    cold_capacity: SemanticSegmentColdCapacity,
+    replay_model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
+    preparation: Mutex<SegmentInstructionPreparation>,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Default)]
+struct SegmentInstructionPreparation {
+    callback: Option<Py<PyAny>>,
+    work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
+    result: Option<Py<PyAny>>,
+    report: Option<xlog_cuda::SemanticColdModelWorkResult>,
+    callback_failed: bool,
+    callback_entered: bool,
+    handoff_entered: bool,
+    handoff_complete: bool,
+    build_entered: bool,
+    scope: Option<Arc<()>>,
+    native_steps: Vec<SemanticPreparedStep>,
+    private_phase: Option<Py<learning_phase::PySemanticLearningPhaseTransition>>,
+    replay_children: Vec<Arc<learning_phase::PrivateReplayChildCustody>>,
+    retirement_entered: bool,
+    retirement_work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
+    retirement_report: Option<xlog_cuda::SemanticColdModelWorkResult>,
+    retirement_callback_entered: bool,
+    retirement_children_entered: bool,
+    retirement_children_ready: bool,
+    preparation_total: Option<xlog_cuda::SemanticColdModelWorkResult>,
+    preparation_totals_frozen: bool,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pyclass(
+    name = "SemanticSegmentInstructionAdmission",
+    module = "pyxlog._native",
+    frozen
+)]
+pub(crate) struct PySemanticSegmentInstructionAdmission {
+    inner: Arc<SegmentInstructionCustody>,
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SegmentInstructionCustody {
+    fn preparation(&self) -> PyResult<MutexGuard<'_, SegmentInstructionPreparation>> {
+        self.preparation
+            .lock()
+            .map_err(|_| invalid("original instruction custody mutex is poisoned"))
+    }
+
+    fn require_owner(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let retained = session
+            .segment_instruction
+            .lock()
+            .map_err(|_| invalid("original instruction owner mutex is poisoned"))?;
+        if retained
+            .as_ref()
+            .is_none_or(|original| !std::ptr::eq(self, original.as_ref()))
+        {
+            return Err(invalid(
+                "instruction admission is not this Session's retained original owner",
+            ));
+        }
+        self.task_use.borrow(py).issuance.require_current()?;
+        let result = session
+            .owner()?
+            .require_segment_instruction_admission(&self.inner, &*self.parent.borrow(py).lease()?)
+            .map_err(xlog_err);
+        result
+    }
+
+    fn require_build(
+        &self,
+        py: Python<'_>,
+        task: &PySemanticTransitionTaskUse,
+        transitions: &[SemanticTransitionKind],
+        capacity: &SemanticSegmentColdCapacity,
+    ) -> PyResult<()> {
+        self.require_owner(py)?;
+        let state = self.preparation()?;
+        if !std::ptr::eq(task, &*self.task_use.borrow(py))
+            || transitions != self.transitions
+            || capacity.tensor_content_capacity != self.cold_capacity.tensor_content_capacity
+            || capacity.model_work_capacity != self.cold_capacity.model_work_capacity
+            || capacity.segment_capacity_bytes != self.cold_capacity.segment_capacity_bytes
+            || capacity.other_external_cuda_bytes != self.cold_capacity.other_external_cuda_bytes
+            || state.callback.is_none()
+            || state.result.is_none()
+            || state.callback_failed
+            || state.build_entered
+        {
+            return Err(invalid("build must consume its complete admitted instruction and known original preparation once"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+#[pymethods]
+impl PySemanticSegmentInstructionAdmission {
+    #[getter]
+    fn preparation_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let session = self.inner.session.borrow(py);
+        session.require_creator()?;
+        let state = self.inner.preparation()?;
+        let frozen = state.preparation_totals_frozen;
+        let report = state.preparation_total;
+        drop(state);
+        let report = if frozen {
+            report
+        } else {
+            session
+                .owner()?
+                .admitted_segment_cold_result(&self.inner.inner)
+                .map_err(xlog_err)?
+        };
+        let Some(report) = report else {
+            return Ok(py.None());
+        };
+        Ok((
+            report.model_work,
+            report.operation_count,
+            report.work_bound,
+            report.model_calls,
+            report.native_work,
+            PyTuple::new(py, report.native_events)?,
+        )
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    }
+
+    #[getter]
+    fn retirement_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.session.borrow(py).require_creator()?;
+        let Some(report) = self.inner.preparation()?.retirement_report else {
+            return Ok(py.None());
+        };
+        Ok((
+            report.model_work,
+            report.operation_count,
+            report.work_bound,
+            report.model_calls,
+            report.native_work,
+            PyTuple::new(py, report.native_events)?,
+        )
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
+    }
+
+    #[getter]
+    fn budgets(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let session = self.inner.session.borrow(py);
+        session.require_creator()?;
+        let budgets = session
+            .owner()?
+            .admitted_segment_budgets(&self.inner.inner)
+            .map_err(xlog_err)?;
+        Ok(PyTuple::new(
+            py,
+            budgets
+                .into_iter()
+                .map(|[work, peak, calls]| (work, peak, calls)),
+        )?
+        .unbind())
+    }
+    fn prepare(&self, py: Python<'_>, prepare_callback: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        self.inner.require_owner(py)?;
+        if !prepare_callback.bind(py).is_callable() {
+            return Err(invalid(
+                "instruction preparation requires its original callable",
+            ));
+        }
+        {
+            let mut state = self.inner.preparation()?;
+            if let Some(original) = &state.callback {
+                if original.as_ptr() != prepare_callback.as_ptr() || state.callback_failed {
+                    return Err(invalid(
+                        "original instruction preparation cannot be replaced or repeated",
+                    ));
+                }
+                if let Some(result) = &state.result {
+                    return Ok(result.clone_ref(py));
+                }
+                if state.callback_entered {
+                    return Err(invalid(
+                        "retain the original unresolved instruction preparation",
+                    ));
+                }
+                // No callback entered: resolve only its retained native
+                // initialization, then continue the original callable once.
+            } else {
+                // Retain before allocation, initialization, or external model work.
+                state.callback = Some(prepare_callback.clone_ref(py));
+            }
+        }
+        let session = self.inner.session.borrow(py);
+        let private = private_execution_owner(py, &session)?;
+        let original_work = self
+            .inner
+            .preparation()?
+            .work
+            .as_ref()
+            .map(|work| work.clone_ref(py));
+        let work = if let Some(work) = original_work {
+            work
+        } else if let Some(private) = &private {
+            private
+                .borrow(py)
+                .instruction_preparation_work(py, &self.inner)?
+        } else {
+            let inner = session
+                .owner()?
+                .prepare_admitted_cold_model_work(
+                    &self.inner.inner,
+                    &*self.inner.parent.borrow(py).lease()?,
+                )
+                .map_err(xlog_err)?;
+            Py::new(
+                py,
+                learning_phase::cold_model_work::PySemanticColdModelWork {
+                    parent: self.inner.parent.clone_ref(py),
+                    reader: self.inner.parent.clone_ref(py),
+                    inner,
+                    region: None,
+                    active: AtomicBool::new(false),
+                },
+            )?
+        };
+        {
+            let mut state = self.inner.preparation()?;
+            state.work = Some(work.clone_ref(py));
+            state.private_phase = private.as_ref().map(|phase| phase.clone_ref(py));
+        }
+        if private.is_some() {
+            let work_ref = work.borrow(py);
+            let reader = work_ref.reader.borrow(py);
+            let source = reader.session.borrow(py);
+            if std::ptr::eq(&*source, &*session) {
+                return Err(invalid(
+                    "shared private preparation requires its original source owner",
+                ));
+            }
+            let source = source.owner()?;
+            session
+                .owner()?
+                .bind_shared_admitted_cold_model_work(
+                    &self.inner.inner,
+                    &*self.inner.parent.borrow(py).lease()?,
+                    &source,
+                    &work_ref.inner,
+                )
+                .map_err(xlog_err)?;
+        }
+        let result = if private.is_some() {
+            work.borrow(py).check(py)?;
+            self.inner.preparation()?.callback_entered = true;
+            prepare_callback.bind(py).call0().map(Bound::unbind)
+        } else {
+            let work_ref = work.borrow(py);
+            let _scope = learning_phase::cold_model_work::ColdCallbackScope::enter(
+                py,
+                &session,
+                &work_ref,
+                work.clone_ref(py),
+            )?;
+            self.inner.preparation()?.callback_entered = true;
+            prepare_callback.bind(py).call0().map(Bound::unbind)
+        };
+        match result {
+            Ok(result) => {
+                self.inner.preparation()?.result = Some(result.clone_ref(py));
+                Ok(result)
+            }
+            Err(error) => {
+                self.inner.preparation()?.callback_failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn parent_identity(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let session = self.inner.session.borrow(py);
+        session.require_creator()?;
+        let identity = session
+            .owner()?
+            .admitted_segment_parent_identity(
+                &self.inner.inner,
+                &*self.inner.parent.borrow(py).lease()?,
+            )
+            .map_err(xlog_err)?;
+        Ok((
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+
+    fn resolve_parent_handoff(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.inner.session.borrow(py);
+        session.require_creator()?;
+        if !self.inner.preparation()?.handoff_entered {
+            return Err(invalid("original parent handoff has not entered"));
+        }
+        session
+            .owner()?
+            .resolve_admitted_segment_parent(
+                &self.inner.inner,
+                &mut *self.inner.parent.borrow(py).lease()?,
+            )
+            .map_err(xlog_err)?;
+        self.inner.preparation()?.handoff_complete = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn require_admitted_cold_callback(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+    work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+) -> PyResult<bool> {
+    let instruction = session
+        .segment_instruction
+        .lock()
+        .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+        .clone();
+    let Some(instruction) = instruction else {
+        return Ok(false);
+    };
+    let state = instruction.preparation()?;
+    if state.private_phase.is_some()
+        || state
+            .work
+            .as_ref()
+            .is_none_or(|retained| !std::ptr::eq(&*retained.borrow(py), work))
+    {
+        return Ok(false);
+    }
+    if state.result.is_some() || state.callback_failed || state.handoff_entered {
+        return Err(invalid("original instruction callback is no longer active"));
+    }
+    let active = session
+        .active_cold_model_work
+        .lock()
+        .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+    if active
+        .as_ref()
+        .is_none_or(|retained| !std::ptr::eq(&*retained.borrow(py), work))
+    {
+        return Err(invalid(
+            "instruction work is outside its original callback scope",
+        ));
+    }
+    session
+        .owner()?
+        .require_admitted_cold_model_work(
+            &instruction.inner,
+            &*instruction.parent.borrow(py).lease()?,
+            &work.inner,
+        )
+        .map_err(xlog_err)?;
+    Ok(true)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn original_instruction_parent_identity(
+    py: Python<'_>,
+    parent: &PySemanticPublishedParent,
+) -> PyResult<xlog_cuda::SemanticPublishedIdentity> {
+    let session = parent.session.borrow(py);
+    let admission = session
+        .segment_instruction
+        .lock()
+        .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+        .clone();
+    let mut owner = session.owner()?;
+    if let Some(admission) =
+        admission.filter(|admission| std::ptr::eq(parent, &*admission.parent.borrow(py)))
+    {
+        owner
+            .admitted_segment_parent_identity(&admission.inner, &*parent.lease()?)
+            .map_err(xlog_err)
+    } else {
+        owner
+            .published_identity(&*parent.lease()?)
+            .map_err(xlog_err)
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn prepared_cold_callback_step(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+    work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+) -> PyResult<Option<Py<PySemanticPreparedStep>>> {
+    let stored = session
+        .prepared_segment
+        .lock()
+        .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+    let Some(stored) = stored.as_ref() else {
+        return Ok(None);
+    };
+    for callback in &stored.cold_callbacks {
+        let callback = callback
+            .lock()
+            .map_err(|_| invalid("prepared cold callback custody is poisoned"))?;
+        if callback
+            .work
+            .as_ref()
+            .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+        {
+            continue;
+        }
+        if callback.private_phase.is_some() {
+            return Ok(None);
+        }
+        if callback.failed
+            || callback.result.is_some()
+            || !session.recording.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "prepared cold work is outside its original active callback",
+            ));
+        }
+        let active = session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+        if active
+            .as_ref()
+            .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+        {
+            return Err(invalid(
+                "prepared cold work changed its original callback scope",
+            ));
+        }
+        let instruction = stored
+            .instruction
+            .as_ref()
+            .ok_or_else(|| invalid("prepared cold work lost its instruction admission"))?;
+        let step = callback.step.borrow(py);
+        if !Arc::ptr_eq(&stored.scope, &step.scope) {
+            return Err(invalid(
+                "prepared cold work changed its original native scope",
+            ));
+        }
+        session
+            .owner()?
+            .require_prepared_replay_parent(&step.inner, &*instruction.parent.borrow(py).lease()?)
+            .map_err(xlog_err)?;
+        return Ok(Some(callback.step.clone_ref(py)));
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "semantic-policy")]
+fn admitted_retirement_cold_callback(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+    work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+) -> PyResult<Option<Arc<SegmentInstructionCustody>>> {
+    let instruction = session
+        .segment_instruction
+        .lock()
+        .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+        .clone();
+    let Some(instruction) = instruction else {
+        return Ok(None);
+    };
+    let state = instruction.preparation()?;
+    if state
+        .retirement_work
+        .as_ref()
+        .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+    {
+        return Ok(None);
+    }
+    if !state.retirement_entered
+        || state.retirement_report.is_some()
+        || !session.retiring.load(Ordering::Acquire)
+    {
+        return Err(invalid(
+            "cold retirement is outside its original retained callback",
+        ));
+    }
+    let active = session
+        .active_cold_model_work
+        .lock()
+        .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+    if active
+        .as_ref()
+        .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), work))
+    {
+        return Err(invalid(
+            "cold retirement changed its original callback scope",
+        ));
+    }
+    session
+        .owner()?
+        .require_admitted_retirement_cold_model_work(&instruction.inner, &work.inner)
+        .map_err(xlog_err)?;
+    drop(state);
+    Ok(Some(instruction))
+}
+
 struct PreparedPythonSegment {
     scope: Arc<()>,
+    #[cfg(feature = "semantic-policy")]
+    instruction: Option<Arc<SegmentInstructionCustody>>,
     task_use: Py<PySemanticTransitionTaskUse>,
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
@@ -3214,6 +3748,21 @@ struct PreparedPythonSegment {
     outcomes: Option<Vec<xlog_cuda::SemanticPreparedStepOutcome>>,
     #[cfg(feature = "semantic-policy")]
     completion: Option<PreparedSegmentCompletion>,
+    #[cfg(feature = "semantic-policy")]
+    cold_callbacks: Vec<Arc<Mutex<PreparedColdCallback>>>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PreparedColdCallback {
+    step: Py<PySemanticPreparedStep>,
+    callback: Py<PyAny>,
+    work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
+    result: Option<Py<PyAny>>,
+    report: Option<xlog_cuda::SemanticColdModelWorkResult>,
+    failed: bool,
+    callback_entered: bool,
+    streams: Vec<u64>,
+    private_phase: Option<Py<learning_phase::PySemanticLearningPhaseTransition>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -11503,6 +12052,194 @@ impl PySemanticPreparedStep {
 
 #[pymethods]
 impl PySemanticPreparedStep {
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (prepare_callback, *, consumer_streams))]
+    fn prepare_cold_model_work(
+        slf: Py<Self>,
+        py: Python<'_>,
+        prepare_callback: Py<PyAny>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let step = slf.borrow(py);
+        let session = step.session.borrow(py);
+        session.require_creator()?;
+        if !prepare_callback.bind(py).is_callable() || !session.recording.load(Ordering::Acquire) {
+            return Err(invalid(
+                "prepared cold work requires its original recording callback",
+            ));
+        }
+        let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
+        let private = private_execution_owner(py, &session)?;
+        let (instruction, callback, fresh) = {
+            let mut stored = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let stored = stored
+                .as_mut()
+                .ok_or_else(|| invalid("prepared cold work lost its segment"))?;
+            if !Arc::ptr_eq(&stored.scope, &step.scope)
+                || !stored
+                    .steps
+                    .iter()
+                    .any(|original| original.as_ptr() == slf.as_ptr())
+            {
+                return Err(invalid(
+                    "prepared cold callback changed its original issued step",
+                ));
+            }
+            let instruction = stored.instruction.as_ref().map(Arc::clone).ok_or_else(|| {
+                invalid("prepared cold work requires its original instruction admission")
+            })?;
+            let position = instruction
+                .preparation()?
+                .native_steps
+                .iter()
+                .position(|original| original.same_handle(&step.inner))
+                .ok_or_else(|| invalid("prepared cold callback lost its native-issued roster"))?;
+            if instruction.transitions.get(position) != Some(&SemanticTransitionKind::Update) {
+                return Err(invalid(
+                    "prepared model preparation requires the original Update",
+                ));
+            }
+            let mut existing = None;
+            for original in &stored.cold_callbacks {
+                if original
+                    .lock()
+                    .map_err(|_| invalid("prepared cold callback custody is poisoned"))?
+                    .step
+                    .as_ptr()
+                    == slf.as_ptr()
+                {
+                    existing = Some(Arc::clone(original));
+                    break;
+                }
+            }
+            if let Some(original) = existing {
+                (instruction, original, false)
+            } else {
+                let callback = Arc::new(Mutex::new(PreparedColdCallback {
+                    step: slf.clone_ref(py),
+                    callback: prepare_callback.clone_ref(py),
+                    work: None,
+                    result: None,
+                    report: None,
+                    failed: false,
+                    callback_entered: false,
+                    streams: streams.clone(),
+                    private_phase: private.as_ref().map(|phase| phase.clone_ref(py)),
+                }));
+                stored.cold_callbacks.push(Arc::clone(&callback));
+                (instruction, callback, true)
+            }
+        };
+        let retained = || {
+            callback
+                .lock()
+                .map_err(|_| invalid("prepared cold callback custody is poisoned"))
+        };
+        if !fresh {
+            let original = retained()?;
+            if original.callback.as_ptr() != prepare_callback.as_ptr()
+                || original.streams != streams
+                || original.failed
+                || (original.result.is_none() && original.callback_entered)
+                || original.private_phase.as_ref().map(Py::as_ptr)
+                    != private.as_ref().map(Py::as_ptr)
+            {
+                return Err(invalid(
+                    "retain the original prepared cold callback without repeating it",
+                ));
+            }
+        }
+        if retained()?.result.is_none() {
+            let original_work = retained()?.work.as_ref().map(|work| work.clone_ref(py));
+            let work = if let Some(work) = original_work {
+                work
+            } else if private.is_some() {
+                session
+                    .active_cold_model_work
+                    .lock()
+                    .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?
+                    .as_ref()
+                    .map(|work| work.clone_ref(py))
+                    .ok_or_else(|| invalid("prepared private callback lost its original work"))?
+            } else {
+                let inner = session
+                    .owner()?
+                    .prepare_admitted_prepared_cold_model_work(
+                        &instruction.inner,
+                        &*instruction.parent.borrow(py).lease()?,
+                        &step.inner,
+                    )
+                    .map_err(xlog_err)?;
+                Py::new(
+                    py,
+                    learning_phase::cold_model_work::PySemanticColdModelWork {
+                        parent: instruction.parent.clone_ref(py),
+                        reader: instruction.parent.clone_ref(py),
+                        inner,
+                        region: None,
+                        active: AtomicBool::new(false),
+                    },
+                )?
+            };
+            retained()?.work = Some(work.clone_ref(py));
+            let result = if private.is_some() {
+                work.borrow(py).check(py)?;
+                retained()?.callback_entered = true;
+                prepare_callback
+                    .bind(py)
+                    .call0()
+                    .map(|value| value.unbind())
+            } else {
+                let work_ref = work.borrow(py);
+                let _scope = learning_phase::cold_model_work::ColdCallbackScope::enter(
+                    py,
+                    &session,
+                    &work_ref,
+                    work.clone_ref(py),
+                )?;
+                retained()?.callback_entered = true;
+                prepare_callback
+                    .bind(py)
+                    .call0()
+                    .map(|value| value.unbind())
+            };
+            match result {
+                Ok(result) => retained()?.result = Some(result),
+                Err(error) => {
+                    retained()?.failed = true;
+                    return Err(error);
+                }
+            }
+        }
+        if private.is_none() && retained()?.report.is_none() {
+            let work = retained()?
+                .work
+                .as_ref()
+                .map(|work| work.clone_ref(py))
+                .ok_or_else(|| invalid("prepared cold callback lost its original work"))?;
+            let report = session
+                .owner()?
+                .finish_admitted_prepared_cold_model_work(
+                    &instruction.inner,
+                    &*instruction.parent.borrow(py).lease()?,
+                    &step.inner,
+                    &work.borrow(py).inner,
+                    &streams,
+                )
+                .map_err(xlog_err)?;
+            retained()?.report = Some(report);
+        }
+        let result = retained()?
+            .result
+            .as_ref()
+            .map(|result| result.clone_ref(py))
+            .ok_or_else(|| invalid("prepared cold callback has no known original result"));
+        result
+    }
+
     /// The Session's immutable nominal mode, readable during cold preparation
     /// and recording. This is not the device-acquired effective mode or a grant
     /// to execute; DRAIN_REQUIRED may override either mode after submission.
@@ -15785,14 +16522,94 @@ impl PySemanticTransitionController {
         )
     }
 
+    /// Admit the original instruction while its selected parent is still active.
+    /// This metadata-only owner precedes cold imports and native step allocation.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, parent, instruction_bytes, first_program_ordinal))]
+    fn admit_segment_instruction(
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        parent: Py<PySemanticPublishedParent>,
+        instruction_bytes: &Bound<'_, PyAny>,
+        first_program_ordinal: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySemanticSegmentInstructionAdmission>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let issued = task_use.borrow(py);
+        self.require_issued(&issued)?;
+        if issued.session.as_ptr() != self.session.as_ptr()
+            || parent.borrow(py).session.as_ptr() != self.session.as_ptr()
+            || session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "instruction admission requires the original quiescent Session and task",
+            ));
+        }
+        parent.borrow(py).require_task(py, &issued)?;
+        let bytes = exact_replay_bytes(instruction_bytes)?;
+        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+            return Err(invalid(
+                "original segment instruction exceeds its bounded transport",
+            ));
+        }
+        let ordinal = ColdValue::read(first_program_ordinal, &mut 128, 0)?.unsigned()?;
+        let mut retained = session
+            .segment_instruction
+            .lock()
+            .map_err(|_| invalid("original instruction owner mutex is poisoned"))?;
+        if retained.is_some()
+            || session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .is_some()
+        {
+            return Err(invalid("the original instruction owner has not retired"));
+        }
+        let (inner, transitions, cold_capacity) = {
+            let mut owner = session.owner()?;
+            issued.require_identity(&owner)?;
+            let inner = owner
+                .admit_segment_instruction(&*parent.borrow(py).lease()?, ordinal, bytes)
+                .map_err(xlog_err)?;
+            let transitions = owner
+                .admitted_segment_transitions(&inner)
+                .map_err(xlog_err)?;
+            let cold_capacity = owner
+                .admitted_segment_cold_capacity(&inner)
+                .map_err(xlog_err)?;
+            (inner, transitions, cold_capacity)
+        };
+        let custody = Arc::new(SegmentInstructionCustody {
+            session: self.session.clone_ref(py),
+            task_use: task_use.clone_ref(py),
+            parent,
+            inner,
+            instruction: Arc::from(bytes),
+            transitions,
+            cold_capacity,
+            replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
+            preparation: Mutex::new(SegmentInstructionPreparation::default()),
+        });
+        // Retention precedes Python allocation/return; losing that handoff never
+        // grants a second native admission or a new attempt.
+        *retained = Some(Arc::clone(&custody));
+        drop(retained);
+        Py::new(py, PySemanticSegmentInstructionAdmission { inner: custody })
+    }
+
     /// Retain one original historical replay before its ColdTask allocates.
     /// step_index addresses the unchanged private group's frozen roster.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step_index, replay_ordinal))]
+    #[pyo3(signature = (task_use, *, instruction_admission, step_index, replay_ordinal))]
     fn prepare_private_replay_child(
         &self,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
+        instruction_admission: Py<PySemanticSegmentInstructionAdmission>,
         step_index: &Bound<'_, PyAny>,
         replay_ordinal: &Bound<'_, PyAny>,
     ) -> PyResult<Py<learning_phase::PySemanticPrivateReplayChild>> {
@@ -15802,20 +16619,40 @@ impl PySemanticTransitionController {
         if self.session.as_ptr() != task_use.borrow(py).session.as_ptr() {
             return Err(invalid("private replay task belongs to another Session"));
         }
-        let phase = private_execution_owner(py, &session)?.ok_or_else(|| {
-            invalid("private replay construction requires its original native phase")
-        })?;
+        let instruction = Arc::clone(&instruction_admission.borrow(py).inner);
+        instruction.require_owner(py)?;
+        if instruction.task_use.as_ptr() != task_use.as_ptr()
+            || instruction.session.as_ptr() != self.session.as_ptr()
+        {
+            return Err(invalid(
+                "replay construction changed its admitted instruction task",
+            ));
+        }
+        let phase = private_execution_owner(py, &session)?;
         let step_index = usize::try_from(ColdValue::read(step_index, &mut 128, 0)?.unsigned()?)
             .map_err(|_| invalid("private replay step index exceeds native address space"))?;
         let replay_ordinal = ColdValue::read(replay_ordinal, &mut 128, 0)?.unsigned()?;
-        let child = phase.borrow(py).prepare_original_replay_child(
-            py,
-            &phase,
-            &self.session,
-            &task_use,
-            step_index,
-            replay_ordinal,
-        )?;
+        let child = if let Some(phase) = phase {
+            phase.borrow(py).prepare_original_replay_child(
+                py,
+                &phase,
+                &self.session,
+                &task_use,
+                &instruction,
+                step_index,
+                replay_ordinal,
+            )?
+        } else {
+            learning_phase::PrivateReplayChildCustody::prepare_instruction(
+                py,
+                &instruction,
+                None,
+                0,
+                Arc::clone(&instruction.replay_model_backings),
+                step_index,
+                replay_ordinal,
+            )?
+        };
         Py::new(
             py,
             learning_phase::PySemanticPrivateReplayChild { inner: child },
@@ -15841,7 +16678,7 @@ impl PySemanticTransitionController {
     /// Device DRAIN_REQUIRED overrides either nominal mode. Recompute binds the
     /// original model continuation without a policy or backward obligation.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes, parent=None, instruction_bytes=None, first_program_ordinal=None))]
+    #[pyo3(signature = (task_use, *, instruction_admission, consumer_streams, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes))]
     #[expect(
         clippy::too_many_arguments,
         reason = "cold recording binds the original producer and four independent capacity obligations"
@@ -15856,9 +16693,8 @@ impl PySemanticTransitionController {
         model_work_capacity: &Bound<'_, PyAny>,
         segment_capacity_bytes: &Bound<'_, PyAny>,
         other_external_cuda_bytes: &Bound<'_, PyAny>,
-        parent: Option<Py<PySemanticPublishedParent>>,
-        instruction_bytes: Option<&Bound<'_, PyAny>>,
-        first_program_ordinal: Option<&Bound<'_, PyAny>>,
+        instruction_admission: Option<Py<PySemanticSegmentInstructionAdmission>>,
+        consumer_streams: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -15869,41 +16705,38 @@ impl PySemanticTransitionController {
         }
         let transitions = prepared_transitions(transitions)?;
         let original_admission = issued.checkpoint.proposal_expense()?.original_admission;
-        let program_binding = match (original_admission, parent, instruction_bytes, first_program_ordinal) {
-            (Some(_), Some(parent), Some(instruction), Some(ordinal)) => {
-                let bytes = exact_replay_bytes(instruction)?;
-                if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
-                    return Err(invalid("original segment instruction exceeds its bounded transport"));
+        let instruction = match (original_admission, instruction_admission) {
+            (Some(_), Some(admission)) => {
+                let admission = Arc::clone(&admission.borrow(py).inner);
+                if admission.session.as_ptr() != self.session.as_ptr() {
+                    return Err(invalid(
+                        "original instruction admission belongs to another Session",
+                    ));
                 }
-                let ordinal = ColdValue::read(ordinal, &mut 128, 0)?.unsigned()?;
-                let acquired = parent.borrow(py);
-                if acquired.session.as_ptr() != self.session.as_ptr() {
-                    return Err(invalid("original Program parent belongs to another Session"));
-                }
-                acquired.require_task(py, &issued)?;
-                drop(acquired);
-                Some((parent, bytes.to_vec(), ordinal))
+                Some(admission)
             }
-            (None, None, None, None) => {
-                if transitions.clone().any(|kind| matches!(kind,
-                    SemanticTransitionKind::Proposal | SemanticTransitionKind::Update)) {
-                    return Err(invalid("Proposal and Update recording require the original Program"));
+            (None, None) => {
+                if transitions.clone().any(|kind| {
+                    matches!(
+                        kind,
+                        SemanticTransitionKind::Proposal | SemanticTransitionKind::Update
+                    )
+                }) {
+                    return Err(invalid(
+                        "Proposal and Update recording require the original Program",
+                    ));
                 }
                 None
             }
-            _ => return Err(invalid("Program-bound segment requires its original parent, complete instruction and Program ordinal")),
+            _ => {
+                return Err(invalid(
+                    "Program-bound segment requires its original instruction admission",
+                ))
+            }
         };
         #[cfg(feature = "semantic-policy")]
         let private = private_execution_owner(py, &session)?;
         #[cfg(feature = "semantic-policy")]
-        if let Some(private) = &private {
-            private.borrow(py).require_private_group_build(
-                py,
-                &session,
-                &issued,
-                &transitions.clone().collect::<Vec<_>>(),
-            )?;
-        }
         let cold_capacity = SemanticSegmentColdCapacity {
             tensor_content_capacity: usize::try_from(
                 ColdValue::read(tensor_content_capacity, &mut 128, 0)?.unsigned()?,
@@ -15918,6 +16751,90 @@ impl PySemanticTransitionController {
             other_external_cuda_bytes: ColdValue::read(other_external_cuda_bytes, &mut 128, 0)?
                 .unsigned()?,
         };
+        let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
+        if let Some(instruction) = &instruction {
+            instruction.require_build(
+                py,
+                &issued,
+                &transitions.clone().collect::<Vec<_>>(),
+                &cold_capacity,
+            )?;
+            let children = instruction.preparation()?.replay_children.clone();
+            for child in children {
+                child.detach_preparation_work(py)?;
+            }
+            let mut preparation = instruction.preparation()?;
+            if !preparation.handoff_complete {
+                if preparation.handoff_entered {
+                    return Err(invalid(
+                        "resolve the original parent handoff without repeating it",
+                    ));
+                }
+                preparation.handoff_entered = true;
+                drop(preparation);
+                session
+                    .owner()?
+                    .handoff_admitted_segment_parent(
+                        &instruction.inner,
+                        &mut *instruction.parent.borrow(py).lease()?,
+                        &streams,
+                    )
+                    .map_err(xlog_err)?;
+                instruction.preparation()?.handoff_complete = true;
+            } else {
+                drop(preparation);
+            }
+            if let Some(private) = &private {
+                private.borrow(py).finish_instruction_preparation(py)?;
+                let work = instruction
+                    .preparation()?
+                    .work
+                    .as_ref()
+                    .map(|work| work.clone_ref(py))
+                    .ok_or_else(|| invalid("shared preparation lost its original source work"))?;
+                let work = work.borrow(py);
+                let reader = work.reader.borrow(py);
+                let source = reader.session.borrow(py);
+                let source = source.owner()?;
+                let report = session
+                    .owner()?
+                    .adopt_shared_admitted_cold_model_work_result(
+                        &instruction.inner,
+                        &*instruction.parent.borrow(py).lease()?,
+                        &source,
+                        &work.inner,
+                    )
+                    .map_err(xlog_err)?;
+                instruction.preparation()?.report = Some(report);
+            } else if instruction.preparation()?.report.is_none() {
+                let work = instruction
+                    .preparation()?
+                    .work
+                    .as_ref()
+                    .map(|work| work.clone_ref(py))
+                    .ok_or_else(|| {
+                        invalid("instruction preparation lost its original work owner")
+                    })?;
+                let report = session
+                    .owner()?
+                    .finish_admitted_cold_model_work(
+                        &instruction.inner,
+                        &*instruction.parent.borrow(py).lease()?,
+                        &work.borrow(py).inner,
+                        &streams,
+                    )
+                    .map_err(xlog_err)?;
+                instruction.preparation()?.report = Some(report);
+            }
+        }
+        if let Some(private) = &private {
+            private.borrow(py).require_private_group_build(
+                py,
+                &session,
+                &issued,
+                &transitions.clone().collect::<Vec<_>>(),
+            )?;
+        }
         if session.importing.load(Ordering::Acquire)
             || session.retiring.load(Ordering::Acquire)
             || session.recording.swap(true, Ordering::AcqRel)
@@ -15962,14 +16879,27 @@ impl PySemanticTransitionController {
                 u64::try_from(nominal_proposals)
                     .map_err(|_| invalid("nominal Proposal roster exceeds u64"))?,
             )?;
-            let handles = owner
-                .prepare_segment_steps(transitions, cold_capacity)
-                .map_err(xlog_err)?;
-            if let Some((parent, instruction, ordinal)) = &program_binding {
-                let parent = parent.borrow(py);
-                owner.bind_prepared_actor_refresh_program(
-                    &handles, &*parent.lease()?, *ordinal, instruction).map_err(xlog_err)?;
-            }
+            let handles = if let Some(instruction) = &instruction {
+                {
+                    let mut preparation = instruction.preparation()?;
+                    preparation.build_entered = true;
+                    preparation.scope = Some(Arc::clone(&scope));
+                }
+                let handles = owner
+                    .prepare_admitted_segment_steps(
+                        &instruction.inner,
+                        &*instruction.parent.borrow(py).lease()?,
+                        transitions,
+                        cold_capacity,
+                    )
+                    .map_err(xlog_err)?;
+                instruction.preparation()?.native_steps = handles.clone();
+                handles
+            } else {
+                owner
+                    .prepare_segment_steps(transitions, cold_capacity)
+                    .map_err(xlog_err)?
+            };
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
             (
                 scope,
@@ -16006,17 +16936,13 @@ impl PySemanticTransitionController {
             producers: Mutex::new(vec![producer.clone_ref(py)]),
             owner_thread: session.owner_thread,
         });
-        if let Some((parent, _, _)) = &program_binding {
-            resources.producers.lock()
-                .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
-                .push(parent.clone_ref(py).into_any());
-        }
         *session
             .prepared_segment
             .lock()
             .map_err(|_| invalid("prepared segment mutex is poisoned"))? =
             Some(PreparedPythonSegment {
                 scope: Arc::clone(&scope),
+                instruction: instruction.as_ref().map(Arc::clone),
                 task_use: task_use.clone_ref(py),
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
@@ -16026,6 +16952,7 @@ impl PySemanticTransitionController {
                 outcomes: None,
                 #[cfg(feature = "semantic-policy")]
                 completion: None,
+                cold_callbacks: Vec::new(),
             });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
         let prepared_owner = recording_callback(check, || {
@@ -16490,10 +17417,25 @@ impl PySemanticTransitionController {
         // failed launch/readback and incomplete native outcomes never set it.
         guard.native_completion = Some((Arc::clone(&scope), operation.clone()));
         if let Some(parent) = &private_parent {
-            session
-                .owner()?
-                .finish_prepared_segment_parent(&mut *parent.borrow(py).lease()?)
-                .map_err(xlog_err)?;
+            let admission = session
+                .segment_instruction
+                .lock()
+                .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+                .clone();
+            if let Some(admission) = admission {
+                session
+                    .owner()?
+                    .admitted_segment_parent_identity(
+                        &admission.inner,
+                        &*parent.borrow(py).lease()?,
+                    )
+                    .map_err(xlog_err)?;
+            } else {
+                session
+                    .owner()?
+                    .finish_prepared_segment_parent(&mut *parent.borrow(py).lease()?)
+                    .map_err(xlog_err)?;
+            }
         }
         {
             let mut retained = session
@@ -16808,7 +17750,8 @@ impl PySemanticTransitionController {
             ));
         }
         let _retirement = PreparedRetirementGuard(&session.retiring);
-        if let Some(private) = private_execution_owner(py, &session)? {
+        let private = private_execution_owner(py, &session)?;
+        if let Some(private) = &private {
             private.borrow(py).begin_private_segment_retirement(
                 py,
                 &session,
@@ -16832,7 +17775,7 @@ impl PySemanticTransitionController {
                 "final segment retirement requires exact supported consumer streams",
             ));
         }
-        let (steps, resources, producers_retired) = {
+        let (steps, resources, producers_retired, instruction) = {
             let stored = session
                 .prepared_segment
                 .lock()
@@ -16851,8 +17794,77 @@ impl PySemanticTransitionController {
                     .collect::<Vec<_>>(),
                 Arc::clone(&stored.resources),
                 stored.producers_retired,
+                stored
+                    .instruction
+                    .as_ref()
+                    .filter(|_| private.is_none())
+                    .map(Arc::clone),
             )
         };
+        let retirement_work = if let Some(instruction) = &instruction {
+            let mut original = instruction.preparation()?;
+            if original.retirement_report.is_some() {
+                None
+            } else if let Some(work) = &original.retirement_work {
+                Some(work.clone_ref(py))
+            } else {
+                // Continue only the same retained initializer. The native
+                // owner joins entered prefixes and submits unentered suffixes.
+                original.retirement_entered = true;
+                drop(original);
+                let inner = session
+                    .owner()?
+                    .prepare_admitted_retirement_cold_model_work(&instruction.inner)
+                    .map_err(xlog_err)?;
+                let work = Py::new(
+                    py,
+                    learning_phase::cold_model_work::PySemanticColdModelWork {
+                        parent: instruction.parent.clone_ref(py),
+                        reader: instruction.parent.clone_ref(py),
+                        inner,
+                        region: None,
+                        active: AtomicBool::new(false),
+                    },
+                )?;
+                instruction.preparation()?.retirement_work = Some(work.clone_ref(py));
+                Some(work)
+            }
+        } else {
+            None
+        };
+        let retirement_ref = retirement_work.as_ref().map(|work| work.borrow(py));
+        let retirement_scope = match (retirement_work.as_ref(), retirement_ref.as_ref()) {
+            (Some(work), Some(work_ref)) => {
+                Some(learning_phase::cold_model_work::ColdCallbackScope::enter(
+                    py,
+                    &session,
+                    work_ref,
+                    work.clone_ref(py),
+                )?)
+            }
+            _ => None,
+        };
+        if let (Some(instruction), Some(work)) = (&instruction, &retirement_work) {
+            let mut original = instruction.preparation()?;
+            if !original.retirement_children_ready {
+                if original.retirement_children_entered {
+                    return Err(invalid(
+                        "retain the original unresolved replay retirement attachment",
+                    ));
+                }
+                original.retirement_children_entered = true;
+                let children = original.replay_children.clone();
+                drop(original);
+                let custody = session
+                    .owner()?
+                    .share_cold_native_work(&work.borrow(py).inner)
+                    .map_err(xlog_err)?;
+                for child in children {
+                    child.attach_retirement_work(py, custody.clone())?;
+                }
+                instruction.preparation()?.retirement_children_ready = true;
+            }
+        }
         let graph = {
             let mut owner = session.owner()?;
             for step in &steps {
@@ -16880,6 +17892,13 @@ impl PySemanticTransitionController {
                 .clone_ref(py)
         };
         if !producers_retired {
+            if let Some(instruction) = &instruction {
+                let mut original = instruction.preparation()?;
+                if original.retirement_callback_entered {
+                    return Err(invalid("original producer retirement cannot be repeated after an uncertain callback"));
+                }
+                original.retirement_callback_entered = true;
+            }
             let check = || -> PyResult<()> {
                 let issued = task_use.borrow(py);
                 self.require_read_issued(&issued)?;
@@ -16910,6 +17929,34 @@ impl PySemanticTransitionController {
             step.release_recorded_producer_aliases(py)?;
         }
         drain_export_owners();
+        if let Some(instruction) = &instruction {
+            let children = instruction.preparation()?.replay_children.clone();
+            for child in children {
+                child.release_session(py)?;
+            }
+            if let Some(work) = &retirement_work {
+                let report = session
+                    .owner()?
+                    .finish_admitted_retirement_cold_model_work(
+                        &instruction.inner,
+                        &work.borrow(py).inner,
+                        &streams,
+                    )
+                    .map_err(xlog_err)?;
+                instruction.preparation()?.retirement_report = Some(report);
+            }
+            let total = session
+                .owner()?
+                .admitted_segment_cold_result(&instruction.inner)
+                .map_err(xlog_err)?
+                .ok_or_else(|| invalid("retain every unresolved original preparation report before retiring its storage"))?;
+            let mut original = instruction.preparation()?;
+            original.preparation_total = Some(total);
+            original.preparation_totals_frozen = true;
+        }
+        // The actual final-use report is complete before its target storage
+        // token can be removed. Neither callbacks nor entered report work recur.
+        drop(retirement_scope);
         for step in &steps {
             session
                 .owner()?
@@ -16954,6 +18001,14 @@ impl PySemanticTransitionController {
                 &session,
                 &task_use.borrow(py),
             )?;
+        }
+        if private.is_none() {
+            let instruction = session
+                .segment_instruction
+                .lock()
+                .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
+                .take();
+            drop(instruction);
         }
         drain_export_owners();
         Ok(())
@@ -21295,6 +22350,8 @@ mod tests {
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            segment_instruction: Mutex::new(None),
             learning_preparing: AtomicBool::new(false),
             learning_transition: Mutex::new(None),
             checkpoint_custody: Mutex::new(None),

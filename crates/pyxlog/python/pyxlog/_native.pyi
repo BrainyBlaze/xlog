@@ -145,6 +145,12 @@ class SemanticPreparedStep:
     @property
     def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
 
+    def prepare_cold_model_work(
+        self, prepare_callback: Callable[[], Any], *, consumer_streams: Sequence[int]
+    ) -> Any:
+        """Prepare once under this original Update's native cold-work owner."""
+        ...
+
     @property
     def execution_measurements(self) -> SemanticCompletedExecutionObservation:
         """Joined step execution only, not preparation or a physical peak."""
@@ -177,6 +183,30 @@ _SemanticTensorLayout = tuple[
     int, int, int, int, int, int, tuple[int, ...], tuple[int, ...]
 ]
 _SemanticTensorInput = tuple[_SemanticTensorLayout, int, int, Any, Optional[Any]]
+
+class SemanticSegmentInstructionAdmission:
+    """Native-issued original instruction custody; construction is not public."""
+
+    def prepare(self, prepare_callback: Callable[[], Any]) -> Any: ...
+    def parent_identity(self) -> _PublishedIdentity: ...
+    def resolve_parent_handoff(self) -> None: ...
+    @property
+    def preparation_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+    @property
+    def retirement_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+    @property
+    def budgets(self) -> tuple[tuple[int, int, int], ...]: ...
+
+class SemanticPrivateReplayChild:
+    """One original selected replay child retained by its instruction owner."""
+
+    def source_task(
+        self, *, refresh_snapshot: Callable[[], Any]
+    ) -> tuple[bytes, tuple[Any, ...], tuple[Any, ...]]: ...
 
 class SemanticColdModelWork:
     """Original native cold registrar, available only in its admitted callback."""
@@ -399,13 +429,23 @@ class SemanticTransitionController:
         max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
     ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
 
+    def admit_segment_instruction(
+        self, task_use: SemanticTransitionTaskUse, *, parent: SemanticPublishedParent,
+        instruction_bytes: bytes, first_program_ordinal: int,
+    ) -> SemanticSegmentInstructionAdmission: ...
+
+    def prepare_private_replay_child(
+        self, task_use: SemanticTransitionTaskUse, *,
+        instruction_admission: SemanticSegmentInstructionAdmission,
+        step_index: int, replay_ordinal: int,
+    ) -> SemanticPrivateReplayChild: ...
+
     def build_segment(
         self, task_use: SemanticTransitionTaskUse, *, transitions: Any,
         producer: Any, tensor_content_capacity: int, model_work_capacity: int,
         segment_capacity_bytes: int, other_external_cuda_bytes: int,
-        parent: Optional[SemanticPublishedParent] = None,
-        instruction_bytes: Optional[bytes] = None,
-        first_program_ordinal: Optional[int] = None,
+        instruction_admission: Optional[SemanticSegmentInstructionAdmission],
+        consumer_streams: Sequence[int],
     ) -> None: ...
 
     def close(self, parent: SemanticPublishedParent) -> None:
