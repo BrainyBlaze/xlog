@@ -546,6 +546,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        kernels_dir.join("semantic_task_ground.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         kernels_dir.join("semantic_rule_action.cuh").display()
     );
     println!(
