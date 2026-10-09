@@ -2,6 +2,7 @@
 //! no evaluation, backward-tape, content-admission or publication authority.
 
 use super::*;
+use crate::semantic_work::ModelWorkPlan;
 
 #[derive(Clone, Debug)]
 pub struct SemanticColdModelWork {
@@ -75,6 +76,14 @@ pub struct SemanticColdModelWorkResult {
     pub native_events: [u64; 9],
 }
 
+/// Authored by the enclosing native operation after its known outcome, never by
+/// a callback error or a Python declaration of partial work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticColdModelWorkDisposition {
+    Complete,
+    KnownRefusal,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecordingState {
     Waiting,
@@ -87,6 +96,12 @@ enum RecordingState {
     NotEntered,
 }
 
+struct EvaluationCleanup {
+    region: usize,
+    original: SemanticModelEvaluation,
+    cancellation: Option<SemanticCancelledModelEvaluation>,
+}
+
 pub(super) struct ColdModelWorkStorage {
     invocation: Arc<()>,
     aliases: Arc<()>,
@@ -97,8 +112,25 @@ pub(super) struct ColdModelWorkStorage {
     report: TrackedCudaSlice<u64>,
     state: RecordingState,
     regions: Vec<RecordingState>,
+    plan: Option<ModelWorkPlan>,
+    evaluation_cleanup: Option<EvaluationCleanup>,
+    disposition: Option<SemanticColdModelWorkDisposition>,
     result: Option<SemanticColdModelWorkResult>,
     streams: Option<Vec<u64>>,
+}
+
+impl ColdModelWorkStorage {
+    fn plan(&self) -> Result<&ModelWorkPlan, SemanticTransitionError> {
+        self.plan.as_ref().ok_or_else(|| {
+            publication_input_error("cold recording requires its admitted operation plan")
+        })
+    }
+
+    fn plan_mut(&mut self) -> Result<&mut ModelWorkPlan, SemanticTransitionError> {
+        self.plan.as_mut().ok_or_else(|| {
+            publication_input_error("cold recording requires its admitted operation plan")
+        })
+    }
 }
 
 impl SemanticTransitionSession {
@@ -418,6 +450,9 @@ impl SemanticTransitionSession {
             report,
             state: RecordingState::Waiting,
             regions: Vec::new(),
+            plan: None,
+            evaluation_cleanup: None,
+            disposition: None,
             result: None,
             streams: None,
         });
@@ -477,6 +512,96 @@ impl SemanticTransitionSession {
         Ok(self.stream.cu_stream() as u64)
     }
 
+    /// Admit the complete ordered model recipe before its first actual recorder
+    /// begins. An enclosing region report may already be open without any model
+    /// event. Returned quantities are (work bound, event count, call upper).
+    pub fn admit_cold_model_work_plan(
+        &mut self,
+        handle: &SemanticColdModelWork,
+        operations: &[(ModelWorkKind, Vec<u64>)],
+        region_ends: &[usize],
+    ) -> Result<[u64; 3], SemanticTransitionError> {
+        self.admit_cold_model_work_plan_in_region(handle, None, operations, region_ends)
+    }
+
+    pub fn admit_cold_model_work_region_plan(
+        &mut self,
+        region: &SemanticColdModelWorkRegion,
+        operations: &[(ModelWorkKind, Vec<u64>)],
+        region_ends: &[usize],
+    ) -> Result<[u64; 3], SemanticTransitionError> {
+        self.admit_cold_model_work_plan_in_region(
+            &region.work,
+            Some(region),
+            operations,
+            region_ends,
+        )
+    }
+
+    fn admit_cold_model_work_plan_in_region(
+        &mut self,
+        handle: &SemanticColdModelWork,
+        region: Option<&SemanticColdModelWorkRegion>,
+        operations: &[(ModelWorkKind, Vec<u64>)],
+        region_ends: &[usize],
+    ) -> Result<[u64; 3], SemanticTransitionError> {
+        let result = (|| {
+            if let Some(region) = region {
+                self.require_cold_model_work_region(region, RecordingState::Waiting)?;
+            } else {
+                let storage = self.cold_model_work(handle)?;
+                if storage.state != RecordingState::Waiting || !storage.regions.is_empty() {
+                    return Err(publication_input_error(
+                        "cold plan requires its original waiting recorder",
+                    ));
+                }
+            }
+            let storage = self.cold_model_work(handle)?;
+            if storage.plan.is_some()
+                || !storage.work.recording.events().is_empty()
+                || storage.regions.iter().any(|state| {
+                    !matches!(state, RecordingState::Waiting | RecordingState::NotEntered)
+                })
+            {
+                return Err(publication_input_error(
+                    "the original cold operation plan is admitted once",
+                ));
+            }
+            let capacity = storage.work.actual.len() / 3;
+            let mut plan =
+                ModelWorkPlan::new(capacity, operations, region_ends, storage.regions.len())
+                    .map_err(publication_input_error)?;
+            for (index, state) in storage.regions.iter().enumerate() {
+                if *state == RecordingState::NotEntered {
+                    plan.skip_unentered_region(index)
+                        .map_err(publication_input_error)?;
+                }
+            }
+            let quantities = plan.quantities();
+            self.steps
+                .get_mut(&handle.token)
+                .expect("checked reader")
+                .cold_model_work
+                .as_mut()
+                .expect("checked cold work")
+                .plan = Some(plan);
+            Ok(quantities)
+        })();
+        if result.is_err() {
+            self.fail_cold_model_work(handle);
+        }
+        result
+    }
+
+    /// Read the retained complete report plan before admitting dependent work.
+    /// Native-authorized skipped regions never change these upper quantities.
+    pub fn cold_model_work_plan_quantities(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<[u64; 3], SemanticTransitionError> {
+        Ok(self.cold_model_work(handle)?.plan()?.quantities())
+    }
+
     pub fn cold_model_work_buffer(
         &mut self,
         lease: &SemanticPublishedLease,
@@ -515,6 +640,7 @@ impl SemanticTransitionSession {
                 "cold model scratch requires its original reader and stream before recording",
             ));
         }
+        storage.plan()?;
         // SAFETY: reset initialized all three words of every original slot.
         let view = unsafe { storage.work.actual.view().cast::<u8>() }
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -542,7 +668,11 @@ impl SemanticTransitionSession {
         count: usize,
     ) -> Result<Vec<SemanticColdModelWorkRegion>, SemanticTransitionError> {
         let storage = self.cold_model_work(handle)?;
-        if count == 0 || storage.state != RecordingState::Waiting || !storage.regions.is_empty() {
+        if count == 0
+            || storage.state != RecordingState::Waiting
+            || !storage.regions.is_empty()
+            || storage.plan.is_some()
+        {
             return Err(publication_input_error(
                 "cold registration regions require their sole original waiting report",
             ));
@@ -593,6 +723,10 @@ impl SemanticTransitionSession {
         region: &SemanticColdModelWorkRegion,
     ) -> Result<(), SemanticTransitionError> {
         self.require_cold_model_work_region(region, RecordingState::Waiting)?;
+        self.cold_model_work(&region.work)?
+            .plan()?
+            .require_region_start(region.index)
+            .map_err(publication_input_error)?;
         self.steps
             .get_mut(&region.work.token)
             .expect("checked original reader")
@@ -603,18 +737,117 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    pub fn close_cold_model_work_region(
+    /// Retain the original result owner before its evaluation can be launched.
+    /// The region remains part of the one original report and admitted plan.
+    pub fn bind_cold_model_work_evaluation_cleanup(
         &mut self,
         region: &SemanticColdModelWorkRegion,
+        original: &SemanticModelEvaluation,
+        evaluation_owner: Option<&SemanticTransitionSession>,
     ) -> Result<(), SemanticTransitionError> {
-        self.require_cold_model_work_region(region, RecordingState::Recording)?;
+        let storage = self.cold_model_work(&region.work)?;
+        if storage.state != RecordingState::Recording
+            || storage.regions.get(region.index) != Some(&RecordingState::Waiting)
+            || storage.evaluation_cleanup.is_some()
+        {
+            return Err(publication_input_error(
+                "evaluation cleanup requires its original waiting region and sole result owner",
+            ));
+        }
+        let work = storage.native_work.view();
+        match evaluation_owner {
+            Some(owner) => owner.require_evaluation_cold_work_origin(original, None, &work)?,
+            None => {
+                self.require_evaluation_cold_work_origin(original, Some(region.work.token), &work)?
+            }
+        }
+        let storage = self
+            .steps
+            .get_mut(&region.work.token)
+            .expect("checked original reader")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original work");
+        storage.evaluation_cleanup = Some(EvaluationCleanup {
+            region: region.index,
+            original: original.clone(),
+            cancellation: None,
+        });
+        Ok(())
+    }
+
+    /// Only the original native non-submission proof can make its result copies
+    /// unreachable. Native cleanup still enters and closes the existing region.
+    pub fn cancel_cold_model_work_evaluation_cleanup(
+        &mut self,
+        region: &SemanticColdModelWorkRegion,
+        cancelled: &SemanticCancelledModelEvaluation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_cold_model_work_region(region, RecordingState::Waiting)?;
+        let storage = self.cold_model_work(&region.work)?;
+        let cleanup = storage.evaluation_cleanup.as_ref().ok_or_else(|| {
+            publication_input_error("cancelled cleanup lost its original evaluation result owner")
+        })?;
+        if cleanup.region != region.index
+            || cleanup.cancellation.is_some()
+            || !cancelled.belongs_to_original(&cleanup.original)
+        {
+            return Err(publication_input_error(
+                "cleanup cancellation changed its original native evaluation proof",
+            ));
+        }
+        storage
+            .plan()?
+            .require_evaluation_result_copy_region(region.index)
+            .map_err(publication_input_error)?;
         self.steps
             .get_mut(&region.work.token)
             .expect("checked original reader")
             .cold_model_work
             .as_mut()
             .expect("checked original work")
-            .regions[region.index] = RecordingState::Closed;
+            .evaluation_cleanup
+            .as_mut()
+            .expect("checked original evaluation")
+            .cancellation = Some(cancelled.clone());
+        Ok(())
+    }
+
+    pub fn close_cold_model_work_region(
+        &mut self,
+        region: &SemanticColdModelWorkRegion,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_cold_model_work_region(region, RecordingState::Recording)?;
+        let cancelled = self
+            .cold_model_work(&region.work)?
+            .evaluation_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| {
+                cleanup.region == region.index && cleanup.cancellation.is_some()
+            });
+        let storage = self
+            .steps
+            .get_mut(&region.work.token)
+            .expect("checked original reader")
+            .cold_model_work
+            .as_mut()
+            .expect("checked original work");
+        if cancelled {
+            storage
+                .plan()?
+                .require_evaluation_result_copy_region(region.index)
+                .map_err(publication_input_error)?;
+            storage
+                .plan_mut()?
+                .skip_unentered_region(region.index)
+                .map_err(publication_input_error)?;
+        } else {
+            storage
+                .plan()?
+                .require_region_end(region.index)
+                .map_err(publication_input_error)?;
+        }
+        storage.regions[region.index] = RecordingState::Closed;
         Ok(())
     }
 
@@ -622,10 +855,14 @@ impl SemanticTransitionSession {
         &mut self,
         handle: &SemanticColdModelWork,
     ) -> Result<(), SemanticTransitionError> {
-        if self.cold_model_work(handle)?.state != RecordingState::Waiting {
+        let storage = self.cold_model_work(handle)?;
+        if storage.state != RecordingState::Waiting {
             return Err(publication_input_error(
                 "original cold recorder begins exactly once",
             ));
+        }
+        if storage.regions.is_empty() {
+            storage.plan()?;
         }
         let storage = self
             .steps
@@ -651,9 +888,12 @@ impl SemanticTransitionSession {
         let storage = self.cold_model_work(handle)?;
         if storage.state != RecordingState::Recording
             || before > storage.regions.len()
-            || storage.regions[..before]
-                .iter()
-                .any(|state| !matches!(state, RecordingState::Waiting | RecordingState::Closed))
+            || storage.regions[..before].iter().any(|state| {
+                !matches!(
+                    state,
+                    RecordingState::Waiting | RecordingState::Closed | RecordingState::NotEntered
+                )
+            })
         {
             return Err(publication_input_error(
                 "known cancellation cannot close an entered, failed or unknown cold region",
@@ -666,8 +906,12 @@ impl SemanticTransitionSession {
             .cold_model_work
             .as_mut()
             .expect("checked original work");
-        for state in &mut storage.regions[..before] {
+        for (index, state) in storage.regions[..before].iter_mut().enumerate() {
             if *state == RecordingState::Waiting {
+                if let Some(plan) = &mut storage.plan {
+                    plan.skip_unentered_region(index)
+                        .map_err(publication_input_error)?;
+                }
                 *state = RecordingState::NotEntered;
             }
         }
@@ -761,21 +1005,39 @@ impl SemanticTransitionSession {
                     "cold model producer requires its active original recorder",
                 ));
             }
-            let work = &mut self
+            if self
+                .cold_model_work(handle)?
+                .evaluation_cleanup
+                .as_ref()
+                .is_some_and(|cleanup| {
+                    region.is_some_and(|region| region.index == cleanup.region)
+                        && cleanup.cancellation.is_some()
+                })
+            {
+                return Err(publication_input_error(
+                    "cancelled evaluation cannot execute its unsubmitted result copies",
+                ));
+            }
+            self.cold_model_work(handle)?
+                .plan()?
+                .require_next(kind, dimensions, region.map(|region| region.index))
+                .map_err(publication_input_error)?;
+            let storage = self
                 .steps
                 .get_mut(&handle.token)
                 .expect("checked reader")
                 .cold_model_work
                 .as_mut()
-                .expect("checked cold work")
-                .work;
-            work.record_operation(
+                .expect("checked cold work");
+            let slot = storage.work.record_operation(
                 kind,
                 dimensions,
                 device_produced,
                 &self.domain,
                 &mut self.poisoned,
-            )
+            )?;
+            storage.plan_mut()?.consume();
+            Ok(slot)
         })();
         if result.is_err() {
             self.fail_cold_model_work(handle);
@@ -815,14 +1077,26 @@ impl SemanticTransitionSession {
                     "cold model call requires its active original recorder",
                 ));
             }
-            self.steps
+            self.cold_model_work(handle)?
+                .plan()?
+                .require_next(
+                    ModelWorkKind::ModelInvocation,
+                    &[],
+                    region.map(|region| region.index),
+                )
+                .map_err(publication_input_error)?;
+            let storage = self
+                .steps
                 .get_mut(&handle.token)
                 .expect("checked reader")
                 .cold_model_work
                 .as_mut()
-                .expect("checked cold work")
+                .expect("checked cold work");
+            storage
                 .work
-                .record_invocation(&self.domain, &mut self.poisoned)
+                .record_invocation(&self.domain, &mut self.poisoned)?;
+            storage.plan_mut()?.consume();
+            Ok(())
         })();
         if result.is_err() {
             self.fail_cold_model_work(handle);
@@ -838,16 +1112,38 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticColdModelWork,
         streams: &[u64],
+        disposition: SemanticColdModelWorkDisposition,
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
         self.checked_reader(lease)?;
         let storage = self.cold_model_work(handle)?;
+        if let Some(plan) = &storage.plan {
+            plan.require_recorded_trace(storage.work.recording.events())
+                .map_err(publication_input_error)?;
+            if disposition == SemanticColdModelWorkDisposition::Complete && !plan.complete() {
+                return Err(publication_input_error(
+                    "successful cold completion requires every non-skipped original plan span",
+                ));
+            }
+        } else if disposition != SemanticColdModelWorkDisposition::KnownRefusal
+            || !storage.work.recording.events().is_empty()
+            || storage
+                .regions
+                .iter()
+                .any(|state| !matches!(state, RecordingState::Waiting | RecordingState::NotEntered))
+        {
+            return Err(publication_input_error(
+                "cold completion without an admitted plan requires known refusal before every model callback",
+            ));
+        }
         if matches!(
             storage.state,
             RecordingState::Submitted | RecordingState::Completed
         ) {
-            if storage.streams.as_deref() != Some(streams) {
+            if storage.streams.as_deref() != Some(streams)
+                || storage.disposition != Some(disposition)
+            {
                 return Err(publication_input_error(
-                    "cold completion changed its original submitted consumer roster",
+                    "cold completion changed its original submitted consumer roster or disposition",
                 ));
             }
             return self.resolve_cold_model_work(lease, handle);
@@ -884,6 +1180,7 @@ impl SemanticTransitionSession {
             .map_err(publication_input_error)?;
         storage.state = RecordingState::Submitting;
         storage.streams = Some(streams.to_vec());
+        storage.disposition = Some(disposition);
         let work = &storage.work;
         let input = if work.recording.events().is_empty() {
             ModelWorkInput::default()

@@ -1440,6 +1440,11 @@ impl PySemanticLearningPhaseTransition {
         {
             return Err(invalid("terminal accounting precedes known private release and unchanged source verification"));
         }
+        let disposition = if refusing {
+            xlog_cuda::SemanticColdModelWorkDisposition::KnownRefusal
+        } else {
+            xlog_cuda::SemanticColdModelWorkDisposition::Complete
+        };
         let (work, reader, closed, verified, cached_report) = {
             let retained = self.delivery_expense()?;
             let current = retained.as_ref().expect("original delivery");
@@ -1492,7 +1497,7 @@ impl PySemanticLearningPhaseTransition {
                 .session
                 .borrow(py)
                 .owner()?
-                .finish_cold_model_work(&*parent.lease()?, &work, &streams)
+                .finish_cold_model_work(&*parent.lease()?, &work, &streams, disposition)
                 .map_err(xlog_err)?;
             self.delivery_expense()?
                 .as_mut()

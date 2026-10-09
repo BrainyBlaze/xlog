@@ -5,6 +5,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use xlog_core::{symbol, RelId, ScalarType, Schema, XlogError};
 
+use crate::cuda_compat::{IntoKernelParamStorage, KernelParamStorage};
 use crate::launch::LaunchEnqueueError;
 use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
@@ -2537,6 +2538,25 @@ struct SemanticKernelLaunchIo<'a> {
     receipt_index: u32,
 }
 
+/// Original native snapshot and its two retained read destinations.
+pub(crate) struct SemanticRootExport {
+    owner: u64,
+    root: SemanticRootHandle,
+    issuance: Arc<()>,
+    upload: crate::device::RetainedDeviceWrite<DeviceCommand>,
+    upload_admitted: bool,
+    completion_entered: bool,
+    kernel_entered: bool,
+    kernel_submitted: bool,
+    launch_counted: bool,
+    receipt_admitted: bool,
+    arena_admitted: bool,
+    completion: crate::device::ExecutionCompletion,
+    receipt: crate::device::RetainedDeviceRead<DeviceReceipt>,
+    arena: crate::device::RetainedDeviceRead<u64>,
+    material: Option<SemanticRootMaterial>,
+}
+
 /// Device-resident immutable-root semantic owner retaining its provider.
 pub struct SemanticHypergraph {
     domain: ResidentExecutionDomain,
@@ -2565,6 +2585,7 @@ pub struct SemanticHypergraph {
     // A child graph borrows the original operation's tally, not a new report.
     // Its guard prevents that original report from closing before child joins.
     cold_work_custody: Option<Arc<()>>,
+    root_export: Option<Arc<()>>,
     // Retire device state before releasing its allocation and driver owner.
     provider: Arc<CudaKernelProvider>,
 }
@@ -2922,6 +2943,7 @@ impl CudaKernelProvider {
             poisoned: false,
             cold_work,
             cold_work_custody,
+            root_export: None,
         };
         let command = graph.command_for(OP_INITIALIZE);
         let receipt = graph.run(command, ArenaAccess::ReadWrite)?;
@@ -3054,6 +3076,30 @@ impl SemanticHypergraph {
         &mut self,
         root: SemanticRootHandle,
     ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
+        let mut original = self.prepare_transition_root_export(root)?;
+        self.submit_transition_root_export(&mut original)?;
+        self.resolve_transition_root_export(&mut original)
+    }
+
+    pub(crate) fn prepare_transition_root_export_parts(
+        &mut self,
+        owner: u64,
+        slot: u64,
+        generation: u64,
+    ) -> Result<SemanticRootExport, SemanticHypergraphError> {
+        if owner != self.owner {
+            return Err(admission_error(
+                "root export changed its native owner or slot",
+            ));
+        }
+        let slot = checked_receipt_slot(slot, SemanticHandleKind::Root, self.capacities.roots)?;
+        self.prepare_transition_root_export(SemanticRootHandle::new(owner, slot, generation))
+    }
+
+    fn prepare_transition_root_export(
+        &mut self,
+        root: SemanticRootHandle,
+    ) -> Result<SemanticRootExport, SemanticHypergraphError> {
         self.ensure_not_poisoned()?;
         if root.owner != self.owner {
             return Err(SemanticHypergraphError::ForeignHandle {
@@ -3065,29 +3111,246 @@ impl SemanticHypergraph {
                 "root material export requires typed admission",
             ));
         }
+        let issuance = Arc::new(());
         let mut command = self.command_for(OP_SNAPSHOT);
         write_view(&mut command, SemanticView::Root(root));
-        let receipt = self.run(command, ArenaAccess::Read)?;
-        self.expect_success(&receipt)?;
+        let original = SemanticRootExport {
+            owner: self.owner,
+            root,
+            issuance: Arc::clone(&issuance),
+            upload: crate::device::RetainedDeviceWrite::new(
+                &self.stream,
+                &[command],
+                self.command.view(),
+            )
+            .map_err(|error| runtime_error("root export command staging", error))?,
+            upload_admitted: false,
+            completion_entered: false,
+            kernel_entered: false,
+            kernel_submitted: false,
+            launch_counted: false,
+            receipt_admitted: false,
+            arena_admitted: false,
+            completion: crate::device::ExecutionCompletion::new(self.stream.context())
+                .map_err(|error| runtime_error("root export completion allocation", error))?,
+            receipt: crate::device::RetainedDeviceRead::new(&self.stream, self.receipt.view())
+                .map_err(|error| runtime_error("root export receipt staging", error))?,
+            arena: crate::device::RetainedDeviceRead::new(&self.stream, self.arena.view())
+                .map_err(|error| runtime_error("root export arena staging", error))?,
+            material: None,
+        };
+        self.root_export = Some(issuance);
+        Ok(original)
+    }
+
+    pub(crate) fn submit_transition_root_export(
+        &mut self,
+        original: &mut SemanticRootExport,
+    ) -> Result<(), SemanticHypergraphError> {
+        self.require_original_root_export(original)?;
+        if !original.upload_admitted {
+            self.provider
+                .admit_launch_metadata_htod(std::mem::size_of::<DeviceCommand>());
+            original.upload_admitted = true;
+        }
+        if !original.upload.entered() {
+            original.upload.enqueue(&self.stream).map_err(|error| {
+                self.poisoned |= original.upload.entered();
+                runtime_error("root export command upload", error)
+            })?;
+        }
+        original.upload.resolve().map_err(|error| {
+            self.poisoned = true;
+            runtime_error("root export original command upload", error)
+        })?;
+        if !original.kernel_entered {
+            if original.completion_entered {
+                // The exact original attempt never reached the driver kernel
+                // boundary. Join its fence before advancing that same stage.
+                original.completion.wait().map_err(|error| {
+                    self.poisoned = true;
+                    runtime_error("root export prelaunch completion", error)
+                })?;
+                original.completion = crate::device::ExecutionCompletion::new(
+                    self.stream.context(),
+                )
+                .map_err(|error| runtime_error("root export completion allocation", error))?;
+                original.completion_entered = false;
+            }
+            let next_launches = self.next_launch_count()?;
+            let mut submitted = None;
+            let completion = original.completion.submit(&self.stream, None, || {
+                original.completion_entered = true;
+                let result = enqueue_device_command_original(
+                    SemanticKernelLaunchSpec {
+                        domain: &self.domain,
+                        execute: &self.execute,
+                        owner: self.owner,
+                        capacities: self.capacities,
+                        arena_words: self.arena_words,
+                        cold_work: self.cold_work.as_ref(),
+                    },
+                    SemanticKernelLaunchIo {
+                        arena: &mut self.arena,
+                        arena_access: ArenaAccess::Read,
+                        input: SemanticKernelInput::HostCommand {
+                            commands: &self.command,
+                            index: 0,
+                        },
+                        receipts: &mut self.receipt,
+                        receipt_index: 0,
+                    },
+                    &mut self.poisoned,
+                    &mut original.kernel_entered,
+                    &mut original.kernel_submitted,
+                );
+                let successful = result.is_ok();
+                submitted = Some(result);
+                if successful {
+                    Ok(())
+                } else {
+                    Err(DriverError(
+                        cudarc::driver::sys::CUresult::CUDA_ERROR_UNKNOWN,
+                    ))
+                }
+            });
+            if original.kernel_submitted && !original.launch_counted {
+                self.stats.cuda_kernel_launches = next_launches;
+                original.launch_counted = true;
+            }
+            submitted.ok_or_else(|| {
+                runtime_error("root export submission", "original command did not enter")
+            })??;
+            completion.map_err(|error| {
+                self.poisoned = true;
+                runtime_error("root export completion fence", error)
+            })?;
+        }
+        original.completion.wait().map_err(|error| {
+            self.poisoned = true;
+            runtime_error("root export original completion", error)
+        })?;
+        if !original.kernel_submitted {
+            return Err(runtime_error(
+                "root export original completion",
+                "original snapshot has no successful kernel submission",
+            ));
+        }
+        if !original.receipt.entered() {
+            if !original.receipt_admitted {
+                self.provider
+                    .admit_small_metadata_dtoh(std::mem::size_of::<DeviceReceipt>())
+                    .map_err(|error| {
+                        runtime_error("root export receipt transfer admission", error)
+                    })?;
+                original.receipt_admitted = true;
+            }
+            self.enqueue_root_export_read(&mut original.receipt)?;
+        }
+        let receipts = original.receipt.resolve().map_err(|error| {
+            self.poisoned = true;
+            runtime_error("root export original receipt", error)
+        })?;
+        self.expect_success(
+            receipts
+                .first()
+                .ok_or_else(|| admission_error("root export receipt is absent"))?,
+        )?;
+        if !original.arena.entered() {
+            if !original.arena_admitted {
+                self.provider
+                    .admit_tracked_dtoh(self.arena_words.checked_mul(8).ok_or_else(size_overflow)?)
+                    .map_err(|error| {
+                        runtime_error("root export arena transfer admission", error)
+                    })?;
+                original.arena_admitted = true;
+            }
+            self.enqueue_root_export_read(&mut original.arena)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_root_export_read<T: DeviceRepr + Copy>(
+        &mut self,
+        original: &mut crate::device::RetainedDeviceRead<T>,
+    ) -> Result<(), SemanticHypergraphError> {
+        let mut recorder = self.domain.new_strict_recorder();
+        recorder.read(original.source());
+        let prior_poison = self.poisoned;
+        let enqueued = unsafe {
+            self.domain.enqueue(recorder, |stream| {
+                self.poisoned = true;
+                original.enqueue(stream.stream())
+            })
+        }
+        .map_err(map_enqueue_error)?;
+        enqueued
+            .commit()
+            .map_err(|error| runtime_error("root export copy commit", error))?;
+        self.poisoned = prior_poison;
+        Ok(())
+    }
+
+    fn require_original_root_export(
+        &self,
+        original: &SemanticRootExport,
+    ) -> Result<(), SemanticHypergraphError> {
+        if original.owner != self.owner
+            || self
+                .root_export
+                .as_ref()
+                .is_none_or(|issuance| !Arc::ptr_eq(issuance, &original.issuance))
+        {
+            return Err(admission_error(
+                "root export lost its original native owner",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_transition_root_export(
+        &mut self,
+        original: &mut SemanticRootExport,
+    ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
+        if original.owner != self.owner {
+            return Err(admission_error("foreign original root export"));
+        }
+        if let Some(material) = &original.material {
+            return Ok(material.clone());
+        }
+        self.require_original_root_export(original)?;
+        self.submit_transition_root_export(original)?;
+        let receipts = original.receipt.resolve().map_err(|error| {
+            self.poisoned = true;
+            runtime_error("root export receipt read", error)
+        })?;
+        let receipt = receipts
+            .first()
+            .ok_or_else(|| admission_error("root export receipt is absent"))?;
+        self.expect_success(receipt)?;
         let result = (|| {
             let snapshot = SemanticRootSnapshot::new(
-                SemanticRootDigest(receipt_identity(&receipt, 16)),
-                receipt_extents(&receipt)?,
+                SemanticRootDigest(receipt_identity(receipt, 16)),
+                receipt_extents(receipt)?,
             );
-            let arena_words = usize::try_from(self.arena_words).map_err(|_| size_overflow())?;
-            let mut arena = vec![0; arena_words];
-            self.provider
-                .dtoh_sync_copy_into_tracked(&self.arena, &mut arena)
+            let arena = original
+                .arena
+                .resolve()
                 .map_err(|error| runtime_error("root material arena read", error))?;
             material_from_arena(
                 &arena,
                 self.capacities,
-                root,
+                original.root,
                 snapshot,
                 self.admission.as_ref().expect("checked typed admission"),
             )
         })();
-        poison_after_reconciliation_error(&mut self.poisoned, result)
+        let material = poison_after_reconciliation_error(&mut self.poisoned, result)?;
+        original.material = Some(material.clone());
+        original.receipt.retire_completed_values();
+        original.arena.retire_completed_values();
+        self.root_export = None;
+        Ok(material)
     }
 
     /// Rematerializes a complete root on a fresh, already-admitted native owner.
@@ -4085,6 +4348,10 @@ impl SemanticHypergraph {
     pub(crate) fn ensure_not_poisoned(&self) -> Result<(), SemanticHypergraphError> {
         if self.poisoned {
             Err(SemanticHypergraphError::Poisoned)
+        } else if self.root_export.is_some() {
+            Err(admission_error(
+                "original root export must resolve before another graph operation",
+            ))
         } else {
             Ok(())
         }
@@ -4224,6 +4491,16 @@ fn enqueue_device_command(
     spec: SemanticKernelLaunchSpec<'_>,
     io: SemanticKernelLaunchIo<'_>,
     poisoned: &mut bool,
+) -> Result<(), SemanticHypergraphError> {
+    enqueue_device_command_original(spec, io, poisoned, &mut false, &mut false)
+}
+
+fn enqueue_device_command_original(
+    spec: SemanticKernelLaunchSpec<'_>,
+    io: SemanticKernelLaunchIo<'_>,
+    poisoned: &mut bool,
+    kernel_entered: &mut bool,
+    kernel_submitted: &mut bool,
 ) -> Result<(), SemanticHypergraphError> {
     let SemanticKernelLaunchIo {
         arena,
@@ -4365,14 +4642,25 @@ fn enqueue_device_command(
     let execute = spec.execute.clone();
     let enqueued = match unsafe {
         spec.domain.enqueue(recorder, |stream| {
-            execute.clone().launch_in(
+            let arena = arena.into_kernel_param_storage();
+            let descriptor = descriptor.into_kernel_param_storage();
+            let cold_work = cold_work.into_kernel_param_storage();
+            let mut params = [
+                arena.as_kernel_param(),
+                descriptor.as_kernel_param(),
+                cold_work.as_kernel_param(),
+            ];
+            execute.launch_raw_in_original(
                 stream,
                 LaunchConfig {
                     grid_dim: (1, 1, 1),
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (arena, descriptor, cold_work),
+                &mut params,
+                false,
+                kernel_entered,
+                kernel_submitted,
             )
         })
     } {
