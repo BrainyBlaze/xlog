@@ -137,6 +137,8 @@ pub(crate) struct ColdNativeAllowance {
 }
 
 pub(super) struct FrozenColdEvaluationContent {
+    invocation: Arc<()>,
+    preparation_available: bool,
     pub(super) cohort: Arc<SemanticEvaluationCohort>,
     pub(super) output: Vec<PreparedSemanticTensor>,
     pub(super) objective: Vec<PreparedSemanticTensor>,
@@ -242,14 +244,37 @@ impl ColdNativeAllowance {
         })?;
         Ok(())
     }
+
+    /// The actual evaluation owner claims its complete original preparation
+    /// once, before any selection or source observation can enter the driver.
+    pub(super) fn claim_evaluation_preparation(
+        &mut self,
+        invocation: &Arc<()>,
+    ) -> Result<(), SemanticTransitionError> {
+        if !self.is_evaluation() {
+            return Ok(());
+        }
+        let content = self.content.as_mut().ok_or_else(|| {
+            publication_input_error("evaluation preparation precedes its original admission")
+        })?;
+        if !Arc::ptr_eq(&content.invocation, invocation) || !content.preparation_available {
+            return Err(publication_input_error(
+                "evaluation preparation differs from its sole admitted original invocation",
+            ));
+        }
+        content.preparation_available = false;
+        Ok(())
+    }
 }
 
 impl FrozenColdEvaluationContent {
     pub(super) fn new(
+        invocation: Arc<()>,
         cohort: Arc<SemanticEvaluationCohort>,
         output: Vec<PreparedSemanticTensor>,
         objective: Vec<PreparedSemanticTensor>,
         model_ceiling: [u64; 9],
+        preparation_ceiling: [u64; 9],
     ) -> Result<Self, SemanticTransitionError> {
         let original = cohort.content_tensors();
         if original.len() != 17 || output.len() != 3 || objective.len() != 8 {
@@ -313,7 +338,7 @@ impl FrozenColdEvaluationContent {
         // capture and two verifies. Captured occurrences remain finite here,
         // although their execution tally is owned by numerical capture.
         let remaining = [[0, 4], [2, 5], [1, 1], [1, 2]];
-        let mut ceiling = [0; 9];
+        let mut ceiling = preparation_ceiling;
         let sources = [&output, &objective];
         for (kind, tensors) in sources.into_iter().enumerate() {
             for verify in [false, true] {
@@ -345,6 +370,8 @@ impl FrozenColdEvaluationContent {
             }
         }
         Ok(Self {
+            invocation,
+            preparation_available: true,
             cohort,
             output,
             objective,

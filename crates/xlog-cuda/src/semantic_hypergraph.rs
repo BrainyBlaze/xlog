@@ -3347,6 +3347,24 @@ impl SemanticHypergraph {
         self.prepare_transition_root_export(SemanticRootHandle::new(owner, slot, generation))
     }
 
+    /// One original host snapshot command. The CUDA owner clears its receipt,
+    /// writes two owner words and the 96-byte root view, and visits the root
+    /// once for validation and once for projection. Refusal writes no more.
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn snapshot_native_work_ceiling(&self) -> [u64; 9] {
+        [
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            std::mem::size_of::<DeviceReceipt>() as u64 + 2 * 8 + 96,
+        ]
+    }
+
     fn prepare_transition_root_export(
         &mut self,
         root: SemanticRootHandle,
