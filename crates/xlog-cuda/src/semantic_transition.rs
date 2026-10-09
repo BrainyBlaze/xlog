@@ -2613,6 +2613,26 @@ pub struct SemanticReplayAppendBinding {
     pub payload_capacity_bytes: usize,
 }
 
+impl SemanticReplayAppendBinding {
+    pub(crate) fn validate(&self) -> Result<(), SemanticTransitionError> {
+        if self.row_capacity == 0
+            || self.raw_byte_capacity == 0
+            || self.append_groups.is_empty()
+            || self.append_groups.len() >= self.row_capacity
+            || self.metadata_bytes == 0
+            || self.max_material_bytes == 0
+            || self.total_material_bytes == 0
+            || self.max_evidence_bytes == 0
+            || self.payload_capacity_bytes == 0
+        {
+            return Err(publication_input_error(
+                "replay append requires its original finite row, payload and acquisition reservation",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Initial canonical parent only. A model continuation cannot be supplied here:
 /// it is admitted after a real Acquire and a forward using that acquired parent.
 /// PrefixIdentity is native-owned: fresh publication derives its 32 bytes from
@@ -4651,13 +4671,14 @@ struct PublicationContract {
     nonterminal_intent_prefix_begin: u64,
     nonterminal_intent_prefix_end: u64,
     replay_row_capacity: u64,
-    replay_initial_row_count: u64,
+    replay_original_slot_boundary: u64,
     replay_raw_capacity_bytes: u64,
     replay_payload_capacity_bytes: u64,
     replay_metadata_bytes: u64,
     replay_max_material_bytes: u64,
     replay_total_material_bytes: u64,
     replay_max_evidence_bytes: u64,
+    replay_reservation_identity: Identity256,
     model_generation: u64,
     policy_generation: u64,
     authority_generation: u64,
@@ -4674,7 +4695,7 @@ impl PublicationContract {
     fn replay_append_entry_capacity(self) -> Result<u64, SemanticTransitionError> {
         if self.replay_row_capacity == 0 {
             if [
-                self.replay_initial_row_count,
+                self.replay_original_slot_boundary,
                 self.replay_raw_capacity_bytes,
                 self.replay_payload_capacity_bytes,
                 self.replay_metadata_bytes,
@@ -4707,7 +4728,7 @@ impl PublicationContract {
             ));
         }
         self.replay_row_capacity
-            .checked_sub(self.replay_initial_row_count)
+            .checked_sub(self.replay_original_slot_boundary)
             .filter(|capacity| *capacity != 0)
             .ok_or_else(|| {
                 publication_input_error("publication replay reservation has no append slots")
@@ -5271,7 +5292,7 @@ const _: () = assert!(size_of::<PublicationControl>() == 144);
 const _: () = assert!(size_of::<PublicationBank>() == 50360);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
-const _: () = assert!(size_of::<PublicationContract>() == 272);
+const _: () = assert!(size_of::<PublicationContract>() == 424);
 const _: () = assert!(size_of::<SemanticTextRow>() == 16);
 const _: () = assert!(size_of::<TextBinding>() == 24);
 const _: () = assert!(size_of::<ModelUpdateBinding>() == 32);
@@ -7634,7 +7655,7 @@ fn runtime_contract_bytes(
         contract.nonterminal_intent_prefix_begin,
         contract.nonterminal_intent_prefix_end,
         contract.replay_row_capacity,
-        contract.replay_initial_row_count,
+        contract.replay_original_slot_boundary,
         contract.replay_raw_capacity_bytes,
         contract.replay_payload_capacity_bytes,
         contract.replay_metadata_bytes,
@@ -7649,6 +7670,7 @@ fn runtime_contract_bytes(
         material_u64(&mut bytes, field);
     }
     bytes.extend_from_slice(contract.nonterminal_intent_plan_digest.as_bytes());
+    bytes.extend_from_slice(contract.replay_reservation_identity.as_bytes());
     let model = contract.model_contract_layout;
     for field in [
         model.schema_begin,
@@ -9115,8 +9137,16 @@ impl PreparedContinuation {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublishedReaderAcquisition {
+    Allocated,
+    Initialized,
+    Entered,
+}
+
 struct PublishedReader {
     device: TrackedCudaSlice<PublicationLease>,
+    acquisition: PublishedReaderAcquisition,
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
     model_owners: Vec<Arc<ModelGenerationOwner>>,
@@ -12800,25 +12830,13 @@ fn initial_intent_records(
 
 fn initial_replay_append_records(
     binding: Option<&SemanticReplayAppendBinding>,
+    arena: Option<&SemanticTrainingViewArena>,
 ) -> Result<[SemanticStateRecord; 2], SemanticTransitionError> {
     use crate::semantic_training_view::{
         SemanticTrainingReplayAppendEntry, SemanticTrainingReplayAppendHeader,
     };
     let (entry_capacity, payload_capacity) = if let Some(binding) = binding {
-        if binding.row_capacity == 0
-            || binding.raw_byte_capacity == 0
-            || binding.append_groups.is_empty()
-            || binding.append_groups.len() > binding.row_capacity
-            || binding.metadata_bytes == 0
-            || binding.max_material_bytes == 0
-            || binding.total_material_bytes == 0
-            || binding.max_evidence_bytes == 0
-            || binding.payload_capacity_bytes == 0
-        {
-            return Err(publication_input_error(
-                "replay append requires its original finite row, payload and acquisition reservation",
-            ));
-        }
+        binding.validate()?;
         (binding.append_groups.len(), binding.payload_capacity_bytes)
     } else {
         (0, 0)
@@ -12836,6 +12854,11 @@ fn initial_replay_append_records(
         payload_capacity_bytes: u64::try_from(payload_capacity)
             .map_err(|_| publication_input_error("replay append payload capacity exceeds u64"))?,
         eligible_count: 0,
+        original_stage: arena.map_or(0, |arena| u64::from(arena.is_materialized())),
+        original_count: arena.map_or(0, |arena| arena.original_count() as u64),
+        original_prefix_identity: arena.map_or(Identity256::default(), |arena| {
+            arena.original_prefix_identity()
+        }),
         chain_head: Identity256::default(),
     };
     Ok([
@@ -12896,6 +12919,16 @@ fn validate_replay_append_records(
     };
     if header.abi != 1
         || header.capacity != contract.replay_append_entry_capacity()?
+        || header.original_stage > 1
+        || (contract.replay_row_capacity != 0
+            && header.original_count > contract.replay_original_slot_boundary)
+        || (header.original_stage == 0
+            && (header.original_count != 0
+                || header.count != 0
+                || header.original_prefix_identity != Identity256::default()))
+        || (header.original_stage == 1
+            && (header.original_count == 0
+                || header.original_prefix_identity == Identity256::default()))
         || header.count > header.capacity
         || header.eligible_count > header.count
         || entry_extent(header.count) != Some(entries.bytes.len())
@@ -15033,6 +15066,7 @@ pub struct SemanticTransitionSession {
     prepared_segment: Option<PreparedSegmentState>,
     prepared_resources: Vec<Arc<dyn Send + Sync>>,
     pending_replay_delivery: Option<PendingReplayDelivery>,
+    pending_training_materialization: Option<PendingTrainingMaterialization>,
     next_reader: u64,
     continuation_base: Option<u64>,
     text_binding: Option<Arc<TextBindingStorage>>,
@@ -16132,6 +16166,17 @@ mod prepared_completion_tests {
     }
 }
 
+struct PendingTrainingMaterialization {
+    base: SemanticPublishedIdentity,
+    lease_token: u64,
+    completion: Option<SemanticPublishedIdentity>,
+    handoff_reader: Option<u64>,
+    release_started: bool,
+    prepared: Option<crate::semantic_training_view::PreparedOriginalTrainingRoster>,
+    _source: TrackedCudaSlice<u8>,
+    _input: TrackedCudaSlice<crate::semantic_training_view::TrainingOriginalMaterializationInput>,
+}
+
 struct UnreleasedPublicationOwners {
     _graph: SemanticHypergraph,
     _publication: Arc<PublicationStorage>,
@@ -16143,6 +16188,7 @@ struct UnreleasedPublicationOwners {
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
     _pending_replay_delivery: Option<PendingReplayDelivery>,
+    _pending_training_materialization: Option<PendingTrainingMaterialization>,
     _prepared_segment: Option<PreparedSegmentState>,
     _text_binding: Option<Arc<TextBindingStorage>>,
     #[cfg(feature = "semantic-policy")]
@@ -16168,6 +16214,7 @@ impl Drop for SemanticTransitionSession {
         // Captured work retires before either the semantic owner or its banks.
         drop(self.captured.take());
         if self.pending_replay_delivery.is_some()
+            || self.pending_training_materialization.is_some()
             || !self.readers.is_empty()
             || !self.steps.is_empty()
             || self
@@ -16192,6 +16239,7 @@ impl Drop for SemanticTransitionSession {
                     _text_binding: self.text_binding.take(),
                     _prepared_resources: std::mem::take(&mut self.prepared_resources),
                     _pending_replay_delivery: self.pending_replay_delivery.take(),
+                    _pending_training_materialization: self.pending_training_materialization.take(),
                     _prepared_segment: self.prepared_segment.take(),
                     #[cfg(feature = "semantic-policy")]
                     _policy: self.policy.take(),
@@ -16542,6 +16590,15 @@ impl SemanticTransitionSession {
         let training_view = if update_count == 0 {
             None
         } else {
+            if self
+                .training_views
+                .as_ref()
+                .is_none_or(|arena| !arena.is_materialized())
+            {
+                return Err(publication_input_error(
+                    "prepared updates require the genuine original training roster",
+                ));
+            }
             Some(Arc::clone(self.training_views.as_ref().ok_or_else(
                 || {
                     publication_input_error(
@@ -21474,13 +21531,17 @@ impl SemanticTransitionSession {
             (Some(_), Some(model_witness)) => {
                 self.checked_prepared_content_witness(step, model_witness)?;
                 let owner = &self.steps[&step.token];
-                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals else {
+                let TensorContentSeals::Model(seals) = &owner.content[model_witness.index].seals
+                else {
                     return Err(publication_input_error(
                         "prepared block bounds require their original model-content witness",
                     ));
                 };
                 let prepared = owner.prepared.as_ref().expect("prepared model owner");
-                if seals.prepared.as_ref().is_none_or(|source| source.bank != bank)
+                if seals
+                    .prepared
+                    .as_ref()
+                    .is_none_or(|source| source.bank != bank)
                     || prepared.model_content_recorded & (1 << bank) == 0
                 {
                     return Err(publication_input_error(
@@ -24000,6 +24061,7 @@ impl SemanticTransitionSession {
         validate_parent_records(&parent, &tensors, &role_counts)?;
         parent.records.extend(initial_replay_append_records(
             parent.replay_append.as_ref(),
+            self.training_views.as_deref(),
         )?);
         let mut layouts = BTreeMap::new();
         let mut plans = Vec::new();
@@ -24144,7 +24206,7 @@ impl SemanticTransitionSession {
         let instance = Identity256::from_bytes(instance);
         let (
             replay_row_capacity,
-            replay_initial_row_count,
+            replay_original_slot_boundary,
             replay_raw_capacity_bytes,
             replay_payload_capacity_bytes,
         ) = if let Some(binding) = &parent.replay_append {
@@ -24155,8 +24217,8 @@ impl SemanticTransitionSession {
             (
                 u64::try_from(binding.row_capacity)
                     .map_err(|_| publication_input_error("replay row capacity exceeds u64"))?,
-                u64::try_from(arena.original_count()).map_err(|_| {
-                    publication_input_error("original replay row count exceeds u64")
+                u64::try_from(arena.original_slot_boundary()).map_err(|_| {
+                    publication_input_error("original replay slot boundary exceeds u64")
                 })?,
                 u64::try_from(binding.raw_byte_capacity)
                     .map_err(|_| publication_input_error("replay raw capacity exceeds u64"))?,
@@ -24187,7 +24249,7 @@ impl SemanticTransitionSession {
                 .nonterminal_intent
                 .map_or(0, |binding| binding.candidate_prefix_end),
             replay_row_capacity,
-            replay_initial_row_count,
+            replay_original_slot_boundary,
             replay_raw_capacity_bytes,
             replay_payload_capacity_bytes,
             replay_metadata_bytes: parent
@@ -24207,6 +24269,10 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .map_or(0, |binding| binding.max_evidence_bytes),
             model_generation: parent.model_generation,
+            replay_reservation_identity: crate::semantic_training_view::replay_reservation_identity(
+                parent.replay_append.as_ref(),
+                self.task_training_domain(),
+            ),
             policy_generation: parent.policy_generation,
             authority_generation: parent.authority_generation,
             semantic_owner: self.graph.transition_arena()[1],
@@ -24597,234 +24663,6 @@ impl SemanticTransitionSession {
         Ok(PublicationMaterial::decode(bytes)?.learning_phases)
     }
 
-    /// Admit a new immutable training arena after an exact cold restore, while
-    /// its Session is still private. The saved publication is the only source
-    /// of model, replay, receipt and optimizer bytes; only the live task
-    /// authority binding and its runtime contract are regenerated.
-    pub fn rebind_restored_training_arena(
-        &mut self,
-        source: &[u8],
-        witness: SemanticTaskGoalWitness,
-        rows: Vec<SemanticTrainingViewRow>,
-        objective: SemanticTrainingObjective,
-        replay_capacity: Option<SemanticReplayAppendBinding>,
-    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
-        self.ensure_quiescent()?;
-        if self.poisoned
-            || self.captured.is_some()
-            || !self.readers.is_empty()
-            || self.training_views.is_some()
-            || self.task.is_none()
-            || self.publication.is_none()
-        {
-            return Err(publication_input_error(
-                "training arena transfer requires one private restored publication",
-            ));
-        }
-        self.task_objective_law()
-            .ok_or(SemanticTransitionError::NotBound)?
-            .require_objective(&objective)?;
-        let result = (|| {
-            let mut material = PublicationMaterial::decode(source)?;
-            material.require_successful_recompute()?;
-            let original = material.bank.header;
-            let restored = self.read_publication_header(0)?;
-            let original_storage = self
-                .publication
-                .as_ref()
-                .expect("private restored publication");
-            let immutable_models = original_storage.immutable_model_owners();
-            if immutable_models.is_some() && original_storage.model_memory != material.model_memory
-            {
-                return Err(publication_input_error(
-                    "training arena transfer changed the immutable model alias geometry",
-                ));
-            }
-            if restored.recovered_instance != original.instance
-                || restored.instance == original.instance
-                || restored.publication_word != 0
-                || restored.logical_digest != original.logical_digest
-                || restored.state_digest != original.state_digest
-                || self.task_epoch != original.authority_generation
-            {
-                return Err(publication_input_error(
-                    "training arena source is not the exact private cold restoration",
-                ));
-            }
-            let (task, _) = self
-                .task
-                .as_ref()
-                .ok_or(SemanticTransitionError::NotBound)?;
-            let old_witness = task.goal_witness.ok_or(SemanticTransitionError::NotBound)?;
-            if task.identity() != material.contract.task_identity
-                || witness.semantic_root != old_witness.semantic_root
-                || witness.mandatory_link_count == 0
-                || witness.constraint_count == 0
-                || witness
-                    .authority_root
-                    .as_bytes()
-                    .iter()
-                    .all(|byte| *byte == 0)
-                || witness
-                    .mandatory_links_root
-                    .as_bytes()
-                    .iter()
-                    .all(|byte| *byte == 0)
-                || witness
-                    .constraints_root
-                    .as_bytes()
-                    .iter()
-                    .all(|byte| *byte == 0)
-            {
-                return Err(publication_input_error(
-                    "training arena transfer changed the original task content or semantic goal",
-                ));
-            }
-            let next_epoch = self
-                .task_epoch
-                .checked_add(1)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            let model_mode = material.model_numerical_mode()?.to_vec();
-            let (task, device) = self
-                .task
-                .as_mut()
-                .ok_or(SemanticTransitionError::NotBound)?;
-            task.goal_witness = Some(witness);
-            let task_identity = task.identity();
-            if task_identity == material.contract.task_identity {
-                return Err(publication_input_error(
-                    "training arena transfer requires a new current authority binding",
-                ));
-            }
-            let words = task.words(self.graph.transition_arena()[1]);
-            self.provider
-                .htod_sync_copy_into_tracked(&words, device)
-                .map_err(|error| runtime_error("training arena task owner upload", error))?;
-            self.training_views = Some(SemanticTrainingViewArena::allocate(
-                &self.provider,
-                &self.domain,
-                rows,
-                objective,
-                task.spec.training_domain.as_ref().ok_or_else(|| {
-                    publication_input_error(
-                        "training arena transfer requires the original pre-action input domain",
-                    )
-                })?,
-                task_identity,
-                task.content().0,
-                task.content().1,
-                replay_capacity,
-            )?);
-            material.contract.task_identity = task_identity;
-            material.contract.authority_generation = next_epoch;
-            material.contract.semantic_owner = self.graph.transition_arena()[1];
-            let capacities = material
-                .ranges
-                .iter()
-                .filter(|item| item.range.role != 43)
-                .map(|item| (item.range.role, item.range.index, item.capacity))
-                .collect();
-            let runtime = initial_runtime_contract_record(
-                material.contract,
-                &material.role_counts,
-                &material.terminals,
-                &material.layouts,
-                capacities,
-                &model_mode,
-                &material.model_memory,
-            )?;
-            let runtime_range = material
-                .ranges
-                .iter_mut()
-                .find(|item| item.range.role == 43 && item.range.index == 0)
-                .ok_or(SemanticTransitionError::ObservationMismatch)?;
-            if runtime.bytes.len() > runtime_range.capacity {
-                return Err(publication_input_error(
-                    "training arena runtime contract exceeds its retained allocation",
-                ));
-            }
-            runtime_range.bytes = runtime.bytes;
-            let plans = material
-                .ranges
-                .into_iter()
-                .map(|item| PublicationAllocationPlan {
-                    role: item.range.role,
-                    index: item.range.index,
-                    capacity: item.capacity,
-                    length: item.bytes.len(),
-                    logical_begin: item.range.logical_begin,
-                    logical_end: item.range.logical_end,
-                    payload: if matches!(item.range.role, 18..=25) {
-                        PublicationPayload::Uncomputed
-                    } else {
-                        PublicationPayload::Metadata(item.bytes)
-                    },
-                })
-                .collect::<Vec<_>>();
-            let model_payloads = material
-                .model_allocations
-                .into_iter()
-                .map(PublicationPayload::Metadata)
-                .collect::<Vec<_>>();
-            let mut instance = [0u8; 32];
-            getrandom::fill(&mut instance)
-                .map_err(|error| runtime_error("training arena instance entropy", error))?;
-            let instance = Identity256::from_bytes(instance);
-            if instance == original.instance || instance == restored.instance {
-                return Err(publication_input_error(
-                    "training arena requires a fresh instance",
-                ));
-            }
-            let (storage, uploads, model_owners) = PublicationStorage::allocate(
-                &self.provider,
-                &plans,
-                material.layouts,
-                material.model_memory,
-                &model_payloads,
-                material.contract,
-                &material.terminals,
-                instance,
-                immutable_models.as_deref(),
-            )?;
-            let mut bank = material.bank;
-            bank.header.abi = 0;
-            bank.header.instance = instance;
-            bank.header.recovered_instance = original.instance;
-            bank.header.sealed_epoch = 0;
-            bank.header.base_word = 0;
-            bank.header.publication_word = 0;
-            bank.header.semantic_owner = material.contract.semantic_owner;
-            bank.header.semantic_slot = u64::from(self.root.slot());
-            bank.header.semantic_generation = self.root.generation();
-            bank.header.neural_bank = 0;
-            bank.header.authority_generation = next_epoch;
-            self.publication = Some(Arc::new(storage));
-            self.publication_uploads = uploads;
-            self.model_owners = model_owners;
-            self.task_epoch = next_epoch;
-            self.bind_training_publication()?;
-            let published = self.initialize_publication(
-                bank,
-                &material.terminals,
-                &material.role_counts,
-                original.rng_binding()?,
-                5,
-                None,
-            )?;
-            self.restore_replay_append_rows()?;
-            if published.logical_digest == original.logical_digest
-                || published.state_digest == original.state_digest
-            {
-                return Err(SemanticTransitionError::ObservationMismatch);
-            }
-            Ok(published)
-        })();
-        if result.is_err() {
-            self.poisoned = true;
-        }
-        result
-    }
-
     /// Re-read the selected publication after its external model owner has been
     /// reconstructed and prove that it is still the fresh instance recovered
     /// from these exact original logical and state roots.
@@ -25199,7 +25037,23 @@ impl SemanticTransitionSession {
             recorder.read_write(&self.readers[&token].device);
         }
         let execute = self.execute.clone();
+        let acquisition = if operation == 2 {
+            token.map(|token| {
+                &mut self
+                    .readers
+                    .get_mut(&token)
+                    .expect("installed acquisition reader")
+                    .acquisition
+            })
+        } else {
+            None
+        };
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
+            if let Some(acquisition) = acquisition {
+                // Retain the may-enter boundary before the driver call, including
+                // a failed launch or cleanup whose device outcome is unknown.
+                *acquisition = PublishedReaderAcquisition::Entered;
+            }
             // SAFETY: command, bank directories, storage and optional lease all
             // have actual recorded owners, and the common descriptor ABI is fixed.
             unsafe {
@@ -25299,11 +25153,6 @@ impl SemanticTransitionSession {
             self.observe(proposal)?.into_published()?;
         }
         self.ensure_quiescent()?;
-        let storage = Arc::clone(
-            self.publication
-                .as_ref()
-                .ok_or(SemanticTransitionError::NotBound)?,
-        );
         let token = self
             .next_reader
             .checked_add(1)
@@ -25315,21 +25164,51 @@ impl SemanticTransitionSession {
             token,
             PublishedReader {
                 device,
+                acquisition: PublishedReaderAcquisition::Allocated,
                 aliases: Arc::new(()),
                 consumer_streams: BTreeSet::new(),
                 model_owners: Vec::new(),
             },
         );
-        // Lease storage is retained before upload or Acquire can enqueue.
-        if let Err(error) = upload_publication(
-            &self.provider,
-            &[PublicationLease::default()],
-            &self.readers[&token].device,
-        ) {
-            self.poisoned = true;
-            return Err(error);
+        self.continue_acquire_reader(token)
+    }
+
+    fn continue_acquire_reader(
+        &mut self,
+        token: u64,
+    ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        if self.readers[&token].acquisition == PublishedReaderAcquisition::Allocated {
+            // The retained reader precedes even initialization. After a failed
+            // upload, resolution joins the original stream before retrying this
+            // idempotent prefix; no Acquire has entered at this stage.
+            if let Err(error) = upload_publication(
+                &self.provider,
+                &[PublicationLease::default()],
+                &self.readers[&token].device,
+            ) {
+                self.poisoned = true;
+                return Err(error);
+            }
+            self.readers
+                .get_mut(&token)
+                .expect("installed acquisition reader")
+                .acquisition = PublishedReaderAcquisition::Initialized;
         }
-        self.publication_command(2, Some(token))?;
+        if self.readers[&token].acquisition == PublishedReaderAcquisition::Initialized {
+            self.publication_command(2, Some(token))?;
+        }
+        self.finish_acquired_reader(token)
+    }
+
+    fn finish_acquired_reader(
+        &mut self,
+        token: u64,
+    ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        let storage = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
         let lease = self.publication_read(self.readers[&token].device.view())?[0];
         if lease.status != 0 {
             self.readers.remove(&token);
@@ -28069,8 +27948,18 @@ impl SemanticTransitionSession {
                 "publication reader still owns aliases or an unfinished transition",
             ));
         }
+        if let Err(error) = self.publication_command(3, Some(lease.token)) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        self.finish_retired_reader(lease)
+    }
+
+    fn finish_retired_reader(
+        &mut self,
+        lease: &mut SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
         let result = (|| {
-            self.publication_command(3, Some(lease.token))?;
             let result = self.publication_read(self.readers[&lease.token].device.view())?[0];
             if result.status != 0
                 || result.active != 0
@@ -28706,6 +28595,7 @@ impl SemanticTransitionSession {
             prepared_segment: None,
             prepared_resources: Vec::new(),
             pending_replay_delivery: None,
+            pending_training_materialization: None,
             continuation_base: None,
             text_binding: None,
             admitted_transition: None,
@@ -29260,6 +29150,24 @@ impl SemanticTransitionSession {
     }
 
     fn bind_training_publication(&mut self) -> Result<(), SemanticTransitionError> {
+        let reservation_identity = crate::semantic_training_view::replay_reservation_identity(
+            self.training_views
+                .as_ref()
+                .and_then(|arena| arena.replay_capacity()),
+            self.task_training_domain(),
+        );
+        if self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .contract_value
+            .replay_reservation_identity
+            != reservation_identity
+        {
+            return Err(publication_input_error(
+                "publication changed its original replay reservation identity",
+            ));
+        }
         let Some(arena) = self.training_views.as_mut() else {
             return Ok(());
         };
@@ -29275,7 +29183,7 @@ impl SemanticTransitionSession {
         let expected = arena.replay_capacity().map_or([0; 8], |capacity| {
             [
                 capacity.row_capacity as u64,
-                arena.original_count() as u64,
+                arena.original_slot_boundary() as u64,
                 capacity.raw_byte_capacity as u64,
                 capacity.payload_capacity_bytes as u64,
                 capacity.metadata_bytes,
@@ -29288,7 +29196,7 @@ impl SemanticTransitionSession {
         if expected
             != [
                 contract.replay_row_capacity,
-                contract.replay_initial_row_count,
+                contract.replay_original_slot_boundary,
                 contract.replay_raw_capacity_bytes,
                 contract.replay_payload_capacity_bytes,
                 contract.replay_metadata_bytes,
@@ -29345,12 +29253,434 @@ impl SemanticTransitionSession {
         )
     }
 
+    /// Materialize the genuine original roster into its already reserved backing once.
+    pub fn materialize_original_training_roster(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        rows: Vec<SemanticTrainingViewRow>,
+        objective: SemanticTrainingObjective,
+        consumer_streams: &[u64],
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.ensure_rebindable_with_prefill()?;
+        self.checked_reader(lease)?;
+        if self.readers.len() != 1
+            || self.admitted_transition.is_some()
+            || self.continuation_base.is_some()
+            || lease.header.terminal != 0
+        {
+            return Err(publication_input_error(
+                "original roster admission requires its sole quiescent nonterminal parent",
+            ));
+        }
+        self.quiesce_step_content(lease, consumer_streams)?;
+        self.task_objective_law()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .require_objective(&objective)?;
+        let task = &self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0;
+        let (content, truth) = task.content();
+        let arena = self
+            .training_views
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if Arc::strong_count(arena) != 1 || arena.replay_capacity().is_none() {
+            return Err(publication_input_error(
+                "original roster admission cannot replace or alias its cold reservation",
+            ));
+        }
+        let prepared =
+            arena.prepare_materialization(rows, objective, task.identity(), content, truth)?;
+        let mut packed = Vec::new();
+        for bytes in [
+            publication_abi_bytes(&prepared.descriptors),
+            prepared.raw.clone(),
+            publication_abi_bytes(&[prepared.objective]),
+            publication_abi_bytes(&prepared.groups),
+            publication_abi_bytes(&prepared.group_members),
+            publication_abi_bytes(&prepared.canaries),
+        ] {
+            packed.extend_from_slice(&bytes);
+        }
+        #[cfg(feature = "semantic-policy")]
+        packed.extend_from_slice(&publication_abi_bytes(&prepared.protected_members));
+        let destinations = arena.materialization_destinations();
+        let destination_bytes = destinations.iter().try_fold(0usize, |sum, destination| {
+            sum.checked_add(destination.len())
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
+        if packed.len() != destination_bytes {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let source = allocate_publication::<u8>(&self.provider, packed.len())?;
+        upload_publication(&self.provider, &packed, &source)?;
+        let mut input = crate::semantic_training_view::TrainingOriginalMaterializationInput {
+            lease: self.readers[&lease.token].device.device_ptr_value(),
+            source: source.device_ptr_value(),
+            source_bytes: packed.len() as u64,
+            destinations: [0; 7],
+            lengths: [0; 7],
+            original_count: prepared.initial_row_count as u64,
+            original_prefix_identity: prepared.prefix_identity,
+        };
+        for (index, destination) in destinations.iter().enumerate() {
+            input.destinations[index] = destination.device_ptr_value();
+            input.lengths[index] = destination.len() as u64;
+        }
+        let input_device = allocate_publication::<
+            crate::semantic_training_view::TrainingOriginalMaterializationInput,
+        >(&self.provider, 1)?;
+        upload_publication(&self.provider, &[input], &input_device)?;
+        let publication = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let mut descriptor = self.descriptor();
+        descriptor.publication = PublicationCommand {
+            control: publication.control.device_ptr_value(),
+            lease: input_device.device_ptr_value(),
+            operation: 9,
+        };
+        let mut recorder = self.kernel_recorder();
+        recorder.read(&source);
+        recorder.read(&input_device);
+        recorder.read(&self.readers[&lease.token].device);
+        for destination in &destinations {
+            recorder.write(destination);
+        }
+        self.pending_training_materialization = Some(PendingTrainingMaterialization {
+            base: lease.identity,
+            lease_token: lease.token,
+            completion: None,
+            handoff_reader: None,
+            release_started: false,
+            prepared: Some(prepared),
+            _source: source,
+            _input: input_device,
+        });
+        let execute = self.execute.clone();
+        let mut entered = false;
+        let result = enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
+            entered = true;
+            // SAFETY: the original pending owner retains every source and exact reserved destination through the join.
+            unsafe {
+                execute.launch_in(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (descriptor,),
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        });
+        if let Err(error) = result {
+            if entered {
+                self.poisoned = true;
+            } else {
+                self.pending_training_materialization = None;
+            }
+            return Err(error);
+        }
+        self.resolve_training_arena(lease)
+    }
+
+    pub fn training_arena_pending(&self) -> bool {
+        self.pending_training_materialization.is_some()
+    }
+
+    pub fn validate_training_arena_parent(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let pending = self
+            .pending_training_materialization
+            .as_ref()
+            .ok_or(SemanticTransitionError::NoPendingLaunch)?;
+        if !lease.active
+            || !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+            || !self.readers.contains_key(&lease.token)
+            || lease.identity != pending.base
+            || lease.token != pending.lease_token
+        {
+            return Err(publication_input_error(
+                "training arena resolver requires its original retained parent",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn resolve_training_arena(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<SemanticPublishedIdentity, SemanticTransitionError> {
+        self.validate_training_arena_parent(lease)?;
+        let pending = self
+            .pending_training_materialization
+            .as_ref()
+            .expect("checked original operation");
+        if let Some(identity) = pending.completion {
+            return Ok(identity);
+        }
+        let base = pending.base;
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "original training roster materialization",
+            CudaStream::synchronize,
+        )?;
+        let publication = Arc::clone(
+            self.publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let control = self.publication_read(publication.control.view())?[0];
+        let expected_word = (((base.word >> 1) + 1) << 1) | ((base.word & 1) ^ 1);
+        if control.word == base.word && control.refusal != 0 {
+            let status = control.refusal;
+            self.pending_training_materialization = None;
+            self.poisoned = false;
+            return Err(SemanticTransitionError::PublicationRefused { status });
+        }
+        let header = self.read_publication_header((control.word & 1) as usize)?;
+        if control.word != expected_word
+            || header.publication_word != expected_word
+            || header.instance != base.instance
+            || header.terminal != lease.header.terminal
+            || header.fuel != lease.header.fuel
+            || header.training_cursor != lease.header.training_cursor
+            || header.training_rng != lease.header.training_rng
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let arena = Arc::get_mut(
+            self.training_views
+                .as_mut()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        )
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let pending = self
+            .pending_training_materialization
+            .as_mut()
+            .expect("retained original operation");
+        let prepared = pending
+            .prepared
+            .take()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        arena.finish_materialization(prepared);
+        let identity = SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        };
+        self.poisoned = false;
+        pending.completion = Some(identity);
+        Ok(identity)
+    }
+
+    /// Private, inactive storage for the original operation's Python handoff.
+    /// It is not a reader and every published access rejects it until Acquire.
+    pub fn training_arena_handoff_slot(
+        &self,
+        source: &SemanticPublishedLease,
+    ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        self.checked_reader(source)?;
+        Ok(SemanticPublishedLease {
+            _model_owners: Vec::new(),
+            issuer: Arc::clone(&self.publication_issuer),
+            token: 0,
+            identity: source.identity,
+            header: source.header,
+            source: source.source,
+            directory: Vec::new(),
+            active: false,
+        })
+    }
+
+    /// Fill the already-retained handoff through the sole canonical Acquire.
+    pub fn acquire_training_arena_completion(
+        &mut self,
+        source: &SemanticPublishedLease,
+        successor: &mut SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let identity = self.resolve_training_arena(source)?;
+        if successor.active {
+            if successor.identity != identity {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            return Ok(());
+        }
+        if successor.token != 0 || !Arc::ptr_eq(&successor.issuer, &self.publication_issuer) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut pending = self
+            .pending_training_materialization
+            .take()
+            .expect("resolved original operation");
+        let acquired = if let Some(token) = pending.handoff_reader {
+            // Join the original prefix before continuing. Only its retained
+            // unentered suffix may enqueue; an entered Acquire is observed only.
+            let result = wait_on_stream(
+                &self.stream,
+                &mut self.poisoned,
+                &mut self.stream_waits,
+                "original training successor acquisition",
+                CudaStream::synchronize,
+            )
+            .and_then(|()| self.continue_acquire_reader(token));
+            if result.is_ok() {
+                self.poisoned = false;
+            }
+            result
+        } else {
+            let token = self
+                .next_reader
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted);
+            match token {
+                Err(error) => Err(error),
+                Ok(token) => {
+                    pending.handoff_reader = Some(token);
+                    let result = self.acquire();
+                    if result.is_err() && !self.readers.contains_key(&token) {
+                        pending.handoff_reader = None;
+                    }
+                    result
+                }
+            }
+        };
+        if acquired.is_err()
+            && pending
+                .handoff_reader
+                .is_some_and(|token| !self.readers.contains_key(&token))
+        {
+            pending.handoff_reader = None;
+            if matches!(
+                &acquired,
+                Err(SemanticTransitionError::PublicationRefused { .. })
+            ) {
+                self.poisoned = false;
+            }
+        }
+        self.pending_training_materialization = Some(pending);
+        *successor = acquired?;
+        if successor.identity != identity {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
+    }
+
+    /// The complete successor and checkpoint roster exist before this release.
+    pub fn acknowledge_training_arena_completion(
+        &mut self,
+        source: &mut SemanticPublishedLease,
+        successor: &SemanticPublishedLease,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.validate_training_arena_parent(source)?;
+        if self
+            .pending_training_materialization
+            .as_ref()
+            .and_then(|pending| pending.completion)
+            != Some(successor.identity)
+            || !successor.active
+            || !Arc::ptr_eq(&successor.issuer, &self.publication_issuer)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut pending = self
+            .pending_training_materialization
+            .take()
+            .expect("checked original completion");
+        let result = (|| {
+            if pending.release_started {
+                wait_on_stream(
+                    &self.stream,
+                    &mut self.poisoned,
+                    &mut self.stream_waits,
+                    "original training source retirement",
+                    CudaStream::synchronize,
+                )?;
+                let actual = self.publication_read(self.readers[&source.token].device.view())?[0];
+                if actual.abi != 1
+                    || actual.instance != source.identity.instance
+                    || actual.word != source.identity.word
+                    || actual.active > 1
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                if actual.active == 0 {
+                    self.finish_retired_reader(source)?;
+                    self.poisoned = false;
+                    return Ok(());
+                }
+                // The joined original device lease proves no decrement committed.
+                // Only this known retained reader may retry its retirement.
+                self.poisoned = false;
+            }
+            self.training_arena_state(successor)?;
+            pending.release_started = true;
+            self.release_published_reader(source, consumer_streams)
+        })();
+        if let Err(error) = result {
+            self.pending_training_materialization = Some(pending);
+            return Err(error);
+        }
+        self.steps.remove(&source.token);
+        Ok(())
+    }
+
+    pub fn training_arena_state(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(u64, u64, u64, Identity256), SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let record = self.read_published_control_record(lease, 56)?;
+        if record.bytes.len()
+            < size_of::<crate::semantic_training_view::SemanticTrainingReplayAppendHeader>()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        // SAFETY: the original publication owns this complete all-integer native record.
+        let header = unsafe {
+            record
+                .bytes
+                .as_ptr()
+                .cast::<crate::semantic_training_view::SemanticTrainingReplayAppendHeader>()
+                .read_unaligned()
+        };
+        let arena = self
+            .training_views
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if header.original_stage != u64::from(arena.is_materialized())
+            || header.original_count != arena.original_count() as u64
+            || header.original_prefix_identity != arena.original_prefix_identity()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok((
+            header.original_stage,
+            header.original_count,
+            arena.original_slot_boundary() as u64,
+            header.original_prefix_identity,
+        ))
+    }
+
     /// Bind every admitted training view and finite append reservation once cold.
     /// No row is selected here and the arena cannot be replaced after binding.
     pub fn bind_training_view_arena(
         &mut self,
         rows: Vec<SemanticTrainingViewRow>,
-        objective: SemanticTrainingObjective,
+        objective: Option<SemanticTrainingObjective>,
         replay_capacity: Option<SemanticReplayAppendBinding>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
@@ -29359,9 +29689,11 @@ impl SemanticTransitionSession {
                 "training-view arena requires one cold task binding and cannot be replaced",
             ));
         }
-        self.task_objective_law()
-            .expect("checked cold task binding")
-            .require_objective(&objective)?;
+        if let Some(objective) = &objective {
+            self.task_objective_law()
+                .expect("checked cold task binding")
+                .require_objective(objective)?;
+        }
         let task_identity = self
             .task
             .as_ref()
@@ -33049,7 +33381,10 @@ impl SemanticTransitionSession {
     fn ensure_quiescent(&self) -> Result<(), SemanticTransitionError> {
         if self.is_poisoned() {
             Err(SemanticTransitionError::Poisoned)
-        } else if self.pending || self.pending_replay_delivery.is_some() {
+        } else if self.pending
+            || self.pending_replay_delivery.is_some()
+            || self.pending_training_materialization.is_some()
+        {
             Err(SemanticTransitionError::OverlappingLaunch)
         } else {
             Ok(())

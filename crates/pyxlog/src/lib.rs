@@ -1254,6 +1254,11 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py()
             .get_type::<semantic_transition::SemanticReplayDeliveryPending>(),
     )?;
+    m.add(
+        "SemanticTrainingArenaPending",
+        m.py()
+            .get_type::<semantic_transition::SemanticTrainingArenaPending>(),
+    )?;
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionColdTask>()?;
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionFreshParent>()?;
     m.add_class::<semantic_transition::PySemanticTransitionTaskUse>()?;

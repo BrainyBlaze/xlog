@@ -32,6 +32,41 @@ const TRAINING_VIEW_HEADER_BYTES: usize = 264;
 const TRAINING_VIEW_ROW_BYTES: usize = 84;
 const PROPOSAL_TRANSITION: u64 = 1;
 pub const SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI: u64 = 3;
+
+pub(crate) fn replay_reservation_identity(
+    binding: Option<&SemanticReplayAppendBinding>,
+    domain: Option<&SemanticTrainingDomain>,
+) -> Identity256 {
+    let mut hash = Sha256::new();
+    hash.update(b"xlog.semantic.original-replay-reservation.v1\0");
+    hash.update(
+        domain
+            .map_or(Identity256::default(), SemanticTrainingDomain::identity)
+            .as_bytes(),
+    );
+    hash.update([u8::from(binding.is_some())]);
+    if let Some(binding) = binding {
+        hash.update((binding.row_capacity as u64).to_le_bytes());
+        hash.update((binding.raw_byte_capacity as u64).to_le_bytes());
+        hash.update((binding.append_groups.len() as u64).to_le_bytes());
+        for group in &binding.append_groups {
+            hash.update((group.len() as u64).to_le_bytes());
+            for kind in group {
+                hash.update(kind.to_le_bytes());
+            }
+        }
+        for value in [
+            binding.metadata_bytes,
+            binding.max_material_bytes,
+            binding.total_material_bytes,
+            binding.max_evidence_bytes,
+            binding.payload_capacity_bytes as u64,
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+    }
+    Identity256::from_bytes(hash.finalize().into())
+}
 pub(crate) const SEMANTIC_TRAINING_COMMITTED_APPEND_ORIGIN: u64 = u64::MAX - 1;
 
 /// Validated geometry of the bytes consumed by native training-view selection.
@@ -462,6 +497,9 @@ pub(crate) struct SemanticTrainingReplayAppendHeader {
     pub payload_used_bytes: u64,
     pub payload_capacity_bytes: u64,
     pub eligible_count: u64,
+    pub original_stage: u64,
+    pub original_count: u64,
+    pub original_prefix_identity: Identity256,
     pub chain_head: Identity256,
 }
 
@@ -482,7 +520,7 @@ pub(crate) struct SemanticTrainingReplayAppendEntry {
 unsafe impl DeviceRepr for SemanticTrainingReplayAppendHeader {}
 unsafe impl DeviceRepr for SemanticTrainingReplayAppendEntry {}
 
-const _: () = assert!(size_of::<SemanticTrainingReplayAppendHeader>() == 80);
+const _: () = assert!(size_of::<SemanticTrainingReplayAppendHeader>() == 128);
 const _: () = assert!(size_of::<SemanticTrainingReplayAppendEntry>() == 480);
 
 struct TrainingPublicationBinding {
@@ -571,6 +609,7 @@ struct TrainingViewLaunch {
     parents: u64,
     cold_work: u64,
     initial_row_count: u64,
+    original_slot_boundary: u64,
     objective_template: u64,
     groups_template: u64,
     group_members_template: u64,
@@ -881,7 +920,10 @@ impl SemanticSelectedTrainingView {
 
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn protected_members(&self) -> DeviceMemoryView<u64> {
-        self.arena.protected_members.view()
+        self.arena
+            .protected_members
+            .view()
+            .slice(..self.arena.protected_member_count)
     }
 
     pub fn token_ids(&self) -> DeviceMemoryView<i64> {
@@ -1048,6 +1090,7 @@ impl SemanticSelectedTrainingView {
             cold_work: cold_work.map_or(0, |work| *work.device_ptr()),
             initial_row_count: u64::try_from(self.arena.initial_row_count)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            original_slot_boundary: self.arena.original_slot_boundary as u64,
             objective_template: self.arena.objective.device_ptr_value(),
             groups_template: self.arena.groups.device_ptr_value(),
             group_members_template: self.arena.group_members.device_ptr_value(),
@@ -1153,6 +1196,47 @@ impl SemanticSelectedTrainingView {
     }
 }
 
+/// The genuine original roster, fully checked before any reserved device slot is written.
+pub(crate) struct PreparedOriginalTrainingRoster {
+    pub descriptors: Vec<TrainingViewRowDescriptor>,
+    pub raw: Vec<u8>,
+    pub objective: SemanticTrainingObjectiveRecord,
+    pub groups: Vec<SemanticTrainingObjectiveGroupRecord>,
+    pub group_members: Vec<u64>,
+    pub canaries: Vec<SemanticTrainingCanaryRecord>,
+    pub protected_members: Vec<u64>,
+    #[cfg(feature = "semantic-policy")]
+    actor_group_member_count: u64,
+    #[cfg(feature = "semantic-policy")]
+    actor_group_members: Box<[FrozenPolicyGroupMember]>,
+    #[cfg(feature = "semantic-policy")]
+    edit_group_members: Box<[FrozenPolicyGroupMember]>,
+    pub initial_row_count: usize,
+    pub original_slot_boundary: usize,
+    row_bytes: usize,
+    capacity: usize,
+    row_capacity: usize,
+    materialized: bool,
+    protected_member_count: usize,
+    pub prefix_identity: Identity256,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct TrainingOriginalMaterializationInput {
+    pub lease: u64,
+    pub source: u64,
+    pub source_bytes: u64,
+    pub destinations: [u64; 7],
+    pub lengths: [u64; 7],
+    pub original_count: u64,
+    pub original_prefix_identity: Identity256,
+}
+
+// SAFETY: the private materialization launch ABI contains only initialized u64 and identity words.
+unsafe impl DeviceRepr for TrainingOriginalMaterializationInput {}
+const _: () = assert!(size_of::<TrainingOriginalMaterializationInput>() == 176);
+
 /// Cold-reserved replay storage used by the native Update selector.
 pub(crate) struct SemanticTrainingViewArena {
     training_domain: SemanticTrainingDomain,
@@ -1176,6 +1260,10 @@ pub(crate) struct SemanticTrainingViewArena {
     edit_group_members: Box<[FrozenPolicyGroupMember]>,
     row_count: usize,
     initial_row_count: usize,
+    original_slot_boundary: usize,
+    materialized: bool,
+    protected_member_count: usize,
+    prefix_identity: Identity256,
     row_bytes: usize,
     publication: Option<TrainingPublicationBinding>,
     replay_capacity: Option<SemanticReplayAppendBinding>,
@@ -1186,6 +1274,85 @@ pub(crate) struct SemanticTrainingViewArena {
 impl SemanticTrainingViewArena {
     pub(crate) fn original_count(&self) -> usize {
         self.initial_row_count
+    }
+
+    pub(crate) fn original_slot_boundary(&self) -> usize {
+        self.original_slot_boundary
+    }
+
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.materialized
+    }
+
+    pub(crate) fn original_prefix_identity(&self) -> Identity256 {
+        self.prefix_identity
+    }
+
+    pub(crate) fn physical_ordinal(
+        &self,
+        ordinal: usize,
+    ) -> Result<usize, SemanticTransitionError> {
+        if ordinal < self.initial_row_count {
+            return Ok(ordinal);
+        }
+        self.original_slot_boundary
+            .checked_add(ordinal - self.initial_row_count)
+            .filter(|physical| *physical < self.row_count)
+            .ok_or_else(|| input_error("training row exceeds its original reserved suffix"))
+    }
+
+    pub(crate) fn prepare_materialization(
+        &self,
+        rows: Vec<SemanticTrainingViewRow>,
+        objective: SemanticTrainingObjective,
+        task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        expected_truth: [SemanticTruth; 3],
+    ) -> Result<PreparedOriginalTrainingRoster, SemanticTransitionError> {
+        if self.materialized || rows.is_empty() {
+            return Err(input_error(
+                "original training roster materializes exactly once from genuine rows",
+            ));
+        }
+        Self::prepare_original_roster(
+            rows,
+            Some(objective),
+            &self.training_domain,
+            task_identity,
+            task_content,
+            expected_truth,
+            &self.replay_capacity,
+        )
+    }
+
+    pub(crate) fn finish_materialization(&mut self, prepared: PreparedOriginalTrainingRoster) {
+        self.initial_row_count = prepared.initial_row_count;
+        self.materialized = true;
+        self.protected_member_count = prepared.protected_member_count;
+        self.prefix_identity = prepared.prefix_identity;
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.actor_group_member_count = prepared.actor_group_member_count;
+            self.actor_group_members = prepared.actor_group_members;
+            self.edit_group_members = prepared.edit_group_members;
+        }
+    }
+
+    pub(crate) fn materialization_destinations(&self) -> Vec<DeviceMemoryView<u8>> {
+        // SAFETY: these native scalar ABI buffers have fully initialized integer layouts.
+        let mut views = vec![
+            unsafe { self.descriptors.view().cast::<u8>() }.expect("descriptor byte layout"),
+            self.raw.view(),
+            unsafe { self.objective.view().cast::<u8>() }.expect("objective byte layout"),
+            unsafe { self.groups.view().cast::<u8>() }.expect("group byte layout"),
+            unsafe { self.group_members.view().cast::<u8>() }.expect("member byte layout"),
+            unsafe { self.canaries.view().cast::<u8>() }.expect("canary byte layout"),
+        ];
+        #[cfg(feature = "semantic-policy")]
+        views.push(
+            unsafe { self.protected_members.view().cast::<u8>() }.expect("protected byte layout"),
+        );
+        views
     }
 
     pub(crate) fn row_capacity(&self) -> usize {
@@ -1273,7 +1440,7 @@ impl SemanticTrainingViewArena {
         let rows = extent(self.row_count)?;
         let original_rows = extent(self.initial_row_count)?;
         let append_slots = rows
-            .checked_sub(original_rows)
+            .checked_sub(extent(self.original_slot_boundary)?)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let members = extent(self.group_members.len())?;
         let candidates = extent(origin_candidates.map_or(0, TrackedCudaSlice::len))?;
@@ -1320,6 +1487,11 @@ impl SemanticTrainingViewArena {
     }
 
     fn require_authenticated_appends(&self) -> Result<(), SemanticTransitionError> {
+        if !self.materialized {
+            return Err(input_error(
+                "original training reservation has no admitted full roster",
+            ));
+        }
         if !self.appends_authenticated.load(Ordering::Acquire) {
             return Err(input_error(
                 "restored replay appends require their original receipts and canonical rows to be authenticated",
@@ -1338,7 +1510,7 @@ impl SemanticTrainingViewArena {
     ) -> Result<(), SemanticTransitionError> {
         let queue_bytes = self
             .row_count
-            .checked_sub(self.initial_row_count)
+            .checked_sub(self.original_slot_boundary)
             .and_then(|slots| slots.checked_mul(size_of::<SemanticTrainingReplayAppendEntry>()))
             .and_then(|bytes| bytes.checked_add(size_of::<SemanticTrainingReplayAppendHeader>()))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -1379,8 +1551,8 @@ impl SemanticTrainingViewArena {
         ordinal: usize,
         row: &SemanticTrainingViewRow,
     ) -> Result<TrainingViewRowDescriptor, SemanticTransitionError> {
-        if ordinal < self.initial_row_count
-            || ordinal >= self.row_count
+        if !self.materialized
+            || ordinal < self.initial_row_count
             || row.basis != SemanticTrainingViewBasis::Episode
             || row.bytes.len() != self.row_bytes
         {
@@ -1391,7 +1563,7 @@ impl SemanticTrainingViewArena {
         validate_row(
             ordinal,
             row,
-            ordinal
+            self.physical_ordinal(ordinal)?
                 .checked_mul(self.row_bytes)
                 .ok_or(SemanticTransitionError::GenerationExhausted)?,
             &self.training_domain,
@@ -1505,25 +1677,22 @@ impl SemanticTrainingViewArena {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "arena retains the task, numerical law and original input domain"
+        reason = "one original roster owns the task, objective and reserved geometry"
     )]
-    pub(crate) fn allocate(
-        provider: &Arc<CudaKernelProvider>,
-        domain: &ResidentExecutionDomain,
+    fn prepare_original_roster(
         rows: Vec<SemanticTrainingViewRow>,
-        objective: SemanticTrainingObjective,
+        objective: Option<SemanticTrainingObjective>,
         training_domain: &SemanticTrainingDomain,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
         expected_truth: [SemanticTruth; 3],
-        replay_binding: Option<SemanticReplayAppendBinding>,
-    ) -> Result<Arc<Self>, SemanticTransitionError> {
-        validate_execution_domain(provider, domain)
-            .map_err(|error| runtime_error("training-view domain validation", error))?;
-        if rows.is_empty() {
-            return Err(input_error(
-                "training-view arena requires at least one admitted row",
-            ));
+        replay_binding: &Option<SemanticReplayAppendBinding>,
+    ) -> Result<PreparedOriginalTrainingRoster, SemanticTransitionError> {
+        if let Some(binding) = replay_binding {
+            binding.validate()?;
+        }
+        if objective.is_none() != rows.is_empty() || (rows.is_empty() && replay_binding.is_none()) {
+            return Err(input_error("unmaterialized training storage requires its original finite reservation and no objective"));
         }
         let replay_capacity = match &replay_binding {
             Some(binding) => SemanticTrainingReplayCapacity {
@@ -1581,11 +1750,15 @@ impl SemanticTrainingViewArena {
             }
         }
         let initial_row_count = rows.len();
-        let append_slots = replay_capacity
+        let append_slots = replay_capacity.append_groups.len();
+        let original_slot_boundary = replay_capacity
             .row_capacity
-            .checked_sub(initial_row_count)
-            .ok_or_else(|| input_error("replay capacity is smaller than its original roster"))?;
-        if replay_capacity.append_groups.len() != append_slots
+            .checked_sub(append_slots)
+            .ok_or_else(|| {
+                input_error("replay append slots exceed the original finite capacity")
+            })?;
+        if initial_row_count > original_slot_boundary
+            || replay_capacity.row_capacity == 0
             || episode_count
                 .checked_add(
                     u64::try_from(append_slots)
@@ -1606,34 +1779,24 @@ impl SemanticTrainingViewArena {
                 "replay append capacity requires bounded original-domain non-actor groups",
             ));
         }
-        let select = provider
-            .device()
-            .inner()
-            .get_func(MODULE, SELECT_KERNEL)
-            .ok_or_else(|| runtime_error("training-view kernel lookup", "selector unavailable"))?;
-        let gather = provider
-            .device()
-            .inner()
-            .get_func(MODULE, GATHER_KERNEL)
-            .ok_or_else(|| runtime_error("training-view kernel lookup", "gather unavailable"))?;
         let mut raw = Vec::new();
         let mut descriptors = Vec::with_capacity(rows.len());
         #[cfg(feature = "semantic-policy")]
         let mut row_bytes_identities = Vec::with_capacity(rows.len());
-        let mut capacity = 0usize;
+        let capacity = usize::try_from(training_domain.window)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         for (ordinal, row) in rows.into_iter().enumerate() {
             let descriptor = validate_row(ordinal, &row, raw.len(), training_domain)?;
             #[cfg(feature = "semantic-policy")]
             row_bytes_identities.push(row.bytes_identity);
-            capacity = capacity.max(descriptor.window as usize);
             raw.extend_from_slice(&row.bytes);
             descriptors.push(descriptor);
         }
-        let row_bytes = raw
-            .len()
-            .checked_div(initial_row_count)
-            .filter(|stride| stride.checked_mul(initial_row_count) == Some(raw.len()))
-            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let row_bytes = TRAINING_VIEW_ROW_BYTES
+            .checked_mul(capacity)
+            .and_then(|bytes| bytes.checked_add(TRAINING_VIEW_HEADER_BYTES))
+            .and_then(|bytes| bytes.checked_add((capacity % 2) * 4))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let required_raw_bytes = replay_capacity
             .row_capacity
             .checked_mul(row_bytes)
@@ -1648,38 +1811,36 @@ impl SemanticTrainingViewArena {
                 "replay byte capacity differs from its fixed original training geometry",
             ));
         }
-        #[cfg(feature = "semantic-policy")]
-        let (mut objective, mut groups, mut group_members, canaries, protected_members) =
-            validate_objective(
-                objective,
-                &descriptors,
-                &raw,
-                capacity,
-                task_identity,
-                task_content,
-                expected_truth,
-                record_limit,
-            )?;
-        #[cfg(not(feature = "semantic-policy"))]
-        let (mut objective, mut groups, mut group_members, canaries, _) = validate_objective(
-            objective,
-            &descriptors,
-            &raw,
-            capacity,
-            task_identity,
-            task_content,
-            expected_truth,
-            record_limit,
-        )?;
+        let materialized = objective.is_some();
+        let (mut objective, mut groups, mut group_members, mut canaries, mut protected_members) =
+            match objective {
+                Some(objective) => validate_objective(
+                    objective,
+                    &descriptors,
+                    &raw,
+                    capacity,
+                    task_identity,
+                    task_content,
+                    expected_truth,
+                    record_limit,
+                )?,
+                None => (
+                    SemanticTrainingObjectiveRecord::default(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+        let protected_member_count = protected_members.len();
         #[cfg(feature = "semantic-policy")]
         let actor_group = groups
             .iter()
-            .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost as u64)
-            .ok_or_else(|| input_error("training objective has no actor-critic-cost group"))?;
+            .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::ActorCriticCost as u64);
         #[cfg(feature = "semantic-policy")]
-        let actor_group_member_count = actor_group.member_count;
+        let actor_group_member_count = actor_group.map_or(0, |group| group.member_count);
         #[cfg(feature = "semantic-policy")]
-        let actor_group_members = {
+        let actor_group_members = if let Some(actor_group) = actor_group {
             let start = usize::try_from(actor_group.member_offset)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
             let count = usize::try_from(actor_group.member_count)
@@ -1699,9 +1860,11 @@ impl SemanticTrainingViewArena {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
+        } else {
+            Box::new([])
         };
         #[cfg(feature = "semantic-policy")]
-        let edit_group_members = {
+        let edit_group_members = if materialized {
             let group = groups
                 .iter()
                 .find(|group| group.kind == SemanticTrainingObjectiveGroupKind::Edit as u64)
@@ -1725,6 +1888,8 @@ impl SemanticTrainingViewArena {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
+        } else {
+            Box::new([])
         };
         let mut expanded_members = Vec::with_capacity(group_members.len());
         for group in &mut groups {
@@ -1738,7 +1903,7 @@ impl SemanticTrainingViewArena {
             for (slot, assignments) in replay_capacity.append_groups.iter().enumerate() {
                 if assignments.iter().any(|kind| *kind as u64 == group.kind) {
                     expanded_members.push(
-                        u64::try_from(initial_row_count + slot)
+                        u64::try_from(original_slot_boundary + slot)
                             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                     );
                 }
@@ -1748,26 +1913,135 @@ impl SemanticTrainingViewArena {
                 - group.member_offset;
         }
         group_members = expanded_members;
-        let mut objective_hash = Sha256::new();
-        objective_hash.update(b"xlog.semantic.training-replay-capacity.v1\0");
-        for word in objective.identity {
-            objective_hash.update(word.to_le_bytes());
-        }
-        objective_hash.update((replay_capacity.row_capacity as u64).to_le_bytes());
-        objective_hash.update((replay_capacity.raw_byte_capacity as u64).to_le_bytes());
-        for assignments in &replay_capacity.append_groups {
-            objective_hash.update((assignments.len() as u64).to_le_bytes());
-            for kind in assignments {
-                objective_hash.update((*kind as u64).to_le_bytes());
+        if materialized {
+            let mut objective_hash = Sha256::new();
+            objective_hash.update(b"xlog.semantic.training-replay-capacity.v1\0");
+            for word in objective.identity {
+                objective_hash.update(word.to_le_bytes());
             }
+            objective_hash.update((replay_capacity.row_capacity as u64).to_le_bytes());
+            objective_hash.update((replay_capacity.raw_byte_capacity as u64).to_le_bytes());
+            for assignments in &replay_capacity.append_groups {
+                objective_hash.update((assignments.len() as u64).to_le_bytes());
+                for kind in assignments {
+                    objective_hash.update((*kind as u64).to_le_bytes());
+                }
+            }
+            objective.identity =
+                identity_words(Identity256::from_bytes(objective_hash.finalize().into()));
         }
-        objective.identity =
-            identity_words(Identity256::from_bytes(objective_hash.finalize().into()));
+        let mut prefix_hash = Sha256::new();
+        prefix_hash.update(b"xlog.semantic.original-training-roster.v1\0");
+        prefix_hash.update((initial_row_count as u64).to_le_bytes());
+        prefix_hash.update(training_domain.identity().as_bytes());
+        for word in objective.identity {
+            prefix_hash.update(word.to_le_bytes());
+        }
+        prefix_hash.update(&raw);
+        let prefix_identity = if materialized {
+            Identity256::from_bytes(prefix_hash.finalize().into())
+        } else {
+            Identity256::default()
+        };
+        let member_capacity = replay_capacity
+            .row_capacity
+            .checked_mul(8)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        if group_members.len() > member_capacity || protected_members.len() > capacity {
+            return Err(input_error(
+                "original objective exceeds its cold finite metadata capacity",
+            ));
+        }
+        group_members.resize(member_capacity, 0);
+        groups.resize(8, SemanticTrainingObjectiveGroupRecord::default());
+        canaries.resize(5, SemanticTrainingCanaryRecord::default());
+        protected_members.resize(capacity, 0);
         descriptors.resize(
             replay_capacity.row_capacity,
             TrainingViewRowDescriptor::default(),
         );
         raw.resize(replay_capacity.raw_byte_capacity, 0);
+
+        Ok(PreparedOriginalTrainingRoster {
+            descriptors,
+            raw,
+            objective,
+            groups,
+            group_members,
+            canaries,
+            protected_members,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_member_count,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_members,
+            #[cfg(feature = "semantic-policy")]
+            edit_group_members,
+            initial_row_count,
+            original_slot_boundary,
+            row_bytes,
+            capacity,
+            row_capacity: replay_capacity.row_capacity,
+            materialized,
+            protected_member_count,
+            prefix_identity,
+        })
+    }
+
+    pub(crate) fn allocate(
+        provider: &Arc<CudaKernelProvider>,
+        domain: &ResidentExecutionDomain,
+        rows: Vec<SemanticTrainingViewRow>,
+        objective: Option<SemanticTrainingObjective>,
+        training_domain: &SemanticTrainingDomain,
+        task_identity: Identity256,
+        task_content: SemanticTaskContentIdentity,
+        expected_truth: [SemanticTruth; 3],
+        replay_binding: Option<SemanticReplayAppendBinding>,
+    ) -> Result<Arc<Self>, SemanticTransitionError> {
+        validate_execution_domain(provider, domain)
+            .map_err(|error| runtime_error("training-view domain validation", error))?;
+        let prepared = Self::prepare_original_roster(
+            rows,
+            objective,
+            training_domain,
+            task_identity,
+            task_content,
+            expected_truth,
+            &replay_binding,
+        )?;
+        let select = provider
+            .device()
+            .inner()
+            .get_func(MODULE, SELECT_KERNEL)
+            .ok_or_else(|| runtime_error("training-view kernel lookup", "selector unavailable"))?;
+        let gather = provider
+            .device()
+            .inner()
+            .get_func(MODULE, GATHER_KERNEL)
+            .ok_or_else(|| runtime_error("training-view kernel lookup", "gather unavailable"))?;
+        let PreparedOriginalTrainingRoster {
+            descriptors,
+            raw,
+            objective,
+            groups,
+            group_members,
+            canaries,
+            protected_members,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_member_count,
+            #[cfg(feature = "semantic-policy")]
+            actor_group_members,
+            #[cfg(feature = "semantic-policy")]
+            edit_group_members,
+            initial_row_count,
+            original_slot_boundary,
+            row_bytes,
+            capacity,
+            row_capacity,
+            materialized,
+            protected_member_count,
+            prefix_identity,
+        } = prepared;
         let bytes = descriptors
             .len()
             .checked_mul(size_of::<TrainingViewRowDescriptor>())
@@ -1872,8 +2146,12 @@ impl SemanticTrainingViewArena {
             actor_group_members,
             #[cfg(feature = "semantic-policy")]
             edit_group_members,
-            row_count: replay_capacity.row_capacity,
+            row_count: row_capacity,
             initial_row_count,
+            original_slot_boundary,
+            materialized,
+            protected_member_count,
+            prefix_identity,
             row_bytes,
             publication: None,
             replay_capacity: replay_binding,

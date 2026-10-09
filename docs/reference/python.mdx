@@ -540,10 +540,10 @@ to `RN32(1/M)` and the critic coefficient to `RN32(1/(M*M))`, where
 `M = max(1, abs(R_min), abs(R_max))` in FP64. Training arenas must retain these
 same bits and structural-cost law. Reading them grants no actor eligibility,
 selects no future denominator, and does not certify the full physical pullback.
-The scoring-law identity binds immutable task content, not the authority binding
-that a cold arena transfer must advance. Content, goal and authority checks
-remain separate. The projection follows the existing immutable TaskUse read
-scope, including the private arena's model-restore callback.
+The scoring-law identity binds immutable task content. Original roster
+materialization does not regenerate task authority, grants or the model owner.
+Content, goal and authority checks remain separate. The projection follows the
+existing immutable TaskUse read scope.
 Task identity now binds this frozen numerical law; older task identities are
 not accepted as restoration matches.
 
@@ -582,7 +582,7 @@ The existing packed-view parser bounds branch geometry and target arrays by `W`.
 Byte caps and arena storage capacities are never substituted for `R`.
 
 `import_task` also requires `replay_capacity`, either explicit `None` for an
-original-only arena or this exact dictionary before arena allocation:
+already complete original-only arena or this exact dictionary before allocation:
 
 ```text
 {
@@ -608,12 +608,30 @@ and private restore. It cannot be introduced or resized after task import.
 Public caller `role_counts` still has 55 entries; the two append queues are
 native-owned records and cannot be supplied by the caller.
 
+An empty first import may reserve this finite storage with `replay_rows=()` and
+`training_objective=None`. The original sealed domain supplies the window;
+there is no default window, placeholder row, actor, objective or active count.
+This unmaterialized owner permits inference, not training selection or Update.
+The reserved original boundary is `row_capacity - len(append_groups)`; it is
+not the active original count. One genuine original roster may use fewer slots
+than that boundary. It must still satisfy all eight nonempty objective groups,
+five actual canary policies and the original actor qualification requirements.
+The data owner chooses real membership; results cannot manufacture actor or
+anchor eligibility. Before materialization, acquired results stay in their
+existing durable intent/result custody and cannot use replay append to bypass it.
+
 Selected tensor shapes and numerical/work upper bounds cover the full reserved
 capacity. Actual objective membership and denominators use only the original
 rows plus the atomically committed append prefix. The original actor roster is
-not enlarged. The updated task seed has 15 fields; older 14-field seeds are not
-accepted as matching this reservation contract. Episode transport remains
-unchanged.
+not enlarged. Logical original rows occupy physical slots from zero; logical
+appended rows use the fixed physical suffix after the reserved original
+boundary, so unused original capacity never becomes a selected hole. All tensor
+shapes retain full capacity. The task seed has 16 fields, including a separate
+complete original-roster/objective owner; older seeds are not accepted as
+matching this lifecycle. The native publication authenticates stage, genuine
+original count, original-prefix identity and append extent. Its frozen contract
+also authenticates all original caps, ordered append assignments and the sealed
+domain, including while no objective exists. Episode transport is unchanged.
 
 `task_use.task_training_domain()` returns
 `(domain_identity_bytes, original_domain_projection)` in the same immutable read
@@ -667,27 +685,29 @@ labels, accumulate all required loss groups into the actual physical parameters,
 and supply both independent physical-block checks.
 
 `SemanticTransitionController.admit_training_arena(task_use, *, parent,
-consumer_streams, snapshot, snapshot_model_state, restore_model, replay_rows,
-training_objective, training_domain, dependencies, publication_grants, inference_grants,
-training_grants, capacities, memory_bytes, max_material_bytes,
-max_total_material_bytes, max_evidence_bytes, refresh_snapshot)` performs a
-cold structural transfer from the current, successfully recomputed inference
-or training publication. This same transition can append original episodes to
-an already trained session; it does not reset the learning phase or parameters.
-The source must hold its original operation rights and training rights, and
-`replay_rows` must retain the complete existing roster as an unchanged prefix.
-The original pre-action `training_domain` must be unchanged. The method quiesces and seals
-the complete native/task/model checkpoint, restores it into a private session,
-then binds the larger training arena and current authority there. It preserves
-the saved model, optimizer, RNG, cache, learning-phase history, and native records;
-the new authority binding and
-publication have new identities and digests. `restore_model` has the same
-four-argument factory contract as ordinary restore. After that factory returns,
-`refresh_snapshot()` must return a newer authorized snapshot. Only after both
-sessions pass revalidation does the method revoke the source task use and return
-the single runnable `SemanticTransitionRestoredCheckpoint`. A preparation
-failure leaves the source runnable only when it can still be revalidated; it
-never grants execution to the unfinished candidate.
+consumer_streams, snapshot, replay_rows, training_objective, training_domain,
+refresh_snapshot, resolve_checkpoint=None, max_checkpoint_bytes=None,
+max_total_checkpoint_bytes=None)` materializes that genuine original roster
+once from the current nonterminal inference or training publication. It uses
+the original Session, controller, task use, model and arena backings. It accepts
+no replacement grants, capacities, memory budget or model restore callback.
+Both original authority and genuine rows must pass current training rights;
+`refresh_snapshot()` supplies current authority without changing the sealed
+domain or any original budget. The complete checkpoint roster is retained before
+native publication. The method returns the newly acquired `PublishedParent`
+only after its original source reader has quiesced and handed off; the old
+parent is released, not rebound to a different identity. Task authority,
+parameters, optimizer, RNG, fuel and learning-phase history stay unchanged.
+
+If admission may have entered, `SemanticTrainingArenaPending` retains
+`controller`, `parent` and `task_use`. Call
+`controller.resolve_training_arena(parent=original_parent)` to join that same
+operation and obtain its already-retained successor. Do not supply rows again,
+release its source or create another owner. A known completion survives Python
+handoff failure. After original sealing, only the finite non-actor append suffix
+can grow; original actor/anchor membership cannot change, and an Update's frozen
+selection cannot incorporate a later result. Fresh and private restore recreate
+the exact saved reservation and stage, with no count-derived budget.
 
 Task import requires `proposal_capacity=original_limit` to bind the original
 whole-task nonnegative U64 nominal Proposal limit. It has no omitted or `None`

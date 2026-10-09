@@ -135,6 +135,14 @@ fn append_header(
         .and_then(|count| count.checked_mul(size_of::<SemanticTrainingReplayAppendEntry>()))
         .and_then(|size| size.checked_add(size_of::<SemanticTrainingReplayAppendHeader>()));
     if header.abi != 1
+        || header.original_stage > 1
+        || (header.original_stage == 0
+            && (header.original_count != 0
+                || header.original_prefix_identity != Identity256::default()
+                || header.count != 0))
+        || (header.original_stage == 1
+            && (header.original_count == 0
+                || header.original_prefix_identity == Identity256::default()))
         || header.count > header.capacity
         || header.eligible_count > header.count
         || extent != Some(bytes.len())
@@ -493,7 +501,11 @@ impl SemanticTransitionSession {
         let entries = self.read_published_control_record(&lease, 56)?;
         let payload = self.read_published_control_record(&lease, 57)?;
         let header = append_header(&entries.bytes)?;
-        if header.capacity != (arena.row_capacity() - arena.original_count()) as u64 {
+        if header.capacity != (arena.row_capacity() - arena.original_slot_boundary()) as u64
+            || header.original_stage != u64::from(arena.is_materialized())
+            || header.original_count != arena.original_count() as u64
+            || header.original_prefix_identity != arena.original_prefix_identity()
+        {
             return Err(publication_input_error(
                 "restored replay queue differs from its original cold arena",
             ));
@@ -517,7 +529,7 @@ impl SemanticTransitionSession {
             eligible_count += 1;
             if row.entry.row_ordinal != expected_ordinal as u64
                 || descriptor.raw_offset
-                    != (expected_ordinal as u64)
+                    != (arena.physical_ordinal(expected_ordinal)? as u64)
                         .checked_mul(raw_len as u64)
                         .ok_or(SemanticTransitionError::GenerationExhausted)?
                 || descriptor
@@ -539,7 +551,8 @@ impl SemanticTransitionSession {
             upload_publication(&self.provider, &[descriptor], source_descriptor.as_ref())?;
             let target =
                 raw.slice(descriptor.raw_offset as usize..descriptor.raw_offset as usize + raw_len);
-            let target_descriptor = descriptors.slice(expected_ordinal..expected_ordinal + 1);
+            let physical = arena.physical_ordinal(expected_ordinal)?;
+            let target_descriptor = descriptors.slice(physical..physical + 1);
             let mut recorder = self.domain.new_strict_recorder();
             recorder.read(source.as_ref());
             recorder.read(source_descriptor.as_ref());
@@ -638,6 +651,9 @@ impl SemanticTransitionSession {
         let capacity = arena
             .replay_capacity()
             .ok_or_else(|| publication_input_error("replay append was not reserved cold"))?;
+        if !arena.is_materialized() {
+            return Err(publication_input_error("acquired results remain in durable custody until original training materialization"));
+        }
         if row.basis != SemanticTrainingViewBasis::Episode
             || row.origin != Some(replay.training_view_origin()?)
             || canonical_row.is_empty()
@@ -754,7 +770,8 @@ impl SemanticTransitionSession {
         let queue = self.read_published_control_record(lease, 56)?;
         let queue_header = append_header(&queue.bytes)?;
         if queue_header.count >= queue_header.capacity
-            || queue_header.capacity != (arena.row_capacity() - arena.original_count()) as u64
+            || queue_header.capacity
+                != (arena.row_capacity() - arena.original_slot_boundary()) as u64
         {
             return Err(publication_input_error(
                 "replay append reservation is exhausted or differs from the original arena",

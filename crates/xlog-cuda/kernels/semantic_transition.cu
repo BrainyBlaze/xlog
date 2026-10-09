@@ -433,8 +433,9 @@ struct PublicationContract {
     uint64_t terminal_tokens,terminal_token_count,final_intent_payload_bytes;
     uint64_t nonterminal_intent_mode,nonterminal_intent_plan_digest[4];
     uint64_t nonterminal_intent_prefix_begin,nonterminal_intent_prefix_end;
-    uint64_t replay_row_capacity,replay_initial_row_count,replay_raw_capacity_bytes,replay_payload_capacity_bytes;
+    uint64_t replay_row_capacity,replay_original_slot_boundary,replay_raw_capacity_bytes,replay_payload_capacity_bytes;
     uint64_t replay_metadata_bytes,replay_max_material_bytes,replay_total_material_bytes,replay_max_evidence_bytes;
+    uint64_t replay_reservation_identity[4];
     uint64_t model_generation,policy_generation,authority_generation,semantic_owner;
     uint64_t task_identity[4],topology_identity[4],table_identity[4],role_counts,role_count;
     ModelContractLayout model_contract_layout;
@@ -467,7 +468,8 @@ struct TrainingViewRowDescriptor {
     SemanticTrainingViewOriginRecord origin;
 };
 struct SemanticTrainingReplayAppendHeader {
-    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count,chain_head[4];
+    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count;
+    uint64_t original_stage,original_count,original_prefix_identity[4],chain_head[4];
 };
 struct SemanticTrainingReplayAppendEntry {
     uint64_t row_ordinal,content_identity[4];
@@ -481,7 +483,11 @@ struct PublicationReplayDeliveryInput {
     TrainingViewRowDescriptor row_descriptor;
     uint64_t row_bytes,row_bytes_len,arena_descriptors,arena_descriptor_count,arena_raw,arena_raw_bytes;
 };
-static_assert(sizeof(SemanticTrainingReplayAppendHeader)==80 && sizeof(SemanticTrainingReplayAppendEntry)==480 &&
+struct TrainingOriginalMaterializationInput {
+    uint64_t lease,source,source_bytes,destinations[7],lengths[7],original_count,original_prefix_identity[4];
+};
+static_assert(sizeof(TrainingOriginalMaterializationInput)==176,"original training materialization ABI");
+static_assert(sizeof(SemanticTrainingReplayAppendHeader)==128 && sizeof(SemanticTrainingReplayAppendEntry)==480 &&
     sizeof(PublicationReplayDeliveryInput)==1248,
     "replay append queue ABI");
 struct PublicationTensorLayout {
@@ -1148,7 +1154,7 @@ static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
 static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
-static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
+static_assert(sizeof(PublicationContract)==424,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==344,"pending continuation ABI");
 static_assert(sizeof(ContinuationInputs)==208,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
@@ -5325,18 +5331,21 @@ __device__ uint64_t publication_append_replay(PublicationControl& control,const 
     const auto& added=input.entry;
     const auto& row=input.row_descriptor;
     const bool eligible=added.disposition==1;
-    if(header.abi!=1 || header.eligible_count>header.count || header.count>=header.capacity ||
-       (added.disposition!=1 && added.disposition!=2) || contract.replay_initial_row_count>contract.replay_row_capacity ||
-       header.capacity!=contract.replay_row_capacity-contract.replay_initial_row_count ||
+    if(header.abi!=1 || header.original_stage!=1 || header.original_count>contract.replay_original_slot_boundary ||
+       !(header.original_prefix_identity[0]|header.original_prefix_identity[1]|header.original_prefix_identity[2]|header.original_prefix_identity[3]) ||
+       header.eligible_count>header.count || header.count>=header.capacity ||
+       (added.disposition!=1 && added.disposition!=2) || contract.replay_original_slot_boundary>contract.replay_row_capacity ||
+       header.capacity!=contract.replay_row_capacity-contract.replay_original_slot_boundary ||
        header.capacity>(UINT64_MAX-sizeof(header))/sizeof(SemanticTrainingReplayAppendEntry) ||
        prior_entries->length_bytes!=sizeof(header)+header.count*sizeof(SemanticTrainingReplayAppendEntry) ||
        prior_payload->length_bytes!=header.payload_used_bytes || header.payload_used_bytes>header.payload_capacity_bytes ||
        header.payload_capacity_bytes!=contract.replay_payload_capacity_bytes ||
-       added.row_ordinal!=(eligible ? contract.replay_initial_row_count+header.eligible_count : UINT64_MAX) ||
+       added.row_ordinal!=(eligible ? header.original_count+header.eligible_count : UINT64_MAX) ||
        input.arena_descriptor_count!=contract.replay_row_capacity || input.arena_raw_bytes!=contract.replay_raw_capacity_bytes ||
        row.ordinal!=added.row_ordinal || row.basis!=1 || row.origin.present!=1 ||
        row.raw_bytes!=input.row_bytes_len || !row.raw_bytes ||
-       (eligible && (row.ordinal>UINT64_MAX/row.raw_bytes || row.raw_offset!=row.ordinal*row.raw_bytes ||
+       (eligible && (contract.replay_original_slot_boundary+header.eligible_count>UINT64_MAX/row.raw_bytes ||
+                     row.raw_offset!=(contract.replay_original_slot_boundary+header.eligible_count)*row.raw_bytes ||
                      row.raw_offset>input.arena_raw_bytes || row.raw_bytes>input.arena_raw_bytes-row.raw_offset)) ||
        (!eligible && row.raw_offset!=0) ||
        !publication_identity_equal(row.content_identity,added.content_identity) ||
@@ -5361,7 +5370,7 @@ __device__ uint64_t publication_append_replay(PublicationControl& control,const 
     for(uint64_t i=0;i<header.count;++i) {
         const auto& item=items[i];
         if((item.disposition!=1 && item.disposition!=2) ||
-           item.row_ordinal!=(item.disposition==1 ? contract.replay_initial_row_count+eligible_seen : UINT64_MAX) ||
+           item.row_ordinal!=(item.disposition==1 ? header.original_count+eligible_seen : UINT64_MAX) ||
            item.payload_offset_bytes!=used ||
            item.payload_length_bytes>header.payload_used_bytes-used ||
            publication_identity_equal(item.stable_intent,added.stable_intent) ||
@@ -5402,7 +5411,7 @@ __device__ uint64_t publication_append_replay(PublicationControl& control,const 
     if(eligible) {
         publication_copy_bytes(reinterpret_cast<uint8_t*>(input.arena_raw+row.raw_offset),
             reinterpret_cast<const uint8_t*>(input.row_bytes),row.raw_bytes);
-        reinterpret_cast<TrainingViewRowDescriptor*>(input.arena_descriptors)[row.ordinal]=row;
+        reinterpret_cast<TrainingViewRowDescriptor*>(input.arena_descriptors)[contract.replay_original_slot_boundary+header.eligible_count]=row;
     }
     if(publication_range_digest(control,*next_entries,nullptr,next_entries->digest) ||
        publication_range_digest(control,*next_payload,nullptr,next_payload->digest))return 1;
@@ -5554,6 +5563,91 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
     publication_store(control.reader_gate,0);
     return status;
 }
+__device__ uint64_t publication_materialize_training(PublicationControl& control,
+        const TrainingOriginalMaterializationInput& input) {
+    if(!input.lease || !control.contract || !publication_compare_exchange(control.reader_gate,0,1))return 2;
+    uint64_t status=1;
+    do {
+        const auto& lease=*reinterpret_cast<const PublicationLease*>(input.lease);
+        const uint64_t word=publication_load(control.word);
+        const auto* base=publication_acquired_bank(control,lease);
+        const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+        if(!base || word!=lease.word || base->header.terminal!=0 ||
+           control.reader_counts[word&1]!=1 || control.reader_counts[(word&1)^1] ||
+           (word>>1)==(UINT64_MAX>>1) || !contract.replay_row_capacity ||
+           contract.replay_original_slot_boundary>contract.replay_row_capacity ||
+           !input.original_count || input.original_count>contract.replay_original_slot_boundary ||
+           !(input.original_prefix_identity[0]|input.original_prefix_identity[1]|input.original_prefix_identity[2]|input.original_prefix_identity[3]) ||
+           publication_validate_selected_model(control,*base))break;
+        const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
+        auto* next_ranges=reinterpret_cast<PublicationRange*>(control.directories[(word&1)^1]);
+        const auto* old_entries=publication_find_range(old,base->header.range_count,56);
+        const auto* target=publication_find_range(next_ranges,base->header.range_count,56);
+        if(!old_entries || !target || old_entries->length_bytes!=sizeof(SemanticTrainingReplayAppendHeader) ||
+           target->storage_slot==old_entries->storage_slot || target->storage_slot>=control.storage_count)break;
+        const auto* bytes=publication_range_bytes(control,*old_entries);
+        if(!bytes)break;
+        const auto& original=*reinterpret_cast<const SemanticTrainingReplayAppendHeader*>(bytes);
+        if(original.abi!=1 || original.original_stage || original.original_count || original.count || original.eligible_count ||
+           original.payload_used_bytes || original.capacity!=contract.replay_row_capacity-contract.replay_original_slot_boundary ||
+           original.payload_capacity_bytes!=contract.replay_payload_capacity_bytes ||
+           (original.original_prefix_identity[0]|original.original_prefix_identity[1]|original.original_prefix_identity[2]|original.original_prefix_identity[3]) ||
+           (original.chain_head[0]|original.chain_head[1]|original.chain_head[2]|original.chain_head[3]))break;
+        uint64_t total=0;bool valid=true;
+        for(uint32_t i=0;i<7;++i) {
+            if(input.lengths[i]>UINT64_MAX-total ||
+               (input.lengths[i] && !publication_pointer_span(input.destinations[i],input.lengths[i],8))) {valid=false;break;}
+            total+=input.lengths[i];
+        }
+        if(!valid || total!=input.source_bytes || !publication_pointer_span(input.source,total,8) ||
+           contract.replay_row_capacity>UINT64_MAX/sizeof(TrainingViewRowDescriptor) ||
+           input.lengths[0]!=contract.replay_row_capacity*sizeof(TrainingViewRowDescriptor) ||
+           input.lengths[1]!=contract.replay_raw_capacity_bytes || input.lengths[2]!=sizeof(SemanticTrainingObjectiveRecord) ||
+           input.lengths[3]!=8*sizeof(SemanticTrainingObjectiveGroupRecord) ||
+           contract.replay_row_capacity>UINT64_MAX/64 || input.lengths[4]!=contract.replay_row_capacity*64 ||
+           input.lengths[5]!=5*sizeof(SemanticTrainingCanaryRecord))break;
+        const auto* source=reinterpret_cast<const uint8_t*>(input.source);
+        const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(source+input.lengths[0]+input.lengths[1]);
+        if(objective.row_count!=input.original_count || objective.group_count!=8 || objective.canary_count!=5 ||
+           !objective.capacity || objective.capacity>UINT64_MAX/8 ||
+           (input.lengths[6] && input.lengths[6]!=objective.capacity*8) ||
+           !publication_identity_equal(objective.task_identity,contract.task_identity))break;
+        const PublicationRange target_template=*target;
+        valid=true;
+        for(uint64_t i=0;i<base->header.range_count;++i) {
+            const uint64_t role=old[i].role;
+            if(!publication_mutable_role(role) || role==56 || role==1 || role==2 || role==31 || (role>=18 && role<=25)) {
+                next_ranges[i]=old[i];
+            } else if(publication_preserve_range(control,old,base->header.range_count,old[i],next_ranges[i])) {
+                valid=false;break;
+            }
+        }
+        if(!valid)break;
+        auto* next_entries=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,56));
+        next_entries->storage_slot=target_template.storage_slot;
+        next_entries->generation=target_template.generation;
+        auto* next_bytes=publication_range_bytes(control,*next_entries);
+        if(!next_bytes)break;
+        uint64_t offset=0;
+        for(uint32_t i=0;i<7;++i) {
+            if(input.lengths[i])publication_copy_bytes(reinterpret_cast<uint8_t*>(input.destinations[i]),source+offset,input.lengths[i]);
+            offset+=input.lengths[i];
+        }
+        auto sealed=original;
+        sealed.original_stage=1;sealed.original_count=input.original_count;
+        semantic_graph::copy_identity(sealed.original_prefix_identity,input.original_prefix_identity);
+        *reinterpret_cast<SemanticTrainingReplayAppendHeader*>(next_bytes)=sealed;
+        if(publication_range_digest(control,*next_entries,nullptr,next_entries->digest))break;
+        auto& next=*publication_bank(control,word^1);next=*base;
+        next.header.sealed_epoch=(word>>1)+1;next.header.base_word=word;
+        next.header.publication_word=(next.header.sealed_epoch<<1)|((word&1)^1);
+        if(publication_logical_digest(control,next) || publication_descriptor_digest(control,next))break;
+        status=publication_compare_exchange(control.word,word,next.header.publication_word) ? 0 : 3;
+    } while(false);
+    publication_store(control.reader_gate,0);
+    return status;
+}
+
 __device__ void publication_command(const Descriptor& descriptor) {
     if(!descriptor.publication.control)return;
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
@@ -5568,6 +5662,9 @@ __device__ void publication_command(const Descriptor& descriptor) {
     } else if(descriptor.publication.operation==8 && descriptor.publication.lease) {
         const auto& input=*reinterpret_cast<const PublicationReplayDeliveryInput*>(descriptor.publication.lease);
         status=publication_acknowledge(descriptor,control,input.delivery,&input);
+    } else if(descriptor.publication.operation==9 && descriptor.publication.lease) {
+        status=publication_materialize_training(control,
+            *reinterpret_cast<const TrainingOriginalMaterializationInput*>(descriptor.publication.lease));
     } else if(descriptor.publication.lease) {
         auto& lease=*reinterpret_cast<PublicationLease*>(descriptor.publication.lease);
         if(descriptor.publication.operation==2)status=publication_acquire(control,lease);
