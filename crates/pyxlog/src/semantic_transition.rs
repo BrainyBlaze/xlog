@@ -3863,6 +3863,8 @@ struct PreparedPythonSegment {
     #[cfg(feature = "semantic-policy")]
     execution: Option<Arc<Mutex<PreparedSegmentExecution>>>,
     #[cfg(feature = "semantic-policy")]
+    construction: Option<Arc<Mutex<PreparedSegmentConstruction>>>,
+    #[cfg(feature = "semantic-policy")]
     cold_callbacks: Vec<Arc<Mutex<PreparedColdCallback>>>,
     #[cfg(feature = "semantic-policy")]
     actor_refreshes: Vec<Arc<actor_refresh::ActorRefreshCustody>>,
@@ -3913,6 +3915,17 @@ struct PreparedSegmentExecution {
     invocation: Option<Py<PyAny>>,
 }
 
+#[cfg(feature = "semantic-policy")]
+struct PreparedSegmentConstruction {
+    admission_snapshot: Vec<u8>,
+    native_steps: Option<Vec<SemanticPreparedStep>>,
+    private: Option<Py<learning_phase::PySemanticLearningPhaseTransition>>,
+    private_scope_retained: bool,
+    original_failure: Option<PyErr>,
+    non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
+    cancellation_handoff_complete: bool,
+}
+
 struct PreparedBuildGuard<'a> {
     session: &'a PySemanticTransitionSession,
     task_use: &'a PySemanticTransitionTaskUse,
@@ -3920,6 +3933,8 @@ struct PreparedBuildGuard<'a> {
     native_completion: Option<(Arc<()>, String)>,
     #[cfg(feature = "semantic-policy")]
     native_attempt: Option<(Arc<()>, String, Vec<xlog_cuda::SemanticPreparedStep>)>,
+    #[cfg(feature = "semantic-policy")]
+    construction: Option<Arc<Mutex<PreparedSegmentConstruction>>>,
     native_non_submission: bool,
     cancelled_checkpoint: Option<(Arc<()>, CheckpointTaskPhase)>,
 }
@@ -3961,6 +3976,14 @@ impl Drop for PreparedRetirementGuard<'_> {
 impl Drop for PreparedBuildGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
+            #[cfg(feature = "semantic-policy")]
+            if self.construction.is_some() {
+                // This original owner exists only before any producer callback.
+                // Its issued allocation/initialization roster must be cancelled
+                // through the same native owner, never aborted or prepared again.
+                self.session.recording.store(false, Ordering::Release);
+                return;
+            }
             #[cfg(feature = "semantic-policy")]
             let pending = self.native_attempt.as_ref().is_some_and(|(scope, operation, steps)| {
                 let mut native = self.session.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -17200,10 +17223,15 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_attempt: None,
+            construction: None,
             native_non_submission: false,
             cancelled_checkpoint: None,
         };
-        let (scope, snapshot, handles, stream, checkpoint_phase) = {
+        let resources = Arc::new(PreparedProducerResources {
+            producers: Mutex::new(vec![producer.clone_ref(py)]),
+            owner_thread: session.owner_thread,
+        });
+        let (scope, snapshot, construction, preparation_failed, checkpoint_phase) = {
             let mut owner = session.owner()?;
             issued.require_identity(&owner)?;
             if session
@@ -17231,90 +17259,132 @@ impl PySemanticTransitionController {
                 u64::try_from(nominal_proposals)
                     .map_err(|_| invalid("nominal Proposal roster exceeds u64"))?,
             )?;
-            let handles = if let Some(instruction) = &instruction {
+            let construction = Arc::new(Mutex::new(PreparedSegmentConstruction {
+                admission_snapshot: state.snapshot.canonical.clone(),
+                native_steps: None,
+                private: private.as_ref().map(|private| private.clone_ref(py)),
+                private_scope_retained: false,
+                original_failure: None,
+                non_submission: None,
+                cancellation_handoff_complete: false,
+            }));
+            *session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))? =
+                Some(PreparedPythonSegment {
+                    scope: Arc::clone(&scope),
+                    instruction: instruction.as_ref().map(Arc::clone),
+                    task_use: task_use.clone_ref(py),
+                    steps: Vec::new(),
+                    resources: Arc::clone(&resources),
+                    prepared_owner: None,
+                    memory_scope: None,
+                    checkpoint_phase: checkpoint_phase.clone(),
+                    producers_retired: false,
+                    producer_retirement_entered: false,
+                    retirement_streams: None,
+                    retirement_steps_quiesced: 0,
+                    graph_retired: false,
+                    outcomes: None,
+                    completion: None,
+                    execution: None,
+                    construction: Some(Arc::clone(&construction)),
+                    cold_callbacks: Vec::new(),
+                    actor_refreshes: Vec::new(),
+                });
+            guard.construction = Some(Arc::clone(&construction));
+            let prepared = if let Some(instruction) = &instruction {
                 {
                     let mut preparation = instruction.preparation()?;
                     preparation.build_entered = true;
                     preparation.scope = Some(Arc::clone(&scope));
                 }
-                let handles = owner
+                owner
                     .prepare_admitted_segment_steps(
                         &instruction.inner,
                         &*instruction.parent.borrow(py).lease()?,
                         transitions,
                         cold_capacity,
                     )
-                    .map_err(xlog_err)?;
-                instruction.preparation()?.native_steps = handles.clone();
-                handles
             } else {
                 owner
                     .prepare_segment_steps(transitions, cold_capacity)
-                    .map_err(xlog_err)?
             };
-            let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
+            let (handles, failed) = match prepared {
+                Ok(handles) => (handles, false),
+                Err(error) => {
+                    construction.lock()
+                        .map_err(|_| invalid("original construction custody is poisoned"))?
+                        .original_failure = Some(xlog_err(error));
+                    match owner.prepared_segment_preparation_handles() {
+                        Ok(handles) => (handles, true),
+                        Err(error) => {
+                            // No authenticated allocation roster can be
+                            // recovered. Keep the original failure, and let
+                            // the canonical guard abort without inventing a
+                            // non-submission proof or retaining empty custody.
+                            let failure = construction.lock()
+                                .map_err(|_| invalid("original construction custody is poisoned"))?
+                                .original_failure.as_ref().expect("original preparation failure")
+                                .clone_ref(py);
+                            let retained = {
+                                let mut stored = session.prepared_segment.lock()
+                                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+                                if stored.as_ref().and_then(|stored| stored.construction.as_ref())
+                                    .is_none_or(|original| !Arc::ptr_eq(original, &construction))
+                                {
+                                    return Err(invalid("failed construction changed its retained owner"));
+                                }
+                                stored.take()
+                            };
+                            drop(retained);
+                            guard.construction = None;
+                            return finish_with_cleanup(py, Err(failure), Err(xlog_err(error)));
+                        }
+                    }
+                }
+            };
+            construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?
+                .native_steps = Some(handles.clone());
+            if let Some(instruction) = &instruction {
+                instruction.preparation()?.native_steps = handles;
+            }
             (
                 scope,
                 state.snapshot.canonical.clone(),
-                handles,
-                stream,
+                construction,
+                failed,
                 checkpoint_phase,
             )
         };
-        #[cfg(feature = "semantic-policy")]
-        if let Some(private) = &private {
-            private
-                .borrow(py)
-                .retain_private_build_scope(py, &session, &issued, &scope, &handles)?;
+        if preparation_failed {
+            return self.continue_original_construction_cancellation(
+                py, &session, &issued, &task_use, &construction,
+            );
         }
-        let mut steps = Vec::with_capacity(handles.len());
-        for inner in handles {
-            steps.push(Py::new(
-                py,
-                PySemanticPreparedStep {
-                    session: self.session.clone_ref(py),
-                    task_use: task_use.clone_ref(py),
-                    scope: Arc::clone(&scope),
-                    inner,
-                    continuation_producers: Mutex::new(std::array::from_fn(|_| Vec::new())),
-                    policy_inputs: Mutex::new(std::array::from_fn(|_| None)),
-                    gradient_deliveries: Mutex::new(std::array::from_fn(|_| None)),
-                    #[cfg(feature = "semantic-policy")]
-                    group_gradient_deliveries: Mutex::new(std::array::from_fn(|_| Vec::new())),
-                },
-            )?);
-        }
-        let resources = Arc::new(PreparedProducerResources {
-            producers: Mutex::new(vec![producer.clone_ref(py)]),
-            owner_thread: session.owner_thread,
-        });
-        *session
-            .prepared_segment
-            .lock()
-            .map_err(|_| invalid("prepared segment mutex is poisoned"))? =
-            Some(PreparedPythonSegment {
-                scope: Arc::clone(&scope),
-                instruction: instruction.as_ref().map(Arc::clone),
-                task_use: task_use.clone_ref(py),
-                steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
-                resources: Arc::clone(&resources),
-                prepared_owner: None,
-                memory_scope: None,
-                checkpoint_phase: checkpoint_phase.clone(),
-                producers_retired: false,
-                producer_retirement_entered: false,
-                retirement_streams: None,
-                retirement_steps_quiesced: 0,
-                graph_retired: false,
-                #[cfg(feature = "semantic-policy")]
-                outcomes: None,
-                #[cfg(feature = "semantic-policy")]
-                completion: None,
-                #[cfg(feature = "semantic-policy")]
-                execution: None,
-                cold_callbacks: Vec::new(),
-                actor_refreshes: Vec::new(),
-            });
+        let setup = self.retain_original_construction_steps(
+            py, &session, &issued, &task_use, &construction,
+        );
+        let steps = match setup {
+            Ok(steps) => steps,
+            Err(error) => {
+                construction.lock()
+                    .map_err(|_| invalid("original construction custody is poisoned"))?
+                    .original_failure = Some(error);
+                return self.continue_original_construction_cancellation(
+                    py, &session, &issued, &task_use, &construction,
+                );
+            }
+        };
+        let stream = session.owner()?.prepared_stream(&steps[0].borrow(py).inner).map_err(xlog_err)?;
+        // From this exact boundary onward the producer's existing callback
+        // protocol owns failures. The pre-producer cancellation path cannot
+        // skip cleanup for any callback that may have entered.
+        session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .as_mut().ok_or_else(|| invalid("original construction disappeared"))?
+            .construction = None;
+        guard.construction = None;
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
         let prepared_owner = recording_callback(check, || {
             producer.bind(py).getattr("prepared_segment_owner")
@@ -17565,6 +17635,7 @@ impl PySemanticTransitionController {
             committed: false,
             native_completion: None,
             native_attempt: None,
+            construction: None,
             native_non_submission: false,
             cancelled_checkpoint: None,
         };
@@ -17704,20 +17775,31 @@ impl PySemanticTransitionController {
             return Err(invalid("original segment resolution requires its idle original Session"));
         }
         let _resolution = PreparedRetirementGuard(&session.recording);
-        let execution = {
+        let (execution, construction) = {
             let stored = session.prepared_segment.lock()
                 .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
             let stored = stored.as_ref().ok_or_else(|| invalid("no original segment attempt to resolve"))?;
             if stored.task_use.as_ptr() != task_use.as_ptr() {
                 return Err(invalid("original segment attempt belongs to another task use"));
             }
-            Arc::clone(stored.execution.as_ref().ok_or_else(|| invalid("segment has no original execution attempt"))?)
+            (stored.execution.as_ref().map(Arc::clone), stored.construction.as_ref().map(Arc::clone))
         };
         let mut guard = PreparedBuildGuard {
             session: &session, task_use: &issued, committed: false,
             native_completion: None, native_attempt: None,
+            construction: None,
             native_non_submission: false, cancelled_checkpoint: None,
         };
+        if let Some(construction) = construction {
+            guard.construction = Some(Arc::clone(&construction));
+            return match self.continue_original_construction_cancellation(
+                py, &session, &issued, &task_use, &construction,
+            ) {
+                Err(error) => Err(error),
+                Ok(()) => Err(invalid("original construction cancellation returned without its native disposition")),
+            };
+        }
+        let execution = execution.ok_or_else(|| invalid("segment has no original execution attempt"))?;
         let result = self.continue_original_segment(py, &session, &issued, &task_use, &execution, &mut guard);
         if result.is_ok()
             || result.as_ref().is_err_and(|error| error.is_instance_of::<SemanticPreparedSegmentPending>(py)
@@ -17952,6 +18034,7 @@ impl PySemanticTransitionController {
             actor_refreshes,
             mut quiesced,
             graph_retired,
+            pre_producer_cancelled,
         ) = {
             let mut stored = session
                 .prepared_segment
@@ -17972,6 +18055,15 @@ impl PySemanticTransitionController {
             } else {
                 stored.retirement_streams = Some(streams.clone());
             }
+            let pre_producer_cancelled = if let Some(construction) = &stored.construction {
+                let original = construction.lock()
+                    .map_err(|_| invalid("original construction custody is poisoned"))?;
+                original.cancellation_handoff_complete
+                    && original.non_submission.as_ref().is_some_and(|proof|
+                        original.native_steps.as_ref().is_some_and(|steps| proof.matches(steps)))
+            } else {
+                false
+            };
             (
                 stored
                     .steps
@@ -17989,6 +18081,7 @@ impl PySemanticTransitionController {
                 stored.actor_refreshes.clone(),
                 stored.retirement_steps_quiesced,
                 stored.graph_retired,
+                pre_producer_cancelled,
             )
         };
         if let Some(private) = &private {
@@ -18094,15 +18187,17 @@ impl PySemanticTransitionController {
                 .ok_or_else(|| invalid("original segment disappeared during retirement"))?
                 .graph_retired = true;
         }
-        let prepared = {
+        let prepared = if pre_producer_cancelled {
+            None
+        } else {
             let retained = resources
                 .producers
                 .lock()
                 .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?;
-            retained
+            Some(retained
                 .get(1)
                 .ok_or_else(|| invalid("original prepared producer is absent"))?
-                .clone_ref(py)
+                .clone_ref(py))
         };
         if !producers_retired {
             if producer_entered {
@@ -18130,32 +18225,34 @@ impl PySemanticTransitionController {
                 private.borrow(py).finish_private_retained_sources(py, &session, &task_use.borrow(py))?;
             }
             actor_refresh::finish_actor_refresh_children(py, &actor_refreshes)?;
-            session
-                .prepared_segment
-                .lock()
-                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
-                .as_mut()
-                .ok_or_else(|| invalid("original segment disappeared during retirement"))?
-                .producer_retirement_entered = true;
-            let check = || -> PyResult<()> {
-                let issued = task_use.borrow(py);
-                self.require_read_issued(&issued)?;
-                if issued.state()?.snapshot.canonical != snapshot {
+            if let Some(prepared) = &prepared {
+                session
+                    .prepared_segment
+                    .lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                    .as_mut()
+                    .ok_or_else(|| invalid("original segment disappeared during retirement"))?
+                    .producer_retirement_entered = true;
+                let check = || -> PyResult<()> {
+                    let issued = task_use.borrow(py);
+                    self.require_read_issued(&issued)?;
+                    if issued.state()?.snapshot.canonical != snapshot {
+                        return Err(invalid(
+                            "original task authority changed during producer retirement",
+                        ));
+                    }
+                    if cancellation.is_some() && self.original_segment_cancellation(py, &session, &task_use)?.is_none() {
+                        return Err(invalid("cancelled producer retirement lost its original proof"));
+                    }
+                    Ok(())
+                };
+                let finish = recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
+                let finished = recording_callback(check, || finish.call0())?;
+                if !finished.is_none() {
                     return Err(invalid(
-                        "original task authority changed during producer retirement",
+                        "finish_segment must return None after retiring original producers",
                     ));
                 }
-                if cancellation.is_some() && self.original_segment_cancellation(py, &session, &task_use)?.is_none() {
-                    return Err(invalid("cancelled producer retirement lost its original proof"));
-                }
-                Ok(())
-            };
-            let finish = recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
-            let finished = recording_callback(check, || finish.call0())?;
-            if !finished.is_none() {
-                return Err(invalid(
-                    "finish_segment must return None after retiring original producers",
-                ));
             }
             session
                 .prepared_segment
@@ -21332,12 +21429,294 @@ impl PySemanticTransitionController {
     }
 
     #[cfg(feature = "semantic-policy")]
+    fn retain_original_construction_steps(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        issued: &PySemanticTransitionTaskUse,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+        construction: &Arc<Mutex<PreparedSegmentConstruction>>,
+    ) -> PyResult<Vec<Py<PySemanticPreparedStep>>> {
+        self.require_read_issued(issued)?;
+        if self.session.as_ptr() != task_use.borrow(py).session.as_ptr()
+            || !std::ptr::eq(&*self.session.borrow(py), session)
+        {
+            return Err(invalid("original construction changed its Session"));
+        }
+        issued.require_original_identity(&session.owner()?)?;
+        let (scope, handles) = {
+            let retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained.as_ref()
+                .ok_or_else(|| invalid("original construction lost its retained segment"))?;
+            if retained.task_use.as_ptr() != task_use.as_ptr()
+                || retained.construction.as_ref().is_none_or(|owner| !Arc::ptr_eq(owner, construction))
+            {
+                return Err(invalid("original construction changed its task or owner"));
+            }
+            let original = construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?;
+            let handles = original.native_steps.as_ref()
+                .ok_or_else(|| invalid("original construction has no issued native roster"))?;
+            if handles.is_empty() || retained.steps.len() > handles.len()
+                || retained.steps.iter().zip(handles).any(|(step, handle)|
+                    !step.borrow(py).inner.same_handle(handle))
+            {
+                return Err(invalid("original construction changed its ordered native roster"));
+            }
+            (Arc::clone(&retained.scope), handles.clone())
+        };
+        let private = {
+            let original = construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?;
+            if original.private_scope_retained { None }
+            else { original.private.as_ref().map(|owner| owner.clone_ref(py)) }
+        };
+        if let Some(private) = private {
+            private.borrow(py).retain_private_build_scope(py, session, issued, &scope, &handles)?;
+            construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?
+                .private_scope_retained = true;
+        }
+        loop {
+            let index = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_ref().ok_or_else(|| invalid("original construction disappeared"))?
+                .steps.len();
+            if index == handles.len() { break; }
+            let step = Py::new(py, PySemanticPreparedStep {
+                session: self.session.clone_ref(py),
+                task_use: task_use.clone_ref(py),
+                scope: Arc::clone(&scope),
+                inner: handles[index].clone(),
+                continuation_producers: Mutex::new(std::array::from_fn(|_| Vec::new())),
+                policy_inputs: Mutex::new(std::array::from_fn(|_| None)),
+                gradient_deliveries: Mutex::new(std::array::from_fn(|_| None)),
+                group_gradient_deliveries: Mutex::new(std::array::from_fn(|_| Vec::new())),
+            })?;
+            session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_mut().ok_or_else(|| invalid("original construction disappeared"))?
+                .steps.push(step);
+        }
+        Ok(session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .as_ref().ok_or_else(|| invalid("original construction disappeared"))?
+            .steps.iter().map(|step| step.clone_ref(py)).collect())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn continue_original_construction_cancellation(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        issued: &PySemanticTransitionTaskUse,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+        construction: &Arc<Mutex<PreparedSegmentConstruction>>,
+    ) -> PyResult<()> {
+        let result = (|| -> PyResult<()> {
+            self.retain_original_construction_steps(py, session, issued, task_use, construction)?;
+            let (scope, checkpoint, snapshot) = {
+                let retained = session.prepared_segment.lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+                let retained = retained.as_ref()
+                    .ok_or_else(|| invalid("original construction disappeared"))?;
+                (Arc::clone(&retained.scope), retained.checkpoint_phase.clone(),
+                    construction.lock().map_err(|_| invalid("original construction custody is poisoned"))?
+                        .admission_snapshot.clone())
+            };
+            {
+                let state = issued.state()?;
+                let same_phase = matches!(&state.phase,
+                    TaskUsePhase::Recording { scope: original, .. }
+                    | TaskUsePhase::CancelledPrepared { scope: original, .. }
+                        if Arc::ptr_eq(original, &scope))
+                    || matches!(&state.phase, TaskUsePhase::CancelledPrivate { scope: original, checkpoint: original_checkpoint }
+                        if Arc::ptr_eq(original, &scope) && original_checkpoint == &checkpoint);
+                if !same_phase || state.snapshot.canonical != snapshot {
+                    return Err(invalid("original construction changed its task phase or authority snapshot"));
+                }
+            }
+            let handles = construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?
+                .native_steps.as_ref().expect("retained original native roster").clone();
+            if construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?
+                .non_submission.is_none()
+            {
+                let proof = session.owner()?.cancel_prepared_segment_before_submission(&handles)
+                    .map_err(xlog_err)?;
+                construction.lock()
+                    .map_err(|_| invalid("original construction custody is poisoned"))?
+                    .non_submission = Some(proof);
+            }
+            let (private, proof, handoff_complete) = {
+                let original = construction.lock()
+                    .map_err(|_| invalid("original construction custody is poisoned"))?;
+                let proof = original.non_submission.as_ref().expect("original non-submission proof");
+                if !proof.matches(&handles) {
+                    return Err(invalid("original construction cancellation changed its full native roster"));
+                }
+                (original.private.as_ref().map(|owner| owner.clone_ref(py)),
+                    proof.clone(), original.cancellation_handoff_complete)
+            };
+            if let Some(private) = &private {
+                if !handoff_complete {
+                    private.borrow(py).retain_private_non_submission(py, session, issued, &scope, proof)?;
+                }
+                issued.state()?.phase = TaskUsePhase::CancelledPrivate {
+                    scope, checkpoint,
+                };
+            } else if let CheckpointTaskPhase::Segment(operation) = checkpoint {
+                issued.state()?.phase = TaskUsePhase::CancelledPrepared { scope, operation };
+            }
+            construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?
+                .cancellation_handoff_complete = true;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // The original pre-producer owner stays installed even when an
+            // independent failure blocks its native continuation. No callback,
+            // allocation roster, admission or charged Proposal place repeats.
+            return Err(prepared_segment_pending(py, error));
+        }
+        let cancelled = SemanticPreparedSegmentCancelled::new_err(
+            "original pre-producer construction was cancelled; retain its controller and task use for retirement",
+        );
+        if let Some(error) = &construction.lock()
+            .map_err(|_| invalid("original construction custody is poisoned"))?
+            .original_failure
+        {
+            cancelled.set_cause(py, Some(error.clone_ref(py)));
+        }
+        Err(cancelled)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn original_prepared_construction_pending(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+    ) -> PyResult<bool> {
+        let issued = task_use.borrow(py);
+        self.require_read_issued(&issued)?;
+        if self.session.as_ptr() != issued.session.as_ptr()
+            || !std::ptr::eq(&*self.session.borrow(py), session)
+        {
+            return Err(invalid("original construction changed its Session"));
+        }
+        issued.require_original_identity(&session.owner()?)?;
+        let (handles, private_cancellation) = {
+            let retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let Some(retained) = retained.as_ref() else { return Ok(false); };
+            let Some(construction) = &retained.construction else { return Ok(false); };
+            if retained.task_use.as_ptr() != task_use.as_ptr() {
+                return Err(invalid("original construction belongs to another task use"));
+            }
+            let original = construction.lock()
+                .map_err(|_| invalid("original construction custody is poisoned"))?;
+            let state = issued.state()?;
+            let phase = match &state.phase {
+                TaskUsePhase::ArenaPreparing(original_phase) if original.private.is_some() => original_phase.as_ref(),
+                phase => phase,
+            };
+            if state.snapshot.canonical != original.admission_snapshot
+                || !matches!(phase, TaskUsePhase::Recording { scope, .. }
+                    if Arc::ptr_eq(scope, &retained.scope))
+            {
+                return Err(invalid("original construction changed its task phase or snapshot"));
+            }
+            let handles = original.native_steps.as_ref()
+                .ok_or_else(|| invalid("original construction has no issued native roster"))?;
+            let private_cancellation = if !original.cancellation_handoff_complete {
+                match (&original.private, &original.non_submission) {
+                    (Some(private), Some(proof)) if proof.matches(handles) =>
+                        Some((private.clone_ref(py), Arc::clone(&retained.scope), proof.clone())),
+                    (Some(_), Some(_)) => return Err(invalid("original construction changed its cancellation roster")),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (handles.clone(), private_cancellation)
+        };
+        if session.owner()?.prepared_segment_preparation_pending(&handles).map_err(xlog_err)? {
+            return Ok(true);
+        }
+        if let Some((private, scope, proof)) = private_cancellation {
+            return private.borrow(py).original_build_cancellation_pending(
+                py, session, task_use, &scope, &handles, &proof,
+            );
+        }
+        Ok(false)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn original_construction_cancellation(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+    ) -> PyResult<Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>> {
+        let retained = session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+        let Some(retained) = retained.as_ref() else { return Ok(None); };
+        let Some(construction) = &retained.construction else { return Ok(None); };
+        if retained.task_use.as_ptr() != task_use.as_ptr() {
+            return Err(invalid("original construction belongs to another task use"));
+        }
+        let original = construction.lock()
+            .map_err(|_| invalid("original construction custody is poisoned"))?;
+        if original.private.is_some() || !original.cancellation_handoff_complete {
+            return Ok(None);
+        }
+        let Some(proof) = &original.non_submission else { return Ok(None); };
+        let handles = original.native_steps.as_ref()
+            .ok_or_else(|| invalid("original construction has no issued native roster"))?;
+        if !proof.matches(handles) {
+            return Err(invalid("original construction changed its non-submission roster"));
+        }
+        let mut after = 0;
+        for step in &retained.steps {
+            let offset = handles[after..].iter().position(|handle| handle.same_handle(&step.borrow(py).inner))
+                .ok_or_else(|| invalid("original construction changed its remaining ordered steps"))?;
+            after += offset + 1;
+        }
+        let issued = task_use.borrow(py);
+        self.require_read_issued(&issued)?;
+        if self.session.as_ptr() != issued.session.as_ptr()
+            || !std::ptr::eq(&*self.session.borrow(py), session)
+        {
+            return Err(invalid("original construction changed its Session"));
+        }
+        issued.require_original_identity(&session.owner()?)?;
+        let state = issued.state()?;
+        let phase_matches = match (&state.phase, &retained.checkpoint_phase) {
+            (TaskUsePhase::CancelledPrepared { scope, operation }, CheckpointTaskPhase::Segment(expected)) =>
+                Arc::ptr_eq(scope, &retained.scope) && operation == expected,
+            (TaskUsePhase::Recording { scope, .. }, CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound) =>
+                Arc::ptr_eq(scope, &retained.scope),
+            _ => false,
+        };
+        if !phase_matches || state.snapshot.canonical != original.admission_snapshot {
+            return Err(invalid("original construction changed its cancelled task phase or snapshot"));
+        }
+        Ok(Some(proof.clone()))
+    }
+
+    #[cfg(feature = "semantic-policy")]
     fn original_segment_cancellation(
         &self,
         py: Python<'_>,
         session: &PySemanticTransitionSession,
         task_use: &Py<PySemanticTransitionTaskUse>,
     ) -> PyResult<Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>> {
+        if let Some(proof) = self.original_construction_cancellation(py, session, task_use)? {
+            return Ok(Some(proof));
+        }
         let (scope, execution, steps) = {
             let retained = session.prepared_segment.lock()
                 .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
