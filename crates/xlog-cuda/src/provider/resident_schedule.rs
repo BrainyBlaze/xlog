@@ -1044,6 +1044,11 @@ impl ResidentExecutionDomain {
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn execution_stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 }
 
 /// Graph-free compact scheduler metadata owned by the enclosing runtime capsule.

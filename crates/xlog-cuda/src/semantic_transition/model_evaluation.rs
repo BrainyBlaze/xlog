@@ -291,6 +291,7 @@ impl SemanticTransitionSession {
                 tensors,
                 seals: TensorContentSeals::Captured(digests),
                 verification_inputs: Vec::new(),
+                original_cold: Mutex::new(None),
             };
             let seal = self
                 .provider
@@ -311,7 +312,9 @@ impl SemanticTransitionSession {
                 None,
                 false,
                 cold_work.as_ref(),
+                false,
             )?;
+            content.complete_original_cold_content()?;
             Arc::new(SemanticEvaluationCohort {
                 issuance: Arc::new(()),
                 selected,
@@ -484,7 +487,9 @@ impl SemanticTransitionSession {
             None,
             false,
             cold_work.as_ref(),
-        )
+            false,
+        )?;
+        cohort.content.complete_original_cold_content()
     }
 
     pub fn evaluation_stream(
@@ -679,6 +684,7 @@ impl SemanticTransitionSession {
             None,
             false,
             cold_work.as_ref(),
+            true,
         )
     }
 

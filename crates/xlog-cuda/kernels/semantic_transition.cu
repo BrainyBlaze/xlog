@@ -3394,7 +3394,7 @@ __device__ bool publication_step_layout_capacity(const PublicationTensorLayout& 
 }
 
 __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& header,const SourceSlot* source,
-        uint64_t binding_count,uint64_t output[2][4]) {
+        uint64_t binding_count,uint64_t output[2][4],semantic_graph::NativeWorkTally* work=nullptr) {
     for(uint64_t index=0;index<2;++index) {
         PublicationRange range{};range.index=index;
         range.length_bytes=index ? 32*sizeof(SourceSlot) : sizeof(PublicationHeader);
@@ -3406,11 +3406,11 @@ __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& he
         layout.strides_bytes[1]=index ? 8 : 0;
         const auto* bytes=index ? reinterpret_cast<const uint8_t*>(source) : reinterpret_cast<const uint8_t*>(&header);
         PublicationTensorBytes view{};uint64_t content_bytes=0;
-        if(publication_content_view(bytes,range.length_bytes,range,&layout,&view,&content_bytes) ||
-           publication_content_digest(view,content_bytes,output[index]))return 1;
+        if(publication_content_view(bytes,range.length_bytes,range,&layout,&view,&content_bytes,work) ||
+           publication_content_digest(view,content_bytes,output[index],work))return 1;
     }
     const uint64_t roster_extent[4]={binding_count,0,0,0};
-    publication_fold(output[0],0,0,roster_extent);
+    publication_fold(output[0],0,0,roster_extent,work);
     return 0;
 }
 
@@ -3939,7 +3939,7 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
 // through the original logical interval.
 __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
         uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
-        uint64_t expected_active) {
+        uint64_t expected_active,semantic_graph::NativeWorkTally* work=nullptr) {
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
        !publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
@@ -3962,7 +3962,7 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
     const auto* expected=reinterpret_cast<const uint64_t*>(metadata_digests_ptr);
     if(header.abi!=1 || header.publication_word!=lease.word || header.sealed_epoch!=lease.epoch ||
        !publication_identity_equal(header.instance,lease.instance) || binding_count<9 || binding_count>header.range_count ||
-       publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual) ||
+       publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual,work) ||
        !publication_identity_equal(actual[0],expected) || !publication_identity_equal(actual[1],expected+4)) {
         semantic_content_integrity_trap();return;
     }
@@ -3970,6 +3970,7 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
     const auto* ranges=reinterpret_cast<const PublicationRange*>(ranges_ptr);
     uint64_t fixed_role=8;
     for(uint64_t i=0;i<binding_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         const auto& binding=bindings[i];const auto& range=ranges[i];
         if(range.role>=8 && range.role<=13 && (range.role!=fixed_role++ || range.index)) { semantic_content_integrity_trap();return; }
         const bool alias=range.role==1 || range.role==4 || range.role==5;
@@ -4000,7 +4001,8 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
                 semantic_content_integrity_trap();return;
             }
             bool sealed=false;
-            for(uint64_t previous=0;previous<i;++previous)
+            for(uint64_t previous=0;previous<i;++previous) {
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                 if(ranges[previous].storage_slot==range.storage_slot) {
                     if(bindings[previous].backing!=binding.backing || bindings[previous].backing_bytes!=binding.backing_bytes ||
                        !publication_identity_equal(ranges[previous].backing_digest,range.backing_digest)) {
@@ -4008,9 +4010,10 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
                     }
                     sealed=true;break;
                 }
+            }
             if(!sealed) {
                 uint64_t digest[4];
-                semantic_graph::sha256(reinterpret_cast<const uint8_t*>(binding.backing),binding.backing_bytes,digest);
+                semantic_graph::sha256(reinterpret_cast<const uint8_t*>(binding.backing),binding.backing_bytes,digest,work);
                 if(!publication_identity_equal(digest,range.backing_digest)) { semantic_content_integrity_trap();return; }
             }
         } else if(binding.backing!=binding.destination || binding.backing_bytes!=binding.capacity_bytes) {
@@ -4018,26 +4021,32 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
         }
         PublicationTensorBytes view{};uint64_t bytes=0,digest[4];
         const auto* layout=publication_tensor_role(range.role) ? &binding.layout : nullptr;
-        if(publication_content_view(reinterpret_cast<const uint8_t*>(binding.destination),range.length_bytes,range,layout,&view,&bytes) ||
-           publication_content_digest(view,bytes,digest) || !publication_identity_equal(digest,range.digest)) {
+        if(publication_content_view(reinterpret_cast<const uint8_t*>(binding.destination),range.length_bytes,range,layout,&view,&bytes,work) ||
+           publication_content_digest(view,bytes,digest,work) || !publication_identity_equal(digest,range.digest)) {
            semantic_content_integrity_trap();return;
         }
     }
     if(fixed_role!=14 || ranges[binding_count-1].role!=44 || ranges[binding_count-1].index)semantic_content_integrity_trap();
 }
 extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
-        ranges_ptr,metadata_digests_ptr,1);
+        ranges_ptr,metadata_digests_ptr,1,work);
 }
 // Cold verification authenticates a completed original lease, never a current
 // acquired bank. Its fixed bindings point into the private pre-mutation copy.
 extern "C" __global__ void semantic_completed_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
-        ranges_ptr,metadata_digests_ptr,0);
+        ranges_ptr,metadata_digests_ptr,0,work);
 }
 __device__ void publication_intent_identity(const IntentEntry& entry,uint64_t* identity) {
     uint64_t words[25];words[0]=0x786c6f67696e7431ULL;
