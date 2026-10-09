@@ -1168,10 +1168,13 @@ pub fn compile_positive_binary_task(
     initial_theory: &str,
     input_facts: &str,
     statements: &[&str],
+    query_records: &[u32],
 ) -> Result<xlog_cuda::SemanticProgramAdmission> {
     use xlog_cuda::{SemanticProgramAdmission, SemanticProgramFact};
 
-    if statements.is_empty() || statements.len() > u32::MAX as usize {
+    if statements.is_empty() || statements.len() > u32::MAX as usize
+        || query_records.is_empty() || query_records.len() > u32::MAX as usize
+        || query_records.iter().any(|record| *record as usize >= statements.len()) {
         return Err(XlogError::Compilation(
             "editable semantic task requires a finite nonempty query roster".into(),
         ));
@@ -1190,7 +1193,9 @@ pub fn compile_positive_binary_task(
     }
     // The production compiler remains the authority for XLOG syntax and type
     // semantics. The resident lowering below only handles its admitted subset.
-    let executable_source = positive_binary_task_source(initial_theory, input_facts, statements);
+    let selected_statements = query_records.iter().map(|record| statements[*record as usize])
+        .collect::<Vec<_>>();
+    let executable_source = positive_binary_task_source(initial_theory, input_facts, &selected_statements);
     LogicProgram::compile(&executable_source)?;
 
     let mut predicate_indices = BTreeMap::new();
@@ -1224,19 +1229,29 @@ pub fn compile_positive_binary_task(
             initial_rules.push(lower_positive_binary_rule(rule, &predicate_indices)?);
         }
     }
-    let parsed_queries = xlog_logic::parse_program(&executable_source)?;
-    let queries: Vec<SemanticProgramFact> = parsed_queries
-        .queries
+    let statement_source = positive_binary_task_source(initial_theory, input_facts, statements);
+    let mut parsed_statements = xlog_logic::parse_program(&statement_source)?;
+    let parsed_queries = std::mem::take(&mut parsed_statements.queries);
+    if parsed_queries.len() != statements.len() || !positive_binary_source_only(&parsed_statements)
+        || parsed_statements.predicates.len() != theory.predicates.len()
+        || parsed_statements.rules.len() != theory.rules.len() + facts.rules.len() {
+        return Err(XlogError::Compilation("each admitted Statement must contain exactly one ground query".into()));
+    }
+    let observation_facts: Vec<(u32, SemanticProgramFact)> = parsed_queries
         .iter()
-        .map(|query| lower_binary_fact(&query.atom, &predicate_indices))
+        .enumerate()
+        .map(|(record, query)| lower_binary_fact(&query.atom, &predicate_indices)
+            .map(|fact| (record as u32, fact)))
         .collect::<Result<Vec<_>>>()?;
+    let queries = query_records.iter().map(|record| observation_facts[*record as usize].1)
+        .collect();
     Ok(SemanticProgramAdmission {
         predicate_count: theory.predicates.len() as u32,
         initial_facts,
         initial_rules,
-        observation_facts: queries.iter().copied().enumerate()
-            .map(|(record, fact)| (record as u32, fact)).collect(),
+        observation_facts,
         queries,
+        query_records: query_records.to_vec(),
     })
 }
 

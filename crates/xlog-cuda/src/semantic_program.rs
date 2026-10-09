@@ -43,6 +43,8 @@ pub struct SemanticProgramAdmission {
     pub initial_facts: Vec<SemanticProgramFact>,
     pub initial_rules: Vec<SemanticProgramRule>,
     pub queries: Vec<SemanticProgramFact>,
+    /// Ordered original Statement records selected for the query axis.
+    pub query_records: Vec<u32>,
     /// Original admitted statement-record indices and their compiled tuples.
     /// This roster is independent of the selected query axis.
     pub observation_facts: Vec<(u32, SemanticProgramFact)>,
@@ -53,6 +55,7 @@ impl SemanticProgramAdmission {
         if self.predicate_count == 0
             || self.queries.is_empty()
             || self.queries.len() > u32::MAX as usize
+            || self.query_records.len() != self.queries.len()
             || self.initial_facts.len() > u32::MAX as usize
             || self.initial_rules.len() > u32::MAX as usize
             || self
@@ -63,6 +66,9 @@ impl SemanticProgramAdmission {
             || self.observation_facts.iter().any(|(_, fact)| fact.predicate >= self.predicate_count)
             || self.observation_facts.iter().enumerate().any(|(index, (record, _))| {
                 self.observation_facts[..index].iter().any(|(before, _)| before == record)
+            })
+            || self.query_records.iter().zip(&self.queries).any(|(record, fact)| {
+                !self.observation_facts.iter().any(|(original, tuple)| original == record && tuple == fact)
             })
         {
             return Err("binary program has an invalid predicate or fact count");

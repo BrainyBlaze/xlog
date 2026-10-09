@@ -19,6 +19,7 @@ from pyxlog._native import (
     resource_observer_device_certificate as resource_observer_device_certificate,
     SemanticTransitionTaskUse as SemanticTransitionTaskUse,
     SemanticTransitionController as SemanticTransitionController,
+    SemanticTransitionColdTask as SemanticTransitionColdTask,
     SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
     CarrierRefused as CarrierRefused,
     SolverResourceExhausted as SolverResourceExhausted,
