@@ -274,18 +274,20 @@ pub struct SemanticTrainingCanary {
 }
 
 /// Native-observed immutable Logical source for the original symbolic canaries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SemanticTrainingCanarySource {
     pub(crate) content: SemanticTaskContentIdentity,
     pub(crate) statements: Vec<(Identity256, SemanticTruth)>,
+    pub(crate) memory: Arc<crate::memory::GpuMemoryManager>,
 }
 
 impl SemanticTrainingCanarySource {
     pub(crate) fn observed(
         content: SemanticTaskContentIdentity,
         statements: Vec<(Identity256, SemanticTruth)>,
+        memory: Arc<crate::memory::GpuMemoryManager>,
     ) -> Self {
-        Self { content, statements }
+        Self { content, statements, memory }
     }
 
     /// Immutable metadata from the original native Logical observation.
@@ -774,72 +776,6 @@ impl SemanticTrainingViewPort {
 impl SemanticSelectedTrainingView {
     pub fn capacity(&self) -> usize {
         self.arena.capacity
-    }
-
-    #[cfg(feature = "semantic-policy")]
-    pub(crate) fn account_allocations(
-        &self,
-        allocations: &mut Vec<crate::memory::DeviceAllocationProvenance>,
-    ) -> Result<(), SemanticTransitionError> {
-        macro_rules! account_view {
-            ($view:expr) => {{
-                let provenance = $view
-                    .allocation_provenance()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
-                if !allocations
-                    .iter()
-                    .any(|known| provenance.same_allocation(known))
-                {
-                    allocations.push(provenance);
-                }
-            }};
-        }
-        macro_rules! account {
-            ($slice:expr) => {
-                account_view!($slice.view())
-            };
-        }
-        account!(self.arena.descriptors);
-        account!(self.arena.raw);
-        account!(self.arena.objective);
-        account!(self.arena.groups);
-        account!(self.arena.group_members);
-        account!(self.arena.canaries);
-        account!(self.arena.protected_members);
-        account!(self.storage.selection);
-        account!(self.storage.roster_rows);
-        account!(self.storage.objective);
-        account!(self.storage.groups);
-        account!(self.storage.group_members);
-        account!(self.storage.token_ids);
-        account!(self.storage.mask_labels);
-        account!(self.storage.mask_weights);
-        account!(self.storage.ar_labels);
-        account!(self.storage.retention_labels);
-        account!(self.storage.branch_labels);
-        account!(self.storage.branch_ids);
-        account!(self.storage.source_slots);
-        account!(self.storage.logical_positions);
-        account!(self.storage.kinds);
-        account!(self.storage.parents);
-        #[cfg(feature = "semantic-policy")]
-        account!(self.storage.critic_terms);
-        #[cfg(feature = "semantic-policy")]
-        account!(self.storage.critic_total);
-        if let Some(publication) = &self.arena.publication {
-            account_view!(publication.word);
-            for directory in &publication.directories {
-                account_view!(directory);
-            }
-            account_view!(publication.storage);
-            for entries in &publication.entries {
-                account_view!(entries);
-            }
-            for payload in &publication.payloads {
-                account_view!(payload);
-            }
-        }
-        Ok(())
     }
 
     pub fn row_count(&self) -> usize {

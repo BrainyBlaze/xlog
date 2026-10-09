@@ -8558,35 +8558,6 @@ fn upload_publication<T: DeviceRepr>(
         .map_err(|error| runtime_error("publication cold metadata upload", error))
 }
 
-#[cfg(feature = "semantic-policy")]
-fn account_tracked_allocation<T: cudarc::driver::DeviceRepr>(
-    allocations: &mut Vec<DeviceAllocationProvenance>,
-    slice: &TrackedCudaSlice<T>,
-) -> Result<(), SemanticTransitionError> {
-    let provenance = slice
-        .view()
-        .allocation_provenance()
-        .ok_or(SemanticTransitionError::ObservationMismatch)?;
-    if !allocations
-        .iter()
-        .any(|known| provenance.same_allocation(known))
-    {
-        allocations.push(provenance);
-    }
-    Ok(())
-}
-
-#[cfg(feature = "semantic-policy")]
-fn accounted_tracked_bytes(
-    allocations: Vec<DeviceAllocationProvenance>,
-) -> Result<u64, SemanticTransitionError> {
-    allocations.into_iter().try_fold(0u64, |total, allocation| {
-        total
-            .checked_add(allocation.allocation_bytes())
-            .ok_or(SemanticTransitionError::GenerationExhausted)
-    })
-}
-
 impl PublicationStorage {
     fn continuation_block_contract(
         &self,
@@ -8618,32 +8589,6 @@ impl PublicationStorage {
             ));
         }
         Ok((expected, schema, identity))
-    }
-
-    #[cfg(feature = "semantic-policy")]
-    fn account_allocations(
-        &self,
-        allocations: &mut Vec<DeviceAllocationProvenance>,
-    ) -> Result<(), SemanticTransitionError> {
-        account_tracked_allocation(allocations, &self.control)?;
-        for bank in &self.banks {
-            account_tracked_allocation(allocations, bank)?;
-        }
-        for directory in &self.directories {
-            account_tracked_allocation(allocations, directory)?;
-        }
-        account_tracked_allocation(allocations, &self.storage)?;
-        account_tracked_allocation(allocations, &self.contract)?;
-        account_tracked_allocation(allocations, &self.role_counts)?;
-        account_tracked_allocation(allocations, &self.terminals)?;
-        account_tracked_allocation(allocations, &self.continuation)?;
-        account_tracked_allocation(allocations, &self.continuation_directory)?;
-        for allocation in &self.allocations {
-            if let Some(owner) = allocation.live_slice() {
-                account_tracked_allocation(allocations, &owner)?;
-            }
-        }
-        Ok(())
     }
 
     #[expect(
@@ -10985,7 +10930,7 @@ struct BoundModelUpdate {
     candidate_logits: PreparedSemanticTensor,
     _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
-    accounted_reserved_bytes: u64,
+    accounted_external_bytes: u64,
     _witness: SemanticTensorContentWitness,
     _forward_witnesses: [SemanticModelForwardWitness; 2],
 }
@@ -10999,19 +10944,6 @@ struct ModelUpdateEvidenceOwner {
 }
 
 impl PreparedModelUpdate {
-    #[cfg(feature = "semantic-policy")]
-    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
-        let mut allocations = Vec::new();
-        account_tracked_allocation(&mut allocations, &self.bindings)?;
-        account_tracked_allocation(&mut allocations, self.evidence.as_ref())?;
-        account_tracked_allocation(&mut allocations, &self.forward_seals)?;
-        account_tracked_allocation(&mut allocations, &self.forward_receipts)?;
-        account_tracked_allocation(&mut allocations, &self.admissibility)?;
-        account_tracked_allocation(&mut allocations, &self.canary_results)?;
-        account_tracked_allocation(&mut allocations, &self.refusal)?;
-        accounted_tracked_bytes(allocations)
-    }
-
     fn descriptor(&self) -> ModelUpdateContinuationInputs {
         ModelUpdateContinuationInputs {
             bindings: self.bindings.device_ptr_value(),
@@ -11073,6 +11005,7 @@ impl PreparedModelUpdate {
         training_view: &SemanticSelectedTrainingView,
         task: &TrackedCudaSlice<u64>,
         model_work: &PreparedModelWork,
+        native_resident_bytes: u64,
     ) -> Result<(), SemanticTransitionError> {
         let output = self.output.as_ref().ok_or_else(|| {
             publication_input_error("prepared update has no original model output binding")
@@ -11104,23 +11037,12 @@ impl PreparedModelUpdate {
         let canary_results = self.canary_results.device_ptr_value();
         let admissibility_destination = self.admissibility.device_ptr_value();
         let refusal_destination = self.refusal.device_ptr_value();
-        let mut native_allocations = Vec::new();
-        storage.account_allocations(&mut native_allocations)?;
-        training_view.account_allocations(&mut native_allocations)?;
-        let native_allocation_bytes = accounted_tracked_bytes(native_allocations)?;
-        let model_work_bytes = model_work.accounted_allocation_bytes()?;
-        let update_bytes = self.accounted_allocation_bytes()?;
-        let task_bytes = task
-            .view()
-            .allocation_provenance()
-            .ok_or(SemanticTransitionError::ObservationMismatch)?
-            .allocation_bytes();
+        // All source, target, replay-child, tape and prepared allocations are
+        // charged to the same original native manager. Count its actual live
+        // charge once, not a hand-selected subset of this Update's views.
         let accounted_reserved_bytes = output
-            .accounted_reserved_bytes
-            .checked_add(native_allocation_bytes)
-            .and_then(|bytes| bytes.checked_add(task_bytes))
-            .and_then(|bytes| bytes.checked_add(model_work_bytes))
-            .and_then(|bytes| bytes.checked_add(update_bytes))
+            .accounted_external_bytes
+            .checked_add(native_resident_bytes)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let logits = output.baseline_logits.layout;
         let canary_inputs = ModelUpdateCanaryInputs {
@@ -11312,14 +11234,6 @@ impl PreparedModelWork {
             replay_cursor: 0,
             uncaptured_recording: false,
         })
-    }
-
-    #[cfg(feature = "semantic-policy")]
-    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
-        let mut allocations = Vec::new();
-        account_tracked_allocation(&mut allocations, &self.device)?;
-        account_tracked_allocation(&mut allocations, &self.actual)?;
-        accounted_tracked_bytes(allocations)
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -22967,10 +22881,18 @@ impl SemanticTransitionSession {
             ));
         }
         #[cfg(feature = "semantic-policy")]
-        let accounted_reserved_bytes = accounted_tensor_allocations(
+        let slab_allocation_bytes = accounted_tensor_allocations(
             &[admissibility, &baseline_logits, &candidate_logits],
             &slab,
         )?;
+        #[cfg(feature = "semantic-policy")]
+        let accounted_external_bytes = if slab.native_allocation.is_some() {
+            // Native slab ownership is already in the original allocator's
+            // live charge. Only a genuine external slab is additive.
+            0
+        } else {
+            slab_allocation_bytes
+        };
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -23004,7 +22926,7 @@ impl SemanticTransitionSession {
             candidate_logits,
             _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
-            accounted_reserved_bytes,
+            accounted_external_bytes,
             _witness: witness.clone(),
             _forward_witnesses: [baseline_forward.clone(), candidate_forward.clone()],
         });
@@ -26262,6 +26184,7 @@ impl SemanticTransitionSession {
         }
         self.require_completed_graph_retirements()?;
         if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+            || self.training_canary_source_borrowed()
             || lease.active
             || !self.readers.is_empty()
             || !self.steps.is_empty()
@@ -30062,6 +29985,7 @@ impl SemanticTransitionSession {
     /// that owner and prohibits a restored Session from overlapping it.
     pub fn join_observed_cold_release(&mut self) -> Result<(), SemanticTransitionError> {
         if self.is_poisoned()
+            || self.training_canary_source_borrowed()
             || self.cold_content.is_none()
             || self.task.is_some()
             || self.task_epoch != 0
@@ -30095,16 +30019,9 @@ impl SemanticTransitionSession {
     /// Destroy the joined cold owner outside the Python Session mutex, then
     /// complete the allocator's real pending deallocations before returning.
     pub fn finish_observed_cold_release(self) -> Result<(), SemanticTransitionError> {
-        let memory = self.finish_joined_allocation_release()?;
-        if memory.allocated_bytes() != 0
-            || memory
-                .runtime()
-                .is_some_and(|runtime| runtime.bytes_outstanding() != 0)
-        {
-            return Err(publication_input_error(
-                "fresh cold allocation owners remain after retirement",
-            ));
-        }
+        // The original source and its dependents share one allocator. Other
+        // joined live Sessions are not this Session's unreleased allocations.
+        self.finish_joined_allocation_release()?;
         Ok(())
     }
 
@@ -30345,7 +30262,7 @@ impl SemanticTransitionSession {
                     .map_err(SemanticTransitionError::Semantic)
             }).collect::<Result<Vec<_>, _>>()?;
             self.cold_canary_source = Some(Arc::new(crate::SemanticTrainingCanarySource::observed(
-                content.0, statements,
+                content.0, statements, Arc::clone(self.provider.memory()),
             )));
         }
         self.cold_content = Some(content.clone());
@@ -30366,8 +30283,20 @@ impl SemanticTransitionSession {
     /// Freeze the actual source before allocating the original training reservation.
     pub fn bind_training_canary_source(&mut self, source: Arc<crate::SemanticTrainingCanarySource>) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
-        if self.publication.is_some() || self.training_views.is_some() || self.training_canary_source.is_some() {
+        if let Some(original) = &self.training_canary_source {
+            return if Arc::ptr_eq(original, &source) {
+                Ok(())
+            } else {
+                Err(publication_input_error("symbolic canary source differs from its original cold binding"))
+            };
+        }
+        if self.publication.is_some() || self.training_views.is_some() {
             return Err(publication_input_error("symbolic canary source is immutable after its original cold binding"));
+        }
+        if !Arc::ptr_eq(self.provider.memory(), &source.memory) {
+            return Err(publication_input_error(
+                "symbolic canary source must share the original native allocation budget before construction",
+            ));
         }
         self.training_canary_source = Some(source);
         Ok(())
@@ -32010,6 +31939,7 @@ impl SemanticTransitionSession {
                         .model_work
                         .as_ref()
                         .expect("prepared model work frozen above"),
+                    self.provider.memory().allocated_bytes(),
                 )?;
             }
             let io = self.prepared_kernel_io(step, bank)?;

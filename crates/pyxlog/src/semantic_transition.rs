@@ -351,6 +351,9 @@ pub(crate) struct PySemanticTransitionSession {
     issuance: Arc<AtomicU64>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
+    // Retain the actual cold source before the first dependent allocation,
+    // including the interval before a TaskCheckpointSeed exists.
+    training_canary_owner: Mutex<Option<TrainingCanaryOwner>>,
     owner_thread: ThreadId,
     device_ordinal: usize,
     capacities: (u32, u32, u32, u32),
@@ -454,6 +457,10 @@ impl PySemanticTransitionSession {
             guard.take().expect("checked live fresh cold Session")
         };
         owner.finish_observed_cold_release().map_err(xlog_err)?;
+        self.training_canary_owner
+            .lock()
+            .map_err(|_| invalid("symbolic canary owner mutex is poisoned"))?
+            .take();
         drain_export_owners();
         Ok(())
     }
@@ -491,6 +498,10 @@ impl PySemanticTransitionSession {
         owner
             .finish_retired_publication_release()
             .map_err(xlog_err)?;
+        self.training_canary_owner
+            .lock()
+            .map_err(|_| invalid("symbolic canary owner mutex is poisoned"))?
+            .take();
         drain_export_owners();
         Ok(())
     }
@@ -508,6 +519,7 @@ impl PySemanticTransitionSession {
         proposal_expense: Arc<Mutex<ProposalExpense>>,
         checkpoint_sources: Arc<Mutex<CheckpointSources>>,
         allocation_domain: Option<CheckpointAllocationDomain>,
+        training_canary_owner: Option<TrainingCanaryOwner>,
     ) -> PyResult<Self> {
         let editable_source = cold_task::editable_source_from_admission(&records)?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
@@ -537,7 +549,7 @@ impl PySemanticTransitionSession {
                     || provider.memory().budget_limit_bytes() != memory_bytes
                 {
                     return Err(invalid(
-                        "private checkpoint allocation cannot change its original device or memory budget",
+                        "shared allocation cannot change its original device or memory budget",
                     ));
                 }
                 (provider, Some(domain))
@@ -582,13 +594,18 @@ impl PySemanticTransitionSession {
         graph
             .admit_records(graph.empty_root(), records, limits)
             .map_err(xlog_err)?;
-        let session = SemanticTransitionSession::from_hypergraph_with_program(
+        let mut session = SemanticTransitionSession::from_hypergraph_with_program(
             graph,
             editable_source
                 .as_ref()
                 .map(|source| source.program.as_ref()),
         )
         .map_err(xlog_err)?;
+        if let Some((source, _)) = &training_canary_owner {
+            session
+                .bind_training_canary_source(Arc::clone(source))
+                .map_err(xlog_err)?;
+        }
         Ok(Self {
             inner: Mutex::new(Some(session)),
             editable_program: editable_source
@@ -614,6 +631,7 @@ impl PySemanticTransitionSession {
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense,
             checkpoint_sources,
+            training_canary_owner: Mutex::new(training_canary_owner),
             owner_thread: std::thread::current().id(),
             device_ordinal,
             capacities,
@@ -1704,6 +1722,7 @@ impl PySemanticTransitionSession {
             })),
             Arc::new(Mutex::new(CheckpointSources::default())),
             None,
+            None,
         )
     }
 
@@ -2407,6 +2426,23 @@ impl PySemanticTransitionSession {
                 )
             })
             .transpose()?;
+        let source_allocation = canary_owner
+            .as_ref()
+            .map(|source| source.borrow(py).canary_allocation_domain(py))
+            .transpose()?;
+        let allocation_domain = match (allocation_domain, source_allocation) {
+            (Some(original), Some(source)) => {
+                if !Arc::ptr_eq(original.provider.memory(), source.provider.memory())
+                    || original.domain.stream_id() != source.domain.stream_id()
+                {
+                    return Err(invalid(
+                        "restored symbolic canary source differs from the original allocation domain",
+                    ));
+                }
+                Some(original)
+            }
+            (original, source) => original.or(source),
+        };
         let restored_session = Self::from_admission(
             admission,
             config.capacities,
@@ -2416,6 +2452,7 @@ impl PySemanticTransitionSession {
             Arc::clone(&seed.proposal_expense),
             Arc::clone(&seed.checkpoint_sources),
             allocation_domain,
+            canary_source.clone().zip(canary_owner.clone()),
         )?;
         let session = Py::new(py, restored_session)?;
         session
@@ -7745,6 +7782,11 @@ impl ProposalExpense {
         Ok(())
     }
 }
+
+type TrainingCanaryOwner = (
+    Arc<xlog_cuda::SemanticTrainingCanarySource>,
+    Arc<Py<cold_task::PySemanticTransitionColdTask>>,
+);
 
 type TrainingCanarySourceRead = (
     Option<Arc<xlog_cuda::SemanticTrainingCanarySource>>,
