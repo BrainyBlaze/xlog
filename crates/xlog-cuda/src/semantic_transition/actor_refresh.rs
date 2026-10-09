@@ -7,6 +7,27 @@ pub struct SemanticPreparedActorRefresh {
     pub(super) inner: Arc<PreparedActorRefreshOwner>,
 }
 
+/// The original outer execution reached this child's initializer, refused it,
+/// and authenticated its actual native prefix. No child model outcome is implied.
+#[derive(Clone)]
+pub struct SemanticActorRefreshInitializerRefusal {
+    inner: Arc<ActorRefreshInitializerRefusalOwner>,
+}
+
+struct ActorRefreshInitializerRefusalOwner {
+    issuer: Arc<()>,
+    scope: Arc<()>,
+    proof: Arc<PreparedActorRefreshOwner>,
+    target_bank: usize,
+    observation: ActorRefreshInitializerObservation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ActorRefreshInitializerObservation {
+    marker: PreparedActorRefreshDevice,
+    native_work: [u64; 11],
+}
+
 pub(super) struct PreparedActorRefreshOwner {
     pub(super) issuer: Arc<()>,
     pub(super) scope: Arc<()>,
@@ -49,7 +70,7 @@ pub(super) enum ActorRefreshCaptureState {
 /// The target reader and copied header are original prepared-step producers.
 /// Acquired basis fields are written only inside the original Update bank.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct PreparedActorRefreshDevice {
     pub(super) abi: u64,
     pub(super) status: u64,
@@ -83,6 +104,8 @@ pub(super) struct StagedActorRefresh {
     pub(super) device: Arc<TrackedCudaSlice<PreparedActorRefreshDevice>>,
     pub(super) native_work: Arc<TrackedCudaSlice<u64>>,
     native_ceiling: [u64; 9],
+    initializer_observation: Arc<Mutex<Option<ActorRefreshInitializerObservation>>>,
+    initializer_refusal: Option<SemanticActorRefreshInitializerRefusal>,
 }
 
 #[repr(C)]
@@ -187,8 +210,35 @@ pub(super) struct ActorRefreshObservedComponent {
     pub(super) model_event_records: [Vec<ModelWorkEvent>; 2],
     pub(super) native_ceiling: [u64; 9],
     pub(super) transition_ceilings: [[u64; 9]; 2],
+    initializer_observation: Arc<Mutex<Option<ActorRefreshInitializerObservation>>>,
     model_events: [DeviceMemoryView<ModelWorkEvent>; 2],
     model_inputs: [ModelWorkInput; 2],
+}
+
+impl ActorRefreshObservedComponent {
+    pub(super) fn retain_initializer_refusal(
+        &self,
+        marker: PreparedActorRefreshDevice,
+        native_work: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        if marker.abi != 1 || marker.status != 2 || marker.member_ordinal != self.member_ordinal {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let observation = ActorRefreshInitializerObservation {
+            marker,
+            native_work: native_work
+                .try_into()
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+        };
+        let mut original = self.initializer_observation.lock().map_err(|_| {
+            publication_input_error("original actor refusal observation lock is poisoned")
+        })?;
+        if original.is_some_and(|original| original != observation) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        *original = Some(observation);
+        Ok(())
+    }
 }
 
 impl ActorRefreshWork {
@@ -893,6 +943,8 @@ impl SemanticTransitionSession {
             device: Arc::clone(&device),
             native_work: Arc::clone(&native_work),
             native_ceiling: [0; 9],
+            initializer_observation: Arc::new(Mutex::new(None)),
+            initializer_refusal: None,
         });
         upload_publication(&self.provider, &[0u64; 11], &native_work)?;
         let staged = self.restore_state_material_inner(
@@ -1392,6 +1444,7 @@ impl SemanticTransitionSession {
                 native_ceiling: staged.native_ceiling,
                 transition_ceilings:
                     native_work_bound::actor_refresh_transition_native_work_ceilings(self)?,
+                initializer_observation: Arc::clone(&staged.initializer_observation),
                 model_events: [recompute_work.device.view(), proposal_work.device.view()],
                 model_inputs: [recompute_work.descriptor(), proposal_work.descriptor()],
             });
@@ -1581,6 +1634,155 @@ impl SemanticTransitionSession {
             ));
         }
         Ok(())
+    }
+
+    fn validate_actor_refresh_initializer_refusal(
+        &self,
+        observation: &ActorRefreshInitializerObservation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_actor_refresh_parent_completion()?;
+        let staged = self
+            .actor_refresh
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        let proof = &staged.proof.inner;
+        let marker = observation.marker;
+        if staged.state != ActorRefreshCaptureState::Frozen
+            || !build.finished
+            || build.submitted
+            || build.graph_retirement.is_none()
+            || !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&build.actor_refresh_execution, &proof.execution)
+            || !Arc::ptr_eq(&build.cancelled, &proof.cancelled)
+            || build.transitions
+                != [
+                    SemanticTransitionKind::Recompute,
+                    SemanticTransitionKind::Proposal,
+                ]
+            || build.tokens.len() != 2
+            || marker.abi != 1
+            || marker.status != 2
+            || marker.target_bank != staged.target_bank as u64
+            || marker.target_control != proof.target.control.device_ptr_value()
+            || marker.target_lease != proof.inputs.reader.device_ptr_value()
+            || marker.target_header != proof.inputs.header.device_ptr_value()
+            || marker.child_control
+                != self
+                    .publication
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?
+                    .control
+                    .device_ptr_value()
+            || marker.member_ordinal != proof.member.ordinal
+            || marker.minimum_generation != proof.minimum_generation
+            || marker.stream_serial != proof.rng.stream_serial
+            || marker.family_id != u64::from(proof.rng.family_id)
+            || marker.proposal != u64::from(proof.rng.proposal)
+            || marker.program != proof.program
+            || marker.phase != proof.phase
+            || marker.original_origin != proof.member.origin
+            || observation.native_work[10] != 0
+            || observation.native_work[1..10]
+                .iter()
+                .try_fold(0u64, |sum, value| sum.checked_add(*value))
+                != Some(observation.native_work[0])
+            || observation.native_work[1..10]
+                .iter()
+                .zip(staged.native_ceiling)
+                .any(|(actual, ceiling)| *actual > ceiling)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let children = proof.children.lock().map_err(|_| {
+            publication_input_error("original actor child custody lock is poisoned")
+        })?;
+        if children[staged.target_bank]
+            .as_ref()
+            .is_none_or(|issuer| !Arc::ptr_eq(issuer, &self.publication_issuer))
+            || *staged.initializer_observation.lock().map_err(|_| {
+                publication_input_error("original actor refusal observation lock is poisoned")
+            })? != Some(*observation)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn retain_actor_refresh_initializer_refusal(
+        &mut self,
+        marker: PreparedActorRefreshDevice,
+    ) -> Result<(), SemanticTransitionError> {
+        let staged = self
+            .actor_refresh
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let observation = staged
+            .initializer_observation
+            .lock()
+            .map_err(|_| {
+                publication_input_error("original actor refusal observation lock is poisoned")
+            })?
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if observation.marker != marker {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.validate_actor_refresh_initializer_refusal(&observation)?;
+        if self.checked_actor_refresh_initializer_refusal()?.is_some() {
+            return Ok(());
+        }
+        let refusal = SemanticActorRefreshInitializerRefusal {
+            inner: Arc::new(ActorRefreshInitializerRefusalOwner {
+                issuer: Arc::clone(&self.publication_issuer),
+                scope: Arc::clone(
+                    &self.prepared_segment.as_ref().expect("original actor child").scope,
+                ),
+                proof: Arc::clone(&staged.proof.inner),
+                target_bank: staged.target_bank,
+                observation,
+            }),
+        };
+        self.actor_refresh
+            .as_mut()
+            .expect("original actor child")
+            .initializer_refusal = Some(refusal);
+        Ok(())
+    }
+
+    pub(super) fn checked_actor_refresh_initializer_refusal(
+        &self,
+    ) -> Result<Option<&SemanticActorRefreshInitializerRefusal>, SemanticTransitionError> {
+        let Some(staged) = self.actor_refresh.as_ref() else {
+            return Ok(None);
+        };
+        let Some(refusal) = staged.initializer_refusal.as_ref() else {
+            return Ok(None);
+        };
+        let build = self
+            .prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if !Arc::ptr_eq(&refusal.inner.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&refusal.inner.scope, &build.scope)
+            || !Arc::ptr_eq(&refusal.inner.proof, &staged.proof.inner)
+            || refusal.inner.target_bank != staged.target_bank
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.validate_actor_refresh_initializer_refusal(&refusal.inner.observation)?;
+        Ok(Some(refusal))
+    }
+
+    /// Return only the reached refusal authenticated by this child's original
+    /// completion observer. It authorizes final-use retirement, not Recompute
+    /// or Proposal outcomes.
+    pub fn actor_refresh_initializer_refusal(
+        &self,
+    ) -> Result<Option<SemanticActorRefreshInitializerRefusal>, SemanticTransitionError> {
+        Ok(self.checked_actor_refresh_initializer_refusal()?.cloned())
     }
 
     /// Retire the genuine fresh Proposal's final-use tape after the same outer
