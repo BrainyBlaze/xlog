@@ -5993,7 +5993,7 @@ fn completed_theory_delta_for_slot(
         return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
             kind: "rule",
             delta,
-            theory_generation,
+            theory_generation: predecessor_semantic_root_digest,
             verdict: if lane_refusal == 0 {
                 "accepted"
             } else {
