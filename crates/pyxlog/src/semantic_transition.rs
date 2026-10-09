@@ -2397,6 +2397,7 @@ impl PySemanticTransitionSession {
                     snapshot: current_snapshot,
                 }),
                 delivery: Mutex::new(None),
+                pending_delivery_receiver: Mutex::new(None),
             },
         )?;
         if let Some(pending) = learning_owner {
@@ -5424,108 +5425,76 @@ impl ReplayRow {
         })
     }
 
-    /// Classify the complete acquired result, not process exit status. The
-    /// trusted issuer signs this disposition together with the original row.
-    fn acquired_result_disposition(&self) -> PyResult<u64> {
+    /// Transport the original ordered verification tail without classifying
+    /// outcomes or replacing any full signed material with its metadata.
+    fn acquired_verification_materials(&self) -> PyResult<Vec<(Identity256, Vec<u8>, Vec<u8>)>> {
         const FAMILIES: [&str; 5] = ["build", "test", "proof", "measurement", "environment"];
-        let receipts: Vec<serde_json::Value> =
+        let receipts: Vec<Box<serde_json::value::RawValue>> =
             serde_json::from_str(replay_json_field(&self.record, "receipts")?)
                 .map_err(|_| invalid("acquired result receipts are not an array"))?;
-        let begin = receipts
-            .iter()
-            .position(|receipt| {
-                receipt
-                    .get("kind")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| FAMILIES.contains(&kind))
-            })
-            .ok_or_else(|| invalid("acquired result requires all five verification families"))?;
-        let mut identities = BTreeSet::new();
-        let mut seen = [false; 5];
-        let mut previous = 0;
-        let mut disposition = 1;
-        for receipt in &receipts[begin..] {
-            let body = receipt
-                .as_object()
-                .ok_or_else(|| invalid("verification receipt is not an object"))?;
-            let family = body
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
+        let mut materials = Vec::new();
+        let mut verification_started = false;
+        for receipt in receipts {
+            let metadata = replay_json_object(receipt.get())?;
+            let family = replay_json_value(replay_json_field(&metadata, "kind")?)?;
+            let family = family
+                .as_str()
                 .ok_or_else(|| invalid("verification receipt family is absent"))?;
-            let ordinal = FAMILIES
-                .iter()
-                .position(|value| *value == family)
-                .ok_or_else(|| invalid("acquired verification receipt has another family"))?;
-            if ordinal < previous {
-                return Err(invalid(
-                    "acquired verification families changed their original order",
-                ));
+            if !FAMILIES.contains(&family) {
+                if verification_started {
+                    return Err(invalid(
+                        "acquired verification tail has another receipt kind",
+                    ));
+                }
+                continue;
             }
-            seen[ordinal] = true;
-            previous = ordinal;
-            let fields = [
-                "kind",
-                "identity",
-                "outcome",
-                "refusal_scope",
-                "comparator_identity",
-                "metric_identity",
-                "tolerance_identity",
-            ];
-            if body.len() != fields.len()
-                || fields.iter().any(|field| !body.contains_key(*field))
-                || !body["refusal_scope"].is_null()
-            {
-                return Err(invalid(
-                    "acquired result changed its original typed receipt roster",
-                ));
-            }
-            let identity = body["identity"]
+            verification_started = true;
+            let identity = replay_json_value(replay_json_field(&metadata, "identity")?)?;
+            let identity = identity
                 .as_str()
                 .ok_or_else(|| invalid("verification receipt identity is absent"))?;
-            replay_digest_identity(identity)?;
-            if !identities.insert(identity)
-                || !self.materials.iter().any(|material| {
-                    material.kind == "receipt"
-                        && material.identity == identity
-                        && material.bytes.is_some()
-                })
-            {
-                return Err(invalid(
-                    "verification receipt lacks its distinct complete original material",
-                ));
-            }
-            for name in [
-                "comparator_identity",
-                "metric_identity",
-                "tolerance_identity",
-            ] {
-                if family == "measurement" {
-                    replay_digest_identity(body[name].as_str().ok_or_else(|| {
-                        invalid("measurement requires its frozen comparator, metric and tolerance")
-                    })?)?;
-                } else if !body[name].is_null() {
-                    return Err(invalid(
-                        "only measurement carries comparator, metric and tolerance identities",
-                    ));
-                }
-            }
-            match (family, body["outcome"].as_str()) {
-                ("measurement", Some("REJECTED")) => disposition = 2,
-                ("measurement", Some("EXACT" | "REPRODUCIBLE_NOT_EXACT")) => {}
-                (_, Some("PASS" | "FAIL")) if family != "measurement" => {}
-                _ => {
-                    return Err(invalid(
-                        "acquired verification receipt has another typed outcome",
-                    ));
-                }
-            }
-        }
-        if !seen.into_iter().all(|present| present) {
-            return Err(invalid(
-                "acquired result requires all five verification families",
+            let material = self
+                .materials
+                .iter()
+                .find(|material| material.kind == "receipt" && material.identity == identity)
+                .and_then(|material| material.bytes.as_ref())
+                .ok_or_else(|| {
+                    invalid("verification receipt lacks its complete original material")
+                })?;
+            // Preserve original binding order and the exact metadata bytes.
+            // The native verifier owns the full binding, outcome and MAC law.
+            materials.push((
+                replay_digest_identity(identity)?,
+                material.to_vec(),
+                receipt.get().as_bytes().to_vec(),
             ));
         }
+        if materials.is_empty() {
+            return Err(invalid(
+                "acquired result has no original verification materials",
+            ));
+        }
+        Ok(materials)
+    }
+
+    fn result_permission_disposition(receipt: &[u8]) -> PyResult<u64> {
+        const DOMAIN: &[u8] = b"xlog.replay.result.v2\0";
+        let offset = DOMAIN.len() + 7 * 32;
+        if receipt.len() != offset + 8 + 32 || !receipt.starts_with(DOMAIN) {
+            return Err(invalid(
+                "external result receipt has another canonical extent",
+            ));
+        }
+        let disposition = u64::from_le_bytes(
+            receipt[offset..offset + 8]
+                .try_into()
+                .expect("checked result disposition"),
+        );
+        if !matches!(disposition, 1 | 2) {
+            return Err(invalid("external result receipt has another disposition"));
+        }
+        // This wire value only selects the original permission precheck.
+        // Native verification independently derives and authenticates it.
         Ok(disposition)
     }
 
@@ -8425,13 +8394,30 @@ pub(crate) struct PySemanticTransitionTaskUse {
     checkpoint: TaskCheckpointSeed,
     state: Mutex<TaskUseState>,
     delivery: Mutex<Option<DeliveryReceiverBinding>>,
+    pending_delivery_receiver: Mutex<Option<PendingDeliveryReceiver>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct DeliveryReceiverBinding {
     recipient_id: Identity256,
     verification_key: [u8; 32],
     expected_effect: Vec<u8>,
+}
+
+struct PendingDeliveryReceiver {
+    binding: DeliveryReceiverBinding,
+    stored: Option<(Vec<Vec<u8>>, [u64; 4])>,
+    parsed: Option<
+        Vec<(
+            xlog_cuda::SemanticReplayMaterial,
+            xlog_cuda::SemanticTrainingViewRow,
+            Vec<u8>,
+            Identity256,
+            Identity256,
+            Identity256,
+            Vec<(Identity256, Vec<u8>, Vec<u8>)>,
+        )>,
+    >,
 }
 
 impl PySemanticTransitionTaskUse {
@@ -16933,6 +16919,7 @@ impl PySemanticTransitionController {
                 },
                 state: Mutex::new(TaskUseState { phase, snapshot }),
                 delivery: Mutex::new(None),
+                pending_delivery_receiver: Mutex::new(None),
             },
         )?;
         let mut retained = None;
@@ -18545,9 +18532,6 @@ impl PySemanticTransitionController {
         self.session.borrow(py).require_creator()?;
         self.require_issued(task_use)?;
         let session = self.session.borrow(py);
-        let owner = session.owner()?;
-        task_use.require_current(&owner)?;
-        drop(owner);
         let recipient_id = identity_bytes(recipient_id)?;
         if recipient_id == Identity256::default()
             || !verification_key.is_exact_instance_of::<PyBytes>()
@@ -18576,19 +18560,54 @@ impl PySemanticTransitionController {
                 "task use already has its one delivery receiver binding",
             ));
         }
-        let mut owner = session.owner()?;
-        task_use.require_current(&owner)?;
-        let mut lease = owner.acquire().map_err(xlog_err)?;
-        let stored = owner.replay_append_rows(&lease).map_err(xlog_err);
-        drop(owner);
-        let authentication = (|| -> PyResult<()> {
-            let stored = stored?;
+        let requested = DeliveryReceiverBinding {
+            recipient_id,
+            verification_key,
+            expected_effect,
+        };
+        let mut pending = task_use.pending_delivery_receiver.lock().map_err(|_| {
+            PyRuntimeError::new_err("receiver authentication custody mutex is poisoned")
+        })?;
+        {
+            let owner = session.owner()?;
+            if let Some(original) = pending.as_ref() {
+                if original.binding != requested
+                    || owner.task_evaluation_epoch() != task_use.task_epoch
+                    || owner
+                        .task_evaluation_identity()
+                        .is_none_or(|identity| identity.as_bytes() != &task_use.task_identity)
+                {
+                    return Err(invalid(
+                        "receiver authentication changed its original task or trusted scope",
+                    ));
+                }
+                task_use.issuance.require_current()?;
+            } else {
+                task_use.require_current(&owner)?;
+                *pending = Some(PendingDeliveryReceiver {
+                    binding: requested,
+                    stored: None,
+                    parsed: None,
+                });
+            }
+        }
+        let original = pending.as_mut().expect("original receiver authentication");
+        if original.stored.is_none() {
+            original.stored = Some(
+                session
+                    .owner()?
+                    .replay_append_rows(
+                        original.binding.recipient_id,
+                        &original.binding.verification_key,
+                        &original.binding.expected_effect,
+                    )
+                    .map_err(xlog_err)?,
+            );
+        }
+        if original.parsed.is_none() {
+            let (stored, limits) = original.stored.as_ref().expect("original receiver archive");
             let mut parsed = Vec::with_capacity(stored.len());
             if !stored.is_empty() {
-                let limits = session
-                    .owner()?
-                    .replay_append_limits(&lease)
-                    .map_err(xlog_err)?;
                 let [metadata_limit, material_limit, total_material_limit, evidence_limit] = limits
                     .map(|limit| {
                         usize::try_from(limit)
@@ -18599,7 +18618,7 @@ impl PySemanticTransitionController {
                 let total_material_limit = total_material_limit?;
                 let evidence_limit = evidence_limit?;
                 for bytes in stored {
-                    let value = checkpoint_cold_value(&bytes, bytes.len())?.python_value(py)?;
+                    let value = checkpoint_cold_value(bytes, bytes.len())?.python_value(py)?;
                     let carrier = PyTuple::new(py, [value])?;
                     // These limits belong to each original acquisition. The
                     // complete archived roster has its separate frozen native
@@ -18615,7 +18634,7 @@ impl PySemanticTransitionController {
                     )?;
                     let value = &rows.fields(1)?[0];
                     if value.canonical_bytes().len() > metadata_limit
-                        || checkpoint_cold_value_bytes(value) != bytes
+                        || checkpoint_cold_value_bytes(value).as_slice() != bytes.as_slice()
                     {
                         return Err(invalid(
                             "acquired replay payload differs from its complete original row",
@@ -18640,35 +18659,33 @@ impl PySemanticTransitionController {
                     let evidence_digest =
                         Identity256::from_bytes(Sha256::digest(&row.evidence).into());
                     let training_row = row.training_view_row()?;
-                    let disposition = row.acquired_result_disposition()?;
+                    let verification_materials = row.acquired_verification_materials()?;
                     let action_identity = row.action_identity()?;
                     parsed.push((
                         row.native_replay()?.material,
                         training_row,
-                        bytes,
+                        bytes.clone(),
                         action_identity,
                         record_digest,
                         evidence_digest,
-                        disposition,
+                        verification_materials,
                     ));
                 }
             }
-            let mut owner = session.owner()?;
-            task_use.require_current(&owner)?;
-            owner
-                .authenticate_replay_appends(
-                    &lease,
-                    recipient_id,
-                    &verification_key,
-                    &expected_effect,
-                    &parsed,
-                )
-                .map_err(xlog_err)
-        })();
-        let cleanup = session
-            .owner()
-            .and_then(|mut owner| owner.release(&mut lease, &[1]).map_err(xlog_err));
-        finish_with_cleanup(py, authentication, cleanup)?;
+            original.parsed = Some(parsed);
+        }
+        session
+            .owner()?
+            .authenticate_replay_appends(
+                original.binding.recipient_id,
+                &original.binding.verification_key,
+                &original.binding.expected_effect,
+                original
+                    .parsed
+                    .as_ref()
+                    .expect("original parsed receiver archive"),
+            )
+            .map_err(xlog_err)?;
         let mut binding = task_use
             .delivery
             .lock()
@@ -18678,11 +18695,8 @@ impl PySemanticTransitionController {
                 "task use already has its one delivery receiver binding",
             ));
         }
-        *binding = Some(DeliveryReceiverBinding {
-            recipient_id,
-            verification_key,
-            expected_effect,
-        });
+        *binding = Some(original.binding.clone());
+        *pending = None;
         Ok(())
     }
 
@@ -18826,7 +18840,9 @@ impl PySemanticTransitionController {
             Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
         let evidence_digest = Identity256::from_bytes(Sha256::digest(&row.evidence).into());
         let action_identity = row.action_identity()?;
-        let disposition = row.acquired_result_disposition()?;
+        let verification_materials = row.acquired_verification_materials()?;
+        let disposition =
+            ReplayRow::result_permission_disposition(result_receipt.cast::<PyBytes>()?.as_bytes())?;
         let training_row = row.training_view_row()?;
         let replay = row.native_replay()?;
         // Construct all Python custody before native entry. The native pending
@@ -18867,7 +18883,7 @@ impl PySemanticTransitionController {
             action_identity,
             record_digest,
             evidence_digest,
-            disposition,
+            &verification_materials,
         );
         let entered = owner.replay_delivery_pending();
         drop(owner);

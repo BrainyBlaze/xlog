@@ -9,7 +9,7 @@ use crate::semantic_work::{ExecutionWork, ModelWorkEvent, ModelWorkKind, ModelWo
 mod cold_model_work;
 mod late_replay;
 mod learning_phase;
-use late_replay::PendingReplayDelivery;
+use late_replay::{PendingReplayDelivery, ReplayAuthentication};
 #[cfg(feature = "semantic-policy")]
 mod model_evaluation;
 #[cfg(feature = "semantic-policy")]
@@ -5087,6 +5087,7 @@ struct PublicationCommand {
     control: u64,
     lease: u64,
     operation: u64,
+    native_work: u64,
 }
 
 #[repr(C)]
@@ -7711,15 +7712,26 @@ fn publication_material_runtime() -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"xlog.publication.material-runtime.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
+        hash.update(include_bytes!("semantic_transition/cold_model_work.rs"));
+        hash.update(include_bytes!("semantic_transition/late_replay.rs"));
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
+        hash.update(include_bytes!("semantic_transition/native_work_bound.rs"));
         hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
         hash.update(include_bytes!("semantic_transition/task_ground.rs"));
         hash.update(include_bytes!("semantic_program.rs"));
         hash.update(include_bytes!("../kernels/semantic_task_ground.cuh"));
-        hash.update(include_bytes!("../kernels/semantic_program.cuh"));
+        hash.update(include_bytes!(
+            "semantic_transition/replay_model_backing.rs"
+        ));
+        hash.update(include_bytes!(
+            "semantic_transition/verification_receipts.rs"
+        ));
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
+        hash.update(include_bytes!("../kernels/semantic_program.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_rule_action.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_feedback_encoding.cuh"));
         let policy_identity: [u8; 32] =
             include!(concat!(env!("OUT_DIR"), "/semantic_policy_identity.rs"));
         hash.update(policy_identity);
@@ -9305,10 +9317,22 @@ enum PublishedReaderAcquisition {
 struct PublishedReader {
     device: TrackedCudaSlice<PublicationLease>,
     acquisition: PublishedReaderAcquisition,
+    acquisition_submitted: bool,
     initialization: Option<crate::device::RetainedDeviceWrite<PublicationLease>>,
+    observation: Option<Arc<Mutex<PublicationRead<PublicationLease>>>>,
+    bank_observation: Option<Arc<Mutex<PublishedReaderBankObservation>>>,
+    retirement_entered: bool,
+    retirement_submitted: bool,
+    retirement: Option<Arc<Mutex<PublicationRead<PublicationLease>>>>,
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
     model_owners: Vec<Arc<ModelGenerationOwner>>,
+}
+
+struct PublishedReaderBankObservation {
+    header: PublicationRead<PublicationHeader>,
+    directory: PublicationRead<PublicationRange>,
+    source: PublicationRead<SemanticTextSlot>,
 }
 
 #[repr(C)]
@@ -14882,7 +14906,7 @@ const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 264);
-const _: () = assert!(size_of::<Descriptor>() == 1416);
+const _: () = assert!(size_of::<Descriptor>() == 1424);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -15618,8 +15642,9 @@ pub struct SemanticTransitionSession {
     prepared_segment: Option<PreparedSegmentState>,
     prepared_resources: Vec<Arc<dyn Send + Sync>>,
     pending_replay_delivery: Option<PendingReplayDelivery>,
-    pub(super) task_observations_authenticated: bool,
+    replay_authentication: Option<ReplayAuthentication>,
     pending_training_materialization: Option<PendingTrainingMaterialization>,
+    pub(super) task_observations_authenticated: bool,
     next_reader: u64,
     continuation_base: Option<u64>,
     text_binding: Option<Arc<TextBindingStorage>>,
@@ -16743,6 +16768,7 @@ struct UnreleasedPublicationOwners {
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
     _prepared_resources: Vec<Arc<dyn Send + Sync>>,
     _pending_replay_delivery: Option<PendingReplayDelivery>,
+    _replay_authentication: Option<ReplayAuthentication>,
     _pending_training_materialization: Option<PendingTrainingMaterialization>,
     _prepared_segment: Option<PreparedSegmentState>,
     _text_binding: Option<Arc<TextBindingStorage>>,
@@ -16795,6 +16821,7 @@ impl Drop for SemanticTransitionSession {
                     _text_binding: self.text_binding.take(),
                     _prepared_resources: std::mem::take(&mut self.prepared_resources),
                     _pending_replay_delivery: self.pending_replay_delivery.take(),
+                    _replay_authentication: self.replay_authentication.take(),
                     _pending_training_materialization: self.pending_training_materialization.take(),
                     _prepared_segment: self.prepared_segment.take(),
                     #[cfg(feature = "semantic-policy")]
@@ -25658,6 +25685,17 @@ impl SemanticTransitionSession {
         operation: u64,
         token: Option<u64>,
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        let native_work = if operation == 2 || operation == 3 {
+            token
+                .map(|token| self.cold_native_work(token))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let native_work: Option<DeviceMemoryView<u64>> = None;
         let storage = self
             .publication
             .as_ref()
@@ -25667,43 +25705,56 @@ impl SemanticTransitionSession {
             control: storage.control.device_ptr_value(),
             operation,
             lease: token.map_or(0, |token| self.readers[&token].device.device_ptr_value()),
+            native_work: native_work
+                .as_ref()
+                .map_or(0, DeviceMemoryView::device_ptr_value),
         };
         let mut recorder = self.kernel_recorder();
         if let Some(token) = token {
             recorder.read_write(&self.readers[&token].device);
         }
+        if let Some(work) = &native_work {
+            recorder.read_write(work);
+        }
         let execute = self.execute.clone();
-        let acquisition = if operation == 2 {
+        let reader = if operation == 2 || operation == 3 {
             token.map(|token| {
-                &mut self
-                    .readers
+                self.readers
                     .get_mut(&token)
                     .expect("installed acquisition reader")
-                    .acquisition
             })
         } else {
             None
         };
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |stream| {
-            if let Some(acquisition) = acquisition {
-                // Retain the may-enter boundary before the driver call, including
-                // a failed launch or cleanup whose device outcome is unknown.
-                *acquisition = PublishedReaderAcquisition::Entered;
-            }
-            // SAFETY: command, bank directories, storage and optional lease all
-            // have actual recorded owners, and the common descriptor ABI is fixed.
-            unsafe {
-                execute.launch_in(
+            let mut entered = false;
+            let mut submitted = false;
+            let mut params = [(&mut descriptor as *mut Descriptor).cast()];
+            // SAFETY: retained strict owners cover the unchanged descriptor ABI.
+            let result = unsafe {
+                execute.launch_raw_in_original(
                     stream,
                     LaunchConfig {
                         grid_dim: (1, 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (descriptor,),
+                    &mut params,
+                    false,
+                    &mut entered,
+                    &mut submitted,
                 )
+            };
+            if let Some(reader) = reader {
+                if operation == 2 && entered {
+                    reader.acquisition = PublishedReaderAcquisition::Entered;
+                    reader.acquisition_submitted = submitted;
+                } else if operation == 3 {
+                    reader.retirement_entered |= entered;
+                    reader.retirement_submitted |= submitted;
+                }
             }
-            .map_err(|error| XlogError::Kernel(error.to_string()))
+            result.map_err(|error| XlogError::Kernel(error.to_string()))
         })?;
         wait_on_stream(
             &self.stream,
@@ -25728,6 +25779,13 @@ impl SemanticTransitionSession {
         source: DeviceMemoryView<T>,
     ) -> Result<PublicationRead<T>, SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.stage_publication_read(source)
+    }
+
+    fn stage_publication_read<T: DeviceRepr + Copy>(
+        &self,
+        source: DeviceMemoryView<T>,
+    ) -> Result<PublicationRead<T>, SemanticTransitionError> {
         let read = crate::device::RetainedDeviceRead::new(&self.stream, source)
             .map_err(|error| runtime_error("publication metadata staging", error))?;
         Ok(PublicationRead {
@@ -25832,7 +25890,13 @@ impl SemanticTransitionSession {
             PublishedReader {
                 device,
                 acquisition: PublishedReaderAcquisition::Allocated,
+                acquisition_submitted: false,
                 initialization: None,
+                observation: None,
+                bank_observation: None,
+                retirement_entered: false,
+                retirement_submitted: false,
+                retirement: None,
                 aliases: Arc::new(()),
                 consumer_streams: BTreeSet::new(),
                 model_owners: Vec::new(),
@@ -25890,8 +25954,23 @@ impl SemanticTransitionSession {
             reader.initialization = None;
         }
         if self.readers[&token].acquisition == PublishedReaderAcquisition::Initialized {
+            if self.readers[&token].observation.is_none() {
+                let observation =
+                    self.stage_publication_read(self.readers[&token].device.view())?;
+                self.readers
+                    .get_mut(&token)
+                    .expect("installed acquisition reader")
+                    .observation = Some(Arc::new(Mutex::new(observation)));
+            }
             self.publication_command(2, Some(token))?;
         }
+        wait_on_stream(
+            &self.stream,
+            &mut self.poisoned,
+            &mut self.stream_waits,
+            "original publication acquisition completion",
+            CudaStream::synchronize,
+        )?;
         self.finish_acquired_reader(token)
     }
 
@@ -25899,12 +25978,25 @@ impl SemanticTransitionSession {
         &mut self,
         token: u64,
     ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        if !self.readers[&token].acquisition_submitted {
+            return Err(publication_input_error(
+                "original Acquire has no known successful driver submission",
+            ));
+        }
         let storage = Arc::clone(
             self.publication
                 .as_ref()
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
-        let lease = self.publication_read(self.readers[&token].device.view())?[0];
+        let observation = Arc::clone(
+            self.readers[&token]
+                .observation
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+        );
+        let lease = self.resolve_publication_read(&mut observation.lock().map_err(|_| {
+            publication_input_error("publication acquisition read owner poisoned")
+        })?)?[0];
         if lease.status != 0 {
             self.readers.remove(&token);
             self.steps.remove(&token);
@@ -25922,8 +26014,6 @@ impl SemanticTransitionSession {
             self.poisoned = true;
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let header = self.read_publication_header(lease.bank as usize)?;
-        let directory = self.publication_read(storage.directories[lease.bank as usize].view())?;
         // SAFETY: source follows Header in the checked fixed bank ABI; no private
         // task observation/result bytes are included in this metadata transfer.
         let source_view = unsafe {
@@ -25938,8 +26028,40 @@ impl SemanticTransitionSession {
                 .cast::<SemanticTextSlot>()
                 .expect("aligned fixed source ABI")
         };
+        if self.readers[&token].bank_observation.is_none() {
+            let header_view = unsafe {
+                storage.banks[lease.bank as usize]
+                    .view()
+                    .cast::<u8>()
+                    .expect("publication bank bytes")
+                    .slice(..size_of::<PublicationHeader>())
+                    .cast::<PublicationHeader>()
+                    .expect("publication header alignment")
+            };
+            let original = PublishedReaderBankObservation {
+                header: self.stage_publication_read(header_view)?,
+                directory: self
+                    .stage_publication_read(storage.directories[lease.bank as usize].view())?,
+                source: self.stage_publication_read(source_view)?,
+            };
+            self.readers
+                .get_mut(&token)
+                .expect("installed acquisition reader")
+                .bank_observation = Some(Arc::new(Mutex::new(original)));
+        }
+        let original = Arc::clone(
+            self.readers[&token]
+                .bank_observation
+                .as_ref()
+                .expect("original acquisition bank observations"),
+        );
+        let mut original = original
+            .lock()
+            .map_err(|_| publication_input_error("publication acquisition bank owner poisoned"))?;
+        let header = self.resolve_publication_read(&mut original.header)?[0];
+        let directory = self.resolve_publication_read(&mut original.directory)?;
         let source: [SemanticTextSlot; 32] = self
-            .publication_read(source_view)?
+            .resolve_publication_read(&mut original.source)?
             .try_into()
             .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
         if header.abi != 1
@@ -27478,6 +27600,7 @@ impl SemanticTransitionSession {
             control: storage.control.device_ptr_value(),
             lease: input_device.device_ptr_value(),
             operation: 6,
+            native_work: 0,
         };
         let mut recorder = self.kernel_recorder();
         recorder.read(&receipt_device);
@@ -29073,7 +29196,15 @@ impl SemanticTransitionSession {
         &mut self,
         lease: &mut SemanticPublishedLease,
     ) -> Result<(), SemanticTransitionError> {
-        let reader = self.checked_reader(lease)?;
+        if !lease.active || !Arc::ptr_eq(&lease.issuer, &self.publication_issuer) {
+            return Err(publication_input_error(
+                "reader retirement changed its original lease",
+            ));
+        }
+        let reader = self
+            .readers
+            .get(&lease.token)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
         if Arc::strong_count(&reader.aliases) != 1
             || (self
                 .admitted_transition
@@ -29084,9 +29215,19 @@ impl SemanticTransitionSession {
                 "publication reader still owns aliases or an unfinished transition",
             ));
         }
-        if let Err(error) = self.publication_command(3, Some(lease.token)) {
-            self.poisoned = true;
-            return Err(error);
+        if self.readers[&lease.token].retirement.is_none() {
+            let retirement =
+                self.stage_publication_read(self.readers[&lease.token].device.view())?;
+            self.readers
+                .get_mut(&lease.token)
+                .expect("installed retirement reader")
+                .retirement = Some(Arc::new(Mutex::new(retirement)));
+        }
+        if !self.readers[&lease.token].retirement_entered {
+            if let Err(error) = self.publication_command(3, Some(lease.token)) {
+                self.poisoned = true;
+                return Err(error);
+            }
         }
         self.finish_retired_reader(lease)
     }
@@ -29095,8 +29236,21 @@ impl SemanticTransitionSession {
         &mut self,
         lease: &mut SemanticPublishedLease,
     ) -> Result<(), SemanticTransitionError> {
+        if !self.readers[&lease.token].retirement_submitted {
+            return Err(publication_input_error(
+                "original Release has no known successful driver submission",
+            ));
+        }
         let result = (|| {
-            let result = self.publication_read(self.readers[&lease.token].device.view())?[0];
+            let original = Arc::clone(
+                self.readers[&lease.token]
+                    .retirement
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            );
+            let result = self.resolve_publication_read(&mut original.lock().map_err(|_| {
+                publication_input_error("publication retirement read owner poisoned")
+            })?)?[0];
             if result.status != 0
                 || result.active != 0
                 || result.instance != lease.identity.instance
@@ -29134,13 +29288,36 @@ impl SemanticTransitionSession {
         lease: &mut SemanticPublishedLease,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
+        if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer) {
+            return Err(publication_input_error(
+                "reader retirement changed its original Session",
+            ));
+        }
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("step retirement stream admission", error))?;
-        self.quiesce_step_content(lease, consumer_streams)?;
+        if lease.active
+            && self
+                .readers
+                .get(&lease.token)
+                .is_some_and(|reader| reader.retirement.is_some())
+        {
+            wait_on_stream(
+                &self.stream,
+                &mut self.poisoned,
+                &mut self.stream_waits,
+                "original publication retirement completion",
+                CudaStream::synchronize,
+            )?;
+        }
         if lease.active {
-            self.retire_published_reader(lease)?;
+            if self.readers[&lease.token].retirement_entered {
+                self.finish_retired_reader(lease)?;
+            } else {
+                self.quiesce_step_content(lease, consumer_streams)?;
+                self.retire_published_reader(lease)?;
+            }
         }
         self.reclaim_model_generations()?;
         self.steps.remove(&lease.token);
@@ -29733,8 +29910,9 @@ impl SemanticTransitionSession {
             prepared_segment: None,
             prepared_resources: Vec::new(),
             pending_replay_delivery: None,
-            task_observations_authenticated: true,
+            replay_authentication: None,
             pending_training_materialization: None,
+            task_observations_authenticated: true,
             continuation_base: None,
             text_binding: None,
             admitted_transition: None,
@@ -30503,6 +30681,7 @@ impl SemanticTransitionSession {
             control: publication.control.device_ptr_value(),
             lease: input_device.device_ptr_value(),
             operation: 9,
+            native_work: 0,
         };
         let mut recorder = self.kernel_recorder();
         recorder.read(&source);
