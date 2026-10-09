@@ -990,10 +990,10 @@ fn require_selected_checkpoint_referent_task(
         .get(ordinal)
         .ok_or_else(|| invalid("selected checkpoint source has no original replay row"))?;
     let mut referents = Vec::new();
-    if let Some(referent) = row
-        .checkpoint_referent()?
-        .or(row.pre_action_checkpoint_referent()?)
-    {
+    if let Some(referent) = row.checkpoint_referent()? {
+        referents.push(referent);
+    }
+    if let Some(referent) = row.pre_action_checkpoint_referent()? {
         referents.push(referent);
     }
     if let Some(referent) = row.recovered_prefill_referent()? {
@@ -1092,6 +1092,22 @@ struct CheckpointSources {
     initialized: bool,
     limits: Option<CheckpointSourceLimits>,
     resolver: Option<Py<PyAny>>,
+    verified: BTreeMap<[u8; 32], Arc<VerifiedCheckpointSource>>,
+}
+
+struct VerifiedCheckpointSource {
+    bytes: Arc<[u8]>,
+    seed: TaskCheckpointSeed,
+    _admission: SemanticAdmissionRecords,
+    cold: Option<cold_task::EditableTaskSource>,
+}
+
+impl std::ops::Deref for VerifiedCheckpointSource {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl CheckpointSources {
@@ -1100,6 +1116,7 @@ impl CheckpointSources {
             initialized: true,
             limits,
             resolver: None,
+            verified: BTreeMap::new(),
         }
     }
 
@@ -1110,6 +1127,48 @@ impl CheckpointSources {
             ));
         }
         Ok(self.limits)
+    }
+
+    fn retain_verified(
+        &mut self,
+        referent: &CheckpointReferent,
+        source: Arc<[u8]>,
+    ) -> PyResult<Arc<VerifiedCheckpointSource>> {
+        if let Some(original) = self.verified.get(&referent.checkpoint_digest) {
+            if original.bytes.as_ref() != source.as_ref() {
+                return Err(invalid(
+                    "checkpoint source changed its original verified bytes",
+                ));
+            }
+            return Ok(Arc::clone(original));
+        }
+        let limits = self.original_limits()?.ok_or_else(|| {
+            invalid("verified checkpoint source has no original finite registration")
+        })?;
+        let total = self
+            .verified
+            .values()
+            .try_fold(source.len(), |total, bytes| total.checked_add(bytes.len()))
+            .filter(|total| *total <= limits.total_bytes);
+        if source.len() > limits.item_bytes || total.is_none() {
+            return Err(invalid(
+                "retained checkpoint sources exceed their original byte limits",
+            ));
+        }
+        let manifest = SemanticCheckpointManifest::decode(&source)?;
+        let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let admission = SemanticTransitionSession::state_material_admission(&manifest.native)
+            .map_err(xlog_err)?;
+        let cold = cold_task::editable_source_from_admission(&admission)?;
+        let source = Arc::new(VerifiedCheckpointSource {
+            bytes: source,
+            seed,
+            _admission: admission,
+            cold,
+        });
+        self.verified
+            .insert(referent.checkpoint_digest, Arc::clone(&source));
+        Ok(source)
     }
 
     fn bind(
@@ -1236,7 +1295,7 @@ fn resolve_replay_checkpoint_referents(
     if referents.is_empty() {
         return Ok(referents);
     }
-    let mut verified = BTreeMap::<[u8; 32], Vec<u8>>::new();
+    let mut verified = BTreeMap::<[u8; 32], Arc<VerifiedCheckpointSource>>::new();
     for (ordinal, recovered_prefill, referent) in &uses {
         let row = &authority.replay[*ordinal];
         let native = row.native_replay()?;
@@ -1276,20 +1335,36 @@ fn resolve_replay_checkpoint_referents(
         }
         let fetched = match verified.entry(referent.checkpoint_digest) {
             Entry::Vacant(entry) => {
-                let source =
-                    resolver.call1((PyBytes::new(py, &referent.checkpoint_digest), item_limit))?;
-                if !source.is_exact_instance_of::<PyBytes>() {
-                    return Err(invalid(
-                        "checkpoint source resolver must return exact builtin bytes",
-                    ));
+                let retained = checkpoint_sources
+                    .lock()
+                    .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?
+                    .verified
+                    .get(&referent.checkpoint_digest)
+                    .map(Arc::clone);
+                if let Some(source) = retained {
+                    referent.verify_source(&source)?;
+                    entry.insert(source);
+                    false
+                } else {
+                    let source = resolver
+                        .call1((PyBytes::new(py, &referent.checkpoint_digest), item_limit))?;
+                    if !source.is_exact_instance_of::<PyBytes>() {
+                        return Err(invalid(
+                            "checkpoint source resolver must return exact builtin bytes",
+                        ));
+                    }
+                    let source = source.cast::<PyBytes>()?.as_bytes();
+                    if source.len() > item_limit {
+                        return Err(invalid("resolved checkpoint exceeds its item limit"));
+                    }
+                    referent.verify_source(source)?;
+                    let source = checkpoint_sources
+                        .lock()
+                        .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?
+                        .retain_verified(referent, Arc::from(source))?;
+                    entry.insert(source);
+                    true
                 }
-                let source = source.cast::<PyBytes>()?.as_bytes();
-                if source.len() > item_limit {
-                    return Err(invalid("resolved checkpoint exceeds its item limit"));
-                }
-                referent.verify_source(source)?;
-                entry.insert(source.to_vec());
-                true
             }
             Entry::Occupied(entry) => {
                 referent.verify_source(entry.get())?;

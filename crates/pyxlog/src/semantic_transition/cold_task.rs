@@ -24,6 +24,9 @@ pub(super) struct EditableTaskSource {
     pub program: Arc<xlog_cuda::SemanticProgramAdmission>,
     pub observer_source: Option<String>,
     pub initial_source: String,
+    pub initial_theory: String,
+    pub input_facts: String,
+    pub statements: Vec<(String, u8)>,
 }
 
 /// Recover executable source only from the canonical typed cold admission.
@@ -82,6 +85,7 @@ pub(super) fn editable_source_from_admission(
     };
     let qualifiers = (statement_count..admission.records.len()).map(|index| index as u32).collect::<Vec<_>>();
     let mut statements = Vec::with_capacity(statement_count);
+    let mut masks = Vec::with_capacity(statement_count);
     for (index, record) in admission.records[..statement_count].iter().enumerate() {
         let [SemanticArgument::U32(ordinal), content, SemanticArgument::U32(mask)] =
             record.arguments.as_slice()
@@ -100,6 +104,7 @@ pub(super) fn editable_source_from_admission(
             ));
         }
         statements.push(symbol(content)?);
+        masks.push(*mask as u8);
     }
     let mut sources = Vec::with_capacity(source_count);
     for (index, record) in admission.records[statement_count..].iter().enumerate() {
@@ -124,6 +129,9 @@ pub(super) fn editable_source_from_admission(
         program: Arc::new(program),
         observer_source: sources.get(2).cloned(),
         initial_source: xlog_gpu::logic::positive_binary_task_source(&sources[0], &sources[1], &statement_texts),
+        initial_theory: sources[0].clone(),
+        input_facts: sources[1].clone(),
+        statements: statements.into_iter().zip(masks).collect(),
     }))
 }
 

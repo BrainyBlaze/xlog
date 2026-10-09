@@ -10,7 +10,6 @@
 #include "semantic_program.cuh"
 #include "semantic_task_ground.cuh"
 #include "semantic_rule_action.cuh"
-#include "semantic_task_ground.cuh"
 #ifdef XLOG_SEMANTIC_POLICY
 #include "semantic_policy_binding.cuh"
 #endif
