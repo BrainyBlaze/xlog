@@ -24508,10 +24508,10 @@ impl SemanticTransitionSession {
             let owner = self.steps.get_mut(&step.token).expect("checked fixed step");
             let prepared = owner.prepared.as_mut().expect("prepared content owner");
             prepared.next_digest = next;
-            if let Some(work) = prepared.model_work.as_mut()
-                && let Some(bank) = work.capture_bank
-            {
-                work.content_banks.insert(index, bank);
+            if let Some(work) = prepared.model_work.as_mut() {
+                if let Some(bank) = work.capture_bank {
+                    work.content_banks.insert(index, bank);
+                }
             }
             owner.content[index].seals = TensorContentSeals::Captured(digests);
             let handle = SemanticTensorContentWitness {
