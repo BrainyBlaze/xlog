@@ -3497,6 +3497,35 @@ impl SemanticHypergraph {
         Ok(())
     }
 
+    pub(crate) fn require_root_export_continuation(
+        &self,
+        original: &SemanticRootExport,
+    ) -> Result<(), SemanticHypergraphError> {
+        if self.poisoned || self.original_command.is_some() {
+            return Err(SemanticHypergraphError::Poisoned);
+        }
+        if original.owner != self.owner {
+            return Err(admission_error("foreign original root export"));
+        }
+        if original.material.is_none() {
+            self.require_original_root_export(original)?;
+        } else if self.root_export.is_some() {
+            return Err(admission_error("another root export replaced the completed original"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn root_export_pending(
+        &self,
+        original: &SemanticRootExport,
+    ) -> Result<bool, SemanticHypergraphError> {
+        self.require_root_export_continuation(original)?;
+        Ok(original.material.is_none() && original.command.poisoned
+            && (original.command.upload.entered() || original.command.completion_entered
+                || original.command.kernel_entered || original.command.receipt.entered()
+                || original.arena.entered()))
+    }
+
     pub(crate) fn resolve_transition_root_export(
         &mut self,
         original: &mut SemanticRootExport,
@@ -3517,15 +3546,17 @@ impl SemanticHypergraph {
             .first()
             .ok_or_else(|| admission_error("root export receipt is absent"))?;
         self.expect_success(receipt)?;
+        // A read-completion error belongs to this retained export, not to
+        // independent graph integrity. Its destination is never recreated.
+        let arena = original.arena.resolve().map_err(|error| {
+            original.command.poisoned = true;
+            runtime_error("root material arena read", error)
+        })?;
         let result = (|| {
             let snapshot = SemanticRootSnapshot::new(
                 SemanticRootDigest(receipt_identity(receipt, 16)),
                 receipt_extents(receipt)?,
             );
-            let arena = original
-                .arena
-                .resolve()
-                .map_err(|error| runtime_error("root material arena read", error))?;
             material_from_arena(
                 &arena,
                 self.capacities,
@@ -3537,6 +3568,7 @@ impl SemanticHypergraph {
         })();
         let material = poison_after_reconciliation_error(&mut self.poisoned, result)?;
         original.material = Some(material.clone());
+        original.command.poisoned = false;
         original.command.receipt.retire_completed_values();
         original.arena.retire_completed_values();
         self.root_export = None;

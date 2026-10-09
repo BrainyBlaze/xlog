@@ -95,6 +95,7 @@ pub use semantic_transition::{
     SemanticPublicationTensorProjection, SemanticPublishedAcquisition, SemanticPublishedIdentity,
     SemanticPublishedLease,
     SemanticPublishedStateObservation, SemanticReplayAppendBinding, SemanticReplayMaterial,
+    SemanticReplayPublicationVerification,
     SemanticReplayModelBackings, SemanticResidentModelMemory, SemanticRngBinding,
     SemanticSegmentColdCapacity, SemanticSegmentTerminalWait, SemanticSourceMapping,
     SemanticStateRecord, SemanticStateRole, SemanticStructuralCostDescriptor,
