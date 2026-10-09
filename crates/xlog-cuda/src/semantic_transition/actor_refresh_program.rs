@@ -802,6 +802,8 @@ impl SemanticTransitionSession {
                 material_u64(&mut bytes, value);
             }
             bytes.extend_from_slice(claim.parent.instance.as_bytes());
+            bytes.extend_from_slice(claim.parent.logical_digest.as_bytes());
+            bytes.extend_from_slice(claim.parent.state_digest.as_bytes());
             bytes.extend_from_slice(claim.instruction_identity.as_bytes());
             material_u64(&mut bytes, claim.instruction.len() as u64);
             bytes.extend_from_slice(&claim.instruction);
@@ -876,6 +878,8 @@ impl SemanticTransitionSession {
             let parent_fully_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
             let resources_retired = match reader.u64().map_err(semantic)? { 0 => false, 1 => true, _ => return Err(invalid_program()) };
             let instance = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+            let logical_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
+            let state_digest = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
             let instruction_identity = Identity256::from_bytes(reader.take(32).map_err(semantic)?.try_into().map_err(|_| invalid_program())?);
             let instruction_len = usize::try_from(reader.u64().map_err(semantic)?).map_err(|_| invalid_program())?;
             if instruction_len == 0 || instruction_len > PROGRAM_BYTES { return Err(invalid_program()); }
@@ -901,7 +905,7 @@ impl SemanticTransitionSession {
             // the original live handle can resolve its asynchronous owners.
             admissions.push(InstructionAdmission { issuance: Arc::new(()), first, end,
                 instruction, instruction_identity,
-                parent: SemanticPublishedIdentity { instance, word }, parent_token, state,
+                parent: SemanticPublishedIdentity { instance, word, logical_digest, state_digest }, parent_token, state,
                 cold_work: None, cold_result, retirement_work: None, retirement_result,
                 prepared_cold_results,
                 handoff_streams: None, parent_fully_retired, resources_retired,

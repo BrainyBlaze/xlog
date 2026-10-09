@@ -20,17 +20,17 @@ fn cold_region_ends(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
 
 #[pyclass(name = "SemanticColdModelWork", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticColdModelWork {
-    pub(super) parent: Py<PySemanticPublishedParent>,
+    pub(in crate::semantic_transition) parent: Py<PySemanticPublishedParent>,
     // The work may precede child allocation. Its original allocation/report
     // reader stays held while the actual child owns the model callback.
-    pub(super) reader: Py<PySemanticPublishedParent>,
-    pub(super) inner: SemanticColdModelWork,
-    pub(super) region: Option<SemanticColdModelWorkRegion>,
-    pub(super) active: AtomicBool,
+    pub(in crate::semantic_transition) reader: Py<PySemanticPublishedParent>,
+    pub(in crate::semantic_transition) inner: SemanticColdModelWork,
+    pub(in crate::semantic_transition) region: Option<SemanticColdModelWorkRegion>,
+    pub(in crate::semantic_transition) active: AtomicBool,
 }
 
 impl PySemanticColdModelWork {
-    pub(super) fn check(&self, py: Python<'_>) -> PyResult<()> {
+    pub(in crate::semantic_transition) fn check(&self, py: Python<'_>) -> PyResult<()> {
         let parent = self.parent.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;

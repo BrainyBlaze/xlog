@@ -31443,7 +31443,10 @@ impl SemanticTransitionSession {
         self.poisoned || self.graph.ensure_not_poisoned().is_err()
             || {
                 #[cfg(feature = "semantic-policy")]
-                { self.policy_tapes.iter().any(|tape| tape.retirement.is_some()) }
+                {
+                    self.has_uninitialized_cold_model_work()
+                        || self.policy_tapes.iter().any(|tape| tape.retirement.is_some())
+                }
                 #[cfg(not(feature = "semantic-policy"))]
                 { false }
             }
@@ -35056,7 +35059,7 @@ impl SemanticTransitionSession {
         let derived = source.prepared_actor_refresh_device(proof)?;
         let target_task = &self.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0;
         let source_task = &source.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0;
-        if source.poisoned
+        if source.is_poisoned()
             || Arc::ptr_eq(&self.publication_issuer, &source.publication_issuer)
             || self.provider.device().ordinal() != source.provider.device().ordinal()
             || self.stream.cu_stream() != source.stream.cu_stream()
