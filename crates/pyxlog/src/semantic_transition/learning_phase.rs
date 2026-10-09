@@ -1072,7 +1072,12 @@ impl PySemanticLearningPhaseTransition {
                 // submission. Native dispatches from the original report's
                 // actual state without re-entering the model callback.
                 owner
-                    .finish_cold_model_work(&lease, &work.inner, &streams)
+                    .finish_cold_model_work(
+                        &lease,
+                        &work.inner,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?
             };
             // Retain the actual components before refusal. Other source S

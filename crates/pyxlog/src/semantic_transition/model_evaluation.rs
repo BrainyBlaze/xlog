@@ -105,6 +105,13 @@ pub(crate) struct PySemanticModelEvaluation {
     completed: Mutex<Option<Py<PySemanticCompletedModelEvaluation>>>,
     cancelled: Mutex<Option<SemanticCancelledModelEvaluation>>,
     cancel_entered: AtomicBool,
+    capture_owners: Mutex<Option<Arc<EvaluationCaptureOwners>>>,
+}
+
+struct EvaluationCaptureOwners {
+    _enqueue: Py<PyAny>,
+    _memory_scope: Py<PyAny>,
+    output: Py<PySemanticTensorContentWitness>,
 }
 
 impl PySemanticModelEvaluation {
@@ -140,6 +147,23 @@ impl PySemanticModelEvaluation {
         pending
     }
 
+    fn launch_error(&self, py: Python<'_>, original: PyErr) -> PyErr {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        if session
+            .owner()
+            .is_ok_and(|owner| owner.model_evaluation_launch_pending(&self.inner))
+        {
+            let pending = SemanticModelEvaluationPending::new_err(
+                "original evaluation graph entered submission; retain its owners and resolve_launch without another capture or launch",
+            );
+            pending.set_cause(py, Some(original));
+            pending
+        } else {
+            original
+        }
+    }
+
     fn publish_observation(
         &self,
         py: Python<'_>,
@@ -165,6 +189,12 @@ impl PySemanticModelEvaluation {
             .lock()
             .map_err(|_| invalid("evaluation completed observation owner is poisoned"))? =
             Some(observation.clone_ref(py));
+        // Native report resolution has joined and retired the graph. Break the
+        // callback/lifetime cycle only after its original consumers are known.
+        self.capture_owners
+            .lock()
+            .map_err(|_| invalid("evaluation capture owner is poisoned"))?
+            .take();
         self.restore_phase(py)?;
         Ok(observation)
     }
@@ -317,21 +347,157 @@ impl PySemanticModelEvaluation {
         )
     }
 
-    fn begin(&self, py: Python<'_>) -> PyResult<()> {
+    /// Capture the one original forward/objective body, never launch it.
+    #[pyo3(signature = (enqueue, *, memory_scope, output_witness, consumer_streams))]
+    fn capture(
+        &self,
+        py: Python<'_>,
+        enqueue: Py<PyAny>,
+        memory_scope: Py<PyAny>,
+        output_witness: Py<PySemanticTensorContentWitness>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<(u64, u64, u64)> {
+        let streams = ColdValue::read(consumer_streams, &mut 4096, 0)?;
+        let streams = streams
+            .sequence()?
+            .iter()
+            .map(ColdValue::unsigned)
+            .collect::<PyResult<Vec<_>>>()?;
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        session.require_creator()?;
+        self.check(py, &session.owner()?)?;
+        let witness = output_witness.borrow(py);
+        if witness.session.as_ptr() != parent.session.as_ptr()
+            || !matches!(&witness.parent, ContentStepOwner::Published(original)
+                if original.as_ptr() == self.parent.as_ptr())
+        {
+            return Err(invalid(
+                "evaluation capture requires its exact original published output witness",
+            ));
+        }
+        let resources = Arc::new(EvaluationCaptureOwners {
+            _enqueue: enqueue.clone_ref(py),
+            _memory_scope: memory_scope.clone_ref(py),
+            output: output_witness.clone_ref(py),
+        });
+        {
+            let mut retained = self
+                .capture_owners
+                .lock()
+                .map_err(|_| invalid("evaluation capture owner is poisoned"))?;
+            if retained.is_some() {
+                return Err(invalid(
+                    "evaluation cannot replace or repeat its original capture callback",
+                ));
+            }
+            *retained = Some(Arc::clone(&resources));
+        }
         use learning_phase::phase_evaluation::EvaluationColdStage;
         self.phase_cold_boundary(
             py,
             EvaluationColdStage::Preparation,
             EvaluationColdStage::OutputProjection,
         )?;
+        let check = || {
+            session.require_creator()?;
+            self.check(py, &session.owner()?)
+        };
+        let mut memory = PreparedMemoryScope::new(py, memory_scope.bind(py), &check)?;
+        recording_callback(&check, || {
+            memory_scope.bind(py).getattr("__enter__")?.call0()?;
+            memory.entered = true;
+            Ok(())
+        })?;
+        let recorded = (|| {
+            let capture = {
+                let mut owner = session.owner()?;
+                self.check(py, &owner)?;
+                owner
+                    .begin_model_evaluation_capture(
+                        &*parent.lease()?,
+                        &self.inner,
+                        &witness.inner,
+                        &streams,
+                    )
+                    .map_err(xlog_err)?
+            };
+            let callback_error = std::cell::RefCell::new(None);
+            let external: Arc<dyn Send + Sync> = resources;
+            let captured = capture.record(vec![external], || {
+                let result = (|| {
+                    recording_callback(&check, || {
+                        if !enqueue.bind(py).call0()?.is_none() {
+                            return Err(invalid("evaluation enqueue must retain its original outputs and return None"));
+                        }
+                        Ok(())
+                    })?;
+                    session.owner()?.record_model_evaluation_output(
+                        &*parent.lease()?, &self.inner, &witness.inner,
+                    ).map_err(xlog_err)
+                })();
+                if let Err(error) = result {
+                    *callback_error.borrow_mut() = Some(error);
+                    return Err(xlog_core::error::XlogError::Kernel(
+                        "original evaluation capture callback failed".into(),
+                    ));
+                }
+                Ok(())
+            }).map_err(|error| callback_error.into_inner().unwrap_or_else(|| xlog_err(error)))?;
+            let quantities = session
+                .owner()?
+                .finish_model_evaluation_capture(&*parent.lease()?, &self.inner, captured)
+                .map_err(xlog_err)?;
+            Ok((quantities[0], quantities[1], quantities[2]))
+        })();
+        let cleanup = memory.finish(recorded.as_ref().err());
+        finish_with_cleanup(py, recorded, cleanup)
+    }
+
+    /// Admit the retained original capture, enqueue it once and join it.
+    fn launch(&self, py: Python<'_>) -> PyResult<()> {
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
-        let mut owner = session.owner()?;
-        self.check(py, &owner)?;
-        let lease = parent.lease()?;
-        owner
-            .begin_model_evaluation(&lease, &self.inner)
-            .map_err(xlog_err)
+        let (quantities, native_work) = {
+            let owner = session.owner()?;
+            self.check(py, &owner)?;
+            (
+                owner
+                    .model_evaluation_capture_quantities(&self.inner)
+                    .map_err(xlog_err)?,
+                owner
+                    .model_evaluation_capture_native_work_bound(&self.inner)
+                    .map_err(xlog_err)?,
+            )
+        };
+        let phase = private_execution_owner(py, &session)?.ok_or_else(|| {
+            invalid("evaluation launch requires its original signed phase admission")
+        })?;
+        phase
+            .borrow(py)
+            .admit_evaluation_capture(py, self, quantities, native_work)?;
+        let result = {
+            let mut owner = session.owner()?;
+            owner
+                .launch_model_evaluation(&*parent.lease()?, &self.inner)
+                .map_err(xlog_err)
+        };
+        result.map_err(|error| self.launch_error(py, error))
+    }
+
+    /// Join only the same entered graph; no new launch or recording occurs.
+    fn resolve_launch(&self, py: Python<'_>) -> PyResult<()> {
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        session.require_creator()?;
+        let result = {
+            let mut owner = session.owner()?;
+            self.check(py, &owner)?;
+            owner
+                .resolve_model_evaluation_launch(&*parent.lease()?, &self.inner)
+                .map_err(xlog_err)
+        };
+        result.map_err(|error| self.launch_error(py, error))
     }
 
     /// Record on the original invocation stream at the real model forward site.
@@ -404,12 +570,30 @@ impl PySemanticModelEvaluation {
                 "evaluation outputs require the exact original published-parent content owner",
             ));
         }
+        {
+            let owner = session.owner()?;
+            self.check(py, &owner)?;
+            owner
+                .require_model_evaluation_launch_completed(&self.inner)
+                .map_err(xlog_err)?;
+        }
         let mut retained = self
             .output
             .lock()
             .map_err(|_| invalid("evaluation output owner is poisoned"))?;
         if retained.is_some() {
             return Err(invalid("evaluation output was already submitted"));
+        }
+        if self
+            .capture_owners
+            .lock()
+            .map_err(|_| invalid("evaluation capture owner is poisoned"))?
+            .as_ref()
+            .is_none_or(|original| original.output.as_ptr() != output_witness.as_ptr())
+        {
+            return Err(invalid(
+                "evaluation finish cannot substitute its captured output witness",
+            ));
         }
         *retained = Some(output_witness.clone_ref(py));
         drop(retained);
@@ -504,6 +688,10 @@ impl PySemanticModelEvaluation {
             .map_err(|_| invalid("evaluation cancellation custody is poisoned"))? =
             Some(cancelled.clone());
         drop(owner);
+        self.capture_owners
+            .lock()
+            .map_err(|_| invalid("evaluation capture owner is poisoned"))?
+            .take();
         if let Some(original) = private_execution_owner(py, &session)? {
             original.borrow(py).cancel_phase_evaluation(
                 py,
@@ -638,6 +826,7 @@ impl PySemanticTransitionController {
                 completed: Mutex::new(None),
                 cancelled: Mutex::new(None),
                 cancel_entered: AtomicBool::new(false),
+                capture_owners: Mutex::new(None),
             },
         )?;
         if let Some(pending) = private_execution_owner(py, &session)? {

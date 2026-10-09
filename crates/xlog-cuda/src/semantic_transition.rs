@@ -10,12 +10,14 @@ mod cold_model_work;
 mod learning_phase;
 #[cfg(feature = "semantic-policy")]
 mod model_evaluation;
+#[cfg(feature = "semantic-policy")]
+mod native_work_bound;
 mod prepared_replay;
 mod replay_model_backing;
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
-    SemanticColdModelWork, SemanticColdModelWorkRegion, SemanticColdModelWorkResult,
-    SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkRegion,
+    SemanticColdModelWorkResult, SemanticColdNativeWork,
 };
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
@@ -25717,6 +25719,10 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        if self.evaluation_content_capture_active(witness.reader_token) {
+            return self.record_evaluation_content_witness(witness, consumer_stream, verify);
+        }
         let cold_work = self.cold_native_work(witness.reader_token)?;
         let execute = self
             .provider

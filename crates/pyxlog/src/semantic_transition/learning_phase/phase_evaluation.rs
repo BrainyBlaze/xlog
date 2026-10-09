@@ -6,8 +6,8 @@ use super::super::model_evaluation::{
 };
 use super::*;
 use xlog_cuda::{
-    SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkResult,
-    SemanticColdNativeWork, SemanticModelEvaluation,
+    SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkDisposition,
+    SemanticColdModelWorkResult, SemanticColdNativeWork, SemanticModelEvaluation,
 };
 
 pub(super) struct EvaluationOwners {
@@ -1828,6 +1828,65 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    pub(in crate::semantic_transition) fn admit_evaluation_capture(
+        &self,
+        py: Python<'_>,
+        original: &PySemanticModelEvaluation,
+        quantities: [u64; 3],
+        captured_native: u64,
+    ) -> PyResult<()> {
+        let (work, budget) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained
+                .last()
+                .ok_or_else(|| invalid("evaluation capture lost its original signed operation"))?;
+            Self::require_evaluation_entry(py, current)?;
+            if !self.phase_evaluation_active.load(Ordering::Acquire)
+                || !current.ready
+                || !current.evaluation_admitted
+                || current
+                    .native_evaluation
+                    .as_ref()
+                    .is_none_or(|owner| !std::ptr::eq(&*owner.borrow(py), original))
+            {
+                return Err(invalid("evaluation capture admission changed its original native owner or signed operation"));
+            }
+            (
+                current.work.clone().ok_or_else(|| {
+                    invalid("evaluation capture lost its original full cold report")
+                })?,
+                current.budget,
+            )
+        };
+        self.records()?.require_preparation_admission()?;
+        // The entire immutable cold producer plan, not a caller's claimed
+        // remainder or just the already visited regions, shares this budget.
+        // The captured native producers share the same checked common sum.
+        // Later cold native producers and the physical certificate remain
+        // separate; this is not a whole-lifecycle native ceiling.
+        let cold = self
+            .source
+            .borrow(py)
+            .owner()?
+            .cold_model_work_plan_quantities(&work)
+            .map_err(xlog_err)?;
+        let known_bound = quantities[0]
+            .checked_add(cold[0])
+            .and_then(|bound| bound.checked_add(captured_native))
+            .ok_or_else(|| invalid("evaluation's original model work bounds overflowed"))?;
+        let calls = quantities[2]
+            .checked_add(cold[2])
+            .ok_or_else(|| invalid("evaluation's original model call bounds overflowed"))?;
+        if known_bound > budget[0] || calls > budget[2] {
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained evaluation")
+                .budget_exceeded = true;
+            return Err(invalid("evaluation's frozen original producers exceed its signed operation budget before launch"));
+        }
+        Ok(())
+    }
+
     pub(in crate::semantic_transition) fn evaluation_cold_boundary(
         &self,
         py: Python<'_>,
@@ -2908,7 +2967,7 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
     ) -> PyResult<(SemanticColdModelWorkResult, u64)> {
-        let (work, closed, work_result, parent, custody, cached_peak) = {
+        let (work, closed, work_result, parent, custody, cached_peak, disposition) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained evaluation");
             if !matches!(
@@ -2940,6 +2999,11 @@ impl PySemanticLearningPhaseTransition {
                     .map(|owners| owners.parent.clone_ref(py)),
                 current.custody.clone(),
                 current.backing_peak,
+                if current.refusal.is_some() && current.terminal_known() {
+                    SemanticColdModelWorkDisposition::KnownRefusal
+                } else {
+                    SemanticColdModelWorkDisposition::Complete
+                },
             )
         };
         let source = self.source.borrow(py);
@@ -2992,7 +3056,12 @@ impl PySemanticLearningPhaseTransition {
                 // chooses the original submit or read-only resolution.
                 let result = source
                     .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*self.parent.borrow(py).lease()?,
+                        &work,
+                        &streams,
+                        disposition,
+                    )
                     .map_err(xlog_err)?;
                 self.phase_evaluations()?
                     .last_mut()

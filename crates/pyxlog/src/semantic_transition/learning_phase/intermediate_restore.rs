@@ -1009,7 +1009,12 @@ impl PySemanticLearningPhaseTransition {
                     .source
                     .borrow(py)
                     .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*self.parent.borrow(py).lease()?,
+                        &work,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?;
                 self.intermediate()?
                     .as_mut()

@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- *(cuda, python)* capture each admitted model evaluation before its single launch,
+  retain uncertain submissions through resolution, and enforce immutable ordered
+  cold-model recipes across native-authorized region cancellation ([#305](https://github.com/BrainyBlaze/xlog/issues/305)).
 - Epistemic execution classifies modal dependencies before single-pass planning.
   Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
   ordinary founded least fixpoint; supported positive exact-tuple
