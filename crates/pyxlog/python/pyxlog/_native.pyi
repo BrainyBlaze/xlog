@@ -66,7 +66,7 @@ class _UpdateCanaryMeasurement(TypedDict):
     memory_limit: int
     work_used: int
     work_limit: int
-    obligation_positions: tuple[int, int, int]
+    obligation_positions: tuple[int, ...]
     protected_member_offset: int
     protected_member_count: int
     protected_positions: tuple[int, ...]
@@ -252,7 +252,14 @@ class SemanticModelEvaluation:
     def consumer_stream(self) -> int: ...
     def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
     def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
-    def begin(self) -> None: ...
+    def capture(
+        self, enqueue: Callable[[], Any], *, memory_scope: Any,
+        output_witness: Any, consumer_streams: Sequence[int],
+    ) -> tuple[int, int, int]:
+        """Retain the original capture and its work/event/call bounds without launching."""
+        ...
+    def launch(self) -> None: ...
+    def resolve_launch(self) -> None: ...
     def record_model_invocation(self) -> None: ...
     def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
@@ -268,8 +275,42 @@ class SemanticModelEvaluation:
         ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
+class SemanticTransitionColdTask:
+    """Original admitted statement roster and its explicit ordered query selection."""
+
+    def __init__(
+        self, *, initial_theory: str, input_facts: str,
+        observer_program: Optional[str], statements: tuple[tuple[str, int], ...],
+        query_records: tuple[int, ...], task_ground: tuple[str, tuple[Any, ...]],
+        training_canary_source: Optional[SemanticTransitionColdTask],
+        capacities: tuple[int, int, int, int],
+        admission_limits: tuple[int, int, int, int], device_ordinal: int,
+        memory_bytes: int, provenance_capacity_records: int, prefix_capacity: int,
+        feedback_capacity: int, pad_token: int, terminal_tokens: tuple[int, ...],
+        final_intent_payload_bytes: int, intent_effect: bytes,
+        intent_entry_capacity: int, intent_payload_capacity_bytes: int,
+        acknowledgement_payload_capacity_bytes: int,
+        authority_decisions_capacity_bytes: int, generations: tuple[int, int, int, int],
+        training_cursor: int, training_rng: tuple[int, int, int, int], fuel: int,
+        rng: tuple[int, int, int], private_replay_child: Any = None,
+    ) -> None: ...
+
+    @property
+    def task_content(self) -> tuple[bytes, bytes, bytes, tuple[int, ...]]: ...
+    @property
+    def statement_records(self) -> tuple[int, ...]:
+        """Original selected record indices, preserving order and repeated selections."""
+        ...
+    @property
+    def task_ground(self) -> tuple[str, tuple[Any, ...]]: ...
+    def close(self) -> None: ...
+
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
+
+    def task_ground(self) -> tuple[str, tuple[Any, ...]]:
+        """Original tagged ground and full ordered verification bindings."""
+        ...
 
     def task_actor_eligible(self) -> bool:
         """Original native ex-ante actor decision, including after restore.
@@ -300,8 +341,10 @@ class SemanticTransitionController:
         self, *, task_ref: Any, task_scope: Any, statement_records: Any,
         allowed_support_records: Any, task_program_source: Any,
         task_query_ordinals: Any, task_scoring: Any, task_priority_levels: Any,
-        admissible_truth_masks: Any, actor_eligible: Any, live_authorities: Any,
+        admissible_truth_masks: Any, actor_eligible: Any, task_ground: Any,
+        live_authorities: Any,
         replay_rows: Any, training_objective: Any, training_domain: Any,
+        training_canary_source: Any, replay_capacity: Any,
         max_material_bytes: Any, max_total_material_bytes: Any,
         max_evidence_bytes: Any, dependencies: Any, feedback_roots: Any,
         publication_grants: Any, inference_grants: Any, training_grants: Any,
@@ -312,6 +355,10 @@ class SemanticTransitionController:
         resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
         max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
     ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
+
+    def close(self, parent: SemanticPublishedParent) -> None:
+        """Confirm terminal native release after the original parent and steps retire."""
+        ...
 
     def prepare_model_evaluation(
         self, task_use: Any, parent: Any, *, model_work_capacity: int,

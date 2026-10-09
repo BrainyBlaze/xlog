@@ -99,14 +99,54 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
 
 ### Semantic task binding
 
-`SemanticTransitionColdTask` executes its admitted observer once during
-construction and exposes `task_content` before final task import. This read
+`SemanticTransitionColdTask` retains the full admitted `statements` roster and
+requires `query_records`, an exact nonempty tuple selecting original statement
+record indices in query order. Repeated selections retain their original order;
+the constructor neither sorts nor deduplicates them. Protected verification
+observations may name other statements outside this query selection.
+The selection is part of the same typed admission and checkpoint, not a second
+program or a caller-authored result. With `N` statements, `Q` selected queries
+and `S` source records (`2` for Coding, `3` for Logical), admission has
+`N + S + Q` records and three predicates. Compared with the original source and
+statement schemas, selector metadata adds `2*Q + 3` terms and 62 schema UTF-8
+bytes; original statement-to-source references remain `N*S`. The caller's
+explicit admission limits must cover this complete geometry.
+
+Construction executes the original Logical observer, or the admitted initial
+program for Coding, once and exposes `task_content` before final task import. This read
 returns `(query_identity, theory_program_identity, result_identity, truths)`
-with three 32-byte identities and three truth codes (`0=Neither`, `1=True`,
+with three 32-byte identities and all `Q` truth codes (`0=Neither`, `1=True`,
 `2=False`, `3=Both`). It carries no use authority. Final import executes the
-observer again and must reproduce the same identities and truths; a mismatch
+same source again and must reproduce the same identities and truths; a mismatch
 refuses the native session. Cold content observation does not run the model or
 prefill its cache.
+
+`observer_program` and import `task_program_source` are explicitly `None` for
+Coding; its actual initial program is compiled from the admitted theory and
+input facts. Import `statement_records` must equal the retained `query_records`.
+Logical `task_query_ordinals` uses those original indices in its observer;
+Coding uses `tuple(range(Q))` in its selected initial-program query source.
+Truth masks follow the selected original statements. Current dependencies must
+cover the union of selected statements and every original protected observation
+statement, together with the task's original `observer:0` or `program:0` source.
+
+The constructor, task import and checkpoint restore also require
+`training_canary_source`: the same open original Logical `ColdTask`, or explicit
+`None` when no symbolic training source is needed. Prospective training retains
+that source before the first dependent allocation. Native source and dependent
+Sessions share its original allocator, device, serial stream and memory budget;
+restore cannot substitute a fresh allocator or enlarge that budget. The native
+proof and Python source owner remain held before import and through joined
+terminal release. Symbolic canaries use that source's own immutable query order,
+content and full truth vector, independently of the dependent task's query count
+or Coding ground. Checkpoints retain the exact source projection and require
+the same original owner on restore; they do not accept caller-supplied truths.
+Keep the source open while dependent Sessions exist. After the original parent,
+segments and aliases have retired, `controller.close(parent)` joins the native
+Session release. Private replay children retire through their original phase
+owner. Only after all dependent native borrows have ended may the source's own
+`close()` release it. Aborting, poisoning or dropping a Python object is not a
+confirmed release.
 
 An original private Update can issue a one-shot historical child with
 `controller.prepare_private_replay_child(task_use, step_index=..., replay_ordinal=...)`.
@@ -117,6 +157,45 @@ row in another Update has separate custody. Pass the returned
 `SemanticPrivateReplayChild` unchanged as `private_replay_child=` to the same
 `SemanticTransitionColdTask` constructor before construction begins. Ordinary
 fresh-task callers omit this keyword.
+
+Before constructing the child, call
+`child.source_task(refresh_snapshot=...)`. It returns
+`(checkpoint_bytes, cold_source, import_source)` for the selected original row,
+not the task receiving the Update. The immutable `cold_source` tuple contains
+`(initial_theory, input_facts, observer_program, statements, query_records)`, where `statements`
+is the full original ordered tuple of `(text, truth_mask)` pairs and
+`query_records` is its original query selection. Pass these source
+values to the existing cold-task constructor. `observer_program` remains `None`
+when the original typed admission has no reference observer.
+Pass the same retained `training_canary_source` separately, including for a
+private child; its existing private allocation owner must match that source's
+allocator and serial stream.
+
+The immutable `import_source` tuple contains
+`(authority, evaluation, training_domain, initial_sources, source_mapping,
+replay_capacity)`. `authority` has the existing ten-field import order:
+`task_ref`, `task_scope`, `live_authorities`, `replay_rows`, `dependencies`,
+`feedback_roots`, `publication_grants`, `inference_grants`, `training_grants`,
+and `task_priority_levels`. `evaluation` has the original eight-field order:
+`statement_records`, `allowed_support_records`, `task_program_source`,
+`task_query_ordinals`, `task_scoring`, `admissible_truth_masks`, `actor_eligible`,
+and `task_ground`.
+
+Use the original source task's constructor, evaluation and authority values,
+while retaining the target's complete frozen replay roster, objective and
+selected ordinal. Other retained rows keep their own authenticated task
+identities; they need not describe the selected source task. The getter checks
+fresh target read rights, but its content projection grants no source execution
+authority. The ordinary child import must validate the source's current grants
+and snapshot before numerical work.
+
+Canonical checkpoint resolution retains the verified full sources and decoded
+admissions once under the original item and aggregate byte limits. Children
+share those same native owners; the getter neither calls a second resolver nor
+loads another checkpoint. These retained host bytes and metadata are not CUDA
+backing allocations. Historical reconstruction still uses the original model
+realization: this source projection does not produce a new actor execution
+under a different policy.
 
 The child uses the original provider, allocation budget, serial stream and cold
 native-work owner. The phase retains its actual Session before the observer runs,
@@ -147,6 +226,15 @@ nodes into the receiving Update's gradient/presence/accumulation destinations an
 restores the historical gradient reference after the single GraphTask. It must
 not accumulate into the historical allocation. Unknown restoration or final use
 retains the original owner; the registry itself cannot release live readers.
+
+After every original segment, executable and external alias has retired, first
+release the acquired parent through `parent.release(consumer_streams=...)`,
+then call `controller.close(parent)`. Close joins the actual native full
+retirement and deallocates that Session; abort or dropping Python objects is not
+a substitute. Retain an owner with unknown completion instead of releasing it,
+and record the single successful close in its original caller. An observed cold
+source may close only after all Sessions depending on its native source proof
+have closed.
 
 Gradient delivery authenticates the complete original parameter-leaf roster
 from the retained model schema, including frozen Parameters with no gradient
@@ -631,7 +719,7 @@ rows plus the atomically committed append prefix. The original actor roster is
 not enlarged. Logical original rows occupy physical slots from zero; logical
 appended rows use the fixed physical suffix after the reserved original
 boundary, so unused original capacity never becomes a selected hole. All tensor
-shapes retain full capacity. The task seed has 16 fields, including a separate
+shapes retain full capacity. The task seed has 17 fields, including a separate
 complete original-roster/objective owner; older seeds are not accepted as
 matching this lifecycle. The native publication authenticates stage, genuine
 original count, original-prefix identity and append extent. Its frozen contract
@@ -2394,14 +2482,15 @@ candidate, with all three task queries in every triple.
 The current semantic engine generation is the catalogue generation, so
 `engine_generation` returns the same material as `action_law`. `observation`
 returns the same native four-valued task-result material as `result_material`;
-its bytes bind the observer query and program identities, actual result bytes,
-and three expected truth values. These aliases do not mint new identities.
+its bytes bind the original query and program identities, actual result bytes,
+and the full initial truth vector. Coding has no expected reference result.
+These aliases do not mint new identities.
 
 The projection's `task_ground` is the one typed semantic ground retained by the
 same completed Proposal owner. It binds acquired base `B`, ordered query identity
-`Q`, expected observer results, the three actual base/no-op truth codes, and the
+`Q`, the original tagged ground, the full actual base/no-op truth vector, and the
 bound goal-authority closure. Its two ordered lane outcomes are tagged
-`EXECUTED`, with the three actual lane truth codes, or `REFUSED`, with the
+`EXECUTED`, with the full actual lane truth vector, or `REFUSED`, with the
 canonical native refusal kind. `task_ground.facts` retains all three ordered
 truth-code vectors together with native agreement, eligibility, value, and work
 facts; a refused lane's terminal tag remains authoritative.

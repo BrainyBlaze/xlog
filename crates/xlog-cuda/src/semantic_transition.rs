@@ -18,6 +18,12 @@ mod native_work_bound;
 pub(crate) use native_work_bound::{ColdNativeAllowance, OriginalNativeCommand};
 mod prepared_replay;
 mod replay_model_backing;
+mod task_ground;
+mod verification_receipts;
+pub use task_ground::{
+    SemanticTaskGround, SemanticTaskMeasurementBinding, SemanticTaskReceiptFamily,
+    SemanticTaskVerificationBinding,
+};
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
     SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkPurpose,
@@ -132,7 +138,7 @@ pub struct SemanticTaskObservation {
     pub program_source: Vec<u8>,
     pub input_bytes: Vec<u8>,
     pub result_bytes: Vec<u8>,
-    pub expected_truth: [crate::SemanticTruth; 3],
+    pub actual_truths: Vec<crate::SemanticTruth>,
 }
 
 /// Independently recomputable identities of the exact semantic task content.
@@ -202,11 +208,12 @@ impl SemanticTaskObjectiveLaw {
 /// The only structural-cost law accepted by a cold training objective.
 pub fn semantic_structural_cost_descriptor(
     editable_program: bool,
+    query_count: u32,
 ) -> SemanticStructuralCostDescriptor {
     let (support_cap, truth_change_cap) = if editable_program {
         (
             crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64,
-            3u64,
+            u64::from(query_count),
         )
     } else {
         (2u64, 2u64)
@@ -234,7 +241,7 @@ pub fn semantic_structural_cost_descriptor(
 /// otherwise; candidate progress subtracts the acquired base's contribution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticTaskPriorityGoal {
-    pub query: u8,
+    pub query: u32,
     pub target_truth: u8,
     pub weight: u32,
 }
@@ -257,15 +264,26 @@ impl SemanticTaskScoring {
         .map(u64::from)
     }
 
-    fn return_bound(self, editable_program: bool) -> Result<i64, SemanticTransitionError> {
+    fn return_bound(
+        self,
+        editable_program: bool,
+        query_count: u32,
+    ) -> Result<i64, SemanticTransitionError> {
         // A rule may derive many facts from one command. Successful resident
         // materialization caps the fact bank at 4096, and a candidate can also
-        // change all three query truths. The graph-only path retains its smaller
+        // change every admitted query truth. The graph-only path retains its smaller
         // support-attachment cap. Priority selection need not maximize value,
         // so both signs of selected-minus-base value must fit.
-        let max_cost = u128::from(semantic_structural_cost_descriptor(editable_program).cap);
-        let max_spent = if editable_program { 19 } else { 17 };
-        let value_span = 3 * u128::from(self.correct_weight)
+        let max_cost = u128::from(
+            semantic_structural_cost_descriptor(editable_program, query_count).cap,
+        );
+        let queries = u128::from(query_count);
+        let max_spent = if editable_program {
+            5 * queries + 4
+        } else {
+            3 * queries + 8
+        };
+        let value_span = queries * u128::from(self.correct_weight)
             + u128::from(self.all_correct_weight)
             + max_cost * u128::from(self.work_weight);
         i64::try_from(value_span)
@@ -277,15 +295,16 @@ impl SemanticTaskScoring {
             .map_err(|_| publication_input_error("task scoring can overflow the signed return"))
     }
 
-    fn validate(self, editable_program: bool) -> Result<(), SemanticTransitionError> {
-        self.return_bound(editable_program).map(|_| ())
+    fn validate(self, editable_program: bool, query_count: u32) -> Result<(), SemanticTransitionError> {
+        self.return_bound(editable_program, query_count).map(|_| ())
     }
 
     fn objective_law(
         self,
         editable_program: bool,
+        query_count: u32,
     ) -> Result<SemanticTaskObjectiveLaw, SemanticTransitionError> {
-        let return_bound = self.return_bound(editable_program)?;
+        let return_bound = self.return_bound(editable_program, query_count)?;
         let mut evaluator_max = return_bound as f64;
         // The integer return bound may exceed exact FP64 integer precision.
         // Never narrow the proven interval when rounding its upper endpoint.
@@ -298,7 +317,7 @@ impl SemanticTaskScoring {
             evaluator_min,
             evaluator_max,
             coefficients: frozen_training_coefficients(evaluator_min, evaluator_max),
-            structural_cost: semantic_structural_cost_descriptor(editable_program),
+            structural_cost: semantic_structural_cost_descriptor(editable_program, query_count),
         })
     }
 
@@ -307,17 +326,18 @@ impl SemanticTaskScoring {
         self,
         task_identity: Identity256,
         editable_program: bool,
+        query_count: u32,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-TASK-SCORING-LAW\0".to_vec();
         material_u64(&mut bytes, 2);
         bytes.extend_from_slice(task_identity.as_bytes());
-        let structural_cost = semantic_structural_cost_descriptor(editable_program);
+        let structural_cost = semantic_structural_cost_descriptor(editable_program, query_count);
         bytes.extend_from_slice(structural_cost.unit.as_bytes());
         material_u64(&mut bytes, structural_cost.cap);
         for weight in self.words() {
             material_u64(&mut bytes, weight);
         }
-        bytes.extend_from_slice(&self.return_bound(editable_program)?.to_le_bytes());
+        bytes.extend_from_slice(&self.return_bound(editable_program, query_count)?.to_le_bytes());
         Ok(bytes)
     }
 }
@@ -365,6 +385,7 @@ fn checkpoint_scoring_law_identity(
 fn validate_completed_task_scoring(
     scoring: SemanticTaskScoring,
     editable_program: bool,
+    queries: u32,
     priority_levels: &[SemanticTaskPriorityLevel],
     facts: &[SemanticTaskFacts; 3],
     work: &[SemanticTransitionWork; 2],
@@ -373,15 +394,15 @@ fn validate_completed_task_scoring(
     winner: u64,
     return_value: i64,
 ) -> bool {
-    if scoring.validate(editable_program).is_err()
-        || query_count > 9
+    if scoring.validate(editable_program, queries).is_err()
+        || query_count > 3 * u64::from(queries)
         || winner > 2
         || lane_refusal.iter().any(|&refusal| refusal > 4)
         || (!editable_program && lane_refusal.iter().any(|&refusal| refusal >= 3))
-        || work.iter().any(|work| !work.is_valid(editable_program))
+        || work.iter().any(|work| !work.is_valid(editable_program, queries))
         || facts
             .iter()
-            .any(|facts| facts.g > 3 || facts.p > 1 || facts.eligible > 1)
+            .any(|facts| facts.g > u64::from(queries) || facts.p > 1 || facts.eligible > 1)
     {
         return false;
     }
@@ -439,10 +460,14 @@ fn task_candidate_better(
                 .goals
                 .iter()
                 .map(|goal| {
-                    let query = usize::from(goal.query);
+                    let query = goal.query as usize;
                     let target = u64::from(goal.target_truth);
-                    let achieved = i64::from(facts[slot].truth[query] == target);
-                    let base = i64::from(facts[0].truth[query] == target);
+                    let achieved = if facts[slot].correct.is_none() {
+                        facts[slot].attained.get(query).copied().unwrap_or(0) as i64
+                    } else { i64::from(facts[slot].truth[query] == target) };
+                    let base = if facts[0].correct.is_none() {
+                        facts[0].attained.get(query).copied().unwrap_or(0) as i64
+                    } else { i64::from(facts[0].truth[query] == target) };
                     i64::from(goal.weight) * (achieved - base)
                 })
                 .sum()
@@ -464,7 +489,9 @@ fn task_candidate_better(
 #[derive(Clone, Debug)]
 pub struct SemanticTaskEvaluationSpec {
     /// Original statement records in the retained admission, in observer order.
-    pub statement_records: [u32; 3],
+    pub statement_records: Vec<u32>,
+    /// Original logical/reference or coding/verification ground, fixed before draw.
+    pub task_ground: SemanticTaskGround,
     /// Admitted support records, each retaining its original statement association.
     pub allowed_support_records: Vec<u32>,
     pub program: Arc<dyn SemanticTaskProgram>,
@@ -473,7 +500,7 @@ pub struct SemanticTaskEvaluationSpec {
     /// predictive agreement and measured cost as the selection cascade.
     pub priority_levels: Vec<SemanticTaskPriorityLevel>,
     /// Bit n permits Truth4 value n for the corresponding candidate query.
-    pub admissible_truth_masks: [u8; 3],
+    pub admissible_truth_masks: Vec<u8>,
     /// Application-owned ex-ante decision that this episode may contribute an
     /// actor term. It is frozen with the task before any action draw.
     pub actor_eligible: bool,
@@ -492,9 +519,10 @@ pub struct SemanticTaskObservationRoots {
     pub root_digest: Identity256,
     pub root_extents: [u32; 3],
     /// Original admitted query selections, retaining their order.
-    pub query_records: [u32; 3],
+    pub query_records: Vec<u32>,
     /// Query ordinal, genuine original insertion target (absent for a derived
-    /// target), and original support record. Ordered by query, then insertion.
+    /// target), and its original admitted or authenticated support. Ordered by
+    /// query, then insertion.
     /// A matching query value never supplies an absent original target.
     pub contributors: Vec<(
         u32,
@@ -526,27 +554,36 @@ impl SemanticTaskEvaluationSpec {
         let invalid = |detail: &str| SemanticTransitionError::InvalidInput {
             detail: format!("task binding: {detail}"),
         };
+        let query_count = self.statement_records.len();
+        let query_count_u32 = u32::try_from(query_count)
+            .map_err(|_| invalid("query roster exceeds the original record-index domain"))?;
+        if query_count == 0
+            || self.admissible_truth_masks.len() != query_count
+        {
+            return Err(invalid("query roster and truth-mask geometry differ from the admission"));
+        }
         self.scoring
-            .validate(self.program.editable_program().is_some())?;
+            .validate(self.program.editable_program().is_some(), query_count_u32)?;
+        self.task_ground.validate(records, query_count)?;
         if let Some(domain) = &self.training_domain {
             domain.validate()?;
         }
-        if self.priority_levels.len() > 3 {
-            return Err(invalid("task priorities exceed the three-query bank"));
+        if self.priority_levels.len() > query_count {
+            return Err(invalid("task priorities exceed the original query roster"));
         }
-        let mut seen_queries = [false; 3];
+        let mut seen_queries = vec![false; query_count];
         let mut goal_count = 0usize;
         for level in &self.priority_levels {
             if level.goals.is_empty() {
                 return Err(invalid("task priority level must contain a goal"));
             }
             goal_count += level.goals.len();
-            if goal_count > 3 {
-                return Err(invalid("task priorities exceed the three-query bank"));
+            if goal_count > query_count {
+                return Err(invalid("task priorities exceed the original query roster"));
             }
             for goal in &level.goals {
-                let query = usize::from(goal.query);
-                if query >= 3 || goal.target_truth > 3 || goal.weight == 0 {
+                let query = goal.query as usize;
+                if query >= query_count || goal.target_truth > 3 || goal.weight == 0 {
                     return Err(invalid(
                         "task priority goal has invalid query, truth or weight",
                     ));
@@ -570,7 +607,7 @@ impl SemanticTaskEvaluationSpec {
                 "truth eligibility requires a nonempty four-valued mask",
             ));
         }
-        for index in self.statement_records {
+        for &index in &self.statement_records {
             let record = records
                 .records
                 .get(index as usize)
@@ -653,8 +690,9 @@ pub(crate) struct TaskEvaluationBinding {
     admission_identity: Identity256,
     schema_generation: Identity256,
     spec: SemanticTaskEvaluationSpec,
-    statements: [crate::SemanticStatementKey; 3],
+    statements: Vec<crate::SemanticStatementKey>,
     statement_bytes: BTreeMap<u32, Vec<u8>>,
+    observation_statements: Vec<(crate::SemanticStatementKey, crate::SemanticProgramFact)>,
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
     goal_witness: Option<SemanticTaskGoalWitness>,
@@ -662,27 +700,24 @@ pub(crate) struct TaskEvaluationBinding {
 }
 
 type TaskContentSelection = (
-    [crate::SemanticStatementKey; 3],
+    Vec<crate::SemanticStatementKey>,
     BTreeMap<u32, Vec<u8>>,
     Vec<(u32, [u8; 32])>,
 );
 
 fn task_content_selection(
     admission: &SemanticAdmission,
-    statement_records: [u32; 3],
+    statement_records: &[u32],
     allowed_support_records: &[u32],
 ) -> Result<TaskContentSelection, SemanticTransitionError> {
-    let statements = statement_records.map(|record| {
+    let statements = statement_records.iter().map(|&record| {
         admission
             .statement_key(record)
             .map_err(SemanticTransitionError::Semantic)
     });
     let statements = statements.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let statements: [_; 3] = statements
-        .try_into()
-        .expect("three selected task statements");
     let mut statement_bytes = BTreeMap::new();
-    for record in statement_records {
+    for &record in statement_records {
         statement_bytes.insert(
             record,
             feedback_statement_payload(admission.records(), &admission.encoded_records, record)?,
@@ -720,12 +755,13 @@ fn task_content_selection(
 fn task_content_identity(
     admission_identity: Identity256,
     schema_generation: Identity256,
-    statement_records: [u32; 3],
-    statements: [crate::SemanticStatementKey; 3],
+    statement_records: &[u32],
+    statements: &[crate::SemanticStatementKey],
     statement_bytes: &BTreeMap<u32, Vec<u8>>,
     allowed_supports: &[(u32, [u8; 32])],
     observation: &SemanticTaskObservation,
     editable: Option<&crate::SemanticProgramAdmission>,
+    task_ground: &SemanticTaskGround,
 ) -> SemanticTaskContentIdentity {
     let append_bytes = |hash: &mut Sha256, bytes: &[u8]| {
         hash.update((bytes.len() as u64).to_le_bytes());
@@ -735,13 +771,13 @@ fn task_content_identity(
     let mut query = Sha256::new();
     query.update(b"xlog.semantic.task-query.v1\0");
     query.update((statement_records.len() as u64).to_le_bytes());
-    for (record, statement) in statement_records.into_iter().zip(statements) {
+    for (record, statement) in statement_records.iter().zip(statements) {
         query.update(record.to_le_bytes());
         query.update(statement.identity().as_bytes());
         append_bytes(
             &mut query,
             statement_bytes
-                .get(&record)
+                .get(record)
                 .expect("bound query statement retains canonical bytes"),
         );
     }
@@ -752,6 +788,14 @@ fn task_content_identity(
     theory_program.update(b"xlog.semantic.task-theory-program.v1\0");
     theory_program.update(admission_identity.as_bytes());
     theory_program.update(schema_generation.as_bytes());
+    theory_program.update(b"xlog.semantic.task-ground.v1\0");
+    theory_program.update(task_ground.code().to_le_bytes());
+    theory_program.update((task_ground.bindings().len() as u64).to_le_bytes());
+    for binding in task_ground.bindings() {
+        for word in binding.words() {
+            theory_program.update(word.to_le_bytes());
+        }
+    }
     theory_program.update((allowed_supports.len() as u64).to_le_bytes());
     for (record, support) in allowed_supports {
         theory_program.update(record.to_le_bytes());
@@ -771,7 +815,7 @@ fn task_content_identity(
     result.update(query.as_bytes());
     result.update(theory_program.as_bytes());
     append_bytes(&mut result, &observation.result_bytes);
-    for truth in observation.expected_truth {
+    for &truth in &observation.actual_truths {
         result.update((truth as u64).to_le_bytes());
     }
 
@@ -798,23 +842,44 @@ impl TaskEvaluationBinding {
         }
         let (statements, statement_bytes, allowed_supports) = task_content_selection(
             admission,
-            spec.statement_records,
+            &spec.statement_records,
             &spec.allowed_support_records,
         )?;
-        if observation.program_source.is_empty() || observation.result_bytes.is_empty() {
+        let observation_statements = spec.task_ground.bindings().iter().map(|binding| {
+            let statement = admission.statement_key(binding.observation_record)
+                .map_err(SemanticTransitionError::Semantic)?;
+            let fact = spec.program.editable_program()
+                .and_then(|program| program.observation_facts.iter()
+                    .find(|(record, _)| *record == binding.observation_record))
+                .map(|(_, fact)| *fact)
+                .ok_or_else(|| publication_input_error(
+                    "protected observation statement is absent from its original compiled source"))?;
+            Ok((statement, fact))
+        }).collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+        if observation.program_source.is_empty()
+            || observation.result_bytes.is_empty()
+            || observation.actual_truths.len() != spec.statement_records.len()
+            || spec.program.editable_program().is_some_and(|program| {
+                program.query_records != spec.statement_records
+            })
+        {
             return Err(publication_input_error(
                 "native task observer omitted source or result custody",
             ));
         }
         let objective_law = spec
             .scoring
-            .objective_law(spec.program.editable_program().is_some())?;
+            .objective_law(
+                spec.program.editable_program().is_some(),
+                spec.statement_records.len() as u32,
+            )?;
         Ok(Self {
             admission_identity: admission.identity(),
             schema_generation: admission.schema_generation(),
             spec,
             statements,
             statement_bytes,
+            observation_statements,
             allowed_supports,
             observation,
             goal_witness: None,
@@ -834,7 +899,7 @@ impl TaskEvaluationBinding {
         // Keep source occurrence and explicit selection order separate from
         // the distinct original support records consumed by the device policy.
         hash.update((self.spec.statement_records.len() as u64).to_le_bytes());
-        for index in self.spec.statement_records {
+        for index in &self.spec.statement_records {
             hash.update(index.to_le_bytes());
         }
         hash.update((self.spec.allowed_support_records.len() as u64).to_le_bytes());
@@ -847,10 +912,18 @@ impl TaskEvaluationBinding {
         hash.update(&self.observation.input_bytes);
         hash.update((self.observation.result_bytes.len() as u64).to_le_bytes());
         hash.update(&self.observation.result_bytes);
-        for truth in self.observation.expected_truth {
+        for &truth in &self.observation.actual_truths {
             hash.update((truth as u64).to_le_bytes());
         }
-        hash.update(self.spec.admissible_truth_masks);
+        hash.update(&self.spec.admissible_truth_masks);
+        hash.update(b"xlog.semantic.task-ground.v1\0");
+        hash.update(self.spec.task_ground.code().to_le_bytes());
+        hash.update((self.spec.task_ground.bindings().len() as u64).to_le_bytes());
+        for binding in self.spec.task_ground.bindings() {
+            for word in binding.words() {
+                hash.update(word.to_le_bytes());
+            }
+        }
         hash.update([u8::from(self.spec.actor_eligible)]);
         for weight in self.spec.scoring.words() {
             hash.update(weight.to_le_bytes());
@@ -873,7 +946,8 @@ impl TaskEvaluationBinding {
         for level in &self.spec.priority_levels {
             hash.update((level.goals.len() as u64).to_le_bytes());
             for goal in &level.goals {
-                hash.update([goal.query, goal.target_truth]);
+                hash.update(goal.query.to_le_bytes());
+                hash.update([goal.target_truth]);
                 hash.update(goal.weight.to_le_bytes());
             }
         }
@@ -883,8 +957,14 @@ impl TaskEvaluationBinding {
                 hash.update(word.to_le_bytes());
             }
         }
-        for statement in self.statements {
+        for statement in &self.statements {
             hash.update(statement.identity().as_bytes());
+        }
+        for (statement, fact) in &self.observation_statements {
+            hash.update(statement.identity().as_bytes());
+            hash.update(fact.predicate.to_le_bytes());
+            hash.update(fact.first.to_le_bytes());
+            hash.update(fact.second.to_le_bytes());
         }
         hash.update((self.allowed_supports.len() as u64).to_le_bytes());
         for (record, support) in &self.allowed_supports {
@@ -907,28 +987,36 @@ impl TaskEvaluationBinding {
         task_content_identity(
             self.admission_identity,
             self.schema_generation,
-            self.spec.statement_records,
-            self.statements,
+            &self.spec.statement_records,
+            &self.statements,
             &self.statement_bytes,
             &self.allowed_supports,
             &self.observation,
             self.spec.program.editable_program(),
+            &self.spec.task_ground,
         )
     }
 
     pub(crate) fn cold_content(
         admission: &SemanticAdmission,
-        statement_records: [u32; 3],
+        statement_records: &[u32],
         allowed_support_records: &[u32],
         editable: Option<&crate::SemanticProgramAdmission>,
         observation: SemanticTaskObservation,
-    ) -> Result<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3]), SemanticTransitionError>
+        task_ground: &SemanticTaskGround,
+    ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
-        if observation.program_source.is_empty() || observation.result_bytes.is_empty() {
+        if observation.program_source.is_empty()
+            || observation.result_bytes.is_empty()
+            || observation.actual_truths.len() != statement_records.len()
+            || statement_records.is_empty()
+            || statement_records.len() > u32::MAX as usize
+        {
             return Err(publication_input_error(
                 "native task observer omitted source or result custody",
             ));
         }
+        task_ground.validate(admission.records(), statement_records.len())?;
         if let Some(program) = editable {
             program
                 .validate()
@@ -942,17 +1030,19 @@ impl TaskEvaluationBinding {
             admission.identity(),
             admission.schema_generation(),
             statement_records,
-            statements,
+            &statements,
             &statement_bytes,
             &allowed_supports,
             &observation,
             editable,
+            task_ground,
         );
-        Ok((content, observation.expected_truth))
+        Ok((content, observation.actual_truths))
     }
 
-    pub(crate) fn expected_truth(&self) -> [crate::SemanticTruth; 3] {
-        self.observation.expected_truth
+    pub(crate) fn expected_truth(&self) -> Option<&[crate::SemanticTruth]> {
+        matches!(self.spec.task_ground, SemanticTaskGround::Logical)
+            .then_some(self.observation.actual_truths.as_slice())
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -960,8 +1050,8 @@ impl TaskEvaluationBinding {
         self.goal_witness
     }
 
-    pub(crate) fn content(&self) -> (SemanticTaskContentIdentity, [crate::SemanticTruth; 3]) {
-        (self.content_identity(), self.expected_truth())
+    pub(crate) fn content(&self) -> (SemanticTaskContentIdentity, Vec<crate::SemanticTruth>) {
+        (self.content_identity(), self.observation.actual_truths.clone())
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -973,7 +1063,7 @@ impl TaskEvaluationBinding {
         bytes.extend_from_slice(identities.theory_program.as_bytes());
         material_u64(&mut bytes, self.observation.result_bytes.len() as u64);
         bytes.extend_from_slice(&self.observation.result_bytes);
-        for truth in self.observation.expected_truth {
+        for &truth in &self.observation.actual_truths {
             material_u64(&mut bytes, truth as u64);
         }
         SemanticCompletedStepWitnessMaterial {
@@ -991,20 +1081,20 @@ impl TaskEvaluationBinding {
     }
 
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
-        let mut words = vec![6, owner];
+        let program = self.spec.program.editable_program().map(|program| program.words());
+        let goal_count = self.spec.priority_levels.iter().map(|level| level.goals.len()).sum::<usize>();
+        let mut words = vec![7, owner];
         words.extend(identity_words(*self.identity().as_bytes()));
-        for statement in self.statements {
-            words.extend(identity_words(*statement.identity().as_bytes()));
-        }
-        words.extend(self.observation.expected_truth.map(|truth| truth as u64));
-        words.push(self.allowed_supports.len() as u64);
-        words.extend(self.spec.statement_records.map(u64::from));
+        words.extend([
+            self.statements.len() as u64,
+            self.spec.task_ground.bindings().len() as u64,
+            self.spec.task_ground.code(),
+            self.allowed_supports.len() as u64,
+            self.spec.priority_levels.len() as u64,
+            goal_count as u64,
+            program.as_ref().map_or(0, |words| words.len() as u64),
+        ]);
         words.extend(self.spec.scoring.words());
-        words.extend(self.spec.admissible_truth_masks.map(u64::from));
-        for (record, support) in &self.allowed_supports {
-            words.push(u64::from(*record));
-            words.extend(identity_words(*support));
-        }
         if let Some(witness) = self.goal_witness {
             words.extend(identity_words(*witness.semantic_root.as_bytes()));
             words.extend(identity_words(*witness.authority_root.as_bytes()));
@@ -1016,12 +1106,21 @@ impl TaskEvaluationBinding {
             words.extend([0; 18]);
         }
         words.push(u64::from(self.spec.actor_eligible));
-        words.push(self.spec.priority_levels.len() as u64);
-        for level in self.spec.priority_levels.iter().take(3) {
+        for (query, statement) in self.statements.iter().enumerate() {
+            words.extend(identity_words(*statement.identity().as_bytes()));
+            words.extend([
+                u64::from(self.spec.statement_records[query]),
+                self.observation.actual_truths[query] as u64,
+                u64::from(self.spec.admissible_truth_masks[query]),
+            ]);
+        }
+        for (record, support) in &self.allowed_supports {
+            words.push(u64::from(*record));
+            words.extend(identity_words(*support));
+        }
+        for level in &self.spec.priority_levels {
             words.push(level.goals.len() as u64);
         }
-        words.resize(words.len() + 3 - self.spec.priority_levels.len(), 0);
-        let mut goals = 0;
         for level in &self.spec.priority_levels {
             for goal in &level.goals {
                 words.extend([
@@ -1029,14 +1128,17 @@ impl TaskEvaluationBinding {
                     u64::from(goal.target_truth),
                     u64::from(goal.weight),
                 ]);
-                goals += 1;
             }
         }
-        words.resize(words.len() + (3 - goals) * 3, 0);
-        if let Some(editable) = self.spec.program.editable_program() {
-            let bank = editable.words();
-            words.extend([1, bank.len() as u64]);
-            words.extend(bank);
+        for binding in self.spec.task_ground.bindings() {
+            words.extend(binding.words());
+        }
+        for (statement, fact) in &self.observation_statements {
+            words.extend(identity_words(*statement.identity().as_bytes()));
+            words.extend([u64::from(fact.predicate), u64::from(fact.first), u64::from(fact.second)]);
+        }
+        if let Some(program) = program {
+            words.extend(program);
         }
         words
     }
@@ -1922,17 +2024,19 @@ fn canonical_text_null(receipt: &SemanticTransitionReceipt) -> bool {
 }
 
 /// Device-computed facts, using the three actual canonical truth-query results.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SemanticTaskFacts {
-    /// Ordered actual Truth4 codes for the three task queries. A task-refused
+    /// Ordered actual Truth4 codes for the complete task query roster. A refused
     /// lane has no executed truth outcome; its terminal refusal is authoritative.
-    pub truth: [u64; 3],
+    pub truth: Vec<u64>,
     /// Equality of each actual Truth4 answer to the protected observer result.
-    pub correct: [u64; 3],
-    /// Number of correct subgoals, in the inclusive range zero to three.
+    pub correct: Option<Vec<u64>>,
+    /// Authenticated attainment of original listed goals, independent of
+    /// reference correctness. Unlisted Coding queries contribute no attainment.
+    pub attained: Vec<u64>,
+    /// Number of correct logical queries or attained original coding goals.
     pub g: u64,
-    /// Parent completion: all three subgoals are correct (zero or one).
+    /// Whether all original logical queries or listed coding goals are attained.
     pub p: u64,
     /// Actual edit commands plus added supports plus defined truth changes.
     pub c: u64,
@@ -1943,14 +2047,23 @@ pub struct SemanticTaskFacts {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DeviceTaskFacts {
+    g: u64,
+    p: u64,
+    c: u64,
+    v: i64,
+    eligible: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DeviceTaskEvaluation {
     lane_refusal: [u64; 2],
-    query_receipts: [[[u64; 42]; 3]; 3],
     query_count: u64,
     winner: u64,
     return_value: i64,
-    facts: [SemanticTaskFacts; 3],
+    facts: [DeviceTaskFacts; 3],
 }
 
 /// Exact piecewise-linear cell selected by the device policy forward pass.
@@ -2145,11 +2258,14 @@ pub enum SemanticStateRole {
     TensorLayout = 55,
     ReplayAppendEntries = 56,
     ReplayAppendPayload = 57,
+    TaskGround = 58,
 }
+
+const PUBLICATION_ROLE_COUNT: usize = SemanticStateRole::TaskGround as usize;
 
 impl SemanticStateRole {
     pub fn from_code(code: u64) -> Option<Self> {
-        const ROLES: [SemanticStateRole; 57] = [
+        const ROLES: [SemanticStateRole; PUBLICATION_ROLE_COUNT] = [
             SemanticStateRole::PrefixSource,
             SemanticStateRole::TokenProvenanceRecords,
             SemanticStateRole::PrefixIdentity,
@@ -2207,6 +2323,7 @@ impl SemanticStateRole {
             SemanticStateRole::TensorLayout,
             SemanticStateRole::ReplayAppendEntries,
             SemanticStateRole::ReplayAppendPayload,
+            SemanticStateRole::TaskGround,
         ];
         let index = usize::try_from(code.checked_sub(1)?).ok()?;
         ROLES.get(index).copied()
@@ -3894,11 +4011,12 @@ fn is_tensor_role(role: u64) -> bool {
     matches!(role, 4..=13 | 18..=25 | 51..=54)
 }
 
-fn validate_publication_counts(counts: &[u64; 57]) -> Result<usize, SemanticTransitionError> {
+fn validate_publication_counts(counts: &[u64; PUBLICATION_ROLE_COUNT]) -> Result<usize, SemanticTransitionError> {
     let mut total = 0u64;
     for (index, &count) in counts.iter().enumerate() {
         let role = index as u64 + 1;
-        if (!is_tensor_role(role) && count != if role == 16 { 3 } else { 1 })
+        if (!is_tensor_role(role) && role != 16 && count != 1)
+            || (role == 16 && (count == 0 || count > u32::MAX as u64))
             || (matches!(role, 8..=13) && count != 1)
             || (role == 18 && count == 0)
         {
@@ -4943,6 +5061,7 @@ pub struct SemanticUpdateForwardReceiptMaterial {
 #[derive(Clone, Debug)]
 pub struct SemanticUpdateCanaryMeasurement {
     pub frozen: crate::SemanticTrainingCanaryRecord,
+    pub obligation_positions: Vec<u64>,
     pub protected_positions: Vec<u64>,
     pub availability: u64,
     pub reason: u64,
@@ -5301,7 +5420,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 128);
 const _: () = assert!(size_of::<PublicationHeader>() == 488);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 50360);
+const _: () = assert!(size_of::<PublicationBank>() == 47192);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 48);
 const _: () = assert!(size_of::<PublicationContract>() == 424);
@@ -5445,9 +5564,9 @@ pub struct SemanticCompletedTheoryDeltaMaterial {
 /// Terminal native result for one learned lane of a completed task ground.
 /// A refusal never invents query results for a request that was not executed.
 #[cfg(feature = "semantic-policy")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticCompletedLaneOutcomeMaterial {
-    Executed([crate::SemanticTruth; 3]),
+    Executed(Vec<crate::SemanticTruth>),
     Refused(SemanticTaskRefusal),
 }
 
@@ -5468,9 +5587,10 @@ pub struct SemanticCompletedTaskGroundMaterial {
     pub goal: SemanticTaskGoalWitness,
     pub priority_levels: Vec<SemanticTaskPriorityLevel>,
     pub base: SemanticPublishedIdentity,
-    pub expected_truth: [crate::SemanticTruth; 3],
+    pub expected_truth: Option<Vec<crate::SemanticTruth>>,
+    pub ground: SemanticTaskGround,
     pub facts: [SemanticTaskFacts; 3],
-    pub base_truth: [crate::SemanticTruth; 3],
+    pub base_truth: Vec<crate::SemanticTruth>,
     pub lane_outcomes: [SemanticCompletedLaneOutcomeMaterial; 2],
 }
 
@@ -6232,24 +6352,30 @@ fn completed_theory_delta_for_slot(
     }))
 }
 
+#[expect(clippy::too_many_arguments, reason = "query receipts bind the original program, publication bank and completed candidate evidence")]
 fn validate_program_query_receipts(
     program: &crate::SemanticProgramAdmission,
     task_identity: Identity256,
     codebooks: &ActionCodebooks,
     state: &DeviceState,
     edits: &[[[u32; 18]; 2]; 2],
+    layout: task_ground::TaskGroundLayout,
+    ground: &[u8],
+    prior_rule_count: u64,
+    candidate_facts: &[SemanticTaskFacts; 3],
 ) -> Result<(), SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
-    let expected_queries = 3 + state
+    let expected_queries = program.queries.len() as u64 + state
         .task_evaluation
         .lane_refusal
         .iter()
-        .filter(|&&refusal| refusal != 3 && refusal != 4)
+        .filter(|&&refusal| matches!(refusal, 0 | 2))
         .count() as u64
-        * 3;
+        * program.queries.len() as u64;
     if state.binding_digest != codebooks.binding.digest
         || state.task_evaluation.query_count != expected_queries
-        || state.task_evaluation.lane_refusal.contains(&1)
+        || prior_rule_count < program.initial_rules.len() as u64
+        || prior_rule_count > crate::semantic_program::RESIDENT_PROGRAM_RULE_CAPACITY as u64
     {
         return Err(mismatch());
     }
@@ -6270,16 +6396,17 @@ fn validate_program_query_receipts(
     for slot in 0..3 {
         let rules: &[crate::SemanticProgramRule] =
             if slot == 0 { &[] } else { &inserted[slot - 1] };
-        let receipts = &state.task_evaluation.query_receipts[slot];
-        let facts = &state.task_evaluation.facts[slot];
-        if slot != 0 && matches!(state.task_evaluation.lane_refusal[slot - 1], 3 | 4) {
+        let receipts = (0..program.queries.len()).map(|query| layout.query(ground, slot, query)
+            .map(|record| record.receipt)).collect::<Result<Vec<_>, _>>()?;
+        let facts = &candidate_facts[slot];
+        if slot != 0 && matches!(state.task_evaluation.lane_refusal[slot - 1], 1 | 3 | 4) {
             let work = state.work[slot - 1];
-            if rules.is_empty()
-                || receipts
+            if receipts
                     .iter()
                     .any(|receipt| receipt.iter().any(|&word| word != 0))
-                || facts.truth != [0; 3]
-                || facts.correct != [0; 3]
+                || !facts.truth.is_empty()
+                || facts.correct.as_ref().is_some_and(|values| !values.is_empty())
+                || !facts.attained.is_empty()
                 || facts.g != 0
                 || facts.p != 0
                 || facts.eligible != 0
@@ -6294,7 +6421,7 @@ fn validate_program_query_receipts(
         let metrics = &receipts[0][37..40];
         if metrics[1] > crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
             || metrics[2] > metrics[1]
-            || facts.truth.iter().any(|&truth| truth > 1)
+            || facts.truth.iter().any(|&truth| truth > 3)
         {
             return Err(mismatch());
         }
@@ -6318,21 +6445,21 @@ fn validate_program_query_receipts(
                 u64::from(query_fact.second),
             ]);
             expected[37..40].copy_from_slice(metrics);
-            expected[40] = program.initial_rules.len() as u64;
+            expected[40] = prior_rule_count;
             expected[41] = program.initial_facts.len() as u64;
             if receipt != &expected {
                 return Err(mismatch());
             }
         }
         if slot != 0 {
-            let baseline = &state.task_evaluation.facts[0];
+            let baseline = &candidate_facts[0];
             let derived = metrics[2]
-                .checked_sub(state.task_evaluation.query_receipts[0][0][39])
+                .checked_sub(layout.query(ground, 0, 0)?.receipt[39])
                 .ok_or_else(mismatch)?;
             let truth_changes = facts
                 .truth
                 .iter()
-                .zip(baseline.truth)
+                .zip(&baseline.truth)
                 .filter(|(current, original)| **current != *original)
                 .count() as u64;
             let work = state.work[slot - 1];
@@ -6349,26 +6476,23 @@ fn validate_program_query_receipts(
 
 #[cfg(feature = "semantic-policy")]
 fn completed_task_truths(
-    facts: SemanticTaskFacts,
-) -> Result<[crate::SemanticTruth; 3], SemanticTransitionError> {
-    Ok([
-        crate::SemanticTruth::from_bits(facts.truth[0])
-            .map_err(SemanticTransitionError::Semantic)?,
-        crate::SemanticTruth::from_bits(facts.truth[1])
-            .map_err(SemanticTransitionError::Semantic)?,
-        crate::SemanticTruth::from_bits(facts.truth[2])
-            .map_err(SemanticTransitionError::Semantic)?,
-    ])
+    facts: &SemanticTaskFacts,
+) -> Result<Vec<crate::SemanticTruth>, SemanticTransitionError> {
+    facts.truth.iter().map(|truth| crate::SemanticTruth::from_bits(*truth)
+        .map_err(SemanticTransitionError::Semantic)).collect()
 }
 
 #[cfg(feature = "semantic-policy")]
-fn encode_completed_task_facts(bytes: &mut Vec<u8>, facts: SemanticTaskFacts) {
-    for value in facts.truth {
+fn encode_completed_task_facts(bytes: &mut Vec<u8>, facts: &SemanticTaskFacts) {
+    material_u64(bytes, facts.truth.len() as u64);
+    for &value in &facts.truth {
         material_u64(bytes, value);
     }
-    for value in facts.correct {
-        material_u64(bytes, value);
+    material_u64(bytes, u64::from(facts.correct.is_some()));
+    if let Some(correct) = &facts.correct {
+        for &value in correct { material_u64(bytes, value); }
     }
+    for &value in &facts.attained { material_u64(bytes, value); }
     for value in [facts.g, facts.p, facts.c, facts.v as u64, facts.eligible] {
         material_u64(bytes, value);
     }
@@ -7142,7 +7266,7 @@ impl SemanticReplayMaterial {
 struct PublicationMaterial {
     bank: PublicationBank,
     contract: PublicationContract,
-    role_counts: [u64; 57],
+    role_counts: [u64; PUBLICATION_ROLE_COUNT],
     terminals: Vec<u64>,
     layouts: BTreeMap<(u64, u64), SemanticTensorLayout>,
     model_memory: ModelMemoryGeometry,
@@ -7620,6 +7744,9 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
         hash.update(include_bytes!("semantic_transition/native_work_bound.rs"));
         hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
+        hash.update(include_bytes!("semantic_transition/task_ground.rs"));
+        hash.update(include_bytes!("semantic_program.rs"));
+        hash.update(include_bytes!("../kernels/semantic_task_ground.cuh"));
         hash.update(include_bytes!(
             "semantic_transition/replay_model_backing.rs"
         ));
@@ -7651,7 +7778,7 @@ const RUNTIME_CONTRACT_MAGIC: &[u8] = b"XLOG-PUBLICATION-RUNTIME\0";
 /// not belong here. The original model contribution is retained in full.
 fn runtime_contract_bytes(
     contract: PublicationContract,
-    counts: &[u64; 57],
+    counts: &[u64; PUBLICATION_ROLE_COUNT],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     capacities: &[(u64, u64, usize)],
@@ -7757,7 +7884,7 @@ fn runtime_contract_bytes(
 fn verified_runtime_model_mode<'a>(
     bytes: &'a [u8],
     contract: PublicationContract,
-    counts: &[u64; 57],
+    counts: &[u64; PUBLICATION_ROLE_COUNT],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     capacities: &[(u64, u64, usize)],
@@ -7815,7 +7942,7 @@ fn verified_runtime_model_mode<'a>(
 
 fn initial_runtime_contract_record(
     contract: PublicationContract,
-    counts: &[u64; 57],
+    counts: &[u64; PUBLICATION_ROLE_COUNT],
     terminals: &[u64],
     layouts: &BTreeMap<(u64, u64), SemanticTensorLayout>,
     mut capacities: Vec<(u64, u64, usize)>,
@@ -7991,7 +8118,7 @@ impl PublicationMaterial {
         // SAFETY: these fixed ABI records contain only all-bit-valid scalars.
         let bank = unsafe { publication_material_record::<PublicationBank>(&mut reader)? };
         let contract = unsafe { publication_material_record::<PublicationContract>(&mut reader)? };
-        let role_counts = unsafe { publication_material_record::<[u64; 57]>(&mut reader)? };
+        let role_counts = unsafe { publication_material_record::<[u64; PUBLICATION_ROLE_COUNT]>(&mut reader)? };
         let terminal_bytes = reader.bytes().map_err(SemanticTransitionError::Semantic)?;
         if terminal_bytes.len() % 8 != 0 {
             return Err(publication_input_error(
@@ -8277,7 +8404,7 @@ impl PublicationMaterial {
             || contract.role_counts != 0
             || contract.semantic_owner != 0
             || contract.window_capacity != 32
-            || contract.role_count != 57
+            || contract.role_count != PUBLICATION_ROLE_COUNT as u64
             || contract.terminal_token_count != self.terminals.len() as u64
             || contract.model_generation == 0
             || header.model_generation < contract.model_generation
@@ -8432,35 +8559,6 @@ fn upload_publication<T: DeviceRepr>(
         .map_err(|error| runtime_error("publication cold metadata upload", error))
 }
 
-#[cfg(feature = "semantic-policy")]
-fn account_tracked_allocation<T: cudarc::driver::DeviceRepr>(
-    allocations: &mut Vec<DeviceAllocationProvenance>,
-    slice: &TrackedCudaSlice<T>,
-) -> Result<(), SemanticTransitionError> {
-    let provenance = slice
-        .view()
-        .allocation_provenance()
-        .ok_or(SemanticTransitionError::ObservationMismatch)?;
-    if !allocations
-        .iter()
-        .any(|known| provenance.same_allocation(known))
-    {
-        allocations.push(provenance);
-    }
-    Ok(())
-}
-
-#[cfg(feature = "semantic-policy")]
-fn accounted_tracked_bytes(
-    allocations: Vec<DeviceAllocationProvenance>,
-) -> Result<u64, SemanticTransitionError> {
-    allocations.into_iter().try_fold(0u64, |total, allocation| {
-        total
-            .checked_add(allocation.allocation_bytes())
-            .ok_or(SemanticTransitionError::GenerationExhausted)
-    })
-}
-
 impl PublicationStorage {
     fn continuation_block_contract(
         &self,
@@ -8492,32 +8590,6 @@ impl PublicationStorage {
             ));
         }
         Ok((expected, schema, identity))
-    }
-
-    #[cfg(feature = "semantic-policy")]
-    fn account_allocations(
-        &self,
-        allocations: &mut Vec<DeviceAllocationProvenance>,
-    ) -> Result<(), SemanticTransitionError> {
-        account_tracked_allocation(allocations, &self.control)?;
-        for bank in &self.banks {
-            account_tracked_allocation(allocations, bank)?;
-        }
-        for directory in &self.directories {
-            account_tracked_allocation(allocations, directory)?;
-        }
-        account_tracked_allocation(allocations, &self.storage)?;
-        account_tracked_allocation(allocations, &self.contract)?;
-        account_tracked_allocation(allocations, &self.role_counts)?;
-        account_tracked_allocation(allocations, &self.terminals)?;
-        account_tracked_allocation(allocations, &self.continuation)?;
-        account_tracked_allocation(allocations, &self.continuation_directory)?;
-        for allocation in &self.allocations {
-            if let Some(owner) = allocation.live_slice() {
-                account_tracked_allocation(allocations, &owner)?;
-            }
-        }
-        Ok(())
     }
 
     #[expect(
@@ -8816,7 +8888,7 @@ impl PublicationStorage {
             });
         }
         let terminals = allocate_publication::<u64>(provider, terminal_tokens.len())?;
-        let role_counts = allocate_publication::<PublicationRoleCount>(provider, 57)?;
+        let role_counts = allocate_publication::<PublicationRoleCount>(provider, PUBLICATION_ROLE_COUNT)?;
         contract.terminal_tokens = terminals.device_ptr_value();
         contract.role_counts = role_counts.device_ptr_value();
         let contract_value = contract;
@@ -10805,6 +10877,7 @@ struct PreparedStepStorage {
 }
 
 struct PreparedBranchStorage {
+    task_ground: Option<task_ground::TaskGroundStorage>,
     model_update: Option<PreparedModelUpdate>,
     continuation: Option<PreparedContinuation>,
     numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
@@ -10858,7 +10931,7 @@ struct BoundModelUpdate {
     candidate_logits: PreparedSemanticTensor,
     _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
-    accounted_reserved_bytes: u64,
+    accounted_external_bytes: u64,
     _witness: SemanticTensorContentWitness,
     _forward_witnesses: [SemanticModelForwardWitness; 2],
 }
@@ -10872,19 +10945,6 @@ struct ModelUpdateEvidenceOwner {
 }
 
 impl PreparedModelUpdate {
-    #[cfg(feature = "semantic-policy")]
-    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
-        let mut allocations = Vec::new();
-        account_tracked_allocation(&mut allocations, &self.bindings)?;
-        account_tracked_allocation(&mut allocations, self.evidence.as_ref())?;
-        account_tracked_allocation(&mut allocations, &self.forward_seals)?;
-        account_tracked_allocation(&mut allocations, &self.forward_receipts)?;
-        account_tracked_allocation(&mut allocations, &self.admissibility)?;
-        account_tracked_allocation(&mut allocations, &self.canary_results)?;
-        account_tracked_allocation(&mut allocations, &self.refusal)?;
-        accounted_tracked_bytes(allocations)
-    }
-
     fn descriptor(&self) -> ModelUpdateContinuationInputs {
         ModelUpdateContinuationInputs {
             bindings: self.bindings.device_ptr_value(),
@@ -10946,6 +11006,7 @@ impl PreparedModelUpdate {
         training_view: &SemanticSelectedTrainingView,
         task: &TrackedCudaSlice<u64>,
         model_work: &PreparedModelWork,
+        native_resident_bytes: u64,
     ) -> Result<(), SemanticTransitionError> {
         let output = self.output.as_ref().ok_or_else(|| {
             publication_input_error("prepared update has no original model output binding")
@@ -10977,23 +11038,12 @@ impl PreparedModelUpdate {
         let canary_results = self.canary_results.device_ptr_value();
         let admissibility_destination = self.admissibility.device_ptr_value();
         let refusal_destination = self.refusal.device_ptr_value();
-        let mut native_allocations = Vec::new();
-        storage.account_allocations(&mut native_allocations)?;
-        training_view.account_allocations(&mut native_allocations)?;
-        let native_allocation_bytes = accounted_tracked_bytes(native_allocations)?;
-        let model_work_bytes = model_work.accounted_allocation_bytes()?;
-        let update_bytes = self.accounted_allocation_bytes()?;
-        let task_bytes = task
-            .view()
-            .allocation_provenance()
-            .ok_or(SemanticTransitionError::ObservationMismatch)?
-            .allocation_bytes();
+        // All source, target, replay-child, tape and prepared allocations are
+        // charged to the same original native manager. Count its actual live
+        // charge once, not a hand-selected subset of this Update's views.
         let accounted_reserved_bytes = output
-            .accounted_reserved_bytes
-            .checked_add(native_allocation_bytes)
-            .and_then(|bytes| bytes.checked_add(task_bytes))
-            .and_then(|bytes| bytes.checked_add(model_work_bytes))
-            .and_then(|bytes| bytes.checked_add(update_bytes))
+            .accounted_external_bytes
+            .checked_add(native_resident_bytes)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let logits = output.baseline_logits.layout;
         let canary_inputs = ModelUpdateCanaryInputs {
@@ -11185,14 +11235,6 @@ impl PreparedModelWork {
             replay_cursor: 0,
             uncaptured_recording: false,
         })
-    }
-
-    #[cfg(feature = "semantic-policy")]
-    fn accounted_allocation_bytes(&self) -> Result<u64, SemanticTransitionError> {
-        let mut allocations = Vec::new();
-        account_tracked_allocation(&mut allocations, &self.device)?;
-        account_tracked_allocation(&mut allocations, &self.actual)?;
-        accounted_tracked_bytes(allocations)
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -12036,7 +12078,7 @@ fn cuda_backing_allocation(
 fn accounted_tensor_allocations(
     tensors: &[&PreparedSemanticTensor],
     slab: &PreparedSemanticTensor,
-) -> Result<u64, SemanticTransitionError> {
+) -> Result<(u64, u64), SemanticTransitionError> {
     let slab_bytes = tensor_layout_bytes(&slab.layout)?;
     let slab_end = slab
         .data
@@ -12062,7 +12104,7 @@ fn accounted_tensor_allocations(
             ));
         }
     }
-    Ok(slab_allocation_bytes)
+    Ok((slab_base, slab_allocation_bytes))
 }
 
 fn same_tensor_content_owner(
@@ -12751,10 +12793,10 @@ pub struct SemanticFeedbackSchema {
 }
 
 impl SemanticFeedbackSchema {
-    pub fn new(statements: [&[u8]; 3]) -> Result<Self, SemanticTransitionError> {
-        if statements.iter().any(|statement| statement.is_empty()) {
+    pub fn new(statements: Vec<&[u8]>) -> Result<Self, SemanticTransitionError> {
+        if statements.is_empty() || statements.iter().any(|statement| statement.is_empty()) {
             return Err(publication_input_error(
-                "native feedback requires three nonempty typed statements",
+                "native feedback requires the original nonempty typed statement roster",
             ));
         }
         let statement_bytes = statements
@@ -12868,6 +12910,7 @@ impl FeedbackAllocationPlan {
             })?;
         let support_capacity = usize::try_from(support_capacity)
             .ok()
+            .and_then(|capacity| capacity.checked_mul(slots))
             .filter(|&n| n != 0 && i64::try_from(n).is_ok())
             .ok_or_else(|| {
                 publication_input_error("feedback support capacity is not representable")
@@ -13541,7 +13584,7 @@ fn initial_acknowledgement_record(
 }
 
 fn publication_mutable_role(role: u64) -> bool {
-    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=57)
+    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=58)
 }
 
 fn continuation_role(role: u64) -> bool {
@@ -13551,7 +13594,7 @@ fn continuation_role(role: u64) -> bool {
 fn validate_parent_records(
     parent: &SemanticParentBinding,
     tensors: &[PreparedSemanticTensor],
-    role_counts: &[u64; 57],
+    role_counts: &[u64; PUBLICATION_ROLE_COUNT],
 ) -> Result<(), SemanticTransitionError> {
     validate_publication_counts(role_counts)?;
     validate_text_parent(
@@ -13563,7 +13606,7 @@ fn validate_parent_records(
         parent.ring_head,
         parent.provenance_records,
     )?;
-    if parent.feedback_capacity < 3
+    if parent.feedback_capacity < role_counts[15]
         || parent.rng.stream_serial >= 1 << 56
         || u64::from(parent.rng.model_generation) != parent.model_generation
         || parent.pad_token >= TEXT_CARDINALITY as u64
@@ -13603,7 +13646,7 @@ fn validate_parent_records(
     for record in &parent.records {
         let role = record.role as u64;
         if is_tensor_role(role)
-            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55..=57)
+            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55..=58)
             || record.index >= parent.role_counts[role as usize - 1]
             || (record.bytes.is_empty() && role != 2)
             || record.bytes.len() > record.capacity_bytes
@@ -13853,6 +13896,11 @@ struct Descriptor {
     task: u64,
     task_words: u64,
     task_return_bound: u64,
+    task_ground: u64,
+    task_ground_bytes: u64,
+    task_support_truths: u64,
+    task_support_lineage: u64,
+    task_support_lineage_words: u64,
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
@@ -13886,6 +13934,7 @@ impl Descriptor {
 }
 
 struct TransitionKernelIo<'a> {
+    task_ground: Option<&'a task_ground::TaskGroundStorage>,
     logits: &'a TrackedCudaSlice<f32>,
     support: &'a TrackedCudaSlice<u8>,
     receipts: &'a TrackedCudaSlice<SemanticTransitionReceipt>,
@@ -14808,6 +14857,7 @@ struct PolicyReplacement {
     support: TrackedCudaSlice<u8>,
     receipts: TrackedCudaSlice<SemanticTransitionReceipt>,
     state: TrackedCudaSlice<DeviceState>,
+    task_ground: Option<task_ground::TaskGroundStorage>,
 }
 
 /// Original numerical inputs and receipts survive later publication and rebinding.
@@ -14824,6 +14874,7 @@ struct PolicyTape {
     // Ordinary proposals keep the exact device state observed with this tape;
     // later restored invocations may rebind the Session's working state.
     origin_state: Option<TrackedCudaSlice<DeviceState>>,
+    origin_task_ground: Option<task_ground::TaskGroundStorage>,
     // Immutable cold catalogue allocations remain shared by their original
     // invocation tapes; no later binding overwrites their bytes.
     components: DeviceMemoryView<SemanticComponent>,
@@ -14902,16 +14953,16 @@ content_kernel_parameter!(PolicyUniformDescriptor);
 const _: () = assert!(size_of::<PendingContinuation>() == 344);
 const _: () = assert!(size_of::<ContinuationInputs>() == 208);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
-const _: () = assert!(size_of::<SemanticTaskFacts>() == 88);
-const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 3328);
-const _: () = assert!(size_of::<DeviceState>() == 7568);
+const _: () = assert!(size_of::<DeviceTaskFacts>() == 40);
+const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 160);
+const _: () = assert!(size_of::<DeviceState>() == 4400);
 const _: () = assert!(size_of::<PolicyField>() == 32);
 const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 264);
-const _: () = assert!(size_of::<Descriptor>() == 1384);
+const _: () = assert!(size_of::<Descriptor>() == 1424);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -15383,13 +15434,13 @@ impl SemanticTransitionWork {
         self.edit_commands + self.added_supports + self.defined_truth_changes
     }
 
-    fn is_valid(self, editable_program: bool) -> bool {
+    fn is_valid(self, editable_program: bool, queries: u32) -> bool {
         if self.edit_commands > 2 {
             return false;
         }
         if editable_program {
             self.added_supports <= crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
-                && self.defined_truth_changes <= 3
+                && self.defined_truth_changes <= u64::from(queries)
                 && (self.edit_commands != 0
                     || (self.added_supports == 0 && self.defined_truth_changes == 0))
         } else {
@@ -15624,9 +15675,12 @@ pub struct SemanticTransitionSession {
     device_components: TrackedCudaSlice<SemanticComponent>,
     // Private observer/checker results never enter the proposal codebooks.
     task: Option<(TaskEvaluationBinding, TrackedCudaSlice<u64>)>,
+    task_ground: Option<task_ground::TaskGroundStorage>,
     // A cold read can precede the final observed-source/authority import. The
     // later binding must reproduce this exact executed task content.
-    cold_content: Option<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3])>,
+    cold_content: Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)>,
+    cold_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
+    training_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     initial_prefill: Option<InitialPrefillStage>,
     retained_initial_prefill: Option<RetainedInitialPrefillContent>,
     checkpoint_initial_prefill: Option<CheckpointInitialPrefill>,
@@ -16013,6 +16067,7 @@ impl SemanticTransitionSession {
         authority_decisions: Vec<u8>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
+        self.require_authenticated_task_observations()?;
         let storage = Arc::clone(
             self.publication
                 .as_ref()
@@ -16765,6 +16820,7 @@ struct UnreleasedPublicationOwners {
     _model_owners: ModelGenerationOwners,
     _training_views: Option<Arc<SemanticTrainingViewArena>>,
     _training_origins: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
+    _task_ground: Option<task_ground::TaskGroundStorage>,
     _readers: BTreeMap<u64, PublishedReader>,
     _steps: BTreeMap<u64, StepContentStorage>,
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
@@ -16815,6 +16871,7 @@ impl Drop for SemanticTransitionSession {
                     _model_owners: std::mem::take(&mut self.model_owners),
                     _training_views: self.training_views.take(),
                     _training_origins: self.training_origins.take(),
+                    _task_ground: self.task_ground.take(),
                     _readers: std::mem::take(&mut self.readers),
                     _events: std::mem::take(&mut self.release_events),
                     _steps: std::mem::take(&mut self.steps),
@@ -17160,6 +17217,7 @@ impl SemanticTransitionSession {
         cold_capacity: SemanticSegmentColdCapacity,
     ) -> Result<Vec<SemanticPreparedStep>, SemanticTransitionError> {
         self.ensure_rebindable()?;
+        self.require_authenticated_task_observations()?;
         let external_floor = cold_capacity.external_floor()?;
         let transitions = transitions.collect::<Vec<_>>();
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
@@ -17278,6 +17336,12 @@ impl SemanticTransitionSession {
             .and_then(|n| n.checked_add(size_of::<DeviceState>()))
             .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add(block_bytes))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let ground_layout = self.task_ground.as_ref().map(|ground| ground.layout);
+        let ground_bytes = ground_layout.map(task_ground::TaskGroundStorage::allocation_bytes)
+            .transpose()?.unwrap_or(0).checked_mul(2)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let policy_bytes = policy_bytes.checked_add(ground_bytes)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let step_bytes = prepared_step_allocation_bytes(
             PreparedStepInputs::allocation_bytes(&input_plans)?,
@@ -17701,6 +17765,7 @@ impl SemanticTransitionSession {
                 let (policy_buffers_one, support_one, receipts_one, state_one) = branch_one;
                 let branches = [
                     PreparedBranchStorage {
+                        task_ground: ground_layout.map(|layout| task_ground::TaskGroundStorage::allocate(layout, &mut reservation)).transpose()?,
                         model_update: model_update_zero,
                         continuation: None,
                         numerical_block_snapshot: blocks_zero,
@@ -17720,6 +17785,7 @@ impl SemanticTransitionSession {
                         policy_witness: None,
                     },
                     PreparedBranchStorage {
+                        task_ground: ground_layout.map(|layout| task_ground::TaskGroundStorage::allocate(layout, &mut reservation)).transpose()?,
                         model_update: model_update_one,
                         continuation: None,
                         numerical_block_snapshot: blocks_one,
@@ -17817,6 +17883,9 @@ impl SemanticTransitionSession {
                 // actual invocation coordinates come from device admission.
                 #[cfg(feature = "semantic-policy")]
                 for branch in &prepared.branches {
+                    if let Some(ground) = &branch.task_ground {
+                        upload_publication(&self.provider, &ground.layout.initial_bytes(), &ground.device)?;
+                    }
                     upload_publication(
                         &self.provider,
                         &[DeviceState {
@@ -19233,8 +19302,17 @@ impl SemanticTransitionSession {
                     .get(begin..end)
                     .ok_or(SemanticTransitionError::ObservationMismatch)?
                     .to_vec();
+                let obligation_begin = usize::try_from(frozen.obligation_member_offset)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let obligation_end = obligation_begin.checked_add(
+                    usize::try_from(frozen.obligation_member_count)
+                        .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+                ).ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let obligation_positions = protected.get(obligation_begin..obligation_end)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?.to_vec();
                 observations.push(SemanticUpdateCanaryMeasurement {
                     frozen,
+                    obligation_positions,
                     protected_positions: positions,
                     availability: measured.availability,
                     reason: measured.reason,
@@ -20026,7 +20104,13 @@ impl SemanticTransitionSession {
             17 * 8,
             10 * 32,
             publication_identity_bytes,
-            3 * size_of::<SemanticTaskFacts>(),
+            repeated_material_extent(3, completed_material_extent(&[
+                7 * 8, repeated_material_extent(task.spec().statement_records.len(), 3 * 8)?,
+            ])?)?,
+            5 * 8,
+            repeated_material_extent(task.spec().statement_records.len(), 8)?,
+            repeated_material_extent(task.spec().task_ground.bindings().len(), 36 * 8)?,
+            self.task_ground.as_ref().ok_or(SemanticTransitionError::NotBound)?.layout.bytes,
         ])?;
         for level in task.priority_levels() {
             ground = completed_material_extent(&[
@@ -20040,7 +20124,7 @@ impl SemanticTransitionSession {
             b"task-scoring-law",
             task.spec()
                 .scoring
-                .completed_law_bytes(task.identity(), editable_program)?
+                .completed_law_bytes(task.identity(), editable_program, task.spec().statement_records.len() as u32)?
                 .len(),
         )?;
         capacity.child(
@@ -20281,6 +20365,18 @@ impl SemanticTransitionSession {
         let active_sets = self.publication_read(active_set_view)?;
         let pwl_cells = self.publication_read(pwl_cell_view)?;
         let selected_score_vjps = self.publication_read(selected_score_vjp_view)?;
+        let (ground_layout, ground_view) = {
+            let ground = self.checked_prepared_step(step, false)?.prepared.as_ref()
+                .expect("checked prepared owner").branches[bank].task_ground.as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            (ground.layout, ground.device.view())
+        };
+        let query_ground = self.publication_read(ground_view)?;
+        let original_ground = self.prepared_parent_task_ground(step, &parent_header)?;
+        ground_layout.validate(&original_ground)?;
+        let prior_rule_count = self.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0
+            .spec.program.editable_program().map_or(0, |program| program.initial_rules.len() as u64)
+            + u64::from_le_bytes(original_ground[48..56].try_into().expect("selected rule count"));
         let schema_generation = {
             let admission = self
                 .graph
@@ -20297,6 +20393,7 @@ impl SemanticTransitionSession {
             task_identity,
             task_content,
             expected_truth,
+            original_task_ground,
             scoring,
             editable_program,
             objective_law,
@@ -20312,7 +20409,8 @@ impl SemanticTransitionSession {
             (
                 task.identity(),
                 task.content_identity(),
-                task.expected_truth(),
+                task.expected_truth().map(<[_]>::to_vec),
+                task.spec().task_ground.clone(),
                 task.spec().scoring,
                 task.spec().program.editable_program().is_some(),
                 task.objective_law,
@@ -20331,33 +20429,31 @@ impl SemanticTransitionSession {
             matches!(state.task_evaluation.lane_refusal[1], 0 | 2),
         ];
         let expected_query_count =
-            executed_slots.iter().filter(|executed| **executed).count() as u64 * 3;
+            executed_slots.iter().filter(|executed| **executed).count() as u64 * ground_layout.queries as u64;
+        let task_facts = task_ground::decoded_task_facts(ground_layout, &query_ground,
+            &state.task_evaluation, expected_truth.as_deref())?;
+        let goal_count = priority_levels.iter().map(|level| level.goals.len()).sum::<usize>();
         let invalid_task_facts =
-            state
-                .task_evaluation
-                .facts
+            task_facts
                 .iter()
                 .zip(executed_slots)
                 .any(|(facts, executed)| {
-                    facts.correct.iter().any(|&value| value > 1)
-                        || facts.g > 3
+                    facts.correct.as_ref().is_some_and(|correct| correct.iter().any(|&value| value > 1))
+                        || facts.g > ground_layout.queries as u64
                         || facts.p > 1
                         || facts.eligible > 1
                         || if executed {
                             facts.truth.iter().any(|&value| value > 3)
-                                || facts
-                                    .truth
-                                    .iter()
-                                    .zip(expected_truth)
-                                    .zip(facts.correct)
-                                    .any(|((&truth, expected), correct)| {
-                                        correct != u64::from(truth == expected as u64)
-                                    })
-                                || facts.g != facts.correct.iter().sum::<u64>()
-                                || facts.p != u64::from(facts.correct == [1; 3])
+                                || facts.truth.len() != ground_layout.queries
+                                || facts.attained.len() != ground_layout.queries
+                                || facts.g != facts.attained.iter().sum::<u64>()
+                                || facts.p != u64::from(if expected_truth.is_some() {
+                                    facts.g == ground_layout.queries as u64
+                                } else { goal_count != 0 && facts.g == goal_count as u64 })
                         } else {
-                            facts.truth != [0; 3]
-                                || facts.correct != [0; 3]
+                            !facts.truth.is_empty()
+                                || facts.correct.as_ref().is_some_and(|correct| !correct.is_empty())
+                                || !facts.attained.is_empty()
                                 || facts.g != 0
                                 || facts.p != 0
                                 || facts.eligible != 0
@@ -20366,8 +20462,9 @@ impl SemanticTransitionSession {
         let invalid_task_scoring = !validate_completed_task_scoring(
             scoring,
             editable_program,
+            ground_layout.queries as u32,
             &priority_levels,
-            &state.task_evaluation.facts,
+            &task_facts,
             &state.work,
             state.task_evaluation.lane_refusal,
             state.task_evaluation.query_count,
@@ -20707,6 +20804,10 @@ impl SemanticTransitionSession {
                 &self.codebooks,
                 &state,
                 &edits,
+                ground_layout,
+                &query_ground,
+                prior_rule_count,
+                &task_facts,
             ) {
                 self.poisoned = true;
                 return Err(error);
@@ -20743,11 +20844,11 @@ impl SemanticTransitionSession {
             }
         }
 
-        let base_truth = completed_task_truths(state.task_evaluation.facts[0])?;
+        let base_truth = completed_task_truths(&task_facts[0])?;
         let lane_outcomes =
             std::array::from_fn(|lane| match state.task_evaluation.lane_refusal[lane] {
                 0 => SemanticCompletedLaneOutcomeMaterial::Executed(
-                    completed_task_truths(state.task_evaluation.facts[lane + 1])
+                    completed_task_truths(&task_facts[lane + 1])
                         .expect("validated executed task truth"),
                 ),
                 1 => SemanticCompletedLaneOutcomeMaterial::Refused(SemanticTaskRefusal::Scope),
@@ -20764,7 +20865,7 @@ impl SemanticTransitionSession {
             });
         let mut ground_bytes = Vec::new();
         ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
-        material_u64(&mut ground_bytes, 3);
+        material_u64(&mut ground_bytes, 4);
         let structural_cost = objective_law.structural_cost;
         ground_bytes.extend_from_slice(structural_cost.unit.as_bytes());
         material_u64(&mut ground_bytes, structural_cost.cap);
@@ -20800,10 +20901,19 @@ impl SemanticTransitionSession {
             }
         }
         encode_publication_identity(&mut ground_bytes, binding.0);
-        for truth in expected_truth {
-            material_u64(&mut ground_bytes, truth as u64);
+        material_u64(&mut ground_bytes, u64::from(expected_truth.is_some()));
+        if let Some(expected) = &expected_truth {
+            material_u64(&mut ground_bytes, expected.len() as u64);
+            for truth in expected { material_u64(&mut ground_bytes, *truth as u64); }
         }
-        for facts in state.task_evaluation.facts {
+        material_u64(&mut ground_bytes, original_task_ground.code());
+        material_u64(&mut ground_bytes, original_task_ground.bindings().len() as u64);
+        for binding in original_task_ground.bindings() {
+            for word in binding.words() { material_u64(&mut ground_bytes, word); }
+        }
+        material_u64(&mut ground_bytes, query_ground.len() as u64);
+        ground_bytes.extend_from_slice(&query_ground);
+        for facts in &task_facts {
             encode_completed_task_facts(&mut ground_bytes, facts);
         }
         material_u64(&mut ground_bytes, state.task_evaluation.query_count);
@@ -20831,7 +20941,7 @@ impl SemanticTransitionSession {
                 owner_identity,
                 b"task-scoring-law",
                 0,
-                &scoring.completed_law_bytes(task_identity, editable_program)?,
+                &scoring.completed_law_bytes(task_identity, editable_program, ground_layout.queries as u32)?,
             ),
             scoring,
             return_bound: objective_law.return_bound,
@@ -20842,23 +20952,21 @@ impl SemanticTransitionSession {
             priority_levels,
             base: binding.0,
             expected_truth,
-            facts: state.task_evaluation.facts,
+            ground: original_task_ground,
+            facts: task_facts.clone(),
             base_truth,
             lane_outcomes,
         };
 
-        let base_solves = state.task_evaluation.facts[0].eligible == 1
-            && state.task_evaluation.facts[0].p == 1
-            && state.task_evaluation.facts[0].correct == [1; 3];
+        let base_solves = task_facts[0].eligible == 1 && task_facts[0].p == 1;
         let decisive_lane = (0..2).find(|&lane| {
-            let facts = state.task_evaluation.facts[lane + 1];
+            let facts = &task_facts[lane + 1];
             state.task_evaluation.lane_refusal[lane] == 0
                 && state.semantic_receipts[3 + lane * 3][0] == 0
                 && state.work[lane].added_supports > 0
                 && !base_solves
                 && facts.eligible == 1
                 && facts.p == 1
-                && facts.correct == [1; 3]
         });
         let edit_solution = decisive_lane.map(|lane| {
             let component_begin = lane * 68 + 32;
@@ -22827,10 +22935,20 @@ impl SemanticTransitionSession {
             ));
         }
         #[cfg(feature = "semantic-policy")]
-        let accounted_reserved_bytes = accounted_tensor_allocations(
+        let (slab_base, slab_allocation_bytes) = accounted_tensor_allocations(
             &[admissibility, &baseline_logits, &candidate_logits],
             &slab,
         )?;
+        #[cfg(feature = "semantic-policy")]
+        let accounted_external_bytes = if slab.native_allocation.as_ref().is_some_and(|owner| {
+            owner.accounts_backing(self.provider.memory(), slab_base, slab_allocation_bytes)
+        }) {
+            // Only this exact backing in the original allocator's live charge
+            // is non-additive. Foreign native ownership is not that proof.
+            0
+        } else {
+            slab_allocation_bytes
+        };
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -22864,7 +22982,7 @@ impl SemanticTransitionSession {
             candidate_logits,
             _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
-            accounted_reserved_bytes,
+            accounted_external_bytes,
             _witness: witness.clone(),
             _forward_witnesses: [baseline_forward.clone(), candidate_forward.clone()],
         });
@@ -24614,6 +24732,7 @@ impl SemanticTransitionSession {
                         | SemanticStateRole::Acknowledgements
                         | SemanticStateRole::ReplayAppendEntries
                         | SemanticStateRole::ReplayAppendPayload
+                        | SemanticStateRole::TaskGround
                 )
             })
         {
@@ -24648,13 +24767,24 @@ impl SemanticTransitionSession {
             parent.intent_payload_capacity_bytes,
             parent.intent_effect.len(),
         )?);
-        let mut role_counts = [1; 57];
+        let mut role_counts = [1; PUBLICATION_ROLE_COUNT];
         role_counts[..55].copy_from_slice(&parent.role_counts);
         validate_parent_records(&parent, &tensors, &role_counts)?;
         parent.records.extend(initial_replay_append_records(
             parent.replay_append.as_ref(),
             self.training_views.as_deref(),
         )?);
+        let ground_layout = self.task_ground.as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?.layout;
+        if parent.role_counts[15] != ground_layout.queries as u64 {
+            return Err(publication_input_error("feedback statement count differs from the original task query roster"));
+        }
+        parent.records.push(SemanticStateRecord {
+            role: SemanticStateRole::TaskGround,
+            index: 0,
+            bytes: ground_layout.initial_bytes(),
+            capacity_bytes: ground_layout.bytes,
+        });
         let mut layouts = BTreeMap::new();
         let mut plans = Vec::new();
         for tensor in tensors {
@@ -24721,7 +24851,7 @@ impl SemanticTransitionSession {
                 payload: PublicationPayload::Metadata(record.bytes.clone()),
             });
         }
-        let statements = self.feedback_statement_bytes()?.map(<[u8]>::to_vec);
+        let statements = self.feedback_statement_bytes()?.into_iter().map(<[u8]>::to_vec).collect::<Vec<_>>();
         let layout_rows: Vec<_> = layouts.values().copied().collect();
         let prefix_capacity = usize::try_from(parent.prefix_capacity)
             .ok()
@@ -24872,7 +25002,7 @@ impl SemanticTransitionSession {
             topology_identity: parent.topology_identity,
             table_identity: parent.table_identity,
             model_contract_layout: parent.model_contract_layout,
-            role_count: 57,
+            role_count: PUBLICATION_ROLE_COUNT as u64,
             ..PublicationContract::default()
         };
         let runtime = initial_runtime_contract_record(
@@ -25047,6 +25177,15 @@ impl SemanticTransitionSession {
             ));
         }
         let mut material = PublicationMaterial::decode(bytes)?;
+        let ground = self.task_ground.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let saved_ground = material.ranges.iter()
+            .find(|range| range.range.role == SemanticStateRole::TaskGround as u64
+                && range.range.index == 0)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        ground.layout.validate(&saved_ground.bytes)?;
+        self.task_observations_authenticated = !saved_ground.bytes[64..ground.layout.query_offset]
+            .chunks_exact(144)
+            .any(|observation| observation[..8] != [0; 8]);
         let header = material.bank.header;
         let mut rng = header.rng_binding()?;
         let mut fold = None;
@@ -25424,7 +25563,7 @@ impl SemanticTransitionSession {
         &mut self,
         bank: PublicationBank,
         terminal_tokens: &[u64],
-        role_counts: &[u64; 57],
+        role_counts: &[u64; PUBLICATION_ROLE_COUNT],
         rng: SemanticRngBinding,
         operation: u64,
         fold: Option<&learning_phase::LearningFoldPlan>,
@@ -26101,6 +26240,7 @@ impl SemanticTransitionSession {
         }
         self.require_completed_graph_retirements()?;
         if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
+            || self.training_canary_source_borrowed()
             || lease.active
             || !self.readers.is_empty()
             || !self.steps.is_empty()
@@ -27992,7 +28132,7 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let counts = self.publication_read(storage.role_counts.view())?;
-        let mut role_counts = [0; 57];
+        let mut role_counts = [0; PUBLICATION_ROLE_COUNT];
         for (index, count) in counts.iter().enumerate() {
             if count.role != index as u64 + 1 {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -29439,6 +29579,7 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
+        self.require_authenticated_task_observations()?;
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         self.checked_reader(lease)?;
@@ -29831,7 +29972,10 @@ impl SemanticTransitionSession {
             device_codebooks,
             device_components,
             task: None,
+            task_ground: None,
             cold_content: None,
+            cold_canary_source: None,
+            training_canary_source: None,
             initial_prefill: None,
             retained_initial_prefill: None,
             checkpoint_initial_prefill: None,
@@ -29901,6 +30045,7 @@ impl SemanticTransitionSession {
     /// that owner and prohibits a restored Session from overlapping it.
     pub fn join_observed_cold_release(&mut self) -> Result<(), SemanticTransitionError> {
         if self.is_poisoned()
+            || self.training_canary_source_borrowed()
             || self.cold_content.is_none()
             || self.task.is_some()
             || self.task_epoch != 0
@@ -29934,16 +30079,9 @@ impl SemanticTransitionSession {
     /// Destroy the joined cold owner outside the Python Session mutex, then
     /// complete the allocator's real pending deallocations before returning.
     pub fn finish_observed_cold_release(self) -> Result<(), SemanticTransitionError> {
-        let memory = self.finish_joined_allocation_release()?;
-        if memory.allocated_bytes() != 0
-            || memory
-                .runtime()
-                .is_some_and(|runtime| runtime.bytes_outstanding() != 0)
-        {
-            return Err(publication_input_error(
-                "fresh cold allocation owners remain after retirement",
-            ));
-        }
+        // The original source and its dependents share one allocator. Other
+        // joined live Sessions are not this Session's unreleased allocations.
+        self.finish_joined_allocation_release()?;
         Ok(())
     }
 
@@ -30008,7 +30146,7 @@ impl SemanticTransitionSession {
             return replay
                 .predecessor
                 .graph
-                .task_observation_roots(admission, spec.statement_records)
+                .task_observation_roots(admission, &spec.statement_records)
                 .map_err(SemanticTransitionError::Semantic);
         }
         let material = self
@@ -30020,7 +30158,7 @@ impl SemanticTransitionSession {
             .admission()
             .ok_or(SemanticTransitionError::NotBound)?;
         material
-            .task_observation_roots(admission, spec.statement_records)
+            .task_observation_roots(admission, &spec.statement_records)
             .map_err(SemanticTransitionError::Semantic)
     }
 
@@ -30065,7 +30203,8 @@ impl SemanticTransitionSession {
         let binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
         if self
             .cold_content
-            .is_some_and(|expected| binding.content() != expected)
+            .as_ref()
+            .is_some_and(|expected| &binding.content() != expected)
         {
             self.poisoned = true;
             return Err(publication_input_error(
@@ -30084,19 +30223,31 @@ impl SemanticTransitionSession {
             }
         }
         let words = binding.words(self.graph.transition_arena()[1]);
+        let ground_layout = task_ground::TaskGroundLayout::new(
+            binding.spec.statement_records.len(), binding.spec.task_ground.bindings().len(),
+            binding.spec.program.editable_program().map(|program| program.initial_rules.len()))?;
+        let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
+        let task_bytes = words.len().checked_mul(size_of::<u64>())
+            .and_then(|bytes| bytes.checked_add(ground_bytes))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let mut reservation = self
             .provider
             .memory()
-            .reserve_bytes((words.len() * size_of::<u64>()) as u64)
+            .reserve_bytes(task_bytes as u64)
             .map_err(|error| runtime_error("private task reservation", error))?;
         let device = reservation
             .alloc::<u64>(words.len())
             .map_err(|error| runtime_error("private task allocation", error))?;
+        let ground = task_ground::TaskGroundStorage::allocate(ground_layout, &mut reservation)?;
         // Retain the new owner before the first may-enqueue boundary. A failed
         // upload/adoption poisons reuse and keeps its storage until Session drop.
         self.captured = None;
         let identity = binding.identity();
         self.task = Some((binding, device));
+        self.task_ground = Some(ground);
+        upload_publication(&self.provider, &ground_layout.initial_bytes(),
+            &self.task_ground.as_ref().expect("original task ground installed").device)
+            .inspect_err(|_| self.poisoned = true)?;
         let (_, device) = self.task.as_mut().expect("private task installed above");
         self.provider
             .htod_sync_copy_into_tracked(&words, device)
@@ -30106,6 +30257,7 @@ impl SemanticTransitionSession {
             })?;
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read_write(device);
+        self.task_ground.as_ref().expect("original task ground installed").record(&mut recorder);
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |_| {
             Ok::<(), XlogError>(())
         })?;
@@ -30126,10 +30278,11 @@ impl SemanticTransitionSession {
     /// no use authority; final import must reproduce the same content exactly.
     pub fn observe_cold_task_content(
         &mut self,
-        statement_records: [u32; 3],
+        statement_records: &[u32],
         allowed_support_records: &[u32],
         program: &dyn SemanticTaskProgram,
-    ) -> Result<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3]), SemanticTransitionError>
+        task_ground: &SemanticTaskGround,
+    ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
         self.ensure_rebindable()?;
         if self.publication.is_some() || self.task.is_some() || self.cold_content.is_some() {
@@ -30159,10 +30312,54 @@ impl SemanticTransitionSession {
             allowed_support_records,
             program.editable_program(),
             observation,
+            task_ground,
         )
         .inspect_err(|_| self.poisoned = true)?;
-        self.cold_content = Some(content);
+        if matches!(task_ground, SemanticTaskGround::Logical) {
+            let statements = statement_records.iter().zip(&content.1).map(|(&record, &truth)| {
+                admission.statement_key(record)
+                    .map(|statement| (Identity256::from_bytes(*statement.identity().as_bytes()), truth))
+                    .map_err(SemanticTransitionError::Semantic)
+            }).collect::<Result<Vec<_>, _>>()?;
+            self.cold_canary_source = Some(Arc::new(crate::SemanticTrainingCanarySource::observed(
+                content.0, statements, Arc::clone(self.provider.memory()),
+            )));
+        }
+        self.cold_content = Some(content.clone());
         Ok(content)
+    }
+
+    /// Borrow the original completed Logical observation, without another device read.
+    pub fn training_canary_source(&self) -> Result<Arc<crate::SemanticTrainingCanarySource>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.cold_canary_source.as_ref().map(Arc::clone)
+            .ok_or_else(|| publication_input_error("symbolic canary source requires an original observed Logical task"))
+    }
+
+    pub fn training_canary_source_borrowed(&self) -> bool {
+        self.cold_canary_source.as_ref().is_some_and(|source| Arc::strong_count(source) > 1)
+    }
+
+    /// Freeze the actual source before allocating the original training reservation.
+    pub fn bind_training_canary_source(&mut self, source: Arc<crate::SemanticTrainingCanarySource>) -> Result<(), SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        if let Some(original) = &self.training_canary_source {
+            return if Arc::ptr_eq(original, &source) {
+                Ok(())
+            } else {
+                Err(publication_input_error("symbolic canary source differs from its original cold binding"))
+            };
+        }
+        if self.publication.is_some() || self.training_views.is_some() {
+            return Err(publication_input_error("symbolic canary source is immutable after its original cold binding"));
+        }
+        if !Arc::ptr_eq(self.provider.memory(), &source.memory) {
+            return Err(publication_input_error(
+                "symbolic canary source must share the original native allocation budget before construction",
+            ));
+        }
+        self.training_canary_source = Some(source);
+        Ok(())
     }
 
     /// Bind the controller's independently validated goal closure to the native
@@ -30249,8 +30446,14 @@ impl SemanticTransitionSession {
 
     /// Exact content identities and observed truths of the currently bound
     /// task, excluding its controller authority and scoring policy.
-    pub fn task_content(&self) -> Option<(SemanticTaskContentIdentity, [crate::SemanticTruth; 3])> {
+    pub fn task_content(&self) -> Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)> {
         self.task.as_ref().map(|(binding, _)| binding.content())
+    }
+
+    /// The original immutable ground tag and ordered verification bindings.
+    /// This is task data, not an external observation or an execution grant.
+    pub fn task_ground(&self) -> Option<&SemanticTaskGround> {
+        self.task.as_ref().map(|(binding, _)| &binding.spec.task_ground)
     }
 
     /// Identity of the exact scoring law bound to the current native task.
@@ -30538,7 +30741,7 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .0;
-        let (content, truth) = task.content();
+        let (content, _) = task.content();
         let arena = self
             .training_views
             .as_ref()
@@ -30549,7 +30752,8 @@ impl SemanticTransitionSession {
             ));
         }
         let prepared =
-            arena.prepare_materialization(rows, objective, task.identity(), content, truth)?;
+            arena.prepare_materialization(rows, objective, task.identity(), content,
+                self.training_canary_source.as_deref().ok_or(SemanticTransitionError::NotBound)?)?;
         let mut packed = Vec::new();
         for bytes in [
             publication_abi_bytes(&prepared.descriptors),
@@ -30958,7 +31162,7 @@ impl SemanticTransitionSession {
             .expect("checked cold task binding")
             .0
             .identity();
-        let (task_content, expected_truth) = self
+        let (task_content, _) = self
             .task
             .as_ref()
             .expect("checked cold task binding")
@@ -30976,7 +31180,8 @@ impl SemanticTransitionSession {
             })?,
             task_identity,
             task_content,
-            expected_truth,
+            self.training_canary_source.as_deref().ok_or_else(|| publication_input_error(
+                "training reservation requires its original observed Logical canary source"))?,
             replay_capacity,
         )?);
         Ok(())
@@ -31002,13 +31207,13 @@ impl SemanticTransitionSession {
     /// Encoding-domain and schema-digest service headers are excluded. The
     /// original qualified key identity remains separately bound to the task.
     /// These schema bytes contain no observer answers or use authority.
-    pub fn feedback_statement_bytes(&self) -> Result<[&[u8]; 3], SemanticTransitionError> {
-        let selected = self.task_evaluation_spec()?.statement_records;
+    pub fn feedback_statement_bytes(&self) -> Result<Vec<&[u8]>, SemanticTransitionError> {
+        let selected = &self.task_evaluation_spec()?.statement_records;
         let (task, _) = self
             .task
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        Ok(selected.map(|record| task.statement_bytes[&record].as_slice()))
+        Ok(selected.iter().map(|record| task.statement_bytes[record].as_slice()).collect())
     }
 
     /// Identity of this build's actual native feedback projection source, not
@@ -31709,6 +31914,7 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         bank: usize,
     ) -> Result<(), SemanticTransitionError> {
+        self.require_authenticated_task_observations()?;
         self.check_prepared_content_stream(step, self.stream.cu_stream() as u64)?;
         if bank > 1 {
             return Err(publication_input_error(
@@ -31793,6 +31999,7 @@ impl SemanticTransitionSession {
                         .model_work
                         .as_ref()
                         .expect("prepared model work frozen above"),
+                    self.provider.memory().allocated_bytes(),
                 )?;
             }
             let io = self.prepared_kernel_io(step, bank)?;
@@ -31962,6 +32169,7 @@ impl SemanticTransitionSession {
             receipts: branch.receipts.take().expect("checked original receipts"),
             prepared_bank: Some(bank),
             origin_state: None,
+            origin_task_ground: None,
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -32035,6 +32243,13 @@ impl SemanticTransitionSession {
                         .into(),
             });
         }
+        let replacement_task_ground = self.task_ground.as_ref().map(|ground| {
+            let bytes = task_ground::TaskGroundStorage::allocation_bytes(ground.layout)?;
+            let mut reservation = self.provider.memory().reserve_bytes(
+                u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            ).map_err(|error| runtime_error("original policy ground reservation", error))?;
+            task_ground::TaskGroundStorage::allocate(ground.layout, &mut reservation)
+        }).transpose()?;
         let policy = PendingPolicyStorage {
             witness: policy_witness,
             // Reserve the next working banks before the proposal may publish.
@@ -32044,6 +32259,7 @@ impl SemanticTransitionSession {
                 support: allocate_publication(&self.provider, self.codebooks.input_cells)?,
                 receipts: allocate_publication(&self.provider, COMPONENT_COUNT)?,
                 state: allocate_publication(&self.provider, 1)?,
+                task_ground: replacement_task_ground,
             },
             buffers: self.allocate_policy_buffers()?,
             invocation: rng,
@@ -32423,6 +32639,8 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            self.steps[&original._witness.reader_token].prepared.as_ref()
+                .expect("original prepared policy ground").branches[origin_bank].task_ground.as_ref(),
             &tape.components,
             &tape.codebooks,
             PolicyVjpInput::UpdateObjective {
@@ -32762,6 +32980,7 @@ impl SemanticTransitionSession {
             support,
             receipts,
             &branch.state,
+            branch.task_ground.as_ref(),
             &components,
             &codebooks,
             if let (Some((member_ordinal, _)), true) = (member, edit_only) {
@@ -33318,6 +33537,7 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            tape.origin_task_ground.as_ref(),
             &tape.components,
             &tape.codebooks,
             if let Some(critic_term) = &critic_term {
@@ -33579,6 +33799,7 @@ impl SemanticTransitionSession {
         support: &TrackedCudaSlice<u8>,
         receipts: &TrackedCudaSlice<SemanticTransitionReceipt>,
         state: &TrackedCudaSlice<DeviceState>,
+        task_ground: Option<&task_ground::TaskGroundStorage>,
         components: &DeviceMemoryView<SemanticComponent>,
         codebooks: &DeviceMemoryView<u64>,
         input: PolicyVjpInput<'_>,
@@ -33608,6 +33829,7 @@ impl SemanticTransitionSession {
         } = adjoints;
         let io = TransitionKernelIo {
             logits: &policy.text_logits,
+            task_ground,
             support,
             receipts,
             state,
@@ -33786,6 +34008,9 @@ impl SemanticTransitionSession {
                 recorder.read(state);
                 recorder.read(origin_lease);
                 recorder.read(task.expect("validated Update task ground"));
+                if let Some(ground) = task_ground {
+                    ground.record(&mut recorder);
+                }
             }
         }
         if let PolicyVjpInput::GroupMember { critic_term, .. } = input {
@@ -33872,6 +34097,7 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            None,
             &tape.components,
             &tape.codebooks,
             PolicyVjpInput::External(&score_cotangents),
@@ -34001,6 +34227,7 @@ impl SemanticTransitionSession {
 
     pub fn capture(&mut self) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
+        self.require_authenticated_task_observations()?;
         if self.publication.is_some()
             && (self.continuation_base.is_none()
                 || self
@@ -34055,6 +34282,7 @@ impl SemanticTransitionSession {
     /// Nonblocking replay. All 136 distributions and RNG blocks execute on device.
     pub fn launch(&mut self) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
+        self.require_authenticated_task_observations()?;
         if let Some(binding) = self.text_binding.as_ref().map(Arc::clone) {
             self.guard_continuation_content(&binding)?;
         }
@@ -34140,6 +34368,13 @@ impl SemanticTransitionSession {
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read(&self.state);
         recorder.write(next_state);
+        let next_ground = policy.replacement.as_ref().expect("original replacement banks").task_ground.as_ref();
+        if let (Some(original), Some(next)) = (&self.task_ground, next_ground) {
+            recorder.read(&original.device);
+            recorder.write(&next.device);
+        } else if self.task_ground.is_some() != next_ground.is_some() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
             // SAFETY: the recorded source and reserved destination each hold
             // exactly one DeviceState on the controller's ordered CUDA stream.
@@ -34152,7 +34387,14 @@ impl SemanticTransitionSession {
                 )
             }
             .result()
-            .map_err(|error| XlogError::Kernel(error.to_string()))
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            if let (Some(original), Some(next)) = (&self.task_ground, next_ground) {
+                unsafe {
+                    sys::cuMemcpyDtoDAsync_v2(next.device.device_ptr_value(), original.device.device_ptr_value(),
+                        original.device.len(), enqueue.stream().cu_stream())
+                }.result().map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
+            Ok::<(), XlogError>(())
         })?;
         let mut policy = self.policy.take().expect("checked original policy");
         let replacement = policy
@@ -34170,6 +34412,7 @@ impl SemanticTransitionSession {
             receipts: std::mem::replace(&mut self.receipts, replacement.receipts),
             prepared_bank: None,
             origin_state: Some(std::mem::replace(&mut self.state, replacement.state)),
+            origin_task_ground: std::mem::replace(&mut self.task_ground, replacement.task_ground),
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -34323,6 +34566,7 @@ impl SemanticTransitionSession {
             .task
             .as_ref()
             .is_some_and(|(task, _)| task.spec().program.editable_program().is_some());
+        let queries = self.task.as_ref().map_or(0, |(task, _)| task.statements.len() as u32);
         if state.status != 0
             || state.proposal != proposal
             || state.next_proposal != proposal + 1
@@ -34334,7 +34578,7 @@ impl SemanticTransitionSession {
             || state
                 .work
                 .iter()
-                .any(|work| !work.is_valid(editable_program))
+                .any(|work| !work.is_valid(editable_program, queries))
             || (published.is_none() && state.retired_roots_mask != 0)
             || state.retired_roots_mask & !3 != 0
             || !state.importance_weight.is_finite()
@@ -34370,11 +34614,21 @@ impl SemanticTransitionSession {
             }
         }
         let mut integrity_error = None;
+        let query_ground = if let Some(storage) = &self.task_ground {
+            let layout = storage.layout;
+            let view = storage.device.view();
+            let bytes = self.publication_read(view)?;
+            layout.validate(&bytes)?;
+            Some((layout, bytes))
+        } else { None };
         let task_evaluation = if let Some((binding, _)) = &self.task {
             let task = &state.task_evaluation;
-            if task.query_count < 3
-                || task.query_count > 9
-                || !task.query_count.is_multiple_of(3)
+            let (layout, bytes) = query_ground.as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let facts = task_ground::decoded_task_facts(*layout, bytes, task, binding.expected_truth())?;
+            if task.query_count < u64::from(queries)
+                || task.query_count > 3 * u64::from(queries)
+                || !task.query_count.is_multiple_of(u64::from(queries))
                 || task.winner > 2
                 || task.facts[task.winner as usize].eligible != 1
                 || task.lane_refusal.iter().any(|&code| code > 4)
@@ -34388,7 +34642,7 @@ impl SemanticTransitionSession {
                 query_count: task.query_count,
                 winner: task.winner,
                 return_value: task.return_value,
-                facts: task.facts,
+                facts,
             })
         } else {
             None
@@ -34399,6 +34653,35 @@ impl SemanticTransitionSession {
             })
         });
         let mut program_rules = [[None; 2]; 2];
+        let original_rule_count = if let Some((program, layout, bytes)) = self.task.as_ref()
+            .and_then(|(task, _)| task.spec().program.editable_program())
+            .zip(query_ground.as_ref()).map(|(program, (layout, bytes))| (program, *layout, bytes))
+        {
+            let initial = program.initial_rules.len() as u64;
+            if let (Some(storage), Some((_, base_word, _))) = (self.publication.clone(), self.admitted_transition) {
+                let directory = self.publication_read(storage.directories[(base_word & 1) as usize].view())?;
+                let range = *directory.iter().find(|range| range.role == SemanticStateRole::TaskGround as u64 && range.index == 0)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let allocation = storage.allocations.get(range.storage_slot as usize)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let begin = usize::try_from(range.offset_bytes).map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+                let end = usize::try_from(range.length_bytes).ok().and_then(|length| begin.checked_add(length))
+                    .filter(|&end| end <= allocation.len()).ok_or(SemanticTransitionError::ObservationMismatch)?;
+                let original = self.publication_read(allocation.slice()?.view().slice(begin..end))?;
+                layout.validate(&original)?;
+                let material = PublicationMaterialRange { range, capacity: allocation.len() - begin, bytes: original };
+                if material.original_record_digest() != range.digest { return Err(SemanticTransitionError::ObservationMismatch); }
+                initial.checked_add(u64::from_le_bytes(material.bytes[48..56].try_into().expect("selected rule count")))
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?
+            } else {
+                // The uncaptured owner has no publication predecessor. Its
+                // actual native receipt binds the retained selected-rule prefix.
+                let count = layout.query(bytes, 0, 0)?.receipt[40];
+                let selected = u64::from_le_bytes(bytes[48..56].try_into().expect("selected rule count"));
+                if count < initial || count > initial + selected { return Err(SemanticTransitionError::ObservationMismatch); }
+                count
+            }
+        } else { 0 };
         if let Some((task, _)) = &self.task {
             if let Some(program) = task.spec().program.editable_program() {
                 if let Err(error) = validate_program_query_receipts(
@@ -34407,6 +34690,10 @@ impl SemanticTransitionSession {
                     &self.codebooks,
                     &state,
                     &edit_choices,
+                    query_ground.as_ref().ok_or(SemanticTransitionError::ObservationMismatch)?.0,
+                    &query_ground.as_ref().ok_or(SemanticTransitionError::ObservationMismatch)?.1,
+                    original_rule_count,
+                    &task_evaluation.as_ref().ok_or(SemanticTransitionError::ObservationMismatch)?.facts,
                 ) {
                     self.poisoned = true;
                     return Err(error);
@@ -34720,6 +35007,15 @@ impl SemanticTransitionSession {
         }
     }
 
+    fn require_authenticated_task_observations(&self) -> Result<(), SemanticTransitionError> {
+        if !self.task_observations_authenticated {
+            return Err(publication_input_error(
+                "restored task observations require original signed-material authentication before resident execution",
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_rebindable(&self) -> Result<(), SemanticTransitionError> {
         if self.initial_prefill.is_some() {
             return Err(publication_input_error(
@@ -34755,6 +35051,7 @@ impl SemanticTransitionSession {
             (&policy.text_logits, Some(policy.text_binding.as_ref()))
         });
         TransitionKernelIo {
+            task_ground: self.task_ground.as_ref(),
             logits,
             support: &self.support,
             receipts: &self.receipts,
@@ -34810,6 +35107,7 @@ impl SemanticTransitionSession {
             }
         };
         Ok(TransitionKernelIo {
+            task_ground: branch.task_ground.as_ref(),
             // Nonproposal execution returns before reading logits or support.
             // Retain the original cold allocation; do not invent policy values.
             logits,
@@ -34859,6 +35157,7 @@ impl SemanticTransitionSession {
         };
         Ok(TransitionKernelIo {
             logits,
+            task_ground: branch.task_ground.as_ref(),
             support: branch
                 .support
                 .as_ref()
@@ -34912,6 +35211,11 @@ impl SemanticTransitionSession {
                 .task
                 .as_ref()
                 .map_or(0, |(binding, _)| binding.objective_law.return_bound as u64),
+            task_ground: io.task_ground.map_or(0, |ground| ground.device.device_ptr_value()),
+            task_ground_bytes: io.task_ground.map_or(0, |ground| ground.layout.bytes as u64),
+            task_support_truths: io.task_ground.map_or(0, |ground| ground.support_truths.device_ptr_value()),
+            task_support_lineage: io.task_ground.map_or(0, |ground| ground.support_lineage.device_ptr_value()),
+            task_support_lineage_words: io.task_ground.map_or(0, |ground| ground.support_lineage.len() as u64),
             publication: PublicationCommand {
                 control: self
                     .publication
@@ -35014,6 +35318,13 @@ impl SemanticTransitionSession {
         if let Some((_, device)) = &self.task {
             ranges.push((device.device_ptr_value(), (device.len() * 8) as u64));
         }
+        if let Some(ground) = io.task_ground {
+            ranges.push((ground.device.device_ptr_value(), ground.device.len() as u64));
+            ranges.push((ground.support_truths.device_ptr_value(), ground.support_truths.len() as u64));
+            if !ground.support_lineage.is_empty() {
+                ranges.push((ground.support_lineage.device_ptr_value(), (ground.support_lineage.len() * 8) as u64));
+            }
+        }
         #[cfg(feature = "semantic-policy")]
         {
             if let Some(policy) = io.policy {
@@ -35095,6 +35406,7 @@ impl SemanticTransitionSession {
         // original private destinations for the complete captured transaction.
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read(io.logits);
+        if let Some(ground) = io.task_ground { ground.record(&mut recorder); }
         recorder.read(io.support);
         if let Some(work) = io.model_work {
             recorder.read(&work.device);
