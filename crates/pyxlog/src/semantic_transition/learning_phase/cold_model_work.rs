@@ -4,6 +4,20 @@
 use super::*;
 use xlog_cuda::{SemanticColdModelWork, SemanticColdModelWorkRegion};
 
+fn cold_region_ends(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid("cold region ends require an exact immutable tuple"));
+    }
+    value
+        .cast::<PyTuple>()?
+        .iter()
+        .map(|end| {
+            usize::try_from(ColdValue::read(&end, &mut 128, 0)?.unsigned()?)
+                .map_err(|_| invalid("cold region end exceeds the native event extent"))
+        })
+        .collect()
+}
+
 #[pyclass(name = "SemanticColdModelWork", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticColdModelWork {
     pub(super) parent: Py<PySemanticPublishedParent>,
@@ -67,6 +81,107 @@ impl PySemanticColdModelWork {
 
 #[pymethods]
 impl PySemanticColdModelWork {
+    /// Original native plan state, not a Python callback invocation count.
+    #[getter]
+    fn plan_admitted(&self, py: Python<'_>) -> PyResult<bool> {
+        self.check(py)?;
+        self.reader
+            .borrow(py)
+            .session
+            .borrow(py)
+            .owner()?
+            .cold_model_work_plan_is_admitted(&self.inner)
+            .map_err(xlog_err)
+    }
+
+    /// Fixed native report geometry, not a callback invocation counter.
+    #[getter]
+    fn region_count(&self, py: Python<'_>) -> PyResult<usize> {
+        self.check(py)?;
+        self.reader
+            .borrow(py)
+            .session
+            .borrow(py)
+            .owner()?
+            .cold_model_work_region_count(&self.inner)
+            .map_err(xlog_err)
+    }
+
+    /// Seventeen original source-port layouts; no device export or selection.
+    fn evaluation_source_geometry(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Vec<(Vec<i64>, Vec<i64>, (u8, u8))>> {
+        self.check(py)?;
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        let result = session
+            .owner()?
+            .evaluation_source_geometry(&*parent.lease()?)
+            .map_err(xlog_err);
+        result
+    }
+
+    /// Retain the complete physical operation recipe before original recording.
+    /// Native returns (work bound, event count, call upper), not a Python estimate.
+    #[pyo3(
+        signature = (operations, *, region_ends = Vec::new()),
+        text_signature = "($self, operations, *, region_ends=())"
+    )]
+    fn admit_plan(
+        &self,
+        py: Python<'_>,
+        operations: &Bound<'_, PyAny>,
+        #[pyo3(from_py_with = cold_region_ends)] region_ends: Vec<usize>,
+    ) -> PyResult<(u64, u64, u64)> {
+        self.check(py)?;
+        let reader = self.reader.borrow(py);
+        let session = reader.session.borrow(py);
+        let mut owner = session.owner()?;
+        let result = (|| {
+            if !operations.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "cold operation plan requires an exact immutable tuple",
+                ));
+            }
+            let operations = operations.cast::<PyTuple>()?;
+            let mut recipe = Vec::new();
+            recipe
+                .try_reserve_exact(operations.len())
+                .map_err(|_| invalid("cold operation plan reservation failed"))?;
+            for operation in operations.iter() {
+                if !operation.is_exact_instance_of::<PyTuple>()
+                    || operation.cast::<PyTuple>()?.len() != 2
+                {
+                    return Err(invalid(
+                        "cold operation plan requires exact kind and geometry pairs",
+                    ));
+                }
+                let operation = operation.cast::<PyTuple>()?;
+                let kind = operation.get_item(0)?;
+                let dimensions = operation.get_item(1)?;
+                if !dimensions.is_exact_instance_of::<PyTuple>() {
+                    return Err(invalid(
+                        "cold operation geometry requires an exact immutable tuple",
+                    ));
+                }
+                let (kind, values, rank) = parse_model_work(&kind, &dimensions)?;
+                recipe.push((kind, values[..rank].to_vec()));
+            }
+            let quantities = if let Some(region) = &self.region {
+                owner.admit_cold_model_work_region_plan(region, &recipe, &region_ends)
+            } else {
+                owner.admit_cold_model_work_plan(&self.inner, &recipe, &region_ends)
+            }
+            .map_err(xlog_err)?;
+            Ok((quantities[0], quantities[1], quantities[2]))
+        })();
+        if result.is_err() {
+            owner.fail_cold_model_work(&self.inner);
+        }
+        result
+    }
+
     #[getter]
     fn consumer_stream(&self, py: Python<'_>) -> PyResult<u64> {
         self.check(py)?;

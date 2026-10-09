@@ -599,7 +599,12 @@ impl PySemanticLearningPhaseTransition {
                 // A callback attempt flag cannot prove report submission.
                 let report = source
                     .owner()?
-                    .finish_cold_model_work(&*parent.lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*parent.lease()?,
+                        &work,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?;
                 self.trajectory_start()?
                     .as_mut()
