@@ -114,6 +114,19 @@ struct EvaluationCaptureOwners {
     output: Py<PySemanticTensorContentWitness>,
 }
 
+pub(super) struct PendingEvaluationPreparation {
+    parent: Py<PySemanticPublishedParent>,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    requested_cohort: Option<Py<PySemanticEvaluationCohort>>,
+    capacity: usize,
+    binding: (Option<String>, Vec<u8>),
+    inner: Option<SemanticModelEvaluation>,
+    cohort: Option<Py<PySemanticEvaluationCohort>>,
+    result: Option<Py<PySemanticModelEvaluation>>,
+    phase_entered: bool,
+    phase_bound: bool,
+}
+
 impl PySemanticModelEvaluation {
     fn phase_cold_boundary(
         &self,
@@ -728,112 +741,205 @@ impl PySemanticTransitionController {
         session.require_creator()?;
         let issued = task_use.borrow(py);
         self.require_read_issued(&issued)?;
-        let public_use = issued.state()?.require_public_use();
-        if let Err(public_error) = public_use {
-            #[cfg(not(feature = "semantic-policy"))]
-            return Err(public_error);
-            #[cfg(feature = "semantic-policy")]
-            {
-                let pending = session
-                    .learning_transition
-                    .lock()
-                    .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
-                    .as_ref()
-                    .map(|pending| pending.clone_ref(py));
-                let pending = pending.ok_or(public_error)?;
-                pending
-                    .borrow(py)
-                    .require_phase_evaluation(py, self, &issued, &acquired)?;
+        let continuing = session
+            .pending_evaluation_preparation
+            .lock()
+            .map_err(|_| invalid("evaluation preparation owner is poisoned"))?
+            .is_some();
+        if !continuing {
+            let public_use = issued.state()?.require_public_use();
+            if let Err(public_error) = public_use {
+                #[cfg(not(feature = "semantic-policy"))]
+                return Err(public_error);
+                #[cfg(feature = "semantic-policy")]
+                {
+                    let pending = session
+                        .learning_transition
+                        .lock()
+                        .map_err(|_| invalid("learning-phase retention mutex is poisoned"))?
+                        .as_ref()
+                        .map(|pending| pending.clone_ref(py));
+                    let pending = pending.ok_or(public_error)?;
+                    pending
+                        .borrow(py)
+                        .require_phase_evaluation(py, self, &issued, &acquired)?;
+                }
+            } else if session.learning_preparing.load(Ordering::Acquire) {
+                #[cfg(feature = "semantic-policy")]
+                {
+                    let pending = private_execution_owner(py, &session)?.ok_or_else(|| {
+                        invalid("private evaluation lost its original phase owner")
+                    })?;
+                    pending
+                        .borrow(py)
+                        .require_phase_evaluation(py, self, &issued, &acquired)?;
+                }
+                #[cfg(not(feature = "semantic-policy"))]
+                return Err(invalid("private evaluation requires semantic-policy"));
             }
-        } else if session.learning_preparing.load(Ordering::Acquire) {
-            #[cfg(feature = "semantic-policy")]
-            {
-                let pending = private_execution_owner(py, &session)?
-                    .ok_or_else(|| invalid("private evaluation lost its original phase owner"))?;
-                pending
-                    .borrow(py)
-                    .require_phase_evaluation(py, self, &issued, &acquired)?;
-            }
-            #[cfg(not(feature = "semantic-policy"))]
-            return Err(invalid("private evaluation requires semantic-policy"));
         }
         if acquired.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid("evaluation parent belongs to another Session"));
         }
         acquired.require_task(py, &issued)?;
         let mut owner = session.owner()?;
-        let binding = acquired.content_binding_with_owner(py, &owner)?;
         let lease = acquired.lease()?;
-        if session.importing.load(Ordering::Acquire)
-            || session.retiring.load(Ordering::Acquire)
-            || session.recording.swap(true, Ordering::AcqRel)
-        {
+        let mut pending = session
+            .pending_evaluation_preparation
+            .lock()
+            .map_err(|_| invalid("evaluation preparation owner is poisoned"))?;
+        let continuing = pending.is_some();
+        if let Some(original) = pending.as_ref() {
+            let same_cohort = match (&original.requested_cohort, &cohort) {
+                (None, None) => true,
+                (Some(original), Some(requested)) => original.as_ptr() == requested.as_ptr(),
+                _ => false,
+            };
+            if original.parent.as_ptr() != parent.as_ptr()
+                || original.task_use.as_ptr() != task_use.as_ptr()
+                || original.capacity != capacity
+                || !same_cohort
+                || issued.state()?.content_handoff_binding()? != original.binding
+            {
+                return Err(invalid("evaluation preparation continuation changed its original parent, task authority, cohort or capacity"));
+            }
+            if owner.task_evaluation_epoch() != issued.task_epoch
+                || owner
+                    .task_evaluation_identity()
+                    .is_none_or(|identity| identity.as_bytes() != &issued.task_identity)
+            {
+                return Err(invalid(
+                    "evaluation preparation changed its original native task binding",
+                ));
+            }
+            if owner
+                .pending_model_evaluation_preparation_identity(&lease)
+                .map_err(xlog_err)?
+                .is_none()
+            {
+                return Err(invalid(
+                    "evaluation preparation lost its original native owner",
+                ));
+            }
+        }
+        if session.importing.load(Ordering::Acquire) || session.retiring.load(Ordering::Acquire) {
             return Err(invalid(
                 "read-only evaluation cannot overlap import, recording or retirement",
             ));
         }
-        let inner = owner.prepare_model_evaluation(
-            &lease,
-            cohort
-                .as_ref()
-                .map(|value| Arc::clone(&value.borrow(py).inner)),
-            capacity,
-        );
-        let inner = match inner {
-            Ok(inner) => inner,
-            Err(error) => {
-                session.recording.store(false, Ordering::Release);
-                return Err(xlog_err(error));
+        if !continuing {
+            let binding = acquired.content_binding_with_owner(py, &owner)?;
+            if session.recording.swap(true, Ordering::AcqRel) {
+                return Err(invalid(
+                    "read-only evaluation cannot overlap an original recording",
+                ));
             }
-        };
-        let issued_cohort = (|| {
-            let cohort = match cohort {
-                Some(original) => original,
+            *pending = Some(PendingEvaluationPreparation {
+                parent: parent.clone_ref(py),
+                task_use: task_use.clone_ref(py),
+                requested_cohort: cohort.as_ref().map(|value| value.clone_ref(py)),
+                capacity,
+                binding,
+                inner: None,
+                cohort: None,
+                result: None,
+                phase_entered: false,
+                phase_bound: false,
+            });
+        }
+        let original = pending.as_mut().expect("retained preparation inputs");
+        if original.inner.is_none() {
+            match owner.prepare_model_evaluation(
+                &lease,
+                original
+                    .requested_cohort
+                    .as_ref()
+                    .map(|value| Arc::clone(&value.borrow(py).inner)),
+                capacity,
+            ) {
+                Ok(inner) => original.inner = Some(inner),
+                Err(error) => {
+                    let error = xlog_err(error);
+                    if owner
+                        .pending_model_evaluation_preparation_identity(&lease)
+                        .is_ok_and(|value| value.is_some())
+                    {
+                        let pending = SemanticModelEvaluationPending::new_err("original evaluation preparation awaits completion; call prepare_model_evaluation again with the same parent, task, cohort and capacity");
+                        pending.set_cause(py, Some(error));
+                        return Err(pending);
+                    }
+                    pending.take();
+                    session.recording.store(false, Ordering::Release);
+                    return Err(error);
+                }
+            }
+        }
+        if original.cohort.is_none() {
+            original.cohort = Some(match &original.requested_cohort {
+                Some(cohort) => cohort.clone_ref(py),
                 None => Py::new(
                     py,
                     PySemanticEvaluationCohort {
-                        inner: inner.cohort(),
+                        inner: original
+                            .inner
+                            .as_ref()
+                            .expect("retained native preparation")
+                            .cohort(),
                     },
                 )?,
-            };
+            });
+        }
+        if original.result.is_none() {
+            original.result = Some(Py::new(
+                py,
+                PySemanticModelEvaluation {
+                    parent: parent.clone_ref(py),
+                    inner: original
+                        .inner
+                        .as_ref()
+                        .expect("retained native preparation")
+                        .clone(),
+                    cohort: original
+                        .cohort
+                        .as_ref()
+                        .expect("retained cohort")
+                        .clone_ref(py),
+                    binding: original.binding.clone(),
+                    closed: AtomicBool::new(false),
+                    output: Mutex::new(None),
+                    completed: Mutex::new(None),
+                    cancelled: Mutex::new(None),
+                    cancel_entered: AtomicBool::new(false),
+                    capture_owners: Mutex::new(None),
+                },
+            )?);
+        }
+        if !original.phase_entered {
             let mut state = issued.state()?;
             state.phase = TaskUsePhase::Evaluating(Box::new(state.phase.clone()));
-            Ok::<_, PyErr>(cohort)
-        })();
-        let cohort = match issued_cohort {
-            Ok(cohort) => cohort,
-            Err(error) => {
-                // Native preparation may already have queued content guards.
-                // A Python allocation/state failure is not their completion.
-                owner.abort();
-                if let Ok(mut state) = issued.state() {
-                    state.phase = TaskUsePhase::Refused;
-                }
-                session.recording.store(false, Ordering::Release);
-                return Err(error);
-            }
-        };
-        drop(owner);
-        let original = Py::new(
-            py,
-            PySemanticModelEvaluation {
-                parent: parent.clone_ref(py),
-                inner,
-                cohort,
-                binding,
-                closed: AtomicBool::new(false),
-                output: Mutex::new(None),
-                completed: Mutex::new(None),
-                cancelled: Mutex::new(None),
-                cancel_entered: AtomicBool::new(false),
-                capture_owners: Mutex::new(None),
-            },
-        )?;
-        if let Some(pending) = private_execution_owner(py, &session)? {
-            pending
-                .borrow(py)
-                .bind_phase_evaluation(py, &original, &original.borrow(py).inner)?;
+            original.phase_entered = true;
         }
-        Ok(original)
+        // The phase binder acquires the same Session owner; release this guard
+        // before it and retain the issued object across a binder failure.
+        drop(owner);
+        if !original.phase_bound {
+            if let Some(phase) = private_execution_owner(py, &session)? {
+                let result = original.result.as_ref().expect("retained evaluation");
+                phase
+                    .borrow(py)
+                    .bind_phase_evaluation(py, result, &result.borrow(py).inner)?;
+            }
+            original.phase_bound = true;
+        }
+        let result = original
+            .result
+            .as_ref()
+            .expect("retained evaluation")
+            .clone_ref(py);
+        // The returned owner now carries the original parent and native
+        // invocation. Do not keep a Session -> parent -> Session cycle after
+        // the complete handoff; the recording flag rejects a second prepare.
+        pending.take();
+        Ok(result)
     }
 }
