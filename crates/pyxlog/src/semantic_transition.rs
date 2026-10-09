@@ -1885,7 +1885,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -1897,6 +1897,7 @@ impl PySemanticTransitionSession {
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: &Bound<'_, PyAny>,
         referent: Option<&Bound<'_, PyAny>>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
@@ -1972,6 +1973,7 @@ impl PySemanticTransitionSession {
             snapshot,
             restore_model,
             training_domain,
+            Some(training_canary_source),
             referent,
             None,
             resolve_checkpoint,
@@ -2100,6 +2102,7 @@ impl PySemanticTransitionSession {
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: Option<&Bound<'_, PyAny>>,
         referent: Option<&Bound<'_, PyAny>>,
         learning_transition: Option<&xlog_cuda::SemanticLearningPhaseTransition>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
@@ -2149,6 +2152,12 @@ impl PySemanticTransitionSession {
         let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
         let (mut seed, saved_snapshot, phase, saved_binding) =
             TaskCheckpointSeed::decode(&manifest.task)?;
+        let (canary_source, canary_owner, canary_projection) =
+            read_training_canary_source(py, training_canary_source)?;
+        if canary_projection != seed.training_canary_source {
+            return Err(invalid("checkpoint symbolic canary source differs from its original native observation"));
+        }
+        seed.training_canary_owner = canary_owner;
         if let Some(shared) = shared_proposal_expense {
             let saved = seed.proposal_expense()?;
             let current = *shared
@@ -2212,20 +2221,21 @@ impl PySemanticTransitionSession {
                 .evaluation
                 .get(2)
                 .ok_or_else(|| invalid("checkpoint task evaluation is incomplete"))?
-                .text()?
-                != source.observer_source
+                != &source.observer_source.as_ref().map_or(ColdValue::None, |source| ColdValue::Text(source.clone()))
             {
                 return Err(invalid(
                     "checkpoint observer source differs from its admission",
                 ));
             }
         }
-        let editable_program = editable_source.map(|source| source.program);
+        let initial_program_source = editable_source.as_ref().map(|source| source.initial_source.as_str());
+        let editable_program = editable_source.as_ref().map(|source| Arc::clone(&source.program));
         let spec = task_evaluation_spec(
             &seed.evaluation,
             authority.priority_levels.clone(),
             editable_program.clone(),
             &seed.training_domain,
+            initial_program_source,
         )?;
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
@@ -2362,6 +2372,8 @@ impl PySemanticTransitionSession {
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
             if training_objective.is_some() || replay_capacity.is_some() {
+                owner.bind_training_canary_source(canary_source.clone().ok_or_else(|| invalid(
+                    "restored training reservation requires its original Logical canary source"))?).map_err(xlog_err)?;
                 owner
                     .bind_training_view_arena(training_views, training_objective, replay_capacity)
                     .map_err(xlog_err)?;
@@ -7659,12 +7671,30 @@ impl ProposalExpense {
     }
 }
 
+type TrainingCanarySourceRead = (
+    Option<Arc<xlog_cuda::SemanticTrainingCanarySource>>,
+    Option<Arc<Py<cold_task::PySemanticTransitionColdTask>>>,
+    ColdValue,
+);
+
+fn read_training_canary_source(py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<TrainingCanarySourceRead> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok((None, None, ColdValue::None));
+    };
+    let owner = value.extract::<Py<cold_task::PySemanticTransitionColdTask>>()?;
+    let source = owner.borrow(py).canary_source(py)?;
+    let bytes = source.projection_words().into_iter().flat_map(u64::to_le_bytes).collect::<Vec<_>>();
+    Ok((Some(source), Some(Arc::new(owner)), ColdValue::Bytes(Arc::from(bytes))))
+}
+
 #[derive(Clone)]
 struct TaskCheckpointSeed {
     authority: Vec<ColdValue>,
     evaluation: Vec<ColdValue>,
     training_objective: ColdValue,
     training_domain: ColdValue,
+    training_canary_source: ColdValue,
+    training_canary_owner: Option<Arc<Py<cold_task::PySemanticTransitionColdTask>>>,
     replay_capacity: ColdValue,
     original_training_roster: Arc<Mutex<OriginalTrainingRoster>>,
     initial_sources: ColdValue,
@@ -7829,6 +7859,7 @@ impl TaskCheckpointSeed {
             checkpoint_sources,
             self.replay_capacity.clone(),
             self.original_training_roster()?,
+            self.training_canary_source.clone(),
         ])))
     }
 
@@ -7841,7 +7872,7 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes, bytes.len())?;
-        let fields = value.fields(16)?;
+        let fields = value.fields(17)?;
         read_replay_capacity(&fields[14])?;
         let roster = fields[15].fields(2)?;
         roster[0].sequence()?;
@@ -7880,6 +7911,8 @@ impl TaskCheckpointSeed {
                 evaluation: fields[1].sequence()?.to_vec(),
                 training_objective: fields[2].clone(),
                 training_domain: fields[10].clone(),
+                training_canary_source: fields[16].clone(),
+                training_canary_owner: None,
                 replay_capacity: fields[14].clone(),
                 original_training_roster: Arc::new(Mutex::new(OriginalTrainingRoster::new(
                     roster[0].clone(),
@@ -9751,12 +9784,20 @@ impl PySemanticCompletedTaskFacts {
         PyTuple::new(py, &self.inner.attained).map(Bound::unbind)
     }
     #[getter]
-    fn correct_count(&self) -> u64 {
+    fn correct_count(&self) -> Option<u64> {
+        self.inner.correct.as_ref().map(|values| values.iter().sum())
+    }
+    #[getter]
+    fn solves_expected_truths(&self) -> Option<bool> {
+        self.inner.correct.as_ref().map(|_| self.inner.p == 1)
+    }
+    #[getter]
+    fn attained_count(&self) -> u64 {
         self.inner.g
     }
     #[getter]
-    fn solves_expected_truths(&self) -> bool {
-        self.inner.p == 1
+    fn all_goals_attained(&self) -> Option<bool> {
+        self.inner.correct.is_none().then_some(self.inner.p == 1)
     }
     #[getter]
     fn measured_work(&self) -> u64 {
@@ -16372,6 +16413,55 @@ impl PySemanticTransitionController {
         Ok(())
     }
 
+    /// Terminally release a Session only after its original publication,
+    /// segments, executables and external aliases have fully retired. This
+    /// performs the existing joined native deallocation; abort is not release.
+    /// An unknown or failed retirement retains its original owner instead.
+    fn close(&self, py: Python<'_>, parent: Py<PySemanticPublishedParent>) -> PyResult<()> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let parent = parent.borrow(py);
+        if parent.session.as_ptr() != self.session.as_ptr()
+            || !Arc::ptr_eq(&self.identity, &parent.task_use.borrow(py).controller)
+        {
+            return Err(invalid(
+                "terminal Session release requires its original controller and publication",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if session.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "private replay Session release belongs to its original native phase",
+            ));
+        }
+        if session.learning_preparing.load(Ordering::Acquire)
+            || session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+            || session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .is_some()
+        {
+            return Err(invalid(
+                "terminal Session release requires completed original phase and segment retirement",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?
+            .is_some()
+        {
+            return Err(invalid(
+                "terminal Session release cannot interrupt its original cold callback",
+            ));
+        }
+        session.release_retired_publication(py, &parent)
+    }
+
     /// Permanently abort this shared native Session after trusted application
     /// validation fails, including verification after bind_parent has published.
     /// Saved task uses, parents and other controllers of this same Session can
@@ -16649,7 +16739,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -16672,6 +16762,7 @@ impl PySemanticTransitionController {
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: &Bound<'_, PyAny>,
         replay_capacity: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
@@ -16761,6 +16852,8 @@ impl PySemanticTransitionController {
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
+        let (canary_source, canary_owner, canary_projection) =
+            read_training_canary_source(py, Some(training_canary_source))?;
         let replay_capacity_value = replay_capacity_value(replay_capacity, &mut budget)?;
         let replay_capacity = read_replay_capacity(&replay_capacity_value)?;
         let training_objective = read_training_objective(&training_objective_value)?;
@@ -16789,12 +16882,15 @@ impl PySemanticTransitionController {
             if evaluation[2].text()? != source {
                 return Err(invalid("task observer source differs from its admission"));
             }
+        } else if session.editable_program.is_some() && evaluation[2] != ColdValue::None {
+            return Err(invalid("coding task has no independent observer reference"));
         }
         let spec = task_evaluation_spec(
             &evaluation,
             authority.priority_levels.clone(),
             session.editable_program.clone(),
             &training_domain_value,
+            session.editable_initial_source.as_deref(),
         )?;
         let checkpoint_referents = resolve_replay_checkpoint_referents(
             py,
@@ -16894,6 +16990,8 @@ impl PySemanticTransitionController {
                 )?;
             }
             if training_objective.is_some() || replay_capacity.is_some() {
+                owner.bind_training_canary_source(canary_source.ok_or_else(|| invalid(
+                    "training reservation requires its original Logical canary source"))?).map_err(xlog_err)?;
                 owner
                     .bind_training_view_arena(training_views, training_objective, replay_capacity)
                     .map_err(xlog_err)?;
@@ -16946,6 +17044,8 @@ impl PySemanticTransitionController {
                     evaluation,
                     training_objective: training_objective_value,
                     training_domain: training_domain_value,
+                    training_canary_source: canary_projection,
+                    training_canary_owner: canary_owner,
                     replay_capacity: replay_capacity_value,
                     initial_sources,
                     source_mapping,

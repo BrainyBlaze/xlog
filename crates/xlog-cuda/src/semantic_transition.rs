@@ -19,6 +19,7 @@ pub(crate) use native_work_bound::OriginalNativeCommand;
 mod prepared_replay;
 mod replay_model_backing;
 mod task_ground;
+mod verification_receipts;
 pub use task_ground::{
     SemanticTaskGround, SemanticTaskMeasurementBinding, SemanticTaskReceiptFamily,
     SemanticTaskVerificationBinding,
@@ -690,6 +691,7 @@ pub(crate) struct TaskEvaluationBinding {
     spec: SemanticTaskEvaluationSpec,
     statements: Vec<crate::SemanticStatementKey>,
     statement_bytes: BTreeMap<u32, Vec<u8>>,
+    observation_statements: Vec<(crate::SemanticStatementKey, crate::SemanticProgramFact)>,
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
     goal_witness: Option<SemanticTaskGoalWitness>,
@@ -842,6 +844,17 @@ impl TaskEvaluationBinding {
             &spec.statement_records,
             &spec.allowed_support_records,
         )?;
+        let observation_statements = spec.task_ground.bindings().iter().map(|binding| {
+            let statement = admission.statement_key(binding.observation_record)
+                .map_err(SemanticTransitionError::Semantic)?;
+            let fact = spec.program.editable_program()
+                .and_then(|program| program.observation_facts.iter()
+                    .find(|(record, _)| *record == binding.observation_record))
+                .map(|(_, fact)| *fact)
+                .ok_or_else(|| publication_input_error(
+                    "protected observation statement is absent from its original compiled source"))?;
+            Ok((statement, fact))
+        }).collect::<Result<Vec<_>, SemanticTransitionError>>()?;
         if observation.program_source.is_empty()
             || observation.result_bytes.is_empty()
             || observation.actual_truths.len() != spec.statement_records.len()
@@ -865,6 +878,7 @@ impl TaskEvaluationBinding {
             spec,
             statements,
             statement_bytes,
+            observation_statements,
             allowed_supports,
             observation,
             goal_witness: None,
@@ -944,6 +958,12 @@ impl TaskEvaluationBinding {
         }
         for statement in &self.statements {
             hash.update(statement.identity().as_bytes());
+        }
+        for (statement, fact) in &self.observation_statements {
+            hash.update(statement.identity().as_bytes());
+            hash.update(fact.predicate.to_le_bytes());
+            hash.update(fact.first.to_le_bytes());
+            hash.update(fact.second.to_le_bytes());
         }
         hash.update((self.allowed_supports.len() as u64).to_le_bytes());
         for (record, support) in &self.allowed_supports {
@@ -1111,6 +1131,10 @@ impl TaskEvaluationBinding {
         }
         for binding in self.spec.task_ground.bindings() {
             words.extend(binding.words());
+        }
+        for (statement, fact) in &self.observation_statements {
+            words.extend(identity_words(*statement.identity().as_bytes()));
+            words.extend([u64::from(fact.predicate), u64::from(fact.first), u64::from(fact.second)]);
         }
         if let Some(program) = program {
             words.extend(program);
@@ -7719,16 +7743,15 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(include_bytes!("semantic_transition/learning_phase.rs"));
         hash.update(include_bytes!("semantic_transition/native_work_bound.rs"));
         hash.update(include_bytes!("semantic_transition/prepared_replay.rs"));
+        hash.update(include_bytes!("semantic_transition/task_ground.rs"));
+        hash.update(include_bytes!("semantic_program.rs"));
+        hash.update(include_bytes!("../kernels/semantic_task_ground.cuh"));
         hash.update(include_bytes!(
             "semantic_transition/replay_model_backing.rs"
         ));
         hash.update(include_bytes!(
             "semantic_transition/verification_receipts.rs"
         ));
-        hash.update(include_bytes!("semantic_transition/task_ground.rs"));
-        hash.update(include_bytes!("semantic_program.rs"));
-        hash.update(include_bytes!("../kernels/semantic_task_ground.cuh"));
-        hash.update(include_bytes!("../kernels/semantic_program.cuh"));
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
@@ -10909,7 +10932,6 @@ struct PreparedStepStorage {
 
 struct PreparedBranchStorage {
     task_ground: Option<task_ground::TaskGroundStorage>,
-    pub(super) task_observations_authenticated: bool,
     model_update: Option<PreparedModelUpdate>,
     continuation: Option<PreparedContinuation>,
     numerical_block_snapshot: Option<Arc<TrackedCudaSlice<f64>>>,
@@ -14867,6 +14889,7 @@ struct PolicyReplacement {
     support: TrackedCudaSlice<u8>,
     receipts: TrackedCudaSlice<SemanticTransitionReceipt>,
     state: TrackedCudaSlice<DeviceState>,
+    task_ground: Option<task_ground::TaskGroundStorage>,
 }
 
 /// Original numerical inputs and receipts survive later publication and rebinding.
@@ -14883,6 +14906,7 @@ struct PolicyTape {
     // Ordinary proposals keep the exact device state observed with this tape;
     // later restored invocations may rebind the Session's working state.
     origin_state: Option<TrackedCudaSlice<DeviceState>>,
+    origin_task_ground: Option<task_ground::TaskGroundStorage>,
     // Immutable cold catalogue allocations remain shared by their original
     // invocation tapes; no later binding overwrites their bytes.
     components: DeviceMemoryView<SemanticComponent>,
@@ -15687,6 +15711,8 @@ pub struct SemanticTransitionSession {
     // A cold read can precede the final observed-source/authority import. The
     // later binding must reproduce this exact executed task content.
     cold_content: Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)>,
+    cold_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
+    training_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     initial_prefill: Option<InitialPrefillStage>,
     retained_initial_prefill: Option<RetainedInitialPrefillContent>,
     checkpoint_initial_prefill: Option<CheckpointInitialPrefill>,
@@ -29964,8 +29990,9 @@ impl SemanticTransitionSession {
             device_components,
             task: None,
             task_ground: None,
-            task_observations_authenticated: true,
             cold_content: None,
+            cold_canary_source: None,
+            training_canary_source: None,
             initial_prefill: None,
             retained_initial_prefill: None,
             checkpoint_initial_prefill: None,
@@ -30311,8 +30338,39 @@ impl SemanticTransitionSession {
             task_ground,
         )
         .inspect_err(|_| self.poisoned = true)?;
+        if matches!(task_ground, SemanticTaskGround::Logical) {
+            let statements = statement_records.iter().zip(&content.1).map(|(&record, &truth)| {
+                admission.statement_key(record)
+                    .map(|statement| (Identity256::from_bytes(*statement.identity().as_bytes()), truth))
+                    .map_err(SemanticTransitionError::Semantic)
+            }).collect::<Result<Vec<_>, _>>()?;
+            self.cold_canary_source = Some(Arc::new(crate::SemanticTrainingCanarySource::observed(
+                content.0, statements,
+            )));
+        }
         self.cold_content = Some(content.clone());
         Ok(content)
+    }
+
+    /// Borrow the original completed Logical observation, without another device read.
+    pub fn training_canary_source(&self) -> Result<Arc<crate::SemanticTrainingCanarySource>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.cold_canary_source.as_ref().map(Arc::clone)
+            .ok_or_else(|| publication_input_error("symbolic canary source requires an original observed Logical task"))
+    }
+
+    pub fn training_canary_source_borrowed(&self) -> bool {
+        self.cold_canary_source.as_ref().is_some_and(|source| Arc::strong_count(source) > 1)
+    }
+
+    /// Freeze the actual source before allocating the original training reservation.
+    pub fn bind_training_canary_source(&mut self, source: Arc<crate::SemanticTrainingCanarySource>) -> Result<(), SemanticTransitionError> {
+        self.ensure_rebindable()?;
+        if self.publication.is_some() || self.training_views.is_some() || self.training_canary_source.is_some() {
+            return Err(publication_input_error("symbolic canary source is immutable after its original cold binding"));
+        }
+        self.training_canary_source = Some(source);
+        Ok(())
     }
 
     /// Bind the controller's independently validated goal closure to the native
@@ -30694,7 +30752,7 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .0;
-        let (content, truth) = task.content();
+        let (content, _) = task.content();
         let arena = self
             .training_views
             .as_ref()
@@ -30705,7 +30763,8 @@ impl SemanticTransitionSession {
             ));
         }
         let prepared =
-            arena.prepare_materialization(rows, objective, task.identity(), content, &truth)?;
+            arena.prepare_materialization(rows, objective, task.identity(), content,
+                self.training_canary_source.as_deref().ok_or(SemanticTransitionError::NotBound)?)?;
         let mut packed = Vec::new();
         for bytes in [
             publication_abi_bytes(&prepared.descriptors),
@@ -31114,7 +31173,7 @@ impl SemanticTransitionSession {
             .expect("checked cold task binding")
             .0
             .identity();
-        let (task_content, expected_truth) = self
+        let (task_content, _) = self
             .task
             .as_ref()
             .expect("checked cold task binding")
@@ -31132,7 +31191,8 @@ impl SemanticTransitionSession {
             })?,
             task_identity,
             task_content,
-            &expected_truth,
+            self.training_canary_source.as_deref().ok_or_else(|| publication_input_error(
+                "training reservation requires its original observed Logical canary source"))?,
             replay_capacity,
         )?);
         Ok(())
@@ -32119,6 +32179,7 @@ impl SemanticTransitionSession {
             receipts: branch.receipts.take().expect("checked original receipts"),
             prepared_bank: Some(bank),
             origin_state: None,
+            origin_task_ground: None,
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });
@@ -32192,6 +32253,13 @@ impl SemanticTransitionSession {
                         .into(),
             });
         }
+        let replacement_task_ground = self.task_ground.as_ref().map(|ground| {
+            let bytes = task_ground::TaskGroundStorage::allocation_bytes(ground.layout)?;
+            let mut reservation = self.provider.memory().reserve_bytes(
+                u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            ).map_err(|error| runtime_error("original policy ground reservation", error))?;
+            task_ground::TaskGroundStorage::allocate(ground.layout, &mut reservation)
+        }).transpose()?;
         let policy = PendingPolicyStorage {
             witness: policy_witness,
             // Reserve the next working banks before the proposal may publish.
@@ -32201,6 +32269,7 @@ impl SemanticTransitionSession {
                 support: allocate_publication(&self.provider, self.codebooks.input_cells)?,
                 receipts: allocate_publication(&self.provider, COMPONENT_COUNT)?,
                 state: allocate_publication(&self.provider, 1)?,
+                task_ground: replacement_task_ground,
             },
             buffers: self.allocate_policy_buffers()?,
             invocation: rng,
@@ -32580,6 +32649,8 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            self.steps[&original._witness.reader_token].prepared.as_ref()
+                .expect("original prepared policy ground").branches[origin_bank].task_ground.as_ref(),
             &tape.components,
             &tape.codebooks,
             PolicyVjpInput::UpdateObjective {
@@ -32919,6 +32990,7 @@ impl SemanticTransitionSession {
             support,
             receipts,
             &branch.state,
+            branch.task_ground.as_ref(),
             &components,
             &codebooks,
             if let (Some((member_ordinal, _)), true) = (member, edit_only) {
@@ -33475,6 +33547,7 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            tape.origin_task_ground.as_ref(),
             &tape.components,
             &tape.codebooks,
             if let Some(critic_term) = &critic_term {
@@ -33736,6 +33809,7 @@ impl SemanticTransitionSession {
         support: &TrackedCudaSlice<u8>,
         receipts: &TrackedCudaSlice<SemanticTransitionReceipt>,
         state: &TrackedCudaSlice<DeviceState>,
+        task_ground: Option<&task_ground::TaskGroundStorage>,
         components: &DeviceMemoryView<SemanticComponent>,
         codebooks: &DeviceMemoryView<u64>,
         input: PolicyVjpInput<'_>,
@@ -33765,6 +33839,7 @@ impl SemanticTransitionSession {
         } = adjoints;
         let io = TransitionKernelIo {
             logits: &policy.text_logits,
+            task_ground,
             support,
             receipts,
             state,
@@ -33943,6 +34018,9 @@ impl SemanticTransitionSession {
                 recorder.read(state);
                 recorder.read(origin_lease);
                 recorder.read(task.expect("validated Update task ground"));
+                if let Some(ground) = task_ground {
+                    ground.record(&mut recorder);
+                }
             }
         }
         if let PolicyVjpInput::GroupMember { critic_term, .. } = input {
@@ -34029,6 +34107,7 @@ impl SemanticTransitionSession {
             &tape.support,
             &tape.receipts,
             state,
+            None,
             &tape.components,
             &tape.codebooks,
             PolicyVjpInput::External(&score_cotangents),
@@ -34299,6 +34378,13 @@ impl SemanticTransitionSession {
         let mut recorder = self.domain.new_strict_recorder();
         recorder.read(&self.state);
         recorder.write(next_state);
+        let next_ground = policy.replacement.as_ref().expect("original replacement banks").task_ground.as_ref();
+        if let (Some(original), Some(next)) = (&self.task_ground, next_ground) {
+            recorder.read(&original.device);
+            recorder.write(&next.device);
+        } else if self.task_ground.is_some() != next_ground.is_some() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
             // SAFETY: the recorded source and reserved destination each hold
             // exactly one DeviceState on the controller's ordered CUDA stream.
@@ -34311,7 +34397,14 @@ impl SemanticTransitionSession {
                 )
             }
             .result()
-            .map_err(|error| XlogError::Kernel(error.to_string()))
+            .map_err(|error| XlogError::Kernel(error.to_string()))?;
+            if let (Some(original), Some(next)) = (&self.task_ground, next_ground) {
+                unsafe {
+                    sys::cuMemcpyDtoDAsync_v2(next.device.device_ptr_value(), original.device.device_ptr_value(),
+                        original.device.len(), enqueue.stream().cu_stream())
+                }.result().map_err(|error| XlogError::Kernel(error.to_string()))?;
+            }
+            Ok::<(), XlogError>(())
         })?;
         let mut policy = self.policy.take().expect("checked original policy");
         let replacement = policy
@@ -34329,6 +34422,7 @@ impl SemanticTransitionSession {
             receipts: std::mem::replace(&mut self.receipts, replacement.receipts),
             prepared_bank: None,
             origin_state: Some(std::mem::replace(&mut self.state, replacement.state)),
+            origin_task_ground: std::mem::replace(&mut self.task_ground, replacement.task_ground),
             components: self.device_components.view(),
             codebooks: self.device_codebooks.view(),
         });

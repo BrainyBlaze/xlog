@@ -804,6 +804,7 @@ struct SemanticTrainingObjectiveRecord {
     uint64_t row_count,capacity,group_count,group_member_count,canary_count,protected_member_count;
     uint64_t evaluator_min_bits,evaluator_max_bits,coefficient_bits[9],cost_unit[4],cost_cap;
     uint64_t truth_tokens[4];
+    uint64_t canary_source_offset,canary_source_words;
 };
 struct SemanticTrainingObjectiveGroupRecord {
     uint64_t kind,denominator,member_offset,member_count;
@@ -815,7 +816,7 @@ struct SemanticTrainingRosterRow {
 };
 struct SemanticTrainingCanaryRecord {
     uint64_t evaluator_abi,kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,work_limit;
-    uint64_t obligation_positions[3],protected_member_offset,protected_member_count;
+    uint64_t obligation_member_offset,obligation_member_count,protected_member_offset,protected_member_count;
     uint64_t row_identity[4],row_content_identity[4],task_identity[4],identity[4];
 };
 struct SemanticTrainingCanaryResultRecord {
@@ -1076,10 +1077,10 @@ static_assert(sizeof(PolicyField)==32,"policy field ABI");
 static_assert(sizeof(PolicyNumericalDescriptor)==96 && sizeof(PolicyDescriptor)==776,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
-static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
+static_assert(sizeof(SemanticTrainingObjectiveRecord)==296,"training objective ABI");
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
 static_assert(sizeof(SemanticTrainingRosterRow)==512,"training roster row ABI");
-static_assert(sizeof(SemanticTrainingCanaryRecord)==224,"training canary ABI");
+static_assert(sizeof(SemanticTrainingCanaryRecord)==216,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==96,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
 static_assert(sizeof(ModelUpdateEvidenceSource)==48,"model update evidence ABI");
@@ -1088,7 +1089,7 @@ static_assert(sizeof(ModelForwardReceipt)==232,"model forward receipt ABI");
 static_assert(sizeof(ModelForwardReceiptInputs)==128,"model forward receipt input ABI");
 static_assert(sizeof(ModelUpdateCanaryInputs)==280,"training canary input ABI");
 static_assert(sizeof(PolicyAdjointNumericalDescriptor)==96,"policy adjoint numerical ABI");
-static_assert(sizeof(PolicyBackward)==256,"policy backward ABI");
+static_assert(sizeof(PolicyBackward)==264,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal,
@@ -2592,15 +2593,28 @@ __device__ bool semantic_task_canary_evidence(const ModelUpdateCanaryInputs& inp
         const SemanticTrainingCanaryRecord& canary,const uint64_t* task,
         const SemanticTrainingObjectiveRecord& objective,uint64_t window,uint64_t& baseline_correct,
         uint64_t& candidate_correct,uint64_t& lost) {
-    const uint64_t goal=34+task[21]*5;
+    TaskProgramBank bank{};
+    if(!task_program_bank(task,inputs.task_words,&bank))return false;
+    const uint64_t* goal=bank.task.goal_witness;
     bool roots[4]={false,false,false,false};
     for(uint32_t root=0;root<4;++root)
-        for(uint32_t word=0;word<4;++word)roots[root]|=task[goal+root*4+word]!=0;
+        for(uint32_t word=0;word<4;++word)roots[root]|=goal[root*4+word]!=0;
     if(!roots[0] || !roots[1] || !roots[2] || !roots[3] ||
-       !task[goal+16] || !task[goal+17])return false;
+       !goal[16] || !goal[17])return false;
+    if(objective.canary_source_offset>inputs.protected_member_count ||
+       objective.canary_source_words>inputs.protected_member_count-objective.canary_source_offset ||
+       objective.canary_source_words<13 || canary.obligation_member_offset>inputs.protected_member_count ||
+       canary.obligation_member_count>inputs.protected_member_count-canary.obligation_member_offset)return false;
+    const auto* members=reinterpret_cast<const uint64_t*>(inputs.protected_members);
+    const auto* source=members+objective.canary_source_offset;
+    const uint64_t queries=source[12];
+    if(!queries || queries>(UINT64_MAX-13)/5 || objective.canary_source_words!=13+5*queries ||
+       canary.obligation_member_count!=queries)return false;
+    for(uint32_t identity=0;identity<3;++identity)
+        if(!(source[identity*4]|source[identity*4+1]|source[identity*4+2]|source[identity*4+3]))return false;
     baseline_correct=0;candidate_correct=0;lost=0;
-    for(uint32_t obligation=0;obligation<3;++obligation) {
-        const uint64_t position=canary.obligation_positions[obligation];
+    for(uint64_t obligation=0;obligation<queries;++obligation) {
+        const uint64_t position=members[canary.obligation_member_offset+obligation];
         if(position==UINT64_MAX || position>=window)return false;
         uint64_t baseline_token{};
         uint64_t candidate_token{};
@@ -2608,7 +2622,9 @@ __device__ bool semantic_task_canary_evidence(const ModelUpdateCanaryInputs& inp
                 position,baseline_token) ||
            !semantic_canary_argmax(inputs,inputs.candidate_logits,canary.row_ordinal,
                 position,candidate_token))return false;
-        const uint64_t truth=task[18+obligation];
+        const uint64_t* statement=source+13+obligation*5;
+        if(!(statement[0]|statement[1]|statement[2]|statement[3]) || statement[4]>3)return false;
+        const uint64_t truth=statement[4];
         const uint64_t expected=objective.truth_tokens[truth];
         const bool baseline_ok=baseline_token==expected;
         const bool candidate_ok=candidate_token==expected;
@@ -2627,7 +2643,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        !inputs.roster_rows || inputs.roster_rows%alignof(SemanticTrainingRosterRow) ||
        !inputs.objective || inputs.objective%alignof(SemanticTrainingObjectiveRecord) ||
        !inputs.canaries || inputs.canaries%alignof(SemanticTrainingCanaryRecord) || inputs.canary_count!=5 ||
-       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<66 ||
+       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<38 ||
        (inputs.protected_member_count && (!inputs.protected_members ||
         inputs.protected_members%alignof(uint64_t))) ||
        !inputs.forward_receipts || inputs.forward_receipts%alignof(ModelForwardReceipt) ||
@@ -2670,15 +2686,13 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     const auto* kinds=reinterpret_cast<const int64_t*>(inputs.kinds);
     auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(inputs.results);
     const uint8_t numerical=*reinterpret_cast<const uint8_t*>(inputs.admissibility_source);
-    const uint64_t support_count=task[21];
     TaskProgramBank program_bank{};
     if(numerical>1 || objective.evaluator_abi!=3 || objective.canary_count!=5 ||
        objective.row_count!=selection.row_count || objective.capacity!=inputs.capacity ||
        objective.protected_member_count!=inputs.protected_member_count ||
        !selection.row_count || selection.row_count>inputs.row_count || selection.capacity!=inputs.capacity ||
-        task[0]!=6 || !task[1] || support_count>(UINT64_MAX-66)/5 ||
+        task[0]!=7 || !task[1] ||
         !task_program_bank(task,inputs.task_words,&program_bank) ||
-        task[52+support_count*5]>1 ||
        !publication_identity_equal(objective.task_identity,task+2)) {
         semantic_content_integrity_trap();return;
     }
@@ -2743,10 +2757,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
            !publication_identity_equal(row.content_identity,canary.row_content_identity)) {
             semantic_content_integrity_trap();return;
         }
-        if(canary.kind!=1 && canary.kind!=4 &&
-           (canary.obligation_positions[0]!=UINT64_MAX ||
-            canary.obligation_positions[1]!=UINT64_MAX ||
-            canary.obligation_positions[2]!=UINT64_MAX)) {
+        if(canary.kind!=1 && canary.kind!=4 && canary.obligation_member_count) {
             semantic_content_integrity_trap();return;
         }
         if(canary.kind==2) {
@@ -2781,15 +2792,21 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
         const uint64_t row_offset=canary.row_ordinal*inputs.capacity;
         if(!reason && (canary.kind==1 || canary.kind==4)) {
             uint64_t baseline_correct=0,candidate_correct=0,lost=0;
-            semantic_canary_charge(work,6*inputs.vocabulary,6);
+            uint64_t argmaxes=0,charged=0;
+            if(!canary.obligation_member_count ||
+               !semantic_graph::checked_mul(canary.obligation_member_count,2,&argmaxes) ||
+               !semantic_graph::checked_mul(argmaxes,inputs.vocabulary,&charged)) {
+                semantic_content_integrity_trap();return;
+            }
+            semantic_canary_charge(work,charged,argmaxes);
             if(!semantic_task_canary_evidence(inputs,canary,task,objective,row.window,baseline_correct,
                     candidate_correct,lost))reason=7;
             else if(!reason && canary.kind==1) {
-                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),3.0);
+                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),double(canary.obligation_member_count));
                 availability=2;
             }
             else if(!reason) {
-                measurement=-__ddiv_rn(double(lost),3.0);
+                measurement=-__ddiv_rn(double(lost),double(canary.obligation_member_count));
                 availability=2;
                 if(lost)reason=7;
             }
@@ -3011,7 +3028,8 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
             publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
                 reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
         }
-        if(old[i].role==32 || old[i].role==44 || old[i].role==56 || old[i].role==57)
+        if(old[i].role==32 || old[i].role==44 || old[i].role==56 || old[i].role==57 ||
+           old[i].role==semantic_task_ground::kPublicationRole)
             if(publication_preserve_range(control,old,base.header.range_count,old[i],to[i],work))return 1;
         if(old[i].role>=18 && old[i].role<=25) {
             if(pending.transition_kind!=4) {
@@ -4708,6 +4726,20 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             if(!descriptor.task || descriptor.task%alignof(uint64_t) ||
                !task_program_bank(reinterpret_cast<const uint64_t*>(descriptor.task),
                                   descriptor.task_words,&backward_program_bank))*status=1;
+            else if(backward_program_bank.editable && b.mode!=0) {
+                semantic_task_ground::Plane ground{};
+                if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,
+                        backward_program_bank.task,&ground)) *status=1;
+                else {
+                    const auto& baseline=ground.query(0,0);
+                    if(baseline.receipt[0]!=semantic_graph::kOk ||
+                       baseline.receipt[1]!=0x5850524f47515545ULL ||
+                       baseline.receipt[40]<backward_program_bank.program.rule_count ||
+                       baseline.receipt[40]-backward_program_bank.program.rule_count>ground.header[7]) *status=1;
+                    else backward_program_bank.selected_rule_count=uint32_t(
+                        baseline.receipt[40]-backward_program_bank.program.rule_count);
+                }
+            }
         }
         apply_selected=1;
         apply_actor=apply_edit=0;
@@ -5391,7 +5423,24 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
         if(restored && bank.header.semantic_extents[i]!=extent)return 6;
         if(!restored)bank.header.semantic_extents[i]=extent;
     }
-    if(!task_queries(descriptor,task,0,&root,nullptr,checked))return 6;
+    TaskProgramBank program{};
+    if(!task_program_bank(task,descriptor.task_words,&program))return 6;
+    if(program.editable) {
+        if(restored) {
+            // Historical query receipts retain their original full invocation.
+            // Restored external supports are authenticated before hot execution.
+            checked->task_evaluation=bank.state.task_evaluation;
+        } else {
+            const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[0]);
+            const auto* ground=publication_find_range(ranges,bank.header.range_count,semantic_task_ground::kPublicationRole);
+            auto* bytes=ground ? publication_range_bytes(control,*ground) : nullptr;
+            if(!ground || !bytes || ground->length_bytes!=descriptor.task_ground_bytes)return 1;
+            Descriptor initial=descriptor;initial.task_ground=reinterpret_cast<uint64_t>(bytes);
+            initial.task_ground_bytes=ground->length_bytes;
+            uint32_t derived=0;
+            if(task_program_queries(initial,task,program,0,nullptr,0,0,checked,&derived)!=TaskProgramQueryOutcome::Ok)return 6;
+        }
+    } else if(!task_queries(descriptor,task,0,&root,nullptr,checked))return 6;
     if(!checked->task_evaluation.facts[0].eligible)return 1;
     if(!restored) {
         const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[0]);
@@ -5701,19 +5750,12 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
                             (uint64_t(decoded[identity][word*2+1])<<32)))exact=false;
                     }
                 }
-                bool original_statement=false;
-                for(uint32_t query=0;query<result_task.queries;++query) {
+                const auto* original=result_task.observation(ordinal);
+                for(uint32_t word=0;word<4;++word) {
                     semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
-                    const auto* original=result_task.query(query);
-                    if(original[4]!=statement.record)continue;
-                    original_statement=true;
-                    for(uint32_t word=0;word<4;++word) {
-                        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
-                        if(original[word]!=(uint64_t(statement.identity_words[word*2])|
-                            (uint64_t(statement.identity_words[word*2+1])<<32)))exact=false;
-                    }
+                    if(original[word]!=(uint64_t(statement.identity_words[word*2])|
+                        (uint64_t(statement.identity_words[word*2+1])<<32)))exact=false;
                 }
-                if(!original_statement)exact=false;
             }
             if(!exact)break;
         }
@@ -6547,14 +6589,11 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
                        (uint64_t(1)<<(binding%64)))channels|=uint64_t(1)<<channel;
                 }
                 if(!channels)continue;
-                uint32_t original=UINT32_MAX;
-                for(uint32_t index=0;index<view.queries;++index)
-                    if(view.query(index)[4]==view.binding(binding)[1]) { original=index;break; }
-                if(original==UINT32_MAX || !plane.observations[binding].present)return 1;
+                if(!plane.observations[binding].present)return 1;
                 semantic_graph::DecodedStatement protected_statement{};
                 protected_statement.record=uint32_t(view.binding(binding)[1]);
                 for(uint32_t word=0;word<8;++word)
-                    protected_statement.identity_words[word]=uint32_t(view.query(original)[word/2]>>(32*(word%2)));
+                    protected_statement.identity_words[word]=uint32_t(view.observation(binding)[word/2]>>(32*(word%2)));
                 semantic_graph::Receipt actual{};
                 semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&actual,&protected_statement);
                 if(actual.words[0]!=semantic_graph::kOk || (actual.words[2]&channels)!=channels ||
@@ -6918,6 +6957,12 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         if(!failed && task)state->actor_eligible=program_bank.task.actor_eligible;
         if(!failed && task && !task_ground_acquire(descriptor,acquired_bank,program_bank.task,transition_kind,state)) {
             failed=1;state->status=9;
+        }
+        if(!failed && program_bank.editable) {
+            semantic_task_ground::Plane plane{};
+            if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,
+                    program_bank.task,&plane)) { failed=1;state->status=9; }
+            else program_bank.selected_rule_count=uint32_t(plane.header[6]);
         }
         input_bank_admitted=!failed && transition_kind==1;
     }

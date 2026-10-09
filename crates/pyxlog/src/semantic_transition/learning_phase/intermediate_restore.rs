@@ -924,6 +924,7 @@ impl PySemanticLearningPhaseTransition {
                     &snapshot,
                     self.model_owner(py, PhaseModelOwner::Restore)?.bind(py),
                     domain.bind(py),
+                    task.checkpoint.training_canary_owner.as_ref().map(|owner| owner.bind(py).as_any()),
                     None,
                     recipe.as_ref(),
                     self.preparation_inputs
