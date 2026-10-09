@@ -1118,15 +1118,10 @@ impl ActorRefreshCustody {
     fn outer_memory(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let update = self.update.borrow(py);
         let session = update.session.borrow(py);
-        let prepared = session
-            .prepared_segment
-            .lock()
-            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
-            .as_ref()
-            .and_then(|segment| segment.prepared_owner.as_ref())
-            .map(|owner| owner.clone_ref(py))
-            .ok_or_else(|| invalid("actor child lost the original outer model producer"))?;
-        Ok(prepared.bind(py).getattr("memory_scope")?.unbind())
+        recording_callback(
+            || self.require_access(py),
+            || session.prepared_memory_scope(py, &update.scope, None),
+        )
     }
 
     fn check_child(&self, py: Python<'_>, bank: usize) -> PyResult<()> {
@@ -1537,6 +1532,7 @@ impl PySemanticPreparedActorRefresh {
                     steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                     resources,
                     prepared_owner: Some(original_prepared.clone_ref(py)),
+                    memory_scope: Some(memory.clone_ref(py)),
                     checkpoint_phase,
                     producers_retired: false,
                     producer_retirement_entered: false,
