@@ -267,9 +267,11 @@ use std::sync::Weak;
 pub(super) fn finish_actor_refresh_children(
     py: Python<'_>,
     children: &[Arc<ActorRefreshCustody>],
+    outer: Option<&xlog_cuda::SemanticPreparedSegmentNonSubmission>,
+    streams: &[u64],
 ) -> PyResult<()> {
     for child in children {
-        child.finish_after_parent_completion(py)?;
+        child.finish_after_parent_completion(py, outer, streams)?;
     }
     Ok(())
 }
@@ -341,12 +343,55 @@ struct ActorRefreshChild {
     retired: bool,
 }
 
+impl ActorRefreshChild {
+    fn pristine(&self) -> bool {
+        !self.construction_entered
+            && self.session.is_none()
+            && self.controller.is_none()
+            && self.task.is_none()
+            && self.scope.is_none()
+            && self.steps.is_empty()
+            && self.producer.is_none()
+            && self.prepared.is_none()
+            && self.original_prepared.is_none()
+            && self.resources.is_none()
+            && self.cold_work.is_none()
+            && self.retirement_work.is_none()
+            && !self.retirement_attached
+            && !self.owner_callback_entered
+            && self.native_steps.is_empty()
+            && self.checkpoint_phase.is_none()
+            && !self.preparation_entered
+            && !self.context_ready
+            && !self.successors_entered
+            && !self.successors_ready
+            && !self.recording_entered
+            && !self.recorded
+            && !self.frozen
+            && self.delivery.is_none()
+            && !self.vjp_entered
+            && !self.vjp_recorded
+            && self.completion.is_none()
+            && !self.producer_retirement_entered
+            && !self.producer_retired
+            && !self.graph_retired
+            && !self.resources_retired
+            && !self.native_released
+            && self.release_memory.is_none()
+            && self.retirement_streams.is_none()
+            && !self.retired
+    }
+}
+
 enum ActorRefreshCompletion {
     Observed {
         _outcomes: Vec<xlog_cuda::SemanticPreparedStepOutcome>,
     },
     InitializerRefused {
         _certificate: xlog_cuda::SemanticActorRefreshInitializerRefusal,
+    },
+    Cancelled {
+        proof: xlog_cuda::SemanticPreparedSegmentNonSubmission,
     },
 }
 
@@ -476,16 +521,48 @@ impl ActorRefreshCustody {
         result
     }
 
-    fn finish_after_parent_completion(&self, py: Python<'_>) -> PyResult<()> {
+    fn finish_after_parent_completion(
+        &self,
+        py: Python<'_>,
+        outer: Option<&xlog_cuda::SemanticPreparedSegmentNonSubmission>,
+        streams: &[u64],
+    ) -> PyResult<()> {
         let work = self.original_retirement_work(py)?;
         for bank in 0..2 {
+            if let Some(outer) = outer {
+                if self.children()?[bank].pristine() {
+                    let absence = {
+                        let update = self.update.borrow(py);
+                        let target = update.session.borrow(py);
+                        target
+                            .owner()?
+                            .cancel_prepared_actor_refresh(
+                                &update.inner,
+                                bank,
+                                None,
+                                &self.proof,
+                                outer,
+                            )
+                            .map_err(xlog_err)?
+                    };
+                    if absence.is_some() || !self.children()?[bank].pristine() {
+                        return Err(invalid(
+                            "unused actor bank changed during original cancellation",
+                        ));
+                    }
+                    // No constructor, native child or producer ever existed.
+                    // Only unused metadata retires; no outcome is fabricated.
+                    self.children()?[bank].retired = true;
+                    continue;
+                }
+            }
             let (session, prepared) = {
                 let children = self.children()?;
                 let child = &children[bank];
                 if child.retired || child.producer_retired {
                     continue;
                 }
-                if !child.frozen {
+                if outer.is_none() && !child.frozen {
                     return Err(invalid(
                         "actor final use requires both original frozen children",
                     ));
@@ -494,14 +571,67 @@ impl ActorRefreshCustody {
                     child
                         .session
                         .as_ref()
-                        .expect("frozen actor Session")
+                        .ok_or_else(|| {
+                            invalid("actor final use retains its unresolved original constructor")
+                        })?
                         .clone_ref(py),
                     child
                         .prepared
                         .as_ref()
-                        .expect("frozen actor producer")
+                        .or(child.original_prepared.as_ref())
+                        .ok_or_else(|| invalid("actor final use lost its original producer"))?
                         .clone_ref(py),
                 )
+            };
+            if let Some(outer) = outer {
+                if self.children()?[bank].completion.is_none() {
+                    let cancellation = {
+                        let update = self.update.borrow(py);
+                        let target = update.session.borrow(py);
+                        let child = session.borrow(py);
+                        let target_owner = target.owner()?;
+                        let mut child_owner = child.owner()?;
+                        target_owner
+                            .cancel_prepared_actor_refresh(
+                                &update.inner,
+                                bank,
+                                Some(&mut *child_owner),
+                                &self.proof,
+                                outer,
+                            )
+                            .map_err(xlog_err)?
+                            .ok_or_else(|| {
+                                invalid(
+                                    "constructed actor cancellation lost its original child proof",
+                                )
+                            })?
+                    };
+                    self.children()?[bank].completion = Some(ActorRefreshCompletion::Cancelled {
+                        proof: cancellation,
+                    });
+                }
+                if !matches!(
+                    self.children()?[bank].completion,
+                    Some(ActorRefreshCompletion::Cancelled { .. })
+                ) {
+                    return Err(invalid(
+                        "actor cancellation cannot replace an observed execution",
+                    ));
+                }
+            } else if matches!(
+                self.children()?[bank].completion,
+                Some(ActorRefreshCompletion::Cancelled { .. })
+            ) {
+                return Err(invalid(
+                    "cancelled actor cannot become a completed execution",
+                ));
+            }
+            let cancellation = {
+                let children = self.children()?;
+                match children[bank].completion.as_ref() {
+                    Some(ActorRefreshCompletion::Cancelled { proof }) => Some(proof.clone()),
+                    _ => None,
+                }
             };
             let attached = self.children()?[bank].retirement_attached;
             if !attached {
@@ -519,7 +649,12 @@ impl ActorRefreshCustody {
                 session
                     .borrow(py)
                     .owner()?
-                    .attach_actor_refresh_retirement_work(&self.proof, bank, work.clone())
+                    .attach_actor_refresh_retirement_work(
+                        &self.proof,
+                        bank,
+                        work.clone(),
+                        cancellation.as_ref(),
+                    )
                     .map_err(xlog_err)?;
                 self.children()?[bank].retirement_attached = true;
             }
@@ -541,18 +676,46 @@ impl ActorRefreshCustody {
             // This graph is the original outer graph. Detaching a child never
             // creates or destroys an independent executable.
             if !self.children()?[bank].graph_retired {
-                let graph = session
-                    .borrow(py)
-                    .owner()?
-                    .take_prepared_executable_for_retirement()
-                    .map_err(xlog_err)?;
+                let graph = {
+                    let source = session.borrow(py);
+                    let mut owner = source.owner()?;
+                    match &cancellation {
+                        Some(proof) => {
+                            owner.take_cancelled_prepared_executable_for_retirement(proof)
+                        }
+                        None => owner.take_prepared_executable_for_retirement(),
+                    }
+                    .map_err(xlog_err)?
+                };
                 drop(graph);
-                session
+                {
+                    let source = session.borrow(py);
+                    let owner = source.owner()?;
+                    match &cancellation {
+                        Some(proof) => owner.require_cancelled_prepared_graph_retirement(proof),
+                        None => owner.require_completed_prepared_graph_retirement(),
+                    }
+                    .map_err(xlog_err)?;
+                }
+                self.children()?[bank].graph_retired = true;
+            }
+            let mut native_steps = self.children()?[bank].native_steps.clone();
+            if native_steps.is_empty() {
+                native_steps = session
                     .borrow(py)
                     .owner()?
-                    .require_completed_prepared_graph_retirement()
+                    .prepared_segment_preparation_handles()
                     .map_err(xlog_err)?;
-                self.children()?[bank].graph_retired = true;
+                self.children()?[bank].native_steps = native_steps.clone();
+            }
+            for step in &native_steps {
+                let source = session.borrow(py);
+                let mut owner = source.owner()?;
+                match &cancellation {
+                    Some(proof) => owner.quiesce_cancelled_prepared_step(step, proof, streams),
+                    None => owner.quiesce_prepared_step(step, streams),
+                }
+                .map_err(xlog_err)?;
             }
             {
                 let mut children = self.children()?;
@@ -580,7 +743,7 @@ impl ActorRefreshCustody {
     fn retire_after_parent_callback(&self, py: Python<'_>, streams: &[u64]) -> PyResult<()> {
         self.require_access(py)?;
         for bank in 0..2 {
-            let (session, steps, resources_done) = {
+            let (session, steps, native_steps, cancellation, resources_done) = {
                 let mut children = self.children()?;
                 let child = &mut children[bank];
                 if child.retired {
@@ -611,6 +774,11 @@ impl ActorRefreshCustody {
                         .iter()
                         .map(|step| step.clone_ref(py))
                         .collect::<Vec<_>>(),
+                    child.native_steps.clone(),
+                    match child.completion.as_ref() {
+                        Some(ActorRefreshCompletion::Cancelled { proof }) => Some(proof.clone()),
+                        _ => None,
+                    },
                     child.resources_retired,
                 )
             };
@@ -621,21 +789,32 @@ impl ActorRefreshCustody {
                     step.borrow(py).release_recorded_producer_aliases(py)?;
                 }
                 drain_export_owners();
-                for step in &steps {
-                    session
-                        .borrow(py)
-                        .owner()?
-                        .release_prepared_step(&step.borrow(py).inner, streams)
+                for step in &native_steps {
+                    {
+                        let source = session.borrow(py);
+                        let mut owner = source.owner()?;
+                        match &cancellation {
+                            Some(proof) => {
+                                owner.release_cancelled_prepared_step(step, proof, streams)
+                            }
+                            None => owner.release_prepared_step(step, streams),
+                        }
                         .map_err(xlog_err)?;
+                    }
                     let removed = {
                         let mut children = self.children()?;
                         let child = &mut children[bank];
                         let index = child
+                            .native_steps
+                            .iter()
+                            .position(|original| original.same_handle(step))
+                            .ok_or_else(|| invalid("actor retirement changed its original step"))?;
+                        child.native_steps.remove(index);
+                        child
                             .steps
                             .iter()
-                            .position(|original| original.as_ptr() == step.as_ptr())
-                            .ok_or_else(|| invalid("actor retirement changed its original step"))?;
-                        child.steps.remove(index)
+                            .position(|original| original.borrow(py).inner.same_handle(step))
+                            .map(|index| child.steps.remove(index))
                     };
                     let removed_native = session
                         .borrow(py)
@@ -643,15 +822,23 @@ impl ActorRefreshCustody {
                         .lock()
                         .map_err(|_| invalid("prepared segment mutex is poisoned"))?
                         .as_mut()
-                        .ok_or_else(|| invalid("actor retirement lost its original segment"))?
-                        .steps
-                        .remove(0);
+                        .and_then(|original| {
+                            original
+                                .steps
+                                .iter()
+                                .position(|original| original.borrow(py).inner.same_handle(step))
+                                .map(|index| original.steps.remove(index))
+                        });
                     drop((removed, removed_native));
                 }
                 let native = session
                     .borrow(py)
                     .owner()?
-                    .take_actor_refresh_resources_for_retirement(&self.proof, bank)
+                    .take_actor_refresh_resources_for_retirement(
+                        &self.proof,
+                        bank,
+                        cancellation.as_ref(),
+                    )
                     .map_err(xlog_err)?;
                 drop(native);
                 let retained = session
@@ -686,11 +873,14 @@ impl ActorRefreshCustody {
                     let live = owner
                         .as_mut()
                         .ok_or_else(|| invalid("original actor Session was already released"))?;
-                    live.join_actor_refresh_release(&self.proof, bank)
+                    live.join_actor_refresh_release(&self.proof, bank, cancellation.as_ref())
                         .map_err(xlog_err)?;
-                    let (provider, _) = live.checkpoint_allocation_domain().map_err(xlog_err)?;
                     let mut children = self.children()?;
-                    children[bank].release_memory = Some(Arc::clone(provider.memory()));
+                    if children[bank].release_memory.is_none() {
+                        return Err(invalid(
+                            "actor release lost its original allocation manager",
+                        ));
+                    }
                     children[bank].native_released = true;
                     source.issuance.fetch_add(1, Ordering::AcqRel);
                     owner.take().expect("joined original actor Session")
@@ -1037,6 +1227,7 @@ impl ActorRefreshCustody {
             .map_err(xlog_err)?;
         let owner = session.owner()?;
         let (provider, domain) = owner.checkpoint_allocation_domain().map_err(xlog_err)?;
+        children[bank].release_memory = Some(Arc::clone(provider.memory()));
         children[bank].cold_work = Some(cold_work.clone());
         children[bank].construction_entered = true;
         Ok(CheckpointAllocationDomain {
@@ -1528,6 +1719,7 @@ impl PySemanticPreparedActorRefresh {
                 *stored = Some(PreparedPythonSegment {
                     scope: Arc::clone(&scope),
                     instruction: None,
+                    construction: None,
                     task_use: task_use.clone_ref(py),
                     steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                     resources,
