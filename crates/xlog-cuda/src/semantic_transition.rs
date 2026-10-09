@@ -12,7 +12,7 @@ mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 mod actor_refresh_program;
 #[cfg(feature = "semantic-policy")]
-pub use actor_refresh::SemanticPreparedActorRefresh;
+pub use actor_refresh::{SemanticActorRefreshInitializerRefusal, SemanticPreparedActorRefresh};
 #[cfg(feature = "semantic-policy")]
 pub use actor_refresh_program::SemanticSegmentInstructionAdmission;
 #[cfg(feature = "semantic-policy")]
@@ -17243,14 +17243,14 @@ impl SemanticTransitionSession {
         let mut native = [0u64; 9];
         for component in components {
             let key = (step.token, component.member_ordinal);
-            let marker = self.prepared_completion_read(component.marker, |bundle| {
+            let marker = self.prepared_completion_read(component.marker.clone(), |bundle| {
                 &mut bundle.actor_refresh.entry(key).or_default().marker
             })?[0];
             // An entered target bank must have reached every original initializer.
             if marker.abi != 1 || !matches!(marker.status, 0 | 2) {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            let tally = self.prepared_completion_read(component.native_work, |bundle| {
+            let tally = self.prepared_completion_read(component.native_work.clone(), |bundle| {
                 &mut bundle.actor_refresh.entry(key).or_default().native_work
             })?;
             if tally.len() != 11
@@ -17272,6 +17272,7 @@ impl SemanticTransitionSession {
             }
             if marker.status == 2 {
                 // The original initializer refused; child model/output owners were never entered.
+                component.retain_initializer_refusal(marker, &tally)?;
                 continue;
             }
             if marker.acquired_generation == 0 {
@@ -17900,8 +17901,9 @@ impl SemanticTransitionSession {
             }
             2 => {
                 // The same outer completion already authenticated this marker
-                // and its reached native tally. Only observation uncertainty
-                // is resolved; no child outcome or retirement proof is issued.
+                // and its reached native tally. Retain its distinct final-use
+                // certificate without fabricating child model outcomes.
+                self.retain_actor_refresh_initializer_refusal(actual)?;
                 self.prepared_segment.as_mut().expect("original embedded actor")
                     .execution_poisoned = false;
                 Err(SemanticTransitionError::PublicationRefused {
@@ -25364,16 +25366,27 @@ impl SemanticTransitionSession {
     pub fn take_prepared_executable_for_retirement(
         &mut self,
     ) -> Result<Option<CapturedCudaGraph>, SemanticTransitionError> {
-        if self
-            .prepared_segment
-            .as_ref()
-            .is_none_or(|build| !build.completed)
-        {
+        if !self.prepared_retirement_completion_known()? {
             return Err(publication_input_error(
                 "prepared executable retirement requires known actual completion",
             ));
         }
         Ok(self.captured.take())
+    }
+
+    fn prepared_retirement_completion_known(&self) -> Result<bool, SemanticTransitionError> {
+        let Some(build) = self.prepared_segment.as_ref() else {
+            return Ok(false);
+        };
+        if build.completed {
+            return Ok(true);
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            return Ok(self.checked_actor_refresh_initializer_refusal()?.is_some());
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        Ok(false)
     }
 
     /// The cancelled graph was never submitted. Its authentic preparation join
@@ -25412,11 +25425,7 @@ impl SemanticTransitionSession {
         &self,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
-        if !self
-            .prepared_segment
-            .as_ref()
-            .is_some_and(|build| build.completed)
-        {
+        if !self.prepared_retirement_completion_known()? {
             return Err(publication_input_error(
                 "prepared graph retirement requires actual completion",
             ));
@@ -25471,7 +25480,7 @@ impl SemanticTransitionSession {
         if let Some(proof) = cancellation {
             build.require_non_submission(proof)?;
             self.require_cancelled_prepared_graph_retirement(proof)?;
-        } else if !build.completed {
+        } else if !self.prepared_retirement_completion_known()? {
             return Err(publication_input_error(
                 "prepared resource retirement lacks actual completion",
             ));
@@ -31598,12 +31607,7 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
         self.checked_original_prepared_consumer_step(step)?;
-        if !self
-            .prepared_segment
-            .as_ref()
-            .expect("checked prepared scope")
-            .completed
-        {
+        if !self.prepared_retirement_completion_known()? {
             return Err(publication_input_error(
                 "prepared step cannot retire before actual segment completion",
             ));
