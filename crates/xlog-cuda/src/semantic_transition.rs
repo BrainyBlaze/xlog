@@ -11623,6 +11623,7 @@ impl PreparedModelUpdate {
         training_view: &SemanticSelectedTrainingView,
         task: &TrackedCudaSlice<u64>,
         model_work: &PreparedModelWork,
+        bank: usize,
         native_resident_bytes: u64,
     ) -> Result<(), SemanticTransitionError> {
         let output = self.output.as_ref().ok_or_else(|| {
@@ -11690,7 +11691,7 @@ impl PreparedModelUpdate {
             row_stride_bytes: logits.strides_bytes[0],
             position_stride_bytes: logits.strides_bytes[1],
             vocabulary_stride_bytes: logits.strides_bytes[2],
-            model_work: model_work.descriptor(),
+            model_work: model_work.descriptor_for_bank(bank),
             accounted_reserved_bytes,
             // Initialization is original producer work. Native acceptance
             // publishes this exact pending generation without a second copy.
@@ -11722,6 +11723,8 @@ impl PreparedModelUpdate {
 
 struct PreparedModelWork {
     recording: ModelWorkRecording,
+    second_recording: Option<ModelWorkRecording>,
+    content_banks: BTreeMap<usize, usize>,
     device: TrackedCudaSlice<ModelWorkEvent>,
     actual: TrackedCudaSlice<u64>,
     reset: CudaFunction,
@@ -11823,7 +11826,31 @@ impl PreparedModelWork {
         reservation: &mut crate::memory::GpuMemoryReservation,
         capacity: usize,
     ) -> Result<Self, SemanticTransitionError> {
+        Self::allocate_rosters(provider, reservation, capacity, false)
+    }
+
+    fn allocate_banked(
+        provider: &Arc<CudaKernelProvider>,
+        reservation: &mut crate::memory::GpuMemoryReservation,
+        capacity: usize,
+    ) -> Result<Self, SemanticTransitionError> {
+        Self::allocate_rosters(provider, reservation, capacity, true)
+    }
+
+    fn allocate_rosters(
+        provider: &Arc<CudaKernelProvider>,
+        reservation: &mut crate::memory::GpuMemoryReservation,
+        capacity: usize,
+        banked: bool,
+    ) -> Result<Self, SemanticTransitionError> {
         let recording = ModelWorkRecording::new(capacity).map_err(publication_input_error)?;
+        let second_recording = banked
+            .then(|| ModelWorkRecording::new(capacity))
+            .transpose()
+            .map_err(publication_input_error)?;
+        let event_capacity = capacity
+            .checked_mul(if banked { 2 } else { 1 })
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let reset = provider
             .device()
             .inner()
@@ -11836,8 +11863,10 @@ impl PreparedModelWork {
             .ok_or_else(|| runtime_error("kernel lookup", "model invocation marker unavailable"))?;
         Ok(Self {
             recording,
+            second_recording,
+            content_banks: BTreeMap::new(),
             device: reservation
-                .alloc(capacity)
+                .alloc(event_capacity)
                 .map_err(|error| runtime_error("original model work allocation", error))?,
             actual: reservation
                 .alloc(
@@ -11862,7 +11891,11 @@ impl PreparedModelWork {
 
     #[cfg(feature = "semantic-policy")]
     fn begin_capture(&mut self, bank: usize, recorded: u8) -> Result<(), &'static str> {
-        if bank > 1 || self.capture_bank.is_some() || self.uncaptured_recording {
+        if bank > 1
+            || self.second_recording.is_none()
+            || self.capture_bank.is_some()
+            || self.uncaptured_recording
+        {
             return Err("model work capture requires one inactive bank recording");
         }
         if (bank == 0 && (recorded != 0 || self.recording.frozen_bound().is_some()))
@@ -11890,9 +11923,30 @@ impl PreparedModelWork {
             Some(0) => self.recording.push(event)?,
             None if self.uncaptured_recording => self.recording.push(event)?,
             Some(1) => {
-                if self.recording.events().get(slot) != Some(&event) {
+                let original = self
+                    .recording
+                    .events()
+                    .get(slot)
+                    .ok_or("second model branch added an original work occurrence")?;
+                // Saved copies are distinct original producers in each bank.
+                // Compare their operation coordinates, not their issued witness
+                // identities; both complete events remain in their own roster.
+                let matches = if event.kind == ModelWorkKind::SavedCopyBytes as u64 {
+                    original.kind == event.kind
+                        && original.tensor == event.tensor
+                        && original.rank == event.rank
+                        && original.dimensions == event.dimensions
+                        && original.actual == event.actual
+                } else {
+                    *original == event
+                };
+                if !matches {
                     return Err("second model branch differs from original work geometry");
                 }
+                self.second_recording
+                    .as_mut()
+                    .ok_or("second model branch has no original event reservation")?
+                    .push(event)?;
                 self.replay_cursor += 1;
             }
             _ => return Err("model work event requires an active prepared bank capture"),
@@ -11944,8 +11998,19 @@ impl PreparedModelWork {
         if bank == 0 {
             self.recording.require_model_invocations()?;
             self.recording.freeze()?;
-        } else if self.replay_cursor != self.recording.events().len() {
-            return Err("second model branch omitted original work occurrences");
+        } else {
+            if self.replay_cursor != self.recording.events().len() {
+                return Err("second model branch omitted original work occurrences");
+            }
+            let second = self
+                .second_recording
+                .as_mut()
+                .ok_or("second model branch has no original event reservation")?;
+            second.require_model_invocations()?;
+            second.freeze()?;
+            if second.frozen_bound() != self.recording.frozen_bound() {
+                return Err("second model branch changed the original work bound");
+            }
         }
         self.capture_bank = None;
         self.replay_cursor = 0;
@@ -12123,11 +12188,37 @@ impl PreparedModelWork {
     }
 
     fn descriptor(&self) -> ModelWorkInput {
+        self.descriptor_for_bank(0)
+    }
+
+    fn recording_for_bank(&self, bank: usize) -> &ModelWorkRecording {
+        match bank {
+            0 => &self.recording,
+            1 => self
+                .second_recording
+                .as_ref()
+                .expect("second original model work bank was reserved"),
+            _ => unreachable!("original model work bank is zero or one"),
+        }
+    }
+
+    fn events_for_bank(&self, bank: usize) -> &[ModelWorkEvent] {
+        self.recording_for_bank(bank).events()
+    }
+
+    fn event_view_for_bank(&self, bank: usize) -> DeviceMemoryView<ModelWorkEvent> {
+        let begin = bank * (self.actual.len() / 3);
+        self.device
+            .view()
+            .slice(begin..begin + self.events_for_bank(bank).len())
+    }
+
+    fn descriptor_for_bank(&self, bank: usize) -> ModelWorkInput {
+        let recording = self.recording_for_bank(bank);
         ModelWorkInput {
-            events: self.device.device_ptr_value(),
-            count: self.recording.events().len() as u64,
-            bound: self
-                .recording
+            events: *self.event_view_for_bank(bank).device_ptr(),
+            count: recording.events().len() as u64,
+            bound: recording
                 .frozen_bound()
                 .expect("original work frozen before enqueue"),
         }
@@ -14605,6 +14696,7 @@ struct TransitionKernelIo<'a> {
     text: Option<&'a TextBindingStorage>,
     lease: Option<&'a TrackedCudaSlice<PublicationLease>>,
     model_work: Option<&'a PreparedModelWork>,
+    model_work_bank: usize,
     replay_custody: Option<&'a PreparedReplayCustody>,
     model_update: Option<&'a PreparedModelUpdate>,
     training_selection: Option<&'a DeviceMemoryView<SemanticTrainingViewSelection>>,
@@ -16687,7 +16779,7 @@ impl SemanticSegmentColdCapacity {
 
     fn model_work_bytes(self) -> Result<u64, SemanticTransitionError> {
         self.model_work_capacity
-            .checked_mul(size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
+            .checked_mul(2 * size_of::<ModelWorkEvent>() + 3 * size_of::<u64>())
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
@@ -17794,12 +17886,13 @@ pub fn cancel_prepared_segment_before_submission(
                             .model_work
                             .as_ref()
                             .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                        let recording = work.recording_for_bank(usize::from(bank));
                         (
-                            work.recording
+                            recording
                                 .frozen_certificate()
                                 .map_err(publication_input_error)?,
                             work.actual.view(),
-                            work.recording.events().to_vec(),
+                            recording.events().to_vec(),
                         )
                     };
                     let (mut certificates, child_events) =
@@ -20253,7 +20346,7 @@ impl SemanticTransitionSession {
             {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
-            PreparedModelWork::allocate(&self.provider, reservation, event_capacity)?
+            PreparedModelWork::allocate_banked(&self.provider, reservation, event_capacity)?
         };
         // Initialize the complete exported scratch allocation cold. Each real
         // producer occurrence additionally records its own reset before use.
@@ -20436,6 +20529,14 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("saved work requires its original cold reservation")
                 })?;
+            let bank = work.capture_bank.ok_or_else(|| {
+                publication_input_error("saved work requires its active original bank capture")
+            })?;
+            if work.content_banks.get(&witness.index) != Some(&bank) {
+                return Err(publication_input_error(
+                    "saved work requires a witness issued in this original bank capture",
+                ));
+            }
             for (index, tensor) in content.tensors.iter().enumerate() {
                 let layout = &tensor.layout;
                 let dimensions = layout
@@ -21724,7 +21825,7 @@ impl SemanticTransitionSession {
                 inputs.header.view(),
                 prepared.result.view(),
                 work.actual.view(),
-                work.recording.events().to_vec(),
+                work.events_for_bank((binding.0.word & 1) as usize).to_vec(),
             )
         };
         let header = self.publication_read(header_view)?[0];
@@ -24405,11 +24506,13 @@ impl SemanticTransitionSession {
                 });
             }
             let owner = self.steps.get_mut(&step.token).expect("checked fixed step");
-            owner
-                .prepared
-                .as_mut()
-                .expect("prepared content owner")
-                .next_digest = next;
+            let prepared = owner.prepared.as_mut().expect("prepared content owner");
+            prepared.next_digest = next;
+            if let Some(work) = prepared.model_work.as_mut()
+                && let Some(bank) = work.capture_bank
+            {
+                work.content_banks.insert(index, bank);
+            }
             owner.content[index].seals = TensorContentSeals::Captured(digests);
             let handle = SemanticTensorContentWitness {
                 issuer: Arc::clone(&self.publication_issuer),
@@ -25992,12 +26095,21 @@ impl SemanticTransitionSession {
                         .checked_add(custody.copy_work_bound()?)
                         .ok_or(SemanticTransitionError::GenerationExhausted)?;
                 }
-                writes.push(state_restoration::OriginalDeviceWrite::new(
-                    &self.stream,
-                    work.recording.events(),
-                    work.device.view().slice(..work.recording.events().len()),
-                    false,
-                )?);
+                for bank in 0..2 {
+                    let recording = work.recording_for_bank(bank);
+                    if recording.frozen_bound() != work.recording.frozen_bound() {
+                        return Err(publication_input_error(
+                            "prepared model banks require their matched frozen original rosters",
+                        ));
+                    }
+                    let events = recording.events();
+                    writes.push(state_restoration::OriginalDeviceWrite::new(
+                        &self.stream,
+                        events,
+                        work.event_view_for_bank(bank),
+                        false,
+                    )?);
+                }
                 for branch in &prepared.branches {
                     if let Some(update) = &branch.model_update {
                         let output = update.output.as_ref().ok_or_else(|| {
@@ -34946,6 +35058,7 @@ impl SemanticTransitionSession {
                         .model_work
                         .as_ref()
                         .expect("prepared model work frozen above"),
+                    bank,
                     self.provider.memory().allocated_bytes(),
                 )?;
             }
@@ -37080,6 +37193,7 @@ impl SemanticTransitionSession {
             text: Some(&policy.text_binding),
             lease: None,
             model_work: None,
+            model_work_bank: 0,
             model_update: None,
             replay_custody: None,
             training_selection: None,
@@ -38430,6 +38544,7 @@ impl SemanticTransitionSession {
             state: &self.state,
             text,
             model_work: None,
+            model_work_bank: 0,
             replay_custody: None,
             model_update: None,
             lease: self
@@ -38496,6 +38611,7 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy,
             model_work: prepared.model_work.as_ref(),
+            model_work_bank: bank,
             replay_custody: prepared.replay_custody.as_ref(),
             model_update: branch.model_update.as_ref(),
             training_selection: branch
@@ -38543,6 +38659,7 @@ impl SemanticTransitionSession {
             lease: Some(&prepared.reader),
             policy: None,
             model_work: None,
+            model_work_bank: 0,
             model_update: None,
             training_selection: None,
             replay_custody: None,
@@ -38615,7 +38732,9 @@ impl SemanticTransitionSession {
             policy,
             model_work: io
                 .model_work
-                .map_or(ModelWorkInput::default(), PreparedModelWork::descriptor),
+                .map_or(ModelWorkInput::default(), |work| {
+                    work.descriptor_for_bank(io.model_work_bank)
+                }),
         })
     }
 

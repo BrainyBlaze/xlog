@@ -1720,24 +1720,30 @@ impl SemanticTransitionSession {
                 model_actual: [recompute_work.actual.view(), proposal_work.actual.view()],
                 model_recordings: [
                     recompute_work
-                        .recording
+                        .recording_for_bank(0)
                         .frozen_certificate()
                         .map_err(publication_input_error)?,
                     proposal_work
-                        .recording
+                        .recording_for_bank(1)
                         .frozen_certificate()
                         .map_err(publication_input_error)?,
                 ],
                 model_event_records: [
-                    recompute_work.recording.events().to_vec(),
-                    proposal_work.recording.events().to_vec(),
+                    recompute_work.events_for_bank(0).to_vec(),
+                    proposal_work.events_for_bank(1).to_vec(),
                 ],
                 native_ceiling: staged.native_ceiling,
                 transition_ceilings:
                     native_work_bound::actor_refresh_transition_native_work_ceilings(self)?,
                 initializer_observation: Arc::clone(&staged.initializer_observation),
-                model_events: [recompute_work.device.view(), proposal_work.device.view()],
-                model_inputs: [recompute_work.descriptor(), proposal_work.descriptor()],
+                model_events: [
+                    recompute_work.event_view_for_bank(0),
+                    proposal_work.event_view_for_bank(1),
+                ],
+                model_inputs: [
+                    recompute_work.descriptor_for_bank(0),
+                    proposal_work.descriptor_for_bank(1),
+                ],
             });
         }
         Ok(Arc::clone(&staged.device))
