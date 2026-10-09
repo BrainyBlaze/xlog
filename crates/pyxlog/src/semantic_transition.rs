@@ -6666,13 +6666,16 @@ fn task_evaluation_spec(
     if query_ordinals.len() != statement_records.len() {
         return Err(invalid("task queries differ from the original statement roster"));
     }
-    if editable_program.is_some()
-        && (statement_records.iter().enumerate().any(|(index, record)| *record as usize != index)
-            || query_ordinals.iter().enumerate().any(|(index, ordinal)| *ordinal != index))
-    {
-        return Err(invalid(
-            "editable task requires the original statement and observer query order",
-        ));
+    if let Some(editable) = &editable_program {
+        let original_queries = match &task_ground {
+            xlog_cuda::SemanticTaskGround::Logical => query_ordinals.iter().zip(&statement_records)
+                .all(|(ordinal, record)| *ordinal == *record as usize),
+            xlog_cuda::SemanticTaskGround::Coding(_) => query_ordinals.iter().enumerate()
+                .all(|(index, ordinal)| *ordinal == index),
+        };
+        if editable.query_records != statement_records || !original_queries {
+            return Err(invalid("editable task requires its original admitted query selection and source query order"));
+        }
     }
     let scoring = &values[4];
     let scoring = scoring.fields(6)?;
@@ -7391,6 +7394,7 @@ impl TaskAuthority {
             .iter()
             .map(|&index| ("statement".to_owned(), index))
             .chain(supports.iter().map(|&index| ("support".to_owned(), index)))
+            .chain(ground.bindings().iter().map(|binding| ("statement".to_owned(), binding.observation_record)))
             .chain(std::iter::once((match ground {
                 xlog_cuda::SemanticTaskGround::Logical => "observer",
                 xlog_cuda::SemanticTaskGround::Coding(_) => "program",

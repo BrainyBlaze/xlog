@@ -859,7 +859,7 @@ impl TaskEvaluationBinding {
             || observation.result_bytes.is_empty()
             || observation.actual_truths.len() != spec.statement_records.len()
             || spec.program.editable_program().is_some_and(|program| {
-                program.queries.len() != spec.statement_records.len()
+                program.query_records != spec.statement_records
             })
         {
             return Err(publication_input_error(

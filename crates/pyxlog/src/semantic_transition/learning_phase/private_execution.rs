@@ -171,6 +171,7 @@ impl PySemanticPrivateReplayChild {
             cold.input_facts.as_str(),
             cold.observer_source.as_deref(),
             PyTuple::new(py, &cold.statements)?,
+            PyTuple::new(py, &cold.query_records)?,
         )
             .into_pyobject(py)?
             .unbind()

@@ -233,6 +233,36 @@ class SemanticModelEvaluation:
         ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
+class SemanticTransitionColdTask:
+    """Original admitted statement roster and its explicit ordered query selection."""
+
+    def __init__(
+        self, *, initial_theory: str, input_facts: str,
+        observer_program: Optional[str], statements: tuple[tuple[str, int], ...],
+        query_records: tuple[int, ...], task_ground: tuple[str, tuple[Any, ...]],
+        training_canary_source: Optional[SemanticTransitionColdTask],
+        capacities: tuple[int, int, int, int],
+        admission_limits: tuple[int, int, int, int], device_ordinal: int,
+        memory_bytes: int, provenance_capacity_records: int, prefix_capacity: int,
+        feedback_capacity: int, pad_token: int, terminal_tokens: tuple[int, ...],
+        final_intent_payload_bytes: int, intent_effect: bytes,
+        intent_entry_capacity: int, intent_payload_capacity_bytes: int,
+        acknowledgement_payload_capacity_bytes: int,
+        authority_decisions_capacity_bytes: int, generations: tuple[int, int, int, int],
+        training_cursor: int, training_rng: tuple[int, int, int, int], fuel: int,
+        rng: tuple[int, int, int], private_replay_child: Any = None,
+    ) -> None: ...
+
+    @property
+    def task_content(self) -> tuple[bytes, bytes, bytes, tuple[int, ...]]: ...
+    @property
+    def statement_records(self) -> tuple[int, ...]:
+        """Original selected record indices, preserving order and repeated selections."""
+        ...
+    @property
+    def task_ground(self) -> tuple[str, tuple[Any, ...]]: ...
+    def close(self) -> None: ...
+
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
 
