@@ -31521,7 +31521,12 @@ impl SemanticTransitionSession {
     }
 
     pub fn is_poisoned(&self) -> bool {
+        self.is_poisoned_except_cold_report(None)
+    }
+
+    fn has_unresolved_native_effect(&self) -> bool {
         self.poisoned || self.graph.ensure_not_poisoned().is_err()
+            || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
             || {
                 #[cfg(feature = "semantic-policy")]
                 {
@@ -31530,6 +31535,31 @@ impl SemanticTransitionSession {
                 }
                 #[cfg(not(feature = "semantic-policy"))]
                 { false }
+            }
+    }
+
+    fn is_poisoned_except_cold_report(&self, except_token: Option<u64>) -> bool {
+        self.has_unresolved_native_effect()
+            || self.readers.values().any(|reader| reader.retirement_pending)
+            || self.steps.values().any(|step| step.consumer_completion.is_some())
+            || {
+                #[cfg(feature = "semantic-policy")]
+                { self.has_pending_cold_model_work_completion(except_token) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { let _ = except_token; false }
+            }
+    }
+
+    fn original_completion_base_may_submit(&self) -> bool {
+        !self.has_unresolved_native_effect()
+            && !self.pending
+            && self.pending_replay_delivery.is_none()
+            && self.pending_training_materialization.is_none()
+            && {
+                #[cfg(feature = "semantic-policy")]
+                { !self.has_pending_cold_model_work_completion(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { true }
             }
     }
 
@@ -36799,7 +36829,14 @@ impl SemanticTransitionSession {
     }
 
     fn ensure_quiescent(&self) -> Result<(), SemanticTransitionError> {
-        if self.is_poisoned() {
+        self.ensure_quiescent_except_cold_report(None)
+    }
+
+    fn ensure_quiescent_except_cold_report(
+        &self,
+        except_token: Option<u64>,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.is_poisoned_except_cold_report(except_token) {
             Err(SemanticTransitionError::Poisoned)
         } else if self.pending
             || self.pending_replay_delivery.is_some()
