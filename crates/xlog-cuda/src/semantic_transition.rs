@@ -9550,6 +9550,8 @@ struct PreparedStepInputs {
     execute: CudaFunction,
     guard: CudaFunction,
     completed_guard: CudaFunction,
+    #[cfg(feature = "semantic-policy")]
+    original_preparation: Mutex<Option<native_work_bound::OriginalStepInputPreparation>>,
 }
 
 impl PreparedStepInputs {
@@ -9767,6 +9769,8 @@ impl PreparedStepInputs {
             execute,
             guard,
             completed_guard,
+            #[cfg(feature = "semantic-policy")]
+            original_preparation: Mutex::new(None),
         };
         owner.validate_output_regions()?;
         Ok(owner)
@@ -9873,11 +9877,146 @@ impl PreparedStepInputs {
         Ok(())
     }
 
+    #[cfg(feature = "semantic-policy")]
+    fn initialize_original(
+        &self,
+        provider: &CudaKernelProvider,
+        domain: &ResidentExecutionDomain,
+        allowance: Option<&Arc<Mutex<native_work_bound::ColdNativeAllowance>>>,
+        native_work: Option<DeviceMemoryView<u64>>,
+        directory: &[PublicationRange],
+    ) -> Result<(), SemanticTransitionError> {
+        let mut retained = self
+            .original_preparation
+            .lock()
+            .map_err(|_| publication_input_error("original step input preparation is poisoned"))?;
+        if retained.is_none() {
+            let stream = provider.device().inner().stream();
+            let writes = [
+                crate::device::RetainedDeviceWrite::new(
+                    stream,
+                    &self.binding_values[0],
+                    self.bindings[0].view(),
+                )
+                .map_err(|error| runtime_error("original step input staging", error))?,
+                crate::device::RetainedDeviceWrite::new(
+                    stream,
+                    &self.binding_values[1],
+                    self.bindings[1].view(),
+                )
+                .map_err(|error| runtime_error("original step input staging", error))?,
+            ];
+            let command = native_work_bound::OriginalNativeCommand::new(domain)?;
+            let claim = allowance
+                .map(|allowance| -> Result<_, SemanticTransitionError> {
+                    let claimed = allowance
+                        .lock()
+                        .map_err(|_| {
+                            publication_input_error("original step input allowance is poisoned")
+                        })?
+                        .claim_step_input_preparation(
+                            native_work_bound::step_input_producer_native_work_ceiling(
+                                &self.storage,
+                                &self.plans,
+                                directory,
+                            )?,
+                            native_work_bound::step_input_dma_ceiling(self.plans.len())?,
+                        )?;
+                    Ok(claimed.then(|| Arc::downgrade(allowance)))
+                })
+                .transpose()?
+                .flatten();
+            *retained = Some(native_work_bound::OriginalStepInputPreparation {
+                writes,
+                admitted: [false; 2],
+                recorded: [false; 2],
+                cursor: 0,
+                command,
+                allowance: claim,
+                native_work: native_work.clone(),
+            });
+        }
+        let original = retained
+            .as_mut()
+            .expect("installed original step input preparation");
+        if original
+            .native_work
+            .as_ref()
+            .map(|work| (*work.device_ptr(), work.len()))
+            != native_work
+                .as_ref()
+                .map(|work| (*work.device_ptr(), work.len()))
+        {
+            return Err(publication_input_error(
+                "original step input preparation changed its native tally",
+            ));
+        }
+        let original_allowance = original
+            .allowance
+            .as_ref()
+            .map(|original| -> Result<_, SemanticTransitionError> {
+                let original = original.upgrade().ok_or_else(|| {
+                    publication_input_error("original step inputs lost their admitted report")
+                })?;
+                if allowance.is_none_or(|current| !Arc::ptr_eq(current, &original)) {
+                    return Err(publication_input_error(
+                        "original step inputs changed their admitted report",
+                    ));
+                }
+                Ok(original)
+            })
+            .transpose()?;
+        let bytes = self.binding_values[0]
+            .len()
+            .checked_mul(size_of::<PublicationStepInput>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        while original.cursor < 2 {
+            let index = original.cursor;
+            if !original.admitted[index] {
+                provider.admit_launch_metadata_htod(bytes);
+                original.admitted[index] = true;
+            }
+            let submitted = if !original.writes[index].entered() {
+                original.writes[index]
+                    .enqueue(provider.device().inner().stream())
+                    .map_err(|error| runtime_error("original step input upload", error))
+            } else {
+                Ok(())
+            };
+            if original.writes[index].submitted() && !original.recorded[index] {
+                if let Some(allowance) = &original_allowance {
+                    allowance
+                        .lock()
+                        .map_err(|_| {
+                            publication_input_error("original step input allowance is poisoned")
+                        })?
+                        .record_submitted_dma(bytes)?;
+                }
+                original.recorded[index] = true;
+            }
+            submitted?;
+            original.writes[index]
+                .resolve()
+                .map_err(|error| runtime_error("original step input upload completion", error))?;
+            original.cursor += 1;
+        }
+        Ok(())
+    }
+
     fn enqueue(
         &self,
         domain: &ResidentExecutionDomain,
         poisoned: &mut bool,
     ) -> Result<(), SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        let mut original = self
+            .original_preparation
+            .lock()
+            .map_err(|_| publication_input_error("original step input preparation is poisoned"))?;
+        #[cfg(feature = "semantic-policy")]
+        let cold_work = original
+            .as_ref()
+            .and_then(|original| original.native_work.clone());
         let mut recorder = domain.new_strict_recorder();
         recorder.read(&self.reader);
         recorder.read(&self.storage.control);
@@ -9906,6 +10045,10 @@ impl PreparedStepInputs {
         for allocation in &self.private {
             recorder.write(allocation);
         }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(work) = &cold_work {
+            recorder.read_write(work);
+        }
         let arguments = (
             self.storage.control.device_ptr_value(),
             *self.reader.device_ptr(),
@@ -9916,7 +10059,48 @@ impl PreparedStepInputs {
             self.source.device_ptr_value(),
             self.ranges.device_ptr_value(),
             self.metadata_digests.device_ptr_value(),
+            {
+                #[cfg(feature = "semantic-policy")]
+                {
+                    cold_work.as_ref().map_or(0, |work| *work.device_ptr())
+                }
+                #[cfg(not(feature = "semantic-policy"))]
+                {
+                    0u64
+                }
+            },
         );
+        #[cfg(feature = "semantic-policy")]
+        if let Some(original) = original.as_mut() {
+            if original.cursor != 2 {
+                return Err(publication_input_error(
+                    "original step input metadata uploads are incomplete",
+                ));
+            }
+            return original.command.run(
+                domain,
+                poisoned,
+                recorder,
+                |enqueue, entered, submitted| {
+                    // SAFETY: the original owner retains both fixed metadata banks,
+                    // all actual sources/outputs and the exact original tally.
+                    unsafe {
+                        self.execute.clone().launch_raw_in_original(
+                            enqueue,
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            arguments,
+                            entered,
+                            submitted,
+                        )
+                    }
+                    .map_err(|error| XlogError::Kernel(error.to_string()))
+                },
+            );
+        }
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: every selectable bank and disjoint output is owned before
             // enqueue. The kernel validates all original seals before writing.
@@ -26574,6 +26758,15 @@ impl SemanticTransitionSession {
             })?;
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|e| runtime_error("content guard stream admission", e))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(original) = original.as_deref_mut() {
+            if let Some(allowance) = self.cold_native_allowance(lease.token)? {
+                original.claim_model_contract_guard(
+                    &allowance,
+                    native_work_bound::model_contract_guard_native_work_ceiling(&storage, &lease.directory)?,
+                )?;
+            }
+        }
         let result = (|| {
             self.order_content_inputs(lease, consumer_stream)?;
             if let Some(inputs) = &inputs {
@@ -27297,11 +27490,36 @@ impl SemanticTransitionSession {
         &mut self,
         lease: &SemanticPublishedLease,
     ) -> Result<Arc<PreparedStepInputs>, SemanticTransitionError> {
+        #[cfg(feature = "semantic-policy")]
+        if let Some(inputs) = self
+            .steps
+            .get(&lease.token)
+            .and_then(|step| step.inputs.as_ref())
+            .map(Arc::clone)
+        {
+            let pending = inputs
+                .original_preparation
+                .lock()
+                .map_err(|_| {
+                    publication_input_error("original step input preparation is poisoned")
+                })?
+                .as_ref()
+                .is_some_and(|original| !original.command.completed());
+            if pending {
+                self.require_original_cold_content_reader(lease)?;
+                return self.resume_original_step_inputs(lease, inputs);
+            }
+        }
         self.checked_reader(lease)?;
         self.checked_step(lease)?;
         lease.model_context_header()?;
         if let Some(inputs) = &self.steps[&lease.token].inputs {
             return Ok(Arc::clone(inputs));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(allowance) = self.cold_native_allowance(lease.token)? {
+            allowance.lock().map_err(|_| publication_input_error("original step input allowance is poisoned"))?
+                .content_ceiling()?;
         }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("step input preparation stream admission", error))?;
@@ -27322,14 +27540,71 @@ impl SemanticTransitionSession {
             .get_mut(&lease.token)
             .expect("validated input step")
             .inputs = Some(Arc::clone(&inputs));
+        #[cfg(feature = "semantic-policy")]
+        {
+            return self.resume_original_step_inputs(lease, inputs);
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let result = inputs
+                .initialize(&self.provider)
+                .and_then(|()| inputs.enqueue(&self.domain, &mut self.poisoned));
+            if let Err(error) = result {
+                self.poisoned = true;
+                return Err(error);
+            }
+            Ok(inputs)
+        }
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn resume_original_step_inputs(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        inputs: Arc<PreparedStepInputs>,
+    ) -> Result<Arc<PreparedStepInputs>, SemanticTransitionError> {
+        self.require_original_cold_content_reader(lease)?;
+        let allowance = self.cold_native_allowance(lease.token)?;
+        let native_work = self.cold_native_work(lease.token)?;
         let result = inputs
-            .initialize(&self.provider)
+            .initialize_original(
+                &self.provider,
+                &self.domain,
+                allowance.as_ref(),
+                native_work,
+                &lease.directory,
+            )
             .and_then(|()| inputs.enqueue(&self.domain, &mut self.poisoned));
         if let Err(error) = result {
             self.poisoned = true;
             return Err(error);
         }
         Ok(inputs)
+    }
+
+    /// Join only the already entered original context-preparation prefix.
+    /// `true` means its original kernel completed; `false` proves that kernel
+    /// never entered after every entered metadata copy joined. Neither result
+    /// exports a context, clears historical poison, or submits untouched work.
+    #[cfg(feature = "semantic-policy")]
+    pub fn resolve_model_context_preparation(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<bool, SemanticTransitionError> {
+        let inputs = Arc::clone(self.require_original_cold_content_reader(lease)?.inputs.as_ref()
+            .ok_or_else(|| publication_input_error("model context has no retained original preparation"))?);
+        if inputs.reader.device_ptr() != self.readers[&lease.token].device.view().device_ptr()
+            || !Arc::ptr_eq(&inputs.storage,self.publication.as_ref().ok_or(SemanticTransitionError::NotBound)?) {
+            return Err(publication_input_error("model context continuation changed its original native owner"));
+        }
+        let mut retained=inputs.original_preparation.lock().map_err(|_| publication_input_error("original step input preparation is poisoned"))?;
+        let original=retained.as_mut().ok_or_else(|| publication_input_error("model context has no original cold preparation"))?;
+        for write in &mut original.writes {
+            if write.entered() {
+                write.resolve().map_err(|error| runtime_error("original step input upload completion",error))?;
+            }
+        }
+        original.command.resolve_entered(&mut self.poisoned)
     }
 
     /// Export private step-owned physical source slots without host copying or rotation.

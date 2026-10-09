@@ -264,6 +264,10 @@ pub(crate) struct RetainedDeviceWrite<T: DeviceRepr> {
 }
 
 impl<T: DeviceRepr> RetainedDeviceWrite<T> {
+    pub(crate) fn submitted(&self) -> bool {
+        self.submitted
+    }
+
     pub(crate) fn new(
         stream: &CudaStream,
         source: &[T],

@@ -306,6 +306,19 @@ impl SemanticTransitionSession {
             )?;
         }
         let [output, objective] = inputs;
+        let step_input_preparation = if self.steps[&lease.token].inputs.is_none() {
+            let plans = native_work_bound::step_input_plans(storage, &lease.directory)?;
+            Some((
+                native_work_bound::step_input_producer_native_work_ceiling(
+                    storage,
+                    &plans,
+                    &lease.directory,
+                )?,
+                native_work_bound::step_input_dma_ceiling(plans.len())?,
+            ))
+        } else {
+            None
+        };
         let output = prepare_semantic_tensors(&self.provider, output)?;
         let objective = prepare_semantic_tensors(&self.provider, objective)?;
         // The initial source observation and the mutually exclusive completed
@@ -342,6 +355,11 @@ impl SemanticTransitionSession {
                 model_ceiling,
                 preparation_ceiling,
                 model_snapshot,
+                native_work_bound::model_contract_guard_native_work_ceiling(
+                    storage,
+                    &lease.directory,
+                )?,
+                step_input_preparation,
             )?,
         })
     }
