@@ -21,6 +21,8 @@ from pyxlog._native import (
     SemanticColdModelWork as SemanticColdModelWork,
     SemanticColdModelWorkOperation as SemanticColdModelWorkOperation,
     SemanticTransitionController as SemanticTransitionController,
+    SemanticPreparedActorRefresh as SemanticPreparedActorRefresh,
+    SemanticRetainedFinalUsePending as SemanticRetainedFinalUsePending,
     SemanticTransitionColdTask as SemanticTransitionColdTask,
     SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
     CarrierRefused as CarrierRefused,

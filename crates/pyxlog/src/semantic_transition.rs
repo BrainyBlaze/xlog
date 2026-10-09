@@ -50,6 +50,8 @@ use crate::types::{val_err, xlog_err};
 pub(crate) mod cold_task;
 pub(crate) mod learning_phase;
 #[cfg(feature = "semantic-policy")]
+pub(crate) mod actor_refresh;
+#[cfg(feature = "semantic-policy")]
 pub(crate) mod model_evaluation;
 
 pyo3::create_exception!(
@@ -350,6 +352,8 @@ pub(crate) struct PySemanticTransitionSession {
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
     #[cfg(feature = "semantic-policy")]
     private_replay_child: Mutex<Option<Arc<learning_phase::PrivateReplayChildCustody>>>,
+    #[cfg(feature = "semantic-policy")]
+    actor_refresh_child: Mutex<Option<actor_refresh::ActorRefreshSession>>,
     issuance: Arc<AtomicU64>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
@@ -390,6 +394,14 @@ impl PySemanticTransitionSession {
             .map_err(|_| invalid("original private replay Session custody is poisoned"))
     }
 
+    #[cfg(feature = "semantic-policy")]
+    fn actor_refresh_custody(&self) -> PyResult<Option<(Arc<actor_refresh::ActorRefreshCustody>, usize)>> {
+        self.actor_refresh_child.lock().map_err(|_| invalid("original actor Session custody is poisoned"))?
+            .as_ref().map(|child| child.owner.upgrade()
+                .map(|owner| (owner, child.bank))
+                .ok_or_else(|| invalid("actor Session lost its original outer owner"))).transpose()
+    }
+
     fn refuse_failed_import(&self, owner: &mut SemanticTransitionSession) {
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = self
@@ -410,6 +422,10 @@ impl PySemanticTransitionSession {
 
     fn owner(&self) -> PyResult<SemanticSessionGuard<'_>> {
         self.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some((owner, _)) = self.actor_refresh_custody()? {
+            Python::attach(|py| owner.require_access(py))?;
+        }
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = self.private_replay_custody()? {
             Python::attach(|py| child.require_access(py))?;
@@ -641,6 +657,8 @@ impl PySemanticTransitionSession {
             active_cold_model_work: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             private_replay_child: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            actor_refresh_child: Mutex::new(None),
             issuance: Arc::new(AtomicU64::new(0)),
             proposal_expense,
             checkpoint_sources,
@@ -3739,6 +3757,7 @@ struct PreparedPythonSegment {
     task_use: Py<PySemanticTransitionTaskUse>,
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
+    prepared_owner: Option<Py<PyAny>>,
     #[cfg(feature = "semantic-policy")]
     checkpoint_phase: CheckpointTaskPhase,
     producers_retired: bool,
@@ -3754,6 +3773,8 @@ struct PreparedPythonSegment {
     completion: Option<PreparedSegmentCompletion>,
     #[cfg(feature = "semantic-policy")]
     cold_callbacks: Vec<Arc<Mutex<PreparedColdCallback>>>,
+    #[cfg(feature = "semantic-policy")]
+    actor_refreshes: Vec<Arc<actor_refresh::ActorRefreshCustody>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -12478,7 +12499,7 @@ impl PySemanticPreparedStep {
     /// ``leaves`` are ``(GradientEdge_or_None, effective_input,
     /// gradient_input_or_None, presence_input, phase_mask_input)`` in the
     /// original physical parameter order.
-    #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream, group_member=None))]
+    #[pyo3(signature = (bank, phase, accumulation, leaves, *, consumer_stream, group_member=None, actor_refresh=None))]
     fn register_gradient_delivery(
         &self,
         bank: &Bound<'_, PyAny>,
@@ -12487,6 +12508,7 @@ impl PySemanticPreparedStep {
         leaves: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
         group_member: Option<Py<PySemanticRetainedReplayMember>>,
+        actor_refresh: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PySemanticGradientDelivery>> {
         let py = bank.py();
         let session = self.session.borrow(py);
@@ -12496,13 +12518,20 @@ impl PySemanticPreparedStep {
         if bank > 1 {
             return Err(invalid("gradient delivery requires bank zero or one"));
         }
+        if group_member.is_some() && actor_refresh.is_some() {
+            return Err(invalid("gradient delivery must name one original historical or CURRENT member"));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let actor_refresh = actor_refresh.map(|owner| owner
+            .extract::<PyRef<'_, actor_refresh::PySemanticPreparedActorRefresh>>()
+            .map(|owner| Arc::clone(&owner.inner))).transpose()?;
         #[cfg(not(feature = "semantic-policy"))]
-        if group_member.is_some() {
+        if group_member.is_some() || actor_refresh.is_some() {
             return Err(invalid(
                 "group gradient delivery requires a semantic-policy build",
             ));
         }
-        if group_member.is_none() {
+        if group_member.is_none() && actor_refresh.is_none() {
             let owners = self
                 .gradient_deliveries
                 .lock()
@@ -12547,6 +12576,8 @@ impl PySemanticPreparedStep {
         let consumer_stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
         let check = || {
             self.require_task(py, &self.task_use.borrow(py))?;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(actor) = &actor_refresh { actor.require_update(py, self, bank)?; }
             #[cfg(feature = "semantic-policy")]
             if let Some(member) = &group_member {
                 let member = member.borrow(py);
@@ -12677,7 +12708,9 @@ impl PySemanticPreparedStep {
         self.content_binding_with_owner(py, &owner)?;
         let inputs = parsed.handoff.into_native();
         #[cfg(feature = "semantic-policy")]
-        let binding = if let Some(member) = &group_member {
+        let binding = if let Some(actor) = &actor_refresh {
+            actor.bind_delivery(py, self, bank, &mut owner, inputs, consumer_stream)
+        } else if let Some(member) = &group_member {
             let member = member.borrow(py);
             let source = member.session.borrow(py);
             let source_owner = source.owner()?;
@@ -12695,10 +12728,11 @@ impl PySemanticPreparedStep {
                 inputs,
                 consumer_stream,
             )
+            .map_err(xlog_err)
         } else {
             owner.bind_prepared_gradient_delivery(&self.inner, bank, inputs, consumer_stream)
-        }
-        .map_err(xlog_err)?;
+                .map_err(xlog_err)
+        }?;
         #[cfg(not(feature = "semantic-policy"))]
         let binding = owner
             .bind_prepared_gradient_delivery(&self.inner, bank, inputs, consumer_stream)
@@ -12799,7 +12833,7 @@ impl PySemanticPreparedStep {
                 handles: Mutex::new(None),
                 deferred_hooks: Mutex::new(deferred_hooks),
                 activated_once: AtomicBool::new(false),
-                shared_reset: group_member.is_some(),
+                shared_reset: group_member.is_some() || actor_refresh.is_some(),
                 restores: Mutex::new(Vec::new()),
                 hook_cleanup: Mutex::new(GradientHookCleanup::Ready),
             },
@@ -12808,10 +12842,18 @@ impl PySemanticPreparedStep {
             .gradient_deliveries
             .lock()
             .map_err(|_| PyRuntimeError::new_err("gradient-delivery roster is poisoned"))?;
-        if group_member.is_none() && owners[bank].is_some() {
+        if group_member.is_none() && actor_refresh.is_none() && owners[bank].is_some() {
             return Err(invalid(
                 "gradient delivery was already registered for this bank",
             ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(actor) = &actor_refresh {
+            actor.retain_delivery(py, bank, &delivery)?;
+            self.group_gradient_deliveries.lock().map_err(|_| {
+                PyRuntimeError::new_err("group gradient-delivery roster is poisoned")
+            })?[bank].push(delivery.clone_ref(py));
+            return Ok(delivery);
         }
         #[cfg(feature = "semantic-policy")]
         if let Some(member) = &group_member {
@@ -16950,6 +16992,7 @@ impl PySemanticTransitionController {
                 task_use: task_use.clone_ref(py),
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
+                prepared_owner: None,
                 checkpoint_phase: checkpoint_phase.clone(),
                 producers_retired: false,
                 producer_retirement_entered: false,
@@ -16961,12 +17004,17 @@ impl PySemanticTransitionController {
                 #[cfg(feature = "semantic-policy")]
                 completion: None,
                 cold_callbacks: Vec::new(),
+                actor_refreshes: Vec::new(),
             });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
         let prepared_owner = recording_callback(check, || {
             producer.bind(py).getattr("prepared_segment_owner")
         })?;
         let original_prepared = recording_callback(check, || prepared_owner.call0())?;
+        session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .as_mut().ok_or_else(|| invalid("prepared owner lost its original segment"))?
+            .prepared_owner = Some(original_prepared.clone().unbind());
         resources
             .producers
             .lock()
@@ -17042,6 +17090,13 @@ impl PySemanticTransitionController {
                 }
                 Ok(())
             })?;
+            let actor_refreshes = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .as_ref().ok_or_else(|| invalid("prepared recording lost its original owner"))?
+                .actor_refreshes.clone();
+            for child in &actor_refreshes {
+                child.prepare_successors(py)?;
+            }
             #[cfg(feature = "semantic-policy")]
             if let Some(private) = &private {
                 private
@@ -17060,193 +17115,17 @@ impl PySemanticTransitionController {
                     "native recording stream changed after cold preparation",
                 ));
             }
-            for step in &steps {
-                check()?;
-                let native = step.borrow(py).inner.clone();
-                let admission_error = std::cell::RefCell::new(None);
-                let admission = capture.add_conditional_if(
-                    &stream,
-                    |handle| -> PyResult<()> {
-                        let result = (|| -> PyResult<()> {
-                            session
-                                .owner()?
-                                .record_prepared_step_admission(&native, handle)
-                                .map_err(xlog_err)?;
-                            #[cfg(feature = "semantic-policy")]
-                            if let Some(private) = &private {
-                                private.borrow(py).bind_private_step_capture(
-                                    py,
-                                    &session,
-                                    &issued,
-                                    &step.borrow(py),
-                                    stream.cu_stream() as u64,
-                                    false,
-                                )?;
-                            }
-                            Ok(())
-                        })();
-                        if let Err(value) = &result {
-                            *admission_error.borrow_mut() = Some(value.clone_ref(py));
-                        }
-                        result
-                    },
-                    |body| {
-                        body.capture_on_stream(&stream, || -> PyResult<()> {
-                            let result = session
-                                .owner()?
-                                .record_prepared_step_inputs(&native)
-                                .map_err(xlog_err);
-                            if let Err(value) = &result {
-                                *admission_error.borrow_mut() = Some(value.clone_ref(py));
-                            }
-                            result
-                        })
-                    },
-                );
-                if let Err(graph_error) = admission {
-                    return Err(admission_error
-                        .into_inner()
-                        .unwrap_or_else(|| xlog_err(graph_error)));
-                }
-
-                for bank in 0..2 {
-                    let requested_error = std::cell::RefCell::new(None);
-                    let requested = capture.add_conditional_if(
-                        &stream,
-                        |handle| -> PyResult<()> {
-                            let result = session
-                                .owner()?
-                                .record_prepared_step_requested_bank_gate(&native, bank, handle)
-                                .map_err(xlog_err);
-                            if let Err(value) = &result {
-                                *requested_error.borrow_mut() = Some(value.clone_ref(py));
-                            }
-                            result
-                        },
-                        |body| {
-                            body.capture_on_stream(&stream, || -> PyResult<()> {
-                                let result = (|| {
-                                    session
-                                        .owner()?
-                                        .begin_prepared_step_bank_capture(&native, bank)
-                                        .map_err(xlog_err)?;
-                                    session
-                                        .owner()?
-                                        .record_prepared_bank_model_content(&native, bank)
-                                        .map_err(xlog_err)?;
-                                    let enqueue = recording_callback(check, || {
-                                        prepared.getattr("enqueue_step")
-                                    })?;
-                                    recording_callback(check, || {
-                                        let value = enqueue.call1((step.clone_ref(py), bank))?;
-                                        if !value.is_none() {
-                                            return Err(invalid(
-                                                "enqueue_step must return None, not a host result",
-                                            ));
-                                        }
-                                        Ok(())
-                                    })?;
-                                    session
-                                        .owner()?
-                                        .enqueue_prepared_transition(&native, bank)
-                                        .map_err(xlog_err)
-                                })();
-                                if let Err(value) = &result {
-                                    *requested_error.borrow_mut() = Some(value.clone_ref(py));
-                                }
-                                result
-                            })
-                        },
-                    );
-                    if let Err(graph_error) = requested {
-                        return Err(requested_error
-                            .into_inner()
-                            .unwrap_or_else(|| xlog_err(graph_error)));
-                    }
-                }
-
-                let drain_error = std::cell::RefCell::new(None);
-                let drain = capture.add_conditional_if(
-                    &stream,
-                    |handle| -> PyResult<()> {
-                        let result = session
-                            .owner()?
-                            .record_prepared_step_drain_gate(&native, handle)
-                            .map_err(xlog_err);
-                        if let Err(value) = &result {
-                            *drain_error.borrow_mut() = Some(value.clone_ref(py));
-                        }
-                        result
-                    },
-                    |body| {
-                        body.capture_on_stream(&stream, || -> PyResult<()> {
-                            let result = session
-                                .owner()?
-                                .enqueue_prepared_drain(&native)
-                                .map_err(xlog_err);
-                            if let Err(value) = &result {
-                                *drain_error.borrow_mut() = Some(value.clone_ref(py));
-                            }
-                            result
-                        })
-                    },
-                );
-                if let Err(graph_error) = drain {
-                    return Err(drain_error
-                        .into_inner()
-                        .unwrap_or_else(|| xlog_err(graph_error)));
-                }
-
-                let release_error = std::cell::RefCell::new(None);
-                let release = capture.add_conditional_if(
-                    &stream,
-                    |handle| -> PyResult<()> {
-                        let result = session
-                            .owner()?
-                            .record_prepared_step_active_gate(&native, handle)
-                            .map_err(xlog_err);
-                        if let Err(value) = &result {
-                            *release_error.borrow_mut() = Some(value.clone_ref(py));
-                        }
-                        result
-                    },
-                    |body| {
-                        body.capture_on_stream(&stream, || -> PyResult<()> {
-                            let result = (|| -> PyResult<()> {
-                                session
-                                    .owner()?
-                                    .record_prepared_step_release(&native)
-                                    .map_err(xlog_err)?;
-                                #[cfg(feature = "semantic-policy")]
-                                if let Some(private) = &private {
-                                    private.borrow(py).bind_private_step_capture(
-                                        py,
-                                        &session,
-                                        &issued,
-                                        &step.borrow(py),
-                                        stream.cu_stream() as u64,
-                                        true,
-                                    )?;
-                                }
-                                Ok(())
-                            })();
-                            if let Err(value) = &result {
-                                *release_error.borrow_mut() = Some(value.clone_ref(py));
-                            }
-                            result
-                        })
-                    },
-                );
-                if let Err(graph_error) = release {
-                    return Err(release_error
-                        .into_inner()
-                        .unwrap_or_else(|| xlog_err(graph_error)));
-                }
-                check()?;
-            }
+            actor_refresh::record_prepared_steps(
+                &mut actor_refresh::PreparedCaptureSequence::Outer(&mut capture), py,
+                &session, &issued, &steps, &prepared, &stream, &check,
+                private.as_ref(), &actor_refreshes,
+            )?;
             // Instantiation and any graph destructor run outside the owner lock.
             let mut executable = Some(capture.instantiate().map_err(xlog_err)?);
             check()?;
+            for child in &actor_refreshes {
+                child.finish_recording(py)?;
+            }
             let installed = session
                 .owner()?
                 .finish_prepared_segment(&mut executable)
@@ -18449,6 +18328,8 @@ impl PySemanticTransitionController {
         #[cfg(feature = "semantic-policy")]
         let private_child = session.private_replay_custody()?;
         #[cfg(feature = "semantic-policy")]
+        let actor_child = session.actor_refresh_custody()?;
+        #[cfg(feature = "semantic-policy")]
         if let Some(child) = &private_child {
             child.require_controller(&self.identity)?;
         }
@@ -18479,7 +18360,7 @@ impl PySemanticTransitionController {
             original_program, actor_refresh_initial_kit,
             [material_limit, total_material_limit, evidence_limit], &mut budget)?;
         #[cfg(feature = "semantic-policy")]
-        let inherit_original_admission = private_child.is_some();
+        let inherit_original_admission = private_child.is_some() || actor_child.is_some();
         #[cfg(not(feature = "semantic-policy"))]
         let inherit_original_admission = false;
         session.proposal_expense.lock()
@@ -18525,6 +18406,9 @@ impl PySemanticTransitionController {
             .as_ref()
             .map(|child| child.source_checkpoint(py))
             .transpose()?;
+        #[cfg(feature = "semantic-policy")]
+        let source_checkpoint = actor_child.as_ref().map(|(child, _)| child.source_checkpoint())
+            .or(source_checkpoint);
         #[cfg(not(feature = "semantic-policy"))]
         let source_checkpoint: Option<Arc<VerifiedCheckpointSource>> = None;
         let training_objective_value = if let Some(source) = &source_checkpoint {
@@ -18643,6 +18527,11 @@ impl PySemanticTransitionController {
                 &values,
             )?;
             (Some(ordinal), Some(material))
+        } else if actor_child.is_some() {
+            if retain_policy || replay_selection != ColdValue::None {
+                return Err(invalid("CURRENT actor source import stages context only, never a historical policy replay"));
+            }
+            (None, None)
         } else {
             decode_selected_replay(&authority.replay, &replay_selection)?
         };
@@ -18653,7 +18542,13 @@ impl PySemanticTransitionController {
             .owner()?
             .task_observation_roots(
                 &spec,
-                selected_material.as_ref().map(|binding| &binding.material),
+                {
+                    #[cfg(feature = "semantic-policy")]
+                    { actor_child.as_ref().map(|(child, _)| child.material())
+                        .or_else(|| selected_material.as_ref().map(|binding| &binding.material)) }
+                    #[cfg(not(feature = "semantic-policy"))]
+                    { selected_material.as_ref().map(|binding| &binding.material) }
+                },
             )
             .map_err(xlog_err)?;
         authority.bind_native_reads(&observations, &spec.allowed_support_records, &spec.task_ground)?;
@@ -18719,7 +18614,11 @@ impl PySemanticTransitionController {
             let expense = session.proposal_expense.lock()
                 .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?
                 .clone();
-            if let Some(admission) = &expense.original_admission {
+            #[cfg(feature = "semantic-policy")]
+            let bind_original_program = actor_child.is_none();
+            #[cfg(not(feature = "semantic-policy"))]
+            let bind_original_program = true;
+            if let Some(admission) = expense.original_admission.as_ref().filter(|_| bind_original_program) {
                 admission.bind_native(py, &mut owner, &authority.live, proposal_capacity)?;
             }
             if !checkpoint_referents.is_empty() || source_checkpoint.is_some() {
@@ -18731,6 +18630,8 @@ impl PySemanticTransitionController {
                         Some(0),
                         native_task,
                     )?;
+                } else if let Some((child, _)) = &actor_child {
+                    require_selected_checkpoint_referent_task(&[child.original_row().clone()], Some(0), native_task)?;
                 } else {
                     require_selected_checkpoint_referent_task(
                         &authority.replay,
@@ -18827,6 +18728,10 @@ impl PySemanticTransitionController {
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = session.private_replay_custody()? {
             child.retain_import_task(py, &task_use)?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some((child, bank)) = &actor_child {
+            child.retain_import_task(py, *bank, &task_use)?;
         }
         if let (Some(ordinal), Some(material), Some(kind)) =
             (selection, selected_material, transition)

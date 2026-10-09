@@ -189,13 +189,19 @@ impl PreparedReplayCustody {
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "stage the original replay allocations and initialization writes in one admitted roster"
+    )]
     pub(super) fn allocate(
         provider: &CudaKernelProvider,
+        stream: &CudaStream,
         storage: &PublicationStorage,
         inputs: &Arc<PreparedStepInputs>,
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
         learning_phases: &[SemanticLearningPhaseRecord],
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
     ) -> Result<Self, SemanticTransitionError> {
         let copy = provider
             .device()
@@ -208,12 +214,13 @@ impl PreparedReplayCustody {
         #[cfg(not(feature = "semantic-policy"))]
         let _ = learning_phases;
         let parent = ReplaySnapshot::allocate(
-            provider,
+            stream,
             storage,
             replay_plan(storage, true, &inputs.model_slots)?,
             storage.bank_templates[0].len(),
             arena_words,
             reservation,
+            writes,
         )?;
         let mut input_views = BTreeMap::new();
         let mut values = inputs.binding_values[0].clone();
@@ -259,19 +266,22 @@ impl PreparedReplayCustody {
         let input_bindings = reservation
             .alloc(values.len())
             .map_err(|error| runtime_error("retained input guard reservation", error))?;
-        upload_publication(provider, &values, &input_bindings)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &values, input_bindings.view(), false,
+        )?);
         Ok(Self {
             parent,
             input_bindings,
             input_views,
             original_inputs: Arc::clone(inputs),
             successor: ReplaySnapshot::allocate(
-                provider,
+                stream,
                 storage,
                 replay_plan(storage, false, &inputs.model_slots)?,
                 storage.bank_templates[0].len(),
                 0,
                 reservation,
+                writes,
             )?,
             copy,
             #[cfg(feature = "semantic-policy")]
@@ -1015,12 +1025,13 @@ impl SemanticTransitionSession {
 
 impl ReplaySnapshot {
     fn allocate(
-        provider: &CudaKernelProvider,
+        stream: &CudaStream,
         storage: &PublicationStorage,
         mut plan: Vec<ReplayCopyRow>,
         count: usize,
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
     ) -> Result<Self, SemanticTransitionError> {
         let mut backings = Vec::with_capacity(plan.len());
         let mut model_owners = Vec::new();
@@ -1052,7 +1063,9 @@ impl ReplaySnapshot {
         let rows = reservation
             .alloc(plan.len())
             .map_err(|error| runtime_error("replay roster reservation", error))?;
-        upload_publication(provider, &plan, &rows)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &plan, rows.view(), false,
+        )?);
         let bank = reservation
             .alloc(1)
             .map_err(|error| runtime_error("replay bank reservation", error))?;
@@ -1071,7 +1084,9 @@ impl ReplaySnapshot {
         let actual = reservation
             .alloc(3)
             .map_err(|error| runtime_error("replay work reservation", error))?;
-        upload_publication(provider, &[0u64; 3], &actual)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &[0u64; 3], actual.view(), false,
+        )?);
         Ok(Self {
             rows,
             plan,

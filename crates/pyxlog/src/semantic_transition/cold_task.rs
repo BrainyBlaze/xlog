@@ -350,7 +350,7 @@ impl PySemanticTransitionColdTask {
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, private_replay_child=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -385,7 +385,20 @@ impl PySemanticTransitionColdTask {
         fuel: u64,
         rng: (u64, u8, u32),
         private_replay_child: Option<&Bound<'_, PyAny>>,
+        prepared_actor_refresh: Option<&Bound<'_, PyAny>>,
+        actor_refresh_bank: Option<usize>,
     ) -> PyResult<Self> {
+        if private_replay_child.is_some() && prepared_actor_refresh.is_some()
+            || prepared_actor_refresh.is_some() != actor_refresh_bank.is_some()
+            || actor_refresh_bank.is_some_and(|bank| bank > 1)
+        {
+            return Err(invalid("actor construction requires one typed owner and original bank, not a historical replay child"));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let actor_custody = prepared_actor_refresh.map(|owner| {
+            owner.extract::<PyRef<'_, super::actor_refresh::PySemanticPreparedActorRefresh>>()
+                .map(|owner| Arc::clone(&owner.inner))
+        }).transpose()?;
         #[cfg(feature = "semantic-policy")]
         let replay_custody = private_replay_child
             .map(|child| {
@@ -399,9 +412,14 @@ impl PySemanticTransitionColdTask {
             .as_ref()
             .map(|child| child.allocation(py))
             .transpose()?;
+        #[cfg(feature = "semantic-policy")]
+        let allocation = match &actor_custody {
+            Some(owner) => Some(owner.allocation(py, actor_refresh_bank.expect("checked actor bank"))?),
+            None => allocation,
+        };
         #[cfg(not(feature = "semantic-policy"))]
         let allocation = {
-            if private_replay_child.is_some() {
+            if private_replay_child.is_some() || prepared_actor_refresh.is_some() {
                 return Err(invalid(
                     "private replay construction requires semantic-policy",
                 ));
@@ -534,6 +552,11 @@ impl PySemanticTransitionColdTask {
             .map(|child| child.shared_import_owners(py))
             .transpose()?
             .unwrap_or_else(import_owners);
+        #[cfg(feature = "semantic-policy")]
+        let (proposal_expense, checkpoint_sources) = match &actor_custody {
+            Some(owner) => owner.shared_import_owners(py)?,
+            None => (proposal_expense, checkpoint_sources),
+        };
         #[cfg(not(feature = "semantic-policy"))]
         let (proposal_expense, checkpoint_sources) = import_owners();
         let native_session = PySemanticTransitionSession::from_admission(
@@ -558,6 +581,10 @@ impl PySemanticTransitionColdTask {
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_session(py, &session)?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &actor_custody {
+            child.retain_session(py, actor_refresh_bank.expect("checked actor bank"), &session)?;
         }
         let content = (|| {
             let native_session = session.borrow(py);
@@ -588,6 +615,10 @@ impl PySemanticTransitionColdTask {
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_controller(&controller.borrow(py).identity)?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &actor_custody {
+            child.retain_controller(py, actor_refresh_bank.expect("checked actor bank"), &controller)?;
         }
         Ok(Self {
             session,

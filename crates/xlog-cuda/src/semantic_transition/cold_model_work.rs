@@ -379,7 +379,7 @@ impl SemanticTransitionSession {
         self.attach_cold_native_work(work)
     }
 
-    fn attach_cold_native_work(
+    pub(super) fn attach_cold_native_work(
         &mut self,
         work: SemanticColdNativeWork,
     ) -> Result<(), SemanticTransitionError> {
