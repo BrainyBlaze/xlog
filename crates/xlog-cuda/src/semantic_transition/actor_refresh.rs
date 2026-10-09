@@ -110,6 +110,7 @@ pub(super) struct StagedActorRefresh {
     native_ceiling: [u64; 9],
     initializer_observation: Arc<Mutex<Option<ActorRefreshInitializerObservation>>>,
     initializer_refusal: Option<SemanticActorRefreshInitializerRefusal>,
+    cancellation: Option<SemanticPreparedSegmentNonSubmission>,
 }
 
 struct ActorRefreshContextPreparation {
@@ -941,6 +942,18 @@ impl SemanticTransitionSession {
             }
             return self.resolve_actor_refresh_context(proof, target_bank);
         }
+        if proof.inner.cancelled.load(Ordering::Acquire)
+            || matches!(
+                *proof.inner.execution.lock().map_err(|_| publication_input_error(
+                    "original actor submission custody lock is poisoned"
+                ))?,
+                ActorRefreshParentExecution::NeverSubmitted
+            )
+        {
+            return Err(publication_input_error(
+                "cancelled actor context cannot begin original staging",
+            ));
+        }
         self.ensure_quiescent()?;
         let device = Arc::new(allocate_publication(&self.provider, 1)?);
         let native_work = Arc::new(allocate_publication(&self.provider, 11)?);
@@ -981,6 +994,7 @@ impl SemanticTransitionSession {
             native_ceiling: [0; 9],
             initializer_observation: Arc::new(Mutex::new(None)),
             initializer_refusal: None,
+            cancellation: None,
         });
         self.resolve_actor_refresh_context(proof, target_bank)
     }
@@ -1718,15 +1732,105 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    /// Retire one genuine unused child only after its original outer whole
+    /// roster was cancelled and the shared executable was destroyed.
+    pub fn cancel_prepared_actor_refresh(
+        &self,
+        update: &SemanticPreparedStep,
+        bank: usize,
+        child: Option<&mut SemanticTransitionSession>,
+        proof: &SemanticPreparedActorRefresh,
+        outer: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<Option<SemanticPreparedSegmentNonSubmission>, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        let build = self.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        build.check_retained(update, &self.publication_issuer)?;
+        build.require_non_submission(outer)?;
+        self.require_original_prepared_graph_retirement()?;
+        if bank > 1
+            || !Arc::ptr_eq(&update.issuer, &proof.inner.issuer)
+            || !Arc::ptr_eq(&update.scope, &proof.inner.scope)
+            || update.token != proof.inner.step
+            || !Arc::ptr_eq(&build.actor_refresh_execution, &proof.inner.execution)
+            || !Arc::ptr_eq(&build.cancelled, &proof.inner.cancelled)
+            || build.tokens.iter().position(|token| *token == update.token)
+                .is_none_or(|index| build.transitions[index] != SemanticTransitionKind::Update)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if !matches!(*proof.inner.execution.lock().map_err(|_| {
+            publication_input_error("original actor submission custody lock is poisoned")
+        })?, ActorRefreshParentExecution::NeverSubmitted) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let Some(child) = child else {
+            let children = proof.inner.children.lock().map_err(|_| {
+                publication_input_error("original actor child issuance lock is poisoned")
+            })?;
+            if children[bank].is_some() {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            return Ok(None);
+        };
+        let staged = child.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        let child_build = child.prepared_segment.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if bank != staged.target_bank
+            || !Arc::ptr_eq(&staged.proof.inner, &proof.inner)
+            || !Arc::ptr_eq(&child.provider, &proof.inner.provider)
+            || !Arc::ptr_eq(&child_build.actor_refresh_execution, &proof.inner.execution)
+            || !Arc::ptr_eq(&child_build.cancelled, &proof.inner.cancelled)
+            || child_build.transitions != [SemanticTransitionKind::Recompute, SemanticTransitionKind::Proposal]
+            || child_build.submitted
+            || child_build.completed
+            || child.captured.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if let Some(original) = &staged.cancellation {
+            child_build.require_non_submission(original)?;
+            return Ok(Some(original.clone()));
+        }
+        let handles = child_build.handles()?;
+        let cancellation = child.cancel_prepared_segment_before_submission(&handles)?;
+        child.actor_refresh.as_mut().expect("authenticated original actor")
+            .cancellation = Some(cancellation.clone());
+        Ok(Some(cancellation))
+    }
+
+    fn require_actor_refresh_final_use(
+        &self,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+    ) -> Result<(), SemanticTransitionError> {
+        let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+        if let Some(cancellation) = cancellation {
+            let retained = original.cancellation.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+            if !retained.matches(&cancellation.steps)
+                || !original.proof.inner.cancelled.load(Ordering::Acquire)
+                || !matches!(*original.proof.inner.execution.lock().map_err(|_| {
+                    publication_input_error("original actor submission custody lock is poisoned")
+                })?, ActorRefreshParentExecution::NeverSubmitted)
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+        } else {
+            if original.cancellation.is_some() {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            self.require_actor_refresh_parent_completion()?;
+        }
+        Ok(())
+    }
+
     /// Attach the same outer final-use report, never an invented child reader.
     pub fn attach_actor_refresh_retirement_work(
         &mut self,
         proof: &SemanticPreparedActorRefresh,
         bank: usize,
         work: SemanticColdNativeWork,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_quiescent()?;
-        self.require_actor_refresh_parent_completion()?;
+        self.require_actor_refresh_final_use(cancellation)?;
         let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
         if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
             || original.target_bank != bank
@@ -1743,8 +1847,9 @@ impl SemanticTransitionSession {
         &mut self,
         proof: &SemanticPreparedActorRefresh,
         bank: usize,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
     ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
-        self.require_actor_refresh_parent_completion()?;
+        self.require_actor_refresh_final_use(cancellation)?;
         let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;
         if !Arc::ptr_eq(&original.proof.inner, &proof.inner)
             || original.target_bank != bank
@@ -1752,7 +1857,10 @@ impl SemanticTransitionSession {
         {
             return Err(publication_input_error("actor resource retirement changed its original child"));
         }
-        let resources = self.take_prepared_resources_for_retirement()?;
+        let resources = match cancellation {
+            Some(cancellation) => self.take_cancelled_prepared_resources_for_retirement(cancellation)?,
+            None => self.take_prepared_resources_for_retirement()?,
+        };
         self.actor_refresh.as_mut().expect("authenticated original actor").retirement_complete = true;
         Ok(resources)
     }
@@ -1763,9 +1871,14 @@ impl SemanticTransitionSession {
         &mut self,
         proof: &SemanticPreparedActorRefresh,
         bank: usize,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
     ) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
-        self.require_actor_refresh_parent_completion()?;
+        if !self.has_retired_prepared_initialization() {
+            self.ensure_quiescent()?;
+        } else if !self.retired_prepared_initialization_may_release() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        self.require_actor_refresh_final_use(cancellation)?;
         self.require_closed_evaluations()?;
         self.require_completed_graph_retirements()?;
         let original = self.actor_refresh.as_ref().ok_or(SemanticTransitionError::NotBound)?;

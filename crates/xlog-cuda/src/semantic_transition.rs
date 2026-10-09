@@ -32062,8 +32062,31 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
+        self.quiesce_original_prepared_step(step, consumer_streams, None)
+    }
+
+    /// Join the final consumers of this genuine unused original preparation.
+    /// This does not observe or fabricate a step outcome.
+    pub fn quiesce_cancelled_prepared_step(
+        &mut self,
+        step: &SemanticPreparedStep,
+        proof: &SemanticPreparedSegmentNonSubmission,
+        consumer_streams: &[u64],
+    ) -> Result<(), SemanticTransitionError> {
+        self.quiesce_original_prepared_step(step, consumer_streams, Some(proof))
+    }
+
+    fn quiesce_original_prepared_step(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+    ) -> Result<(), SemanticTransitionError> {
         self.checked_original_prepared_consumer_step(step)?;
-        if !self.prepared_retirement_completion_known()? {
+        if let Some(cancellation) = cancellation {
+            self.prepared_segment.as_ref().expect("checked prepared scope")
+                .require_non_submission(cancellation)?;
+        } else if !self.prepared_retirement_completion_known()? {
             return Err(publication_input_error(
                 "prepared step cannot retire before actual segment completion",
             ));
