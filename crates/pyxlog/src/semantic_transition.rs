@@ -430,6 +430,49 @@ impl std::ops::DerefMut for SemanticSessionGuard<'_> {
 
 impl PySemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
+    fn prepared_memory_scope(
+        &self,
+        py: Python<'_>,
+        scope: &Arc<()>,
+        observed: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.require_creator()?;
+        let (prepared, cached) = {
+            let stored = self.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let stored = stored.as_ref().ok_or_else(|| invalid("original prepared memory owner is absent"))?;
+            if !Arc::ptr_eq(&stored.scope, scope) {
+                return Err(invalid("prepared memory changed its original segment scope"));
+            }
+            (stored.prepared_owner.as_ref().map(|owner| owner.clone_ref(py)),
+             stored.memory_scope.as_ref().map(|owner| owner.clone_ref(py)))
+        };
+        if observed.is_none() {
+            if let Some(cached) = cached { return Ok(cached); }
+        }
+        // Python attribute access is outside the original segment mutex.
+        let memory = match observed {
+            Some(memory) => memory.clone().unbind(),
+            None => prepared.ok_or_else(|| invalid("original prepared producer is absent"))?
+                .bind(py).getattr("memory_scope")?.unbind(),
+        };
+        let mut stored = self.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+        let stored = stored.as_mut().ok_or_else(|| invalid("original prepared memory owner is absent"))?;
+        if !Arc::ptr_eq(&stored.scope, scope) {
+            return Err(invalid("prepared memory changed its original segment scope"));
+        }
+        if let Some(original) = &stored.memory_scope {
+            if original.as_ptr() != memory.as_ptr() {
+                return Err(invalid("prepared producer changed the original borrowed memory scope"));
+            }
+        } else {
+            stored.memory_scope = Some(memory.clone_ref(py));
+        }
+        Ok(memory)
+    }
+
+    #[cfg(feature = "semantic-policy")]
     fn private_replay_custody(
         &self,
     ) -> PyResult<Option<Arc<learning_phase::PrivateReplayChildCustody>>> {
@@ -3803,6 +3846,7 @@ struct PreparedPythonSegment {
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
     prepared_owner: Option<Py<PyAny>>,
+    memory_scope: Option<Py<PyAny>>,
     #[cfg(feature = "semantic-policy")]
     checkpoint_phase: CheckpointTaskPhase,
     producers_retired: bool,
@@ -17245,6 +17289,7 @@ impl PySemanticTransitionController {
                 steps: steps.iter().map(|step| step.clone_ref(py)).collect(),
                 resources: Arc::clone(&resources),
                 prepared_owner: None,
+                memory_scope: None,
                 checkpoint_phase: checkpoint_phase.clone(),
                 producers_retired: false,
                 producer_retirement_entered: false,
@@ -17314,6 +17359,7 @@ impl PySemanticTransitionController {
             ));
         }
         let memory = recording_callback(check, || prepared.getattr("memory_scope"))?;
+        let memory = session.prepared_memory_scope(py, &scope, Some(&memory))?.into_bound(py);
         resources
             .producers
             .lock()
