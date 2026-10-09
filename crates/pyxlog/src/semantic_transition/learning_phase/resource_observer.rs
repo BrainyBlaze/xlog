@@ -32,6 +32,8 @@ type ReadStep = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, *mut TraceVi
 type ReadCertificate = unsafe extern "C" fn(*mut c_void, *const u8, *mut DeviceCertificate) -> u32;
 type RecordRoot =
     unsafe extern "C" fn(*mut c_void, *const xlog_cuda::memory::GpuBackingRoot) -> u32;
+type ResolveStepCancellation =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64) -> u32;
 
 // These are the exact layouts of the installed xlog_resource_observer.h.
 // Event storage remains producer-owned; this memory consumer never dereferences it.
@@ -55,6 +57,7 @@ struct Api {
     read_step: Option<ReadStep>,
     read_certificate: Option<ReadCertificate>,
     record_root: Option<RecordRoot>,
+    resolve_step_cancellation: Option<ResolveStepCancellation>,
 }
 
 #[repr(C)]
@@ -102,14 +105,14 @@ struct TraceView {
 }
 
 const _: () = assert!(
-    size_of::<Api>() == 80
+    size_of::<Api>() == 88
         && size_of::<TraceView>() == 240
         && size_of::<DeviceCertificate>() == 120
         && size_of::<xlog_cuda::memory::GpuBackingRoot>() == 64
 );
 
 fn checked_api(capsule: &Bound<'_, PyCapsule>) -> PyResult<(usize, Api)> {
-    let pointer = capsule.pointer_checked(Some(c"xlog.resource_observer.v3"))?;
+    let pointer = capsule.pointer_checked(Some(c"xlog.resource_observer.v4"))?;
     if !(pointer.as_ptr() as usize).is_multiple_of(align_of::<Api>()) {
         return Err(invalid(
             "resource observer table has invalid C ABI alignment",
@@ -118,14 +121,18 @@ fn checked_api(capsule: &Bound<'_, PyCapsule>) -> PyResult<(usize, Api)> {
     // SAFETY: original trusted capsule pins its immutable C table. Read only
     // the common header before checking the exact new layout, never an old ABI.
     let header = unsafe { &*pointer.as_ptr().cast::<ApiHeader>() };
-    if header.abi_version != 3 || header.struct_size as usize != size_of::<Api>() {
+    if header.abi_version != 4 || header.struct_size as usize != size_of::<Api>() {
         return Err(invalid(
             "resource observer requires the exact installed C ABI table",
         ));
     }
     // SAFETY: checked original header establishes this complete immutable ABI.
     let api = unsafe { *pointer.as_ptr().cast::<Api>() };
-    if api.context.is_null() || api.record_root.is_none() || api.read_certificate.is_none() {
+    if api.context.is_null()
+        || api.record_root.is_none()
+        || api.read_certificate.is_none()
+        || api.resolve_step_cancellation.is_none()
+    {
         return Err(invalid(
             "resource observer requires its original backing producer and device certificate",
         ));
@@ -390,6 +397,8 @@ struct Interval {
     released: bool,
     steps: Vec<StepInterval>,
     cancellation_attempted: bool,
+    cancellation_arguments: Option<(u64, u64, u64)>,
+    cancellation_status: u32,
     cancelled_roster: bool,
 }
 
@@ -408,6 +417,7 @@ pub(super) struct ResourceObserver {
     release: Release,
     bind_step: BindStep,
     read_step: ReadStep,
+    resolve_step_cancellation: ResolveStepCancellation,
     certificate: DeviceCertificate,
     original_context: u64,
     interval: Mutex<Option<Interval>>,
@@ -452,6 +462,7 @@ impl ResourceObserver {
             release: api.release.ok_or_else(missing)?,
             bind_step: api.bind_step.ok_or_else(missing)?,
             read_step: api.read_step.ok_or_else(missing)?,
+            resolve_step_cancellation: api.resolve_step_cancellation.ok_or_else(missing)?,
             certificate,
             original_context,
             interval: Mutex::new(None),
@@ -463,7 +474,7 @@ impl ResourceObserver {
             || self
                 .capsule
                 .bind(py)
-                .pointer_checked(Some(c"xlog.resource_observer.v3"))?
+                .pointer_checked(Some(c"xlog.resource_observer.v4"))?
                 .as_ptr() as usize
                 != self.table
         {
@@ -539,6 +550,8 @@ impl ResourceObserver {
             released: false,
             steps: Vec::new(),
             cancellation_attempted: false,
+            cancellation_arguments: None,
+            cancellation_status: UNKNOWN,
             cancelled_roster: false,
         });
         let interval = retained.as_mut().expect("retained before original begin");
@@ -634,7 +647,7 @@ impl ResourceObserver {
                 peak: None,
             });
         }
-        // SAFETY: original pinned ABI2 context and handle; these immutable
+        // SAFETY: original pinned ABI context and handle; these immutable
         // original ordinals and stream identify the kernel just enqueued inside
         // its actual capture. The collector resolves and retains the node here.
         let status = unsafe {
@@ -698,6 +711,7 @@ impl ResourceObserver {
             ));
         }
         interval.cancellation_attempted = true;
+        interval.cancellation_arguments = Some((ordinal, count, capture_stream));
         // SAFETY: site 2 is the installed whole-roster cancellation contract on
         // this same pinned table/handle. The native proof excludes submit after
         // known EndCapture and actual preparation joins. Here step_ordinal is
@@ -712,10 +726,72 @@ impl ResourceObserver {
                 CANCEL_GROUP,
             )
         };
+        interval.cancellation_status = status;
         if status != COMPLETE {
             return Err(invalid(
                 "original capture cancellation is unknown; retain its same interval and owners",
             ));
+        }
+        interval.cancelled_roster = true;
+        Ok(())
+    }
+
+    /// Observe the same original cancellation, never repeat its handoff or
+    /// replace the native non-submission proof with collector activity.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn resolve_step_cancellation(
+        &self,
+        py: Python<'_>,
+        ordinal: u64,
+        steps: &[SemanticPreparedStep],
+        capture_stream: u64,
+        proof: &xlog_cuda::SemanticPreparedSegmentNonSubmission,
+    ) -> PyResult<()> {
+        self.require_original(py)?;
+        let mut retained = self.interval()?;
+        let interval = retained
+            .as_mut()
+            .ok_or_else(|| invalid("capture cancellation lost its original interval"))?;
+        let count = u64::try_from(steps.len())
+            .map_err(|_| invalid("original planned roster exceeds u64"))?;
+        if !proof.matches(steps)
+            || !interval.begun
+            || count == 0
+            || capture_stream == 0
+            || interval.ordinal != ordinal
+            || !interval.cancellation_attempted
+            || interval.cancellation_arguments != Some((ordinal, count, capture_stream))
+            || interval.finish_attempted
+            || interval.release_attempted
+            || interval.steps.len() > steps.len()
+            || interval.steps.iter().any(|step| {
+                !step.start_confirmed
+                    || (step.end_attempted && !step.capture_finished)
+                    || step.capture_stream != capture_stream
+            })
+        {
+            return Err(invalid("cancellation resolution requires the exact original handoff, native proof and known capture prefix"));
+        }
+        if interval.cancelled_roster && interval.cancellation_status == COMPLETE {
+            return Ok(());
+        }
+        if !matches!(interval.cancellation_status, INCOMPLETE | UNKNOWN) {
+            return Err(invalid("a known failed capture cancellation cannot be resolved as success"));
+        }
+        // SAFETY: the immutable capsule pins this exact resolver/context. The
+        // retained tuple and native proof authenticate the only prior handoff.
+        let status = unsafe {
+            (self.resolve_step_cancellation)(
+                self.context as *mut c_void,
+                interval.handle as *mut c_void,
+                ordinal,
+                count,
+                capture_stream,
+            )
+        };
+        interval.cancellation_status = status;
+        if status != COMPLETE {
+            return Err(invalid("original capture cancellation is still unresolved; retain its same interval and owners"));
         }
         interval.cancelled_roster = true;
         Ok(())

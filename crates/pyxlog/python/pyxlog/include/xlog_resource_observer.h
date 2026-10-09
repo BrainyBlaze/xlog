@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(3)
-#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v3"
+#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(4)
+#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v4"
 #define XLOG_RESOURCE_MEMORY_UNIT "owned-gpu-backing-peak-bytes"
 #define XLOG_RESOURCE_MEMORY_ADMISSION "whole-device-total-physical-bytes"
 
@@ -308,6 +308,18 @@ typedef struct XlogResourceObserverApi {
                                         XlogResourceDeviceCertificate *certificate);
     uint32_t (*record_native_backing_root)(void *context,
                                           const XlogResourceBackingRoot *root);
+    /* Join only the original unknown CANCEL_GROUP observation. Require its
+     * creator, live interval and exact retained ordinal/count/stream, including
+     * the originally attempted ordinal. Without that original attempt, on a
+     * mismatch, or after a known failure, return FAILED. A confirmed original
+     * result returns COMPLETE idempotently; INCOMPLETE/UNKNOWN may only repeat
+     * its read-only capture-state observation. Never bind, capture, submit,
+     * create markers or clear original errors here. This is not a native
+     * non-submission proof and grants no finish/backing/delivery exemption. */
+    uint32_t (*resolve_step_cancellation)(void *context, void *original_handle,
+                                          uint64_t original_operation_ordinal,
+                                          uint64_t original_planned_count,
+                                          uint64_t original_capture_stream);
 } XlogResourceObserverApi;
 
 #ifdef __cplusplus
