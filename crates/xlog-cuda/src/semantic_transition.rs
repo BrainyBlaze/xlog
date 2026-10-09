@@ -5993,7 +5993,7 @@ fn completed_theory_delta_for_slot(
         return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
             kind: "rule",
             delta,
-            theory_generation,
+            theory_generation: predecessor_semantic_root_digest,
             verdict: if lane_refusal == 0 {
                 "accepted"
             } else {
@@ -40712,10 +40712,7 @@ pub(crate) mod task_binding_tests {
         };
         let delta = project(&hard_decode, 0, None).unwrap().unwrap();
         assert_eq!(delta.kind, "rule");
-        assert_eq!(
-            delta.theory_generation,
-            ActionCodebooks::program_binding(&program)
-        );
+        assert_eq!(delta.theory_generation, predecessor);
         for field in 12..22 {
             let mut changed = hard_decode;
             changed[field] ^= 1;
@@ -40729,7 +40726,7 @@ pub(crate) mod task_binding_tests {
         second[24] = 1;
         second[25..35].copy_from_slice(&semantic_program_rule_words(decoded.rule));
         let second_delta = project(&second, 1, Some(&choices)).unwrap().unwrap();
-        assert_ne!(second_delta.theory_generation, delta.theory_generation);
+        assert_eq!(second_delta.theory_generation, predecessor);
         second[25] ^= 1;
         assert!(project(&second, 1, Some(&choices)).is_err());
         let mut invalid = choices;
