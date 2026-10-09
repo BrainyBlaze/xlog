@@ -342,6 +342,8 @@ pub(crate) struct PySemanticTransitionSession {
     #[cfg(feature = "semantic-policy")]
     pending_content_binding: Mutex<Option<PendingPythonContentBinding>>,
     #[cfg(feature = "semantic-policy")]
+    pending_evaluation_preparation: Mutex<Option<model_evaluation::PendingEvaluationPreparation>>,
+    #[cfg(feature = "semantic-policy")]
     active_cold_model_work:
         Mutex<Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>>,
     #[cfg(feature = "semantic-policy")]
@@ -603,6 +605,8 @@ impl PySemanticTransitionSession {
             checkpoint_custody: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             pending_content_binding: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            pending_evaluation_preparation: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             active_cold_model_work: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
@@ -16379,6 +16383,55 @@ impl PySemanticTransitionController {
         }
         drain_export_owners();
         Ok(())
+    }
+
+    /// Terminally release a Session only after its original publication,
+    /// segments, executables and external aliases have fully retired. This
+    /// performs the existing joined native deallocation; abort is not release.
+    /// An unknown or failed retirement retains its original owner instead.
+    fn close(&self, py: Python<'_>, parent: Py<PySemanticPublishedParent>) -> PyResult<()> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let parent = parent.borrow(py);
+        if parent.session.as_ptr() != self.session.as_ptr()
+            || !Arc::ptr_eq(&self.identity, &parent.task_use.borrow(py).controller)
+        {
+            return Err(invalid(
+                "terminal Session release requires its original controller and publication",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if session.private_replay_custody()?.is_some() {
+            return Err(invalid(
+                "private replay Session release belongs to its original native phase",
+            ));
+        }
+        if session.learning_preparing.load(Ordering::Acquire)
+            || session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+            || session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+                .is_some()
+        {
+            return Err(invalid(
+                "terminal Session release requires completed original phase and segment retirement",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?
+            .is_some()
+        {
+            return Err(invalid(
+                "terminal Session release cannot interrupt its original cold callback",
+            ));
+        }
+        session.release_retired_publication(py, &parent)
     }
 
     /// Permanently abort this shared native Session after trusted application

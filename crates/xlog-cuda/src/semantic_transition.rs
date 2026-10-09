@@ -14,6 +14,8 @@ use late_replay::{PendingReplayDelivery, ReplayAuthentication};
 mod model_evaluation;
 #[cfg(feature = "semantic-policy")]
 mod native_work_bound;
+#[cfg(feature = "semantic-policy")]
+pub(crate) use native_work_bound::OriginalNativeCommand;
 mod prepared_replay;
 mod replay_model_backing;
 mod task_ground;
@@ -10430,6 +10432,8 @@ struct StepContentStorage {
     pending_cold_content: Option<PendingColdContentBinding>,
     #[cfg(feature = "semantic-policy")]
     pending_cold_verification: Option<(usize, u64)>,
+    #[cfg(feature = "semantic-policy")]
+    evaluation_preparation: Option<Arc<Mutex<model_evaluation::EvaluationPreparation>>>,
     #[cfg_attr(
         not(feature = "semantic-policy"),
         expect(
@@ -10461,6 +10465,8 @@ impl StepContentStorage {
             pending_cold_content: None,
             #[cfg(feature = "semantic-policy")]
             pending_cold_verification: None,
+            #[cfg(feature = "semantic-policy")]
+            evaluation_preparation: None,
             adjoints: Vec::new(),
             #[cfg(feature = "semantic-policy")]
             policy_vjp_workspaces: Vec::new(),
@@ -11420,6 +11426,24 @@ impl PreparedModelWork {
         first: usize,
         count: usize,
     ) -> Result<(), SemanticTransitionError> {
+        self.reset_slots_with_original(
+            domain,
+            poisoned,
+            first,
+            count,
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    fn reset_slots_with_original(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        first: usize,
+        count: usize,
+        #[cfg(feature = "semantic-policy")] original: Option<&mut OriginalNativeCommand>,
+    ) -> Result<(), SemanticTransitionError> {
         let end = first
             .checked_add(count)
             .filter(|end| *end <= self.actual.len() / 3)
@@ -11430,6 +11454,32 @@ impl PreparedModelWork {
             self.actual.device_ptr_value() + (first * 3 * size_of::<u64>()) as u64,
             ((end - first) * 3) as u64,
         );
+        #[cfg(feature = "semantic-policy")]
+        if let Some(original) = original {
+            return original.run(domain, poisoned, recorder, |enqueue, entered, submitted| {
+                let (pointer, count) = arguments;
+                let pointer = pointer.into_kernel_param_storage();
+                let count = count.into_kernel_param_storage();
+                let mut parameters = [pointer.as_kernel_param(), count.as_kernel_param()];
+                // SAFETY: this checked range and exact command are retained
+                // by the original work allocation until known completion.
+                unsafe {
+                    self.reset.launch_raw_in_original(
+                        enqueue,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (32, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut parameters,
+                        false,
+                        entered,
+                        submitted,
+                    )
+                }
+                .map_err(|error| XlogError::Kernel(error.to_string()))
+            });
+        }
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: the checked range belongs to this original step's cold
             // allocation. Reset and producer kernels share the capture stream.
@@ -11446,6 +11496,18 @@ impl PreparedModelWork {
             }
             .map_err(|error| XlogError::Kernel(error.to_string()))
         })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn reset_slots_original(
+        &self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        first: usize,
+        count: usize,
+        original: &mut OriginalNativeCommand,
+    ) -> Result<(), SemanticTransitionError> {
+        self.reset_slots_with_original(domain, poisoned, first, count, Some(original))
     }
 
     fn record_invocation(
@@ -27883,6 +27945,31 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
     ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
         self.checked_reader(lease)?;
+        let (arena, selected) = self.training_view_selection_basis(lease)?;
+        let result = arena.enqueue_selection(
+            selected,
+            lease.header.training_cursor,
+            lease.header.training_rng,
+            self.training_origins.clone(),
+            self.cold_native_work(lease.token)?.as_ref(),
+        );
+        if matches!(
+            &result,
+            Err(SemanticTransitionError::Runtime {
+                operation: "training-view device selection" | "training-view launch commit",
+                ..
+            })
+        ) {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn training_view_selection_basis(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(Arc<SemanticTrainingViewArena>, DeviceMemoryView<u8>), SemanticTransitionError>
+    {
         let arena = Arc::clone(
             self.training_views
                 .as_ref()
@@ -27917,23 +28004,7 @@ impl SemanticTransitionSession {
             .view()
             .try_slice(begin..end)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let result = arena.enqueue_selection(
-            selected,
-            lease.header.training_cursor,
-            lease.header.training_rng,
-            self.training_origins.clone(),
-            self.cold_native_work(lease.token)?.as_ref(),
-        );
-        if matches!(
-            &result,
-            Err(SemanticTransitionError::Runtime {
-                operation: "training-view device selection" | "training-view launch commit",
-                ..
-            })
-        ) {
-            self.poisoned = true;
-        }
-        result
+        Ok((arena, selected))
     }
 
     /// Allocation origin and complete backing bytes of the exact view exported

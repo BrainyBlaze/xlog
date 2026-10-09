@@ -4,9 +4,13 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "semantic-policy")]
+use crate::cuda_compat::{IntoKernelParamStorage, KernelParamStorage};
 use crate::launch::LaunchEnqueueError;
 use crate::memory::{DeviceMemoryView, TrackedCudaSlice};
 use crate::provider::resident_schedule::{validate_execution_domain, ResidentExecutionDomain};
+#[cfg(feature = "semantic-policy")]
+use crate::semantic_transition::OriginalNativeCommand;
 use crate::semantic_transition::{
     Identity256, SemanticPublishedIdentity, SemanticReplayAppendBinding, SemanticRngBinding,
     SemanticTaskContentIdentity, SemanticTransitionError, SemanticTransitionKind,
@@ -1076,6 +1080,49 @@ impl SemanticSelectedTrainingView {
         coordinates: Option<DeviceMemoryView<u64>>,
         cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<(), SemanticTransitionError> {
+        self.enqueue_with_original(
+            selected_view,
+            cursor,
+            training_rng,
+            coordinates,
+            cold_work,
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn enqueue_original(
+        &self,
+        selected_view: DeviceMemoryView<u8>,
+        cursor: u64,
+        training_rng: [u64; 4],
+        cold_work: Option<&DeviceMemoryView<u64>>,
+        commands: &mut [OriginalNativeCommand; 2],
+        poisoned: &mut bool,
+    ) -> Result<(), SemanticTransitionError> {
+        self.enqueue_with_original(
+            selected_view,
+            cursor,
+            training_rng,
+            None,
+            cold_work,
+            Some((commands, poisoned)),
+        )
+    }
+
+    fn enqueue_with_original(
+        &self,
+        selected_view: DeviceMemoryView<u8>,
+        cursor: u64,
+        training_rng: [u64; 4],
+        coordinates: Option<DeviceMemoryView<u64>>,
+        cold_work: Option<&DeviceMemoryView<u64>>,
+        #[cfg(feature = "semantic-policy")] original: Option<(
+            &mut [OriginalNativeCommand; 2],
+            &mut bool,
+        )>,
+    ) -> Result<(), SemanticTransitionError> {
         self.arena.require_authenticated_appends()?;
         let publication = self.arena.publication.as_ref().ok_or_else(|| {
             input_error(
@@ -1156,52 +1203,91 @@ impl SemanticSelectedTrainingView {
                 publication.payloads[1].len() as u64,
             ],
         };
-        let mut recorder = self.arena.domain.new_strict_recorder();
-        recorder.read(&self.arena.descriptors);
-        recorder.read(&self.arena.raw);
-        recorder.read(&self.arena.objective);
-        recorder.read(&self.arena.groups);
-        recorder.read(&self.arena.group_members);
-        recorder.read(&publication.word);
-        recorder.read(&publication.directories[0]);
-        recorder.read(&publication.directories[1]);
-        recorder.read(&publication.storage);
-        for bank in 0..2 {
-            recorder.read(&publication.entries[bank]);
-            recorder.read(&publication.payloads[bank]);
-        }
-        recorder.read(&selected_view);
-        if let Some(candidates) = &self._origin_candidates {
-            recorder.read(candidates.as_ref());
-        }
-        if let Some(coordinates) = &coordinates {
-            recorder.read(coordinates);
-        }
-        if let Some(work) = cold_work {
-            recorder.read_write(work);
-        }
-        recorder.write(&self.storage.selection);
-        recorder.write(&self.storage.roster_rows);
-        recorder.write(&self.storage.objective);
-        recorder.write(&self.storage.groups);
-        recorder.write(&self.storage.group_members);
-        recorder.write(&self.storage.token_ids);
-        recorder.write(&self.storage.mask_labels);
-        recorder.write(&self.storage.mask_weights);
-        recorder.write(&self.storage.ar_labels);
-        recorder.write(&self.storage.retention_labels);
-        recorder.write(&self.storage.branch_labels);
-        recorder.write(&self.storage.branch_ids);
-        recorder.write(&self.storage.source_slots);
-        recorder.write(&self.storage.logical_positions);
-        recorder.write(&self.storage.kinds);
-        recorder.write(&self.storage.parents);
+        let record = || {
+            let mut recorder = self.arena.domain.new_strict_recorder();
+            recorder.read(&self.arena.descriptors);
+            recorder.read(&self.arena.raw);
+            recorder.read(&self.arena.objective);
+            recorder.read(&self.arena.groups);
+            recorder.read(&self.arena.group_members);
+            recorder.read(&publication.word);
+            recorder.read(&publication.directories[0]);
+            recorder.read(&publication.directories[1]);
+            recorder.read(&publication.storage);
+            for bank in 0..2 {
+                recorder.read(&publication.entries[bank]);
+                recorder.read(&publication.payloads[bank]);
+            }
+            recorder.read(&selected_view);
+            if let Some(candidates) = &self._origin_candidates {
+                recorder.read(candidates.as_ref());
+            }
+            if let Some(coordinates) = &coordinates {
+                recorder.read(coordinates);
+            }
+            if let Some(work) = cold_work {
+                recorder.read_write(work);
+            }
+            recorder.write(&self.storage.selection);
+            recorder.write(&self.storage.roster_rows);
+            recorder.write(&self.storage.objective);
+            recorder.write(&self.storage.groups);
+            recorder.write(&self.storage.group_members);
+            recorder.write(&self.storage.token_ids);
+            recorder.write(&self.storage.mask_labels);
+            recorder.write(&self.storage.mask_weights);
+            recorder.write(&self.storage.ar_labels);
+            recorder.write(&self.storage.retention_labels);
+            recorder.write(&self.storage.branch_labels);
+            recorder.write(&self.storage.branch_ids);
+            recorder.write(&self.storage.source_slots);
+            recorder.write(&self.storage.logical_positions);
+            recorder.write(&self.storage.kinds);
+            recorder.write(&self.storage.parents);
+            recorder
+        };
         let select = self.arena.select.clone();
         let gather = self.arena.gather.clone();
         let gather_grid = u32::try_from(self.arena.row_count)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some((commands, poisoned)) = original {
+            let [select_command, gather_command] = commands;
+            for (command, kernel, grid) in [
+                (select_command, select, 1),
+                (gather_command, gather, gather_grid),
+            ] {
+                command.run(
+                    &self.arena.domain,
+                    poisoned,
+                    record(),
+                    |enqueue, entered, submitted| {
+                        let argument = launch.into_kernel_param_storage();
+                        let mut parameters = [argument.as_kernel_param()];
+                        // SAFETY: this original selection retains every fixed port,
+                        // source view and publication allocation registered above.
+                        unsafe {
+                            kernel.launch_raw_in_original(
+                                enqueue,
+                                LaunchConfig {
+                                    grid_dim: (grid, 1, 1),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                &mut parameters,
+                                false,
+                                entered,
+                                submitted,
+                            )
+                        }
+                        .map_err(|error| xlog_core::XlogError::Kernel(error.to_string()))
+                    },
+                )?;
+            }
+            return Ok(());
+        }
         let enqueued = unsafe {
-            self.arena.domain.enqueue(recorder, |stream| {
+            self.arena.domain.enqueue(record(), |stream| {
                 select.clone().launch_in(
                     stream,
                     LaunchConfig {
@@ -2205,6 +2291,15 @@ impl SemanticTrainingViewArena {
         origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
         cold_work: Option<&DeviceMemoryView<u64>>,
     ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
+        let selected = self.prepare_selection(origin_candidates)?;
+        selected.enqueue(selected_view, cursor, training_rng, None, cold_work)?;
+        Ok(selected)
+    }
+
+    pub(crate) fn prepare_selection(
+        self: &Arc<Self>,
+        origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
+    ) -> Result<SemanticSelectedTrainingView, SemanticTransitionError> {
         let output_bytes = self.selection_bytes()?;
         let mut reservation = self
             .provider
@@ -2218,7 +2313,6 @@ impl SemanticTrainingViewArena {
         if reservation.remaining_bytes() != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        selected.enqueue(selected_view, cursor, training_rng, None, cold_work)?;
         Ok(selected)
     }
 }
