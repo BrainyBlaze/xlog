@@ -32278,6 +32278,12 @@ impl SemanticTransitionSession {
     // Its caller must separately authenticate the owner, both original readers
     // and the original graph export before excluding that one pending flag.
     fn has_unresolved_session_native_effect_except_replay_verification(&self) -> bool {
+        self.has_independent_session_native_effect()
+            || self.has_pending_prepared_segment_preparation()
+            || self.has_pending_prepared_metadata_freeze()
+    }
+
+    fn has_independent_session_native_effect(&self) -> bool {
         self.poisoned
             || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
             || {
@@ -32312,13 +32318,64 @@ impl SemanticTransitionSession {
     // graph owner. This common base never grants that exclusion by itself.
     fn original_session_completion_may_submit(&self) -> bool {
         !self.has_unresolved_session_native_effect()
-            && !self.readers.values().any(|reader| reader.acquisition_pending)
+            && self.original_session_completion_is_uncontended()
+    }
+
+    fn original_session_completion_is_uncontended(&self) -> bool {
+        !self.readers.values().any(|reader| reader.acquisition_pending)
             && !self.pending
             && self.pending_replay_delivery.is_none()
             && self.pending_training_materialization.is_none()
             && {
                 #[cfg(feature = "semantic-policy")]
                 { !self.has_pending_cold_model_work_completion(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { true }
+            }
+    }
+
+    fn original_prepared_initialization_may_submit(&self) -> bool {
+        let Some(build) = &self.prepared_segment else { return false; };
+        let Some(original) = &build.initialization else { return false; };
+        self.original_prepared_owner_may_submit(Some(original), None)
+    }
+
+    fn original_prepared_metadata_may_submit(&self) -> bool {
+        let Some(build) = &self.prepared_segment else { return false; };
+        let Some(original) = &build.metadata_freeze else { return false; };
+        self.original_prepared_owner_may_submit(None, Some(original))
+    }
+
+    // Both callers derive their capability from the same retained build. No
+    // pointer, pending flag or mutex availability from a foreign owner grants
+    // this exclusion, and every other independent continuation remains a gate.
+    fn original_prepared_owner_may_submit(
+        &self,
+        initialization: Option<&Arc<Mutex<PreparedSegmentInitialization>>>,
+        metadata: Option<&Arc<Mutex<PreparedSegmentMetadataFreeze>>>,
+    ) -> bool {
+        let Some(build) = &self.prepared_segment else { return false; };
+        if !Arc::ptr_eq(&build.issuer, &self.publication_issuer)
+            || initialization.is_some() == metadata.is_some()
+            || initialization.is_some_and(|owner| build.initialization.as_ref()
+                .is_none_or(|original| !Arc::ptr_eq(original, owner)))
+            || metadata.is_some_and(|owner| build.metadata_freeze.as_ref()
+                .is_none_or(|original| !Arc::ptr_eq(original, owner)))
+        {
+            return false;
+        }
+        !self.has_independent_session_native_effect()
+            && !self.replay_verification_pending.load(Ordering::Acquire)
+            && (initialization.is_some() || !self.has_pending_prepared_segment_preparation())
+            && (metadata.is_some() || !self.has_pending_prepared_metadata_freeze())
+            && self.original_session_completion_is_uncontended()
+            && !self.readers.values().any(|reader| reader.retirement_pending)
+            && !self.steps.values().any(|step| step.consumer_completion.is_some())
+            && self.graph.ensure_not_poisoned().is_ok()
+            && !self.has_pending_state_restoration_except(None, None)
+            && {
+                #[cfg(feature = "semantic-policy")]
+                { !self.has_pending_actor_refresh_context_except(None) }
                 #[cfg(not(feature = "semantic-policy"))]
                 { true }
             }
