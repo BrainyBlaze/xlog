@@ -14,6 +14,7 @@ pub(super) struct PreparedActorRefreshOwner {
     logical_update: u64,
     program: Identity256,
     phase: Identity256,
+    minimum_generation: u64,
     rng: SemanticRngBinding,
     member: crate::semantic_training_view::FrozenPolicyGroupMember,
     inputs: Arc<PreparedStepInputs>,
@@ -191,6 +192,7 @@ impl SemanticTransitionSession {
             logical_update,
             program: program.identity,
             phase,
+            minimum_generation: released_parent.header.model_generation,
             rng,
             member,
             inputs,
@@ -247,7 +249,8 @@ impl SemanticTransitionSession {
         self.stream = Arc::clone(self.domain.execution_stream());
         let staged = self.restore_state_material_inner(
             &material.predecessor.encode()?, None,
-            Some(RestoredModelOwners::Current(&proof.inner.models)),
+            Some(RestoredModelOwners::Current { owners: &proof.inner.models,
+                minimum_generation: proof.inner.minimum_generation }),
         )?;
         if staged.is_some() {
             return Err(SemanticTransitionError::ObservationMismatch);

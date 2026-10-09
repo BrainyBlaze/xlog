@@ -14903,7 +14903,7 @@ struct PolicyVjpRecording {
 enum RestoredModelOwners<'a> {
     Historical(&'a [Arc<ReplayModelBacking>]),
     #[cfg(feature = "semantic-policy")]
-    Current(&'a [Arc<ModelGenerationOwner>]),
+    Current { owners: &'a [Arc<ModelGenerationOwner>], minimum_generation: u64 },
 }
 
 impl RestoredModelOwners<'_> {
@@ -14911,7 +14911,7 @@ impl RestoredModelOwners<'_> {
         match self {
             Self::Historical(owners) => owners.len(),
             #[cfg(feature = "semantic-policy")]
-            Self::Current(owners) => owners.len(),
+            Self::Current { owners, .. } => owners.len(),
         }
     }
 
@@ -14919,7 +14919,7 @@ impl RestoredModelOwners<'_> {
         match self {
             Self::Historical(owners) => ModelGenerationOwner::historical(Arc::clone(&owners[index])),
             #[cfg(feature = "semantic-policy")]
-            Self::Current(owners) => Arc::clone(&owners[index]),
+            Self::Current { owners, .. } => Arc::clone(&owners[index]),
         }
     }
 
@@ -14927,7 +14927,7 @@ impl RestoredModelOwners<'_> {
         match self {
             Self::Historical(_) => false,
             #[cfg(feature = "semantic-policy")]
-            Self::Current(_) => true,
+            Self::Current { .. } => true,
         }
     }
 }
@@ -25416,6 +25416,16 @@ impl SemanticTransitionSession {
             }
             let mut contract = material.contract;
             contract.semantic_owner = self.graph.transition_arena()[1];
+            #[cfg(feature = "semantic-policy")]
+            if let Some(RestoredModelOwners::Current { minimum_generation, .. }) = immutable_models {
+                if minimum_generation == 0 || minimum_generation > u64::from(u32::MAX) {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                // This immutable lifetime floor is the real released target
+                // lineage's known generation, never the historical row's
+                // unrelated generation or an unexecuted future input header.
+                contract.model_generation = minimum_generation;
+            }
             let plans: Vec<_> = material
                 .ranges
                 .into_iter()
