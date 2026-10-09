@@ -967,11 +967,54 @@ impl PrivateReplayChildCustody {
             .non_submission
             .as_ref()
             .ok_or_else(|| invalid("cancelled replay lost its original native proof"))?;
-        let result = session
-            .owner()?
-            .require_cancelled_prepared_graph_retirement(proof)
+        let target = group.native_steps.get(self.step_index)
+            .ok_or_else(|| invalid("cancelled replay lost its original target Update"))?;
+        let result = session.owner()?.require_cancelled_prepared_step_final_use(target, proof)
             .map_err(xlog_err);
         result
+    }
+
+    pub(in crate::semantic_transition) fn finish_retained_source(
+        &self,
+        py: Python<'_>,
+        cancelled: bool,
+    ) -> PyResult<()> {
+        let member = {
+            let state = self.state()?;
+            if self.failed.load(Ordering::Acquire) || !state.import_returned
+                || !state.retirement_entered || state.released
+            {
+                return Err(invalid("source final use requires its original attached retirement"));
+            }
+            state.member.as_ref()
+                .ok_or_else(|| invalid("source retirement lost its original member"))?
+                .clone_ref(py)
+        };
+        let member = member.borrow(py);
+        if member.completed.load(Ordering::Acquire) {
+            let mode = member.final_use.try_lock()
+                .map_err(|_| invalid("original source final use is already active or poisoned"))?
+                .mode.ok_or_else(|| invalid("original final-use acknowledgment has no disposition"))?;
+            if (mode == RetainedFinalUseMode::Cancelled) != cancelled {
+                return Err(invalid("original source final use changed its cancellation disposition"));
+            }
+            return member.require_final_use_ack(py, mode, None);
+        }
+        if cancelled {
+            return member.finish_cancelled_private_segment(py);
+        }
+        let unpublished = {
+            let state = member.group_use.lock()
+                .map_err(|_| invalid("original retained target use is poisoned"))?;
+            match state.completion {
+                Some(RetainedTargetCompletion::Published) => None,
+                Some(RetainedTargetCompletion::Unpublished) => Some(state.update.as_ref()
+                    .ok_or_else(|| invalid("original unpublished target has no Update"))?
+                    .clone_ref(py)),
+                None => return Err(invalid("source final use requires its actual original target outcome")),
+            }
+        };
+        member.finish_retained_import(py, unpublished)
     }
 
     pub(in crate::semantic_transition) fn release_session(&self, py: Python<'_>) -> PyResult<()> {
@@ -1354,11 +1397,6 @@ impl PySemanticLearningPhaseTransition {
             if group.native_retired {
                 return Ok(());
             }
-            if group.retirement_entered {
-                return Err(invalid(
-                    "unknown cancelled native retirement retains its original owners without retry",
-                ));
-            }
             group.retirement_entered = true;
             (group.restored.clone_ref(py), group.native_steps.clone())
         };
@@ -1374,11 +1412,40 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         let _retirement = PreparedRetirementGuard(&session.retiring);
-        let graph = session
-            .owner()?
-            .take_cancelled_prepared_executable_for_retirement(proof)
-            .map_err(xlog_err)?;
-        drop(graph);
+        let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
+        let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
+        let (mut quiesced, graph_retired) = {
+            let mut retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?;
+            let retained = retained.as_mut()
+                .ok_or_else(|| invalid("cancelled retirement lost its original Python segment"))?;
+            if let Some(original) = &retained.retirement_streams {
+                if original != &streams {
+                    return Err(invalid("cancelled retirement changed its original consumer roster"));
+                }
+            } else {
+                retained.retirement_streams = Some(streams.clone());
+            }
+            (retained.retirement_steps_quiesced, retained.graph_retired)
+        };
+        if !graph_retired {
+            while quiesced < steps.len() {
+                session.owner()?.quiesce_cancelled_prepared_step(&steps[quiesced], proof, &streams)
+                    .map_err(xlog_err)?;
+                quiesced += 1;
+                session.prepared_segment.lock()
+                    .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?
+                    .as_mut().ok_or_else(|| invalid("cancelled segment disappeared during final use"))?
+                    .retirement_steps_quiesced = quiesced;
+            }
+            let graph = session.owner()?.take_cancelled_prepared_executable_for_retirement(proof)
+                .map_err(xlog_err)?;
+            drop(graph);
+            session.prepared_segment.lock()
+                .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?
+                .as_mut().ok_or_else(|| invalid("cancelled segment disappeared during graph retirement"))?
+                .graph_retired = true;
+        }
         session
             .owner()?
             .require_cancelled_prepared_graph_retirement(proof)
@@ -1392,7 +1459,28 @@ impl PySemanticLearningPhaseTransition {
             .ok_or_else(|| {
                 invalid("cancelled replay requires the original active cold retirement region")
             })?;
-        self.attach_replay_retirement_work(py, &work.borrow(py))?;
+        if !self.private_group()?.as_ref().expect("original cancelled group").retirement_children_ready {
+            self.attach_replay_retirement_work(py, &work.borrow(py))?;
+            self.private_group()?.as_mut().expect("original cancelled group")
+                .retirement_children_ready = true;
+        }
+        let children = self.private_group()?.as_ref().expect("original cancelled group")
+            .replay_children.clone();
+        let producer_state = {
+            let retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?;
+            let retained = retained.as_ref()
+                .ok_or_else(|| invalid("cancelled retirement lost its original Python segment"))?;
+            (retained.producer_retirement_entered, retained.producers_retired)
+        };
+        if !producer_state.1 {
+            if producer_state.0 {
+                return Err(invalid("original cancelled producer cleanup has no known return and cannot repeat"));
+            }
+            for child in children {
+                child.finish_retained_source(py, true)?;
+            }
+        }
         let python_owners = {
             let retained = session
                 .prepared_segment
@@ -1403,18 +1491,17 @@ impl PySemanticLearningPhaseTransition {
             })?;
             if segment.task_use.as_ptr() != restored.task_use.as_ptr()
                 || !Arc::ptr_eq(&segment.scope, scope)
-                || segment.steps.len() != steps.len()
-                || !proof.matches(
-                    &segment
-                        .steps
-                        .iter()
-                        .map(|step| step.borrow(py).inner.clone())
-                        .collect::<Vec<_>>(),
-                )
             {
                 return Err(invalid(
                     "cancelled Python segment differs from its original native proof",
                 ));
+            }
+            let mut after = 0;
+            for step in &segment.steps {
+                let step = step.borrow(py);
+                let offset = steps[after..].iter().position(|original| original.same_handle(&step.inner))
+                    .ok_or_else(|| invalid("cancelled retirement changed its remaining ordered steps"))?;
+                after += offset + 1;
             }
             (
                 segment
@@ -1427,14 +1514,11 @@ impl PySemanticLearningPhaseTransition {
         };
         {
             let (steps, resources) = &python_owners;
-            let prepared = resources
-                .producers
-                .lock()
-                .map_err(|_| invalid("cancelled producer custody is poisoned"))?
-                .get(1)
-                .map(|owner| owner.clone_ref(py))
-                .ok_or_else(|| invalid("cancelled retirement lost its original prepared owner"))?;
-            {
+            if !producer_state.1 {
+                let prepared = resources.producers.lock()
+                    .map_err(|_| invalid("cancelled producer custody is poisoned"))?
+                    .get(1).map(|owner| owner.clone_ref(py))
+                    .ok_or_else(|| invalid("cancelled retirement lost its original prepared owner"))?;
                 let task = restored.task_use.borrow(py);
                 let snapshot = task.state()?.snapshot.canonical.clone();
                 let check = || -> PyResult<()> {
@@ -1448,6 +1532,10 @@ impl PySemanticLearningPhaseTransition {
                     }
                     Ok(())
                 };
+                session.prepared_segment.lock()
+                    .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?
+                    .as_mut().ok_or_else(|| invalid("cancelled producer owner disappeared"))?
+                    .producer_retirement_entered = true;
                 let finish =
                     recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
                 if !recording_callback(check, || finish.call0())?.is_none() {
@@ -1478,13 +1566,21 @@ impl PySemanticLearningPhaseTransition {
         }
         drain_export_owners();
         self.release_replay_children(py)?;
-        let streams = self.preparation_inputs.consumer_streams.python_value(py)?;
-        let streams = checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
-        for step in &steps {
+        for step in &python_owners.0 {
             session
                 .owner()?
-                .release_cancelled_prepared_step(step, proof, &streams)
+                .release_cancelled_prepared_step(&step.borrow(py).inner, proof, &streams)
                 .map_err(xlog_err)?;
+            let removed = {
+                let mut retained = session.prepared_segment.lock()
+                    .map_err(|_| invalid("cancelled Python segment custody is poisoned"))?;
+                let retained = retained.as_mut()
+                    .ok_or_else(|| invalid("cancelled segment disappeared during storage retirement"))?;
+                let index = retained.steps.iter().position(|original| original.as_ptr() == step.as_ptr())
+                    .ok_or_else(|| invalid("cancelled storage changed its original step"))?;
+                retained.steps.remove(index)
+            };
+            drop(removed);
         }
         let resources = session
             .owner()?
@@ -2372,6 +2468,29 @@ impl PySemanticLearningPhaseTransition {
         drop(retained);
         self.issue_private_cold_callback(py, session, PrivateColdRole::Retirement, parent, ordinal)
             .map(|_| ())
+    }
+
+    pub(in crate::semantic_transition) fn finish_private_retained_sources(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task: &PySemanticTransitionTaskUse,
+    ) -> PyResult<()> {
+        self.require_private_group_owner(py, session, task)?;
+        let children = {
+            let retained = self.private_group()?;
+            let group = retained.as_ref().expect("original private group");
+            if !group.retirement_entered || !group.retirement_children_ready
+                || group.native_retired || group.non_submission_confirmed
+            {
+                return Err(invalid("source final use requires the original executed private retirement"));
+            }
+            group.replay_children.clone()
+        };
+        for child in children {
+            child.finish_retained_source(py, false)?;
+        }
+        Ok(())
     }
 
     pub(in crate::semantic_transition) fn retain_private_segment_retirement(

@@ -285,6 +285,23 @@ fn prepared_segment_pending(py: Python<'_>, original: PyErr) -> PyErr {
 }
 
 #[cfg(feature = "semantic-policy")]
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticRetainedFinalUsePending,
+    PyRuntimeError,
+    "The original retained source final use is pending; retain it and join that same final use."
+);
+
+#[cfg(feature = "semantic-policy")]
+fn retained_final_use_pending(py: Python<'_>, original: PyErr) -> PyErr {
+    let pending = SemanticRetainedFinalUsePending::new_err(
+        "retain the original source member and target retirement; do not repeat cleanup, import or execution",
+    );
+    pending.set_cause(py, Some(original));
+    pending
+}
+
+#[cfg(feature = "semantic-policy")]
 fn private_execution_owner(
     py: Python<'_>,
     session: &PySemanticTransitionSession,
@@ -10047,6 +10064,8 @@ struct ColdImportGuard<'a> {
     original_decisions: Option<Arc<[u8]>>,
     committed: bool,
     deferred: bool,
+    retained_final_use: bool,
+    native_pending: std::cell::Cell<bool>,
 }
 
 impl<'a> ColdImportGuard<'a> {
@@ -10088,12 +10107,20 @@ impl<'a> ColdImportGuard<'a> {
             original_decisions,
             committed: false,
             deferred: false,
+            retained_final_use: false,
+            native_pending: std::cell::Cell::new(false),
         })
     }
 }
 
 impl Drop for ColdImportGuard<'_> {
     fn drop(&mut self) {
+        // Only an authenticated retained native continuation sets this bit.
+        // Keep its original import/issuance alive; never turn Unknown into an
+        // abort, successful cleanup, or permission to start another import.
+        if self.native_pending.get() {
+            return;
+        }
         #[cfg(feature = "semantic-policy")]
         if !self.committed {
             let child = self
@@ -14264,7 +14291,39 @@ pub(crate) struct PySemanticRetainedReplayMember {
     refresh_snapshot: Py<PyAny>,
     #[cfg(feature = "semantic-policy")]
     group_use: Mutex<RetainedGroupUse>,
+    #[cfg(feature = "semantic-policy")]
+    final_use: Mutex<RetainedReplayFinalUse>,
     completed: AtomicBool,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Default)]
+struct RetainedReplayFinalUse {
+    mode: Option<RetainedFinalUseMode>,
+    target: Option<SemanticPreparedStep>,
+    started: bool,
+    native_finished: bool,
+    completion: ReplayImportFinalization,
+}
+
+#[derive(Default)]
+struct ReplayImportFinalization {
+    cleanup_entered: bool,
+    cleanup_result: Option<Py<PyAny>>,
+    streams: Option<Vec<u64>>,
+    refresh_entered: bool,
+    refresh_result: Option<Py<PyAny>>,
+    child_refresh_entered: bool,
+    child_refreshed: bool,
+    snapshot: Option<AuthoritySnapshot>,
+    reader_quiesced: bool,
+    acquisition: Option<xlog_cuda::SemanticPublishedAcquisition>,
+    successor: Option<SemanticPublishedLease>,
+    comparison: Option<xlog_cuda::SemanticReplayPublicationVerification>,
+    comparison_finished: bool,
+    successor_released: bool,
+    predecessor_released: bool,
+    state_finished: bool,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -14282,6 +14341,14 @@ struct RetainedGroupUse {
 enum RetainedTargetCompletion {
     Published,
     Unpublished,
+}
+
+#[cfg(feature = "semantic-policy")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedFinalUseMode {
+    Published,
+    Unpublished,
+    Cancelled,
 }
 
 impl Drop for PySemanticRetainedReplayMember {
@@ -14466,7 +14533,7 @@ impl PySemanticRetainedReplayMember {
     /// destruction; no VJP or target completion is inferred or fabricated.
     fn finish_cancelled_private_segment(&self, py: Python<'_>) -> PyResult<()> {
         if self.completed.load(Ordering::Acquire) {
-            return Err(invalid("retained replay member has already finished"));
+            return self.require_final_use_ack(py, RetainedFinalUseMode::Cancelled, None);
         }
         let session = self.session.borrow(py);
         let child = session.private_replay_custody()?.ok_or_else(|| {
@@ -14517,7 +14584,7 @@ impl PySemanticRetainedReplayMember {
             std::mem::replace(&mut state.deliveries, std::array::from_fn(|_| None))
         };
         drop((retained, deliveries));
-        self.finish_original_import(py)
+        self.finish_original_import(py, RetainedFinalUseMode::Cancelled, None)
     }
 }
 
@@ -14613,8 +14680,14 @@ impl PySemanticRetainedReplayMember {
         py: Python<'_>,
         unpublished_update: Option<Py<PySemanticPreparedStep>>,
     ) -> PyResult<()> {
+        let mode = if unpublished_update.is_some() {
+            RetainedFinalUseMode::Unpublished
+        } else {
+            RetainedFinalUseMode::Published
+        };
         if self.completed.load(Ordering::Acquire) {
-            return Err(invalid("retained replay member has already finished"));
+            let target = unpublished_update.as_ref().map(|update| update.borrow(py).inner.clone());
+            return self.require_final_use_ack(py, mode, target.as_ref());
         }
         let update = {
             let use_state = self
@@ -14654,20 +14727,61 @@ impl PySemanticRetainedReplayMember {
                 .require_prepared_step_final_use(&update.inner)
                 .map_err(xlog_err)?;
         }
-        self.finish_original_import(py)
+        let target = update.borrow(py).inner.clone();
+        self.finish_original_import(py, mode, Some(target))
     }
 
-    fn finish_original_import(&self, py: Python<'_>) -> PyResult<()> {
+    fn require_final_use_ack(
+        &self,
+        py: Python<'_>,
+        mode: RetainedFinalUseMode,
+        target: Option<&SemanticPreparedStep>,
+    ) -> PyResult<()> {
+        self.session.borrow(py).require_creator()?;
+        self.task_use.borrow(py).issuance.require_current()?;
+        let original = self.final_use.try_lock()
+            .map_err(|_| invalid("original final use is already active or poisoned"))?;
+        if !self.completed.load(Ordering::Acquire)
+            || original.mode != Some(mode)
+            || !original.completion.state_finished
+            || target.is_some_and(|target| original.target.as_ref()
+                .is_none_or(|stored| !stored.same_handle(target)))
+        {
+            return Err(invalid("final-use acknowledgment changed its original source, target or disposition"));
+        }
+        Ok(())
+    }
+
+    fn finish_original_import(
+        &self,
+        py: Python<'_>,
+        mode: RetainedFinalUseMode,
+        target: Option<SemanticPreparedStep>,
+    ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         if !session.importing.load(Ordering::Acquire) {
             return Err(invalid("retained original import was already closed"));
         }
-        // Claim the invocation's original one-shot final use before any
-        // Python cleanup or authority refresh. A rejected reentry must not
-        // reach the finalizer that also handles first-entry native failures.
+        let mut original = self.final_use.try_lock()
+            .map_err(|_| invalid("original final use is already active or poisoned"))?;
+        if let Some(stored) = original.mode {
+            if stored != mode || match (&original.target, &target) {
+                (None, None) => false,
+                (Some(stored), Some(given)) => !stored.same_handle(given),
+                _ => true,
+            } {
+                return Err(invalid("retained final use changed its original target or disposition"));
+            }
+        } else {
+            original.mode = Some(mode);
+            original.target = target;
+        }
         let invocation = self.invocation.borrow(py);
-        invocation.start_final_use()?;
+        if !original.started {
+            invocation.start_final_use()?;
+            original.started = true;
+        }
         let issued = self.task_use.borrow(py);
         let acquired = self.parent.borrow(py);
         let controller = PySemanticTransitionController {
@@ -14680,21 +14794,40 @@ impl PySemanticRetainedReplayMember {
             original_decisions: Some(Arc::clone(&self.original_decisions)),
             committed: false,
             deferred: false,
+            retained_final_use: true,
+            native_pending: std::cell::Cell::new(false),
         };
         let completion = (|| -> PyResult<()> {
+            if original.native_finished {
+                return Ok(());
+            }
             let mut owner = session.owner()?;
             let state =
-                controller.execution_state(py, &issued, &acquired, &owner, Some(&import))?;
+                controller.original_import_state(py, &issued, &acquired, &owner, &import)?;
             if PySemanticTransitionController::execution_binding(&state, true)? != self.expected {
                 return Err(invalid(
                     "retained replay authority changed before original final use",
                 ));
             }
             drop(state);
-            owner
-                .finish_policy_invocation(&*acquired.lease()?, invocation.rng, 1)
-                .map_err(xlog_err)
+            let lease = acquired.lease()?;
+            let result = owner.finish_policy_invocation(&lease, invocation.rng, 1);
+            let pending = result.as_ref().is_err_and(|error|
+                matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
+                && owner.policy_invocation_final_use_pending(&lease, invocation.rng).map_err(xlog_err)?;
+            drop(lease);
+            drop(owner);
+            if pending {
+                import.native_pending.set(true);
+                return Err(retained_final_use_pending(py, xlog_err(result.expect_err("original final use is pending"))));
+            }
+            result.map_err(xlog_err)?;
+            original.native_finished = true;
+            Ok(())
         })();
+        if import.native_pending.get() {
+            return completion;
+        }
         let result = controller.finalize_replay_import(
             py,
             &self.task_use,
@@ -14707,6 +14840,7 @@ impl PySemanticRetainedReplayMember {
             &import,
             &self.expected,
             completion,
+            Some(&mut original.completion),
         );
         if result.is_ok() {
             import.committed = true;
@@ -14718,8 +14852,10 @@ impl PySemanticRetainedReplayMember {
             use_state.target = None;
             use_state.deliveries = std::array::from_fn(|_| None);
             self.completed.store(true, Ordering::Release);
-        } else if let Ok(mut state) = issued.state() {
-            state.phase = TaskUsePhase::Refused;
+        } else if !import.native_pending.get() {
+            if let Ok(mut state) = issued.state() {
+                state.phase = TaskUsePhase::Refused;
+            }
         }
         result
     }
@@ -18047,6 +18183,15 @@ impl PySemanticTransitionController {
                 ),
                 _ => None,
             };
+            if let Some(instruction) = &instruction {
+                let children = instruction.preparation()?.replay_children.clone();
+                for child in children {
+                    child.finish_retained_source(py, cancellation.is_some())?;
+                }
+            }
+            if let Some(private) = &private {
+                private.borrow(py).finish_private_retained_sources(py, &session, &task_use.borrow(py))?;
+            }
             session
                 .prepared_segment
                 .lock()
@@ -21629,6 +21774,34 @@ impl PySemanticTransitionController {
         Ok(state)
     }
 
+    fn original_import_state<'a>(
+        &self,
+        py: Python<'_>,
+        task_use: &'a PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        owner: &SemanticTransitionSession,
+        import: &ColdImportGuard<'_>,
+    ) -> PyResult<MutexGuard<'a, TaskUseState>> {
+        self.require_read_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        let session = self.session.borrow(py);
+        if self.session.as_ptr() != task_use.session.as_ptr()
+            || self.session.as_ptr() != parent.session.as_ptr()
+            || !std::ptr::eq(&*session, import.session)
+            || import.committed
+            || !import.issuance.same_as(&task_use.issuance)
+            || !session.importing.load(Ordering::Acquire)
+        {
+            return Err(invalid("original import continuation changed its Session, task or active guard"));
+        }
+        // This permits metadata authentication only. Each native continuation
+        // still authenticates its own retained owner and independent failures.
+        task_use.require_original_identity(owner)?;
+        let state = task_use.state()?;
+        Self::execution_binding(&state, true)?;
+        Ok(state)
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "replay import carries independent material and lifecycle callbacks"
@@ -21860,6 +22033,7 @@ impl PySemanticTransitionController {
                                     gradient_banks: [false; 2],
                                     deliveries: std::array::from_fn(|_| None),
                                 }),
+                                final_use: Mutex::new(RetainedReplayFinalUse::default()),
                                 completed: AtomicBool::new(false),
                             },
                         )
@@ -21916,6 +22090,7 @@ impl PySemanticTransitionController {
             import,
             &expected,
             replay_result.map(|_| ()),
+            None,
         )?;
         Ok(None)
     }
@@ -21937,17 +22112,28 @@ impl PySemanticTransitionController {
         import: &ColdImportGuard<'_>,
         expected: &(String, Vec<u8>),
         replay_result: PyResult<()>,
+        progress: Option<&mut ReplayImportFinalization>,
     ) -> PyResult<()> {
         // Cleanup runs exactly once even if restore, packing, execution or the
         // first comparison failed. Its sole permission is retiring the original
         // Runtime's temporary owners; an aborted native owner still rejects reads.
+        let mut local = ReplayImportFinalization::default();
+        let progress = progress.unwrap_or(&mut local);
         let cleanup_result = (|| -> PyResult<Vec<u64>> {
-            let streams = {
+            if let Some(streams) = &progress.streams {
+                return Ok(streams.clone());
+            }
+            if progress.cleanup_result.is_none() {
+                if progress.cleanup_entered {
+                    return Err(invalid("original cleanup entered without a known result; it cannot be invoked again"));
+                }
+                progress.cleanup_entered = true;
                 let _reads = ImportReadScope::enter(issued)?;
-                finish_invocation.call1((task_use.clone_ref(py), parent.clone_ref(py)))?
-            };
+                let streams = finish_invocation.call1((task_use.clone_ref(py), parent.clone_ref(py)))?;
+                progress.cleanup_result = Some(streams.unbind());
+            }
             let mut budget = 16 * 1024 * 1024;
-            let mut streams = ColdValue::read(&streams, &mut budget, 0)?
+            let mut streams = ColdValue::read(progress.cleanup_result.as_ref().expect("retained cleanup result").bind(py), &mut budget, 0)?
                 .sequence()?
                 .iter()
                 .map(ColdValue::unsigned)
@@ -21957,6 +22143,7 @@ impl PySemanticTransitionController {
             if !streams.contains(&1) {
                 streams.push(1);
             }
+            progress.streams = Some(streams.clone());
             Ok(streams)
         })();
         let streams = match (replay_result, cleanup_result) {
@@ -21968,50 +22155,136 @@ impl PySemanticTransitionController {
             (Ok(()), Err(error)) => return Err(error),
             (Ok(()), Ok(streams)) => streams,
         };
-        let mut release_allowed = true;
-        let final_result = (|| -> PyResult<AuthoritySnapshot> {
-            self.check_import_callback(py, issued, acquired, import, expected)?;
+        let final_result = (|| -> PyResult<()> {
+            {
+                let owner = import.session.owner()?;
+                let state = self.original_import_state(py, issued, acquired, &owner, import)?;
+                if Self::execution_binding(&state, true)? != *expected {
+                    return Err(invalid("original import changed its current authority"));
+                }
+            }
             // Current authority refresh is not a model callback and opens no
             // unfinished import reads. Historical role39 never supplies rights.
-            let snapshot = refresh_snapshot.call0()?;
-            let mut budget = 16 * 1024 * 1024;
-            let snapshot = AuthoritySnapshot::parse(&ColdValue::read(&snapshot, &mut budget, 0)?)?;
-            #[cfg(feature = "semantic-policy")]
-            if let Some(child) = import.session.private_replay_custody()? {
-                child.refresh_current_authority(py)?;
-            }
-            {
-                let mut owner = import.session.owner()?;
-                let state = self.execution_state(py, issued, acquired, &owner, Some(import))?;
-                if Self::execution_binding(&state, true)? != *expected {
-                    return Err(invalid(
-                        "current authority changed outside the importer's refresh",
-                    ));
+            if progress.snapshot.is_none() {
+                if progress.refresh_result.is_none() {
+                    if progress.refresh_entered {
+                        return Err(invalid("original authority refresh entered without a known result; it cannot be invoked again"));
+                    }
+                    progress.refresh_entered = true;
+                    progress.refresh_result = Some(refresh_snapshot.call0()?.unbind());
                 }
+                let mut budget = 16 * 1024 * 1024;
+                let snapshot = AuthoritySnapshot::parse(&ColdValue::read(progress.refresh_result.as_ref().expect("retained authority result").bind(py), &mut budget, 0)?)?;
+                #[cfg(feature = "semantic-policy")]
+                if let Some(child) = import.session.private_replay_custody()? {
+                    if !progress.child_refreshed {
+                        if progress.child_refresh_entered {
+                            return Err(invalid("original child authority refresh entered without a known result; it cannot be invoked again"));
+                        }
+                        progress.child_refresh_entered = true;
+                        child.refresh_current_authority(py)?;
+                        progress.child_refreshed = true;
+                    }
+                }
+                let owner = import.session.owner()?;
+                let state = self.original_import_state(py, issued, acquired, &owner, import)?;
                 snapshot.newer_than(&state.snapshot)?;
                 issued.authority.check_use(&expected.0, &snapshot, false)?;
+                progress.snapshot = Some(snapshot);
+            }
+            if !progress.reader_quiesced {
+                let mut owner = import.session.owner()?;
                 // Join all callback writes to P/S shared storage and retire
                 // aliases, but retain P's reader for final full comparison.
-                // An uncertain completion is quarantined, never retried here.
-                release_allowed = false;
-                owner
-                    .quiesce_published_reader(&*acquired.lease()?, &streams)
-                    .map_err(xlog_err)?;
-                release_allowed = true;
+                let lease = acquired.lease()?;
+                let result = owner.quiesce_published_reader(&lease, &streams);
+                let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
+                    && owner.published_consumer_completion_pending(&lease).map_err(xlog_err)?;
+                drop(lease);
+                drop(owner);
+                Self::finish_import_native_stage(py, import, result, pending)?;
+                progress.reader_quiesced = true;
             }
-            self.verify_import_successor(py, issued, acquired, material, import)?;
-            Ok(snapshot)
-        })();
-        let release = if release_allowed {
-            Self::release_import_reader(acquired, import, &streams)
-        } else {
+            if progress.successor.is_none() {
+                let mut owner = import.session.owner()?;
+                if progress.acquisition.is_none() {
+                    progress.acquisition = Some(owner.begin_published_acquisition().map_err(xlog_err)?);
+                }
+                let result = owner.resolve_published_acquisition(progress.acquisition.as_ref().expect("original successor acquisition"));
+                // The original capability is installed before its first effect;
+                // native resolution rejects foreign poison before continuing it.
+                let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
+                    && owner.published_acquisition_pending(progress.acquisition.as_ref().expect("original successor acquisition")).map_err(xlog_err)?;
+                drop(owner);
+                progress.successor = Some(Self::finish_import_native_stage(py, import, result, pending)?);
+            }
+            if !progress.comparison_finished {
+                let mut owner = import.session.owner()?;
+                let predecessor = acquired.lease()?;
+                let successor = progress.successor.as_ref().expect("original successor reader");
+                if progress.comparison.is_none() {
+                    progress.comparison = Some(owner.begin_replay_publication_verification(material, &predecessor, successor).map_err(xlog_err)?);
+                }
+                let comparison = progress.comparison.as_mut().expect("original complete-state comparison");
+                let result = owner.resolve_replay_publication_verification(comparison, &predecessor, successor);
+                let pending = result.as_ref().is_err_and(|error| matches!(error,
+                    xlog_cuda::SemanticTransitionError::Runtime { .. }
+                    | xlog_cuda::SemanticTransitionError::Semantic(xlog_cuda::SemanticHypergraphError::Runtime { .. })))
+                    && owner.replay_publication_verification_pending(comparison, &predecessor, successor).map_err(xlog_err)?;
+                drop(predecessor);
+                drop(owner);
+                Self::finish_import_native_stage(py, import, result, pending)?;
+                progress.comparison_finished = true;
+            }
+            if !progress.successor_released {
+                let mut owner = import.session.owner()?;
+                let successor = progress.successor.as_mut().expect("original successor reader");
+                let result = owner.release(successor, &[1]);
+                let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
+                    && owner.published_reader_release_pending(successor).map_err(xlog_err)?;
+                drop(owner);
+                Self::finish_import_native_stage(py, import, result, pending)?;
+                progress.successor_released = true;
+            }
+            if !progress.predecessor_released {
+                let mut owner = import.session.owner()?;
+                let mut predecessor = acquired.lease()?;
+                let result = owner.release(&mut predecessor, &streams);
+                let pending = result.as_ref().is_err_and(|error| matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }))
+                    && owner.published_reader_release_pending(&predecessor).map_err(xlog_err)?;
+                drop(predecessor);
+                drop(owner);
+                Self::finish_import_native_stage(py, import, result, pending)?;
+                acquired.release_continuation_producers();
+                progress.predecessor_released = true;
+            }
+            if !progress.state_finished {
+                let owner = import.session.owner()?;
+                let mut state = self.original_import_state(py, issued, acquired, &owner, import)?;
+                state.finish_import(&issued.authority, progress.snapshot.as_ref().expect("original authority snapshot").clone())?;
+                progress.state_finished = true;
+            }
             Ok(())
-        };
-        let snapshot = finish_with_cleanup(py, final_result, release)?;
-        let owner = import.session.owner()?;
-        let mut state = self.execution_state(py, issued, acquired, &owner, Some(import))?;
-        state.finish_import(&issued.authority, snapshot)?;
-        Ok(())
+        })();
+        final_result
+    }
+
+    fn finish_import_native_stage<T>(
+        py: Python<'_>,
+        import: &ColdImportGuard<'_>,
+        result: Result<T, xlog_cuda::SemanticTransitionError>,
+        pending: bool,
+    ) -> PyResult<T> {
+        match result {
+            Err(error) if pending && import.retained_final_use => {
+                import.native_pending.set(true);
+                #[cfg(feature = "semantic-policy")]
+                return Err(retained_final_use_pending(py, xlog_err(error)));
+                #[cfg(not(feature = "semantic-policy"))]
+                return Err(xlog_err(error));
+            }
+            result => result.map_err(xlog_err),
+        }
     }
 
     fn release_import_reader(
