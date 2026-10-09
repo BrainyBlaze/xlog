@@ -14,6 +14,9 @@ pub(crate) struct OriginalNativeCommand {
 }
 
 impl OriginalNativeCommand {
+    pub(super) fn completed(&self) -> bool {
+        self.completed
+    }
     pub(crate) fn new(domain: &ResidentExecutionDomain) -> Result<Self, SemanticTransitionError> {
         Ok(Self {
             completion: ExecutionCompletion::new(domain.execution_stream().context())
@@ -90,6 +93,10 @@ impl OriginalNativeCommand {
                 runtime_error("original content completion fence", error)
             })?;
         }
+        self.join_original(poisoned)
+    }
+
+    fn join_original(&mut self, poisoned: &mut bool) -> Result<(), SemanticTransitionError> {
         self.completion.wait().map_err(|error| {
             *poisoned = true;
             runtime_error("original content completion", error)
@@ -103,6 +110,26 @@ impl OriginalNativeCommand {
         }
         self.completed = true;
         Ok(())
+    }
+
+    pub(super) fn resolve_entered(
+        &mut self,
+        poisoned: &mut bool,
+    ) -> Result<bool, SemanticTransitionError> {
+        if self.completed {
+            return Ok(true);
+        }
+        if !self.entered {
+            if self.completion_entered {
+                self.completion.wait().map_err(|error| {
+                    *poisoned = true;
+                    runtime_error("original content prelaunch completion", error)
+                })?;
+            }
+            return Ok(false);
+        }
+        self.join_original(poisoned)?;
+        Ok(true)
     }
 
     pub(super) fn run_dma(
@@ -201,6 +228,7 @@ pub(super) struct FrozenColdEvaluationContent {
     remaining: [[u8; 2]; 4],
     model_snapshot: Option<[u64; 9]>,
     model_contract_guard: Option<[u64; 9]>,
+    step_input_preparation: Option<([u64; 9], [u64; 9])>,
 }
 
 impl ColdNativeAllowance {
@@ -367,7 +395,31 @@ impl ColdNativeAllowance {
         Ok(true)
     }
 
-    fn record_submitted_dma(&mut self, bytes: usize) -> Result<(), SemanticTransitionError> {
+    pub(super) fn claim_step_input_preparation(
+        &mut self,
+        ceiling: [u64; 9],
+        dma: [u64; 9],
+    ) -> Result<bool, SemanticTransitionError> {
+        if !self.is_evaluation() {
+            return Ok(false);
+        }
+        let content = self.content.as_mut().ok_or_else(|| {
+            publication_input_error("step input preparation precedes its original admission")
+        })?;
+        if content.step_input_preparation != Some((ceiling, dma)) {
+            return Err(publication_input_error(
+                "step input preparation exceeded or changed its original finite producer",
+            ));
+        }
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)?;
+        content.step_input_preparation = None;
+        Ok(true)
+    }
+
+    pub(super) fn record_submitted_dma(
+        &mut self,
+        bytes: usize,
+    ) -> Result<(), SemanticTransitionError> {
         let mut reached = self.submitted_dma;
         add_native_work_ceiling(
             &mut reached,
@@ -428,7 +480,10 @@ impl ColdNativeAllowance {
 }
 
 impl FrozenColdEvaluationContent {
-    #[expect(clippy::too_many_arguments, reason = "original admitted producer geometry stays bound to its evaluation owner")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "original admitted producer geometry stays bound to its evaluation owner"
+    )]
     pub(super) fn new(
         invocation: Arc<()>,
         cohort: Arc<SemanticEvaluationCohort>,
@@ -438,6 +493,7 @@ impl FrozenColdEvaluationContent {
         preparation_ceiling: [u64; 9],
         model_snapshot: [u64; 9],
         model_contract_guard: [u64; 9],
+        step_input_preparation: Option<([u64; 9], [u64; 9])>,
     ) -> Result<Self, SemanticTransitionError> {
         let original = cohort.content_tensors();
         if original.len() != 17 || output.len() != 3 || objective.len() != 8 {
@@ -504,6 +560,10 @@ impl FrozenColdEvaluationContent {
         let mut ceiling = preparation_ceiling;
         add_native_work_ceiling(&mut ceiling, model_snapshot)?;
         add_native_work_ceiling(&mut ceiling, model_contract_guard)?;
+        if let Some((native, dma)) = step_input_preparation {
+            add_native_work_ceiling(&mut ceiling, native)?;
+            add_native_work_ceiling(&mut ceiling, dma)?;
+        }
         let sources = [&output, &objective];
         for (kind, tensors) in sources.into_iter().enumerate() {
             for verify in [false, true] {
@@ -545,6 +605,7 @@ impl FrozenColdEvaluationContent {
             remaining,
             model_snapshot: Some(model_snapshot),
             model_contract_guard: Some(model_contract_guard),
+            step_input_preparation,
         })
     }
 }
@@ -557,6 +618,16 @@ pub(super) struct OriginalModelSnapshot {
     pub(super) cursor: usize,
     pub(super) commands: Vec<OriginalNativeCommand>,
     pub(super) allowance: Option<std::sync::Weak<Mutex<ColdNativeAllowance>>>,
+}
+
+pub(super) struct OriginalStepInputPreparation {
+    pub(super) writes: [crate::device::RetainedDeviceWrite<PublicationStepInput>; 2],
+    pub(super) admitted: [bool; 2],
+    pub(super) recorded: [bool; 2],
+    pub(super) cursor: usize,
+    pub(super) command: OriginalNativeCommand,
+    pub(super) allowance: Option<std::sync::Weak<Mutex<ColdNativeAllowance>>>,
+    pub(super) native_work: Option<DeviceMemoryView<u64>>,
 }
 
 pub(super) fn model_snapshot_native_work_ceiling(
@@ -707,6 +778,13 @@ pub(super) fn content_digest_ceiling(
 
 impl PreparedStepInputs {
     fn native_work_ceiling(&self) -> Result<[u64; 9], SemanticTransitionError> {
+        Self::basis_native_work_ceiling(&self.storage, &self.plans)
+    }
+
+    fn basis_native_work_ceiling(
+        storage: &PublicationStorage,
+        plans: &[StepInputPlan],
+    ) -> Result<[u64; 9], SemanticTransitionError> {
         // One original guard, two metadata seals, and the fixed roster fold.
         let mut ceiling = [1, 0, 0, 0, 0, 0, 0, 2, 112];
         for (bytes, prefix_words) in [
@@ -717,7 +795,7 @@ impl PreparedStepInputs {
             digest[0] = 0;
             add_native_work_ceiling(&mut ceiling, digest)?;
         }
-        let count = u64::try_from(self.plans.len()).map_err(|_| native_work_ceiling_overflow())?;
+        let count = u64::try_from(plans.len()).map_err(|_| native_work_ceiling_overflow())?;
         let previous = count
             .checked_sub(1)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -726,7 +804,7 @@ impl PreparedStepInputs {
             .map(|visits| visits / 2)
             .and_then(|visits| visits.checked_add(count))
             .ok_or_else(native_work_ceiling_overflow)?;
-        for plan in &self.plans {
+        for plan in plans {
             let mut digest = if matches!(plan.role, 4..=13 | 18..=25) {
                 let end = if plan.layout.logical_axis == u64::MAX {
                     0
@@ -750,17 +828,12 @@ impl PreparedStepInputs {
         for bank in 0..2 {
             let mut selected = [0; 9];
             let mut seen = BTreeSet::new();
-            for plan in self
-                .plans
-                .iter()
-                .filter(|plan| matches!(plan.role, 18..=25))
-            {
+            for plan in plans.iter().filter(|plan| matches!(plan.role, 18..=25)) {
                 let slot = plan.banks[bank].storage_slot;
                 if !seen.insert(slot) {
                     continue;
                 }
-                let allocation = self
-                    .storage
+                let allocation = storage
                     .allocations
                     .get(slot)
                     .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -779,6 +852,139 @@ impl PreparedStepInputs {
         add_native_work_ceiling(&mut ceiling, backing_ceiling)?;
         Ok(ceiling)
     }
+}
+
+pub(super) fn step_input_plans(
+    storage: &PublicationStorage,
+    directory: &[PublicationRange],
+) -> Result<Vec<StepInputPlan>, SemanticTransitionError> {
+    let mut plans = PreparedStepInputs::plan(storage)?;
+    let slots = storage.model_slots_for_directory(directory)?;
+    for plan in &mut plans {
+        if matches!(plan.role, 18..=25) {
+            let allocation = storage.model_memory.location(plan.role, plan.index)?.0;
+            for bank in 0..2 {
+                plan.banks[bank].storage_slot = slots[allocation][bank];
+            }
+        }
+    }
+    Ok(plans)
+}
+
+pub(super) fn step_input_dma_ceiling(count: usize) -> Result<[u64; 9], SemanticTransitionError> {
+    let bytes = count
+        .checked_mul(size_of::<PublicationStepInput>())
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(native_work_ceiling_overflow)?;
+    Ok([
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        u64::try_from(bytes).map_err(|_| native_work_ceiling_overflow())?,
+    ])
+}
+
+pub(super) fn step_input_producer_native_work_ceiling(
+    storage: &PublicationStorage,
+    plans: &[StepInputPlan],
+    directory: &[PublicationRange],
+) -> Result<[u64; 9], SemanticTransitionError> {
+    let mut ceiling = PreparedStepInputs::basis_native_work_ceiling(storage, plans)?;
+    // The selected-model check is a strict prefix of the full role44 guard.
+    // Retaining that complete guard ceiling is a conservative native bound.
+    add_native_work_ceiling(
+        &mut ceiling,
+        model_contract_guard_native_work_ceiling(storage, directory)?,
+    )?;
+    let table = directory
+        .iter()
+        .find(|range| range.role == 55 && range.index == 0)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let mut table_digest = content_digest_ceiling(table.length_bytes, 21, false)?;
+    table_digest[0] = 0;
+    add_native_work_ceiling(&mut ceiling, table_digest)?;
+    let n = u64::try_from(directory.len()).map_err(|_| native_work_ceiling_overflow())?;
+    let t = u64::try_from(storage.layouts.len()).map_err(|_| native_work_ceiling_overflow())?;
+    let k = u64::try_from(plans.len()).map_err(|_| native_work_ceiling_overflow())?;
+    let s = u64::try_from(storage.allocations.len()).map_err(|_| native_work_ceiling_overflow())?;
+    let d = storage
+        .contract_value
+        .window_capacity
+        .checked_add(storage.contract_value.feedback_capacity)
+        .ok_or_else(native_work_ceiling_overflow)?;
+    let sum = |a: u64, b: u64| a.checked_add(b).ok_or_else(native_work_ceiling_overflow);
+    let product = |a: u64, b: u64| a.checked_mul(b).ok_or_else(native_work_ceiling_overflow);
+    let pairs = |count: u64| product(count, count.saturating_sub(1)).map(|value| value / 2);
+    // Storage validation; role/table/layout validation; original output alias
+    // scans; every binding's full directory/layout scans and fixed layout words;
+    // mutually exclusive previous-binding scans; final copied range lookups.
+    let mut visits = sum(s, pairs(s)?)?;
+    visits = sum(
+        visits,
+        u64::try_from(storage.role_counts.len()).map_err(|_| native_work_ceiling_overflow())?,
+    )?;
+    visits = sum(visits, sum(6, d)?)?;
+    visits = sum(visits, sum(n, product(t, sum(n, 1)?)?)?)?;
+    visits = sum(visits, pairs(t)?)?;
+    visits = sum(visits, product(n, sum(sum(sum(1, n)?, t)?, d)?)?)?;
+    visits = sum(visits, 22 + 44 + 10)?;
+    visits = sum(visits, product(8, sum(s, 2)?)?)?;
+    let words = (size_of::<SemanticTensorLayout>() / 8) as u64;
+    visits = sum(
+        visits,
+        product(k, sum(sum(sum(1, product(2, n)?)?, t)?, words)?)?,
+    )?;
+    visits = sum(visits, product(pairs(k)?, sum(n, 1)?)?)?;
+    visits = sum(visits, product(k, sum(product(2, sum(s, 2)?)?, 4)?)?)?;
+    visits = sum(visits, product(k, sum(n, 1)?)?)?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [0, visits, 0, 0, 0, 0, 0, 0, product(n, 29 * 8)?],
+    )?;
+    let bytes = sum(
+        sum(64, size_of::<PublicationHeader>() as u64)?,
+        (32 * size_of::<SourceSlot>()) as u64,
+    )?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            sum(bytes, product(k, size_of::<PublicationRange>() as u64)?)?,
+        ],
+    )?;
+    for plan in plans
+        .iter()
+        .filter(|plan| !matches!(plan.role, 1 | 4 | 5 | 18..=25))
+    {
+        add_native_work_ceiling(
+            &mut ceiling,
+            [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                u64::try_from(plan.banks[0].span.len())
+                    .map_err(|_| native_work_ceiling_overflow())?,
+            ],
+        )?;
+    }
+    Ok(ceiling)
 }
 
 impl TensorContentBuffers {

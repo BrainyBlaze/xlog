@@ -1981,11 +1981,13 @@ extern "C" __global__ void semantic_initial_prefill_input_guard(uint64_t expecte
         }
 }
 __device__ uint64_t publication_validate_directory(const PublicationControl& control,
-        const PublicationContract& contract,PublicationRange* ranges,uint64_t count,bool seal) {
+        const PublicationContract& contract,PublicationRange* ranges,uint64_t count,bool seal,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(!ranges || count>contract.range_capacity || contract.role_count!=semantic_task_ground::kPublicationRole || !contract.role_counts)return 1;
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     uint64_t expected=0,tensor_count=0;
     for(uint64_t i=0;i<semantic_task_ground::kPublicationRole;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(roles[i].role!=i+1 || !semantic_graph::checked_add(expected,roles[i].count,&expected))return 1;
         if(publication_tensor_role(i+1))tensor_count+=roles[i].count;
         else if(roles[i].count!=(i+1==16 ? 3 : 1))return 1;
@@ -1995,19 +1997,23 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
        roles[52].count!=roles[5].count || roles[53].count!=roles[6].count || !roles[17].count)return 1;
     for(uint64_t role=8;role<=13;++role)if(roles[role-1].count!=1)return 1;
     TensorLayoutTableView table{};
-    if(!publication_tensor_table(control,ranges,count,&table) || table.header->layout_count!=tensor_count ||
-       !publication_active_map_shape(table,contract))return 1;
+    if(!publication_tensor_table(control,ranges,count,&table,work) || table.header->layout_count!=tensor_count ||
+       !publication_active_map_shape(table,contract,work))return 1;
     const auto* layouts=table.layouts;
     for(uint64_t i=0;i<tensor_count;++i) {
-        if(!publication_tensor_role(layouts[i].role) || !publication_find_range(ranges,count,layouts[i].role,layouts[i].index))return 1;
-        for(uint64_t j=0;j<i;++j)
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(!publication_tensor_role(layouts[i].role) || !publication_find_range(ranges,count,layouts[i].role,layouts[i].index,work))return 1;
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(layouts[j].role==layouts[i].role && layouts[j].index==layouts[i].index)return 1;
+        }
     }
     uint64_t cursor=0;
     for(uint64_t role=1;role<=semantic_task_ground::kPublicationRole;++role)for(uint64_t index=0;index<roles[role-1].count;++index) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         PublicationRange& range=ranges[cursor++];
         if(range.role!=role || range.index!=index)return 1;
-        const auto* layout=publication_find_layout(control,ranges,count,role,index);
+        const auto* layout=publication_find_layout(control,ranges,count,role,index,work);
         if(publication_tensor_role(role)!=bool(layout))return 1;
         if(!publication_tensor_role(role) && role!=1 && role!=2 && role!=57 && !range.length_bytes)return 1;
         if(role==14 && range.length_bytes!=sizeof(CompletionCoverage))return 1;
@@ -2025,8 +2031,8 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
             range.logical_begin || range.logical_end!=table.header->active_row_count ||
             ((range.length_bytes==0)!=(table.header->active_row_count==0))))return 1;
         PublicationTensorBytes view{};uint64_t bytes=0;
-        if(publication_tensor_view(control,range,layout,&view,&bytes,&table))return 1;
-        if(seal && publication_range_digest(control,range,layout,range.digest,&table))return 1;
+        if(publication_tensor_view(control,range,layout,&view,&bytes,&table,work))return 1;
+        if(seal && publication_range_digest(control,range,layout,range.digest,&table,work))return 1;
     }
     return 0;
 }
@@ -2034,15 +2040,19 @@ __device__ bool publication_mutable_role(uint64_t role) {
     return role==1 || role==2 || role==3 || (role>=4 && role<=15) || (role>=18 && role<=25) || role==30 || role==31 || role==32 || role==33 || role==39 || role==44 ||
         (role>=51 && role<=semantic_task_ground::kPublicationRole);
 }
-__device__ uint64_t publication_validate_storage(const PublicationControl& control) {
+__device__ uint64_t publication_validate_storage(const PublicationControl& control,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(!control.storage || !control.storage_count)return 1;
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
     for(uint64_t i=0;i<control.storage_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if((!storage[i].pointer != !storage[i].bytes) || !storage[i].generation ||
            storage[i].pointer>UINT64_MAX-storage[i].bytes)return 1;
-        for(uint64_t j=0;j<i;++j)
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(storage[i].pointer<storage[j].pointer+storage[j].bytes &&
                storage[j].pointer<storage[i].pointer+storage[i].bytes)return 1;
+        }
     }
     return 0;
 }
@@ -3438,7 +3448,8 @@ __device__ bool publication_spans_overlap(uint64_t a,uint64_t a_bytes,uint64_t b
     return a<b+b_bytes && b<a+a_bytes;
 }
 __device__ bool publication_step_output_span(const PublicationControl& control,uint64_t lease,
-        uint64_t bindings,uint64_t binding_bytes,uint64_t pointer,uint64_t bytes) {
+        uint64_t bindings,uint64_t binding_bytes,uint64_t pointer,uint64_t bytes,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
     if(!publication_pointer_span(pointer,bytes) ||
        publication_spans_overlap(pointer,bytes,reinterpret_cast<uint64_t>(&control),sizeof(control)) ||
@@ -3447,12 +3458,16 @@ __device__ bool publication_step_output_span(const PublicationControl& control,u
        publication_spans_overlap(pointer,bytes,control.contract,sizeof(contract)) ||
        publication_spans_overlap(pointer,bytes,contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount)) ||
        publication_spans_overlap(pointer,bytes,control.storage,control.storage_count*sizeof(PublicationStorageEntry)))return false;
-    for(uint64_t bank=0;bank<2;++bank)
+    for(uint64_t bank=0;bank<2;++bank) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(publication_spans_overlap(pointer,bytes,control.banks[bank],sizeof(PublicationBank)) ||
            publication_spans_overlap(pointer,bytes,control.directories[bank],contract.range_capacity*sizeof(PublicationRange)))return false;
+    }
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
-    for(uint64_t i=0;i<control.storage_count;++i)
+    for(uint64_t i=0;i<control.storage_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(publication_spans_overlap(pointer,bytes,storage[i].pointer,storage[i].bytes))return false;
+    }
     return true;
 }
 __device__ bool publication_step_layout_capacity(const PublicationTensorLayout& layout,uint64_t* capacity) {
@@ -3824,8 +3839,10 @@ extern "C" __global__ void semantic_publication_model_seals(uint64_t control_ptr
 // Source, feedback records, header and seals are retained private snapshots.
 extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr,uint64_t lease_ptr,
         uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t header_output_ptr,
-        uint64_t source_output_ptr,uint64_t range_output_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t source_output_ptr,uint64_t range_output_ptr,uint64_t metadata_digests_ptr,uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(control_ptr,sizeof(PublicationControl),alignof(PublicationControl)) ||
        !publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
@@ -3861,50 +3878,57 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
             semantic_content_integrity_trap();return;
         }
     const auto* bank=publication_acquired_bank(control,lease);
-    if(!bank || bank->header.range_count>contract.range_capacity || publication_validate_storage(control)) {
+    if(!bank || bank->header.range_count>contract.range_capacity || publication_validate_storage(control,work)) {
         semantic_content_integrity_trap();return;
     }
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[lease.bank]);
     const uint64_t count=bank->header.range_count;
     uint64_t digest[4];
-    if(publication_validate_selected_model(control,*bank)) { semantic_content_integrity_trap();return; }
-    const auto* table_range=publication_find_range(ranges,count,55);
-    if(!table_range || publication_range_digest(control,*table_range,nullptr,digest) ||
-       !publication_identity_equal(digest,table_range->digest) || publication_validate_directory(control,contract,ranges,count,false)) {
+    if(publication_validate_selected_model(control,*bank,work)) { semantic_content_integrity_trap();return; }
+    const auto* table_range=publication_find_range(ranges,count,55,0,work);
+    if(!table_range || publication_range_digest(control,*table_range,nullptr,digest,nullptr,work) ||
+       !publication_identity_equal(digest,table_range->digest) || publication_validate_directory(control,contract,ranges,count,false,work)) {
         semantic_content_integrity_trap();return;
     }
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     uint64_t expected=3;
-    for(uint64_t role=4;role<=25;++role)
+    for(uint64_t role=4;role<=25;++role) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(role!=14 && !semantic_graph::checked_add(expected,roles[role-1].count,&expected)) {
             semantic_content_integrity_trap();return;
         }
+    }
     if(roles[43].count!=1 || binding_count!=expected) { semantic_content_integrity_trap();return; }
     const uint64_t output_pointers[]={header_output_ptr,source_output_ptr,range_output_ptr,metadata_digests_ptr};
     const uint64_t output_bytes[]={sizeof(PublicationHeader),32*sizeof(SourceSlot),range_bytes,8*sizeof(uint64_t)};
     for(uint64_t i=0;i<4;++i) {
-        if(!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,output_pointers[i],output_bytes[i]) ||
-           !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,output_pointers[i],output_bytes[i])) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,output_pointers[i],output_bytes[i],work) ||
+           !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,output_pointers[i],output_bytes[i],work)) {
             semantic_content_integrity_trap();return;
         }
-        for(uint64_t j=0;j<i;++j)
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(publication_spans_overlap(output_pointers[i],output_bytes[i],output_pointers[j],output_bytes[j])) {
                 semantic_content_integrity_trap();return;
             }
+        }
     }
     const auto* bindings=reinterpret_cast<const PublicationStepInput*>(bindings_ptr);
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
     uint64_t cursor=0;
     for(uint64_t role=1;role<=44;++role) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(role==2 || role==14 || (role>25 && role!=44))continue;
         const bool model=role>=18 && role<=25;
         for(uint64_t index=0;index<roles[role-1].count;++index) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             const auto& binding=bindings[cursor++];
-            const auto* range=publication_find_range(ranges,count,role,index);
-            const auto* layout=publication_find_layout(control,ranges,count,role,index);
+            const auto* range=publication_find_range(ranges,count,role,index,work);
+            const auto* layout=publication_find_layout(control,ranges,count,role,index,work);
             if(!range || binding.role!=role || binding.index!=index ||
                ((!model || binding.capacity_bytes) && !publication_pointer_span(binding.destination,binding.capacity_bytes)) ||
-               publication_range_digest(control,*range,layout,digest) || !publication_identity_equal(digest,range->digest)) {
+               publication_range_digest(control,*range,layout,digest,nullptr,work) || !publication_identity_equal(digest,range->digest)) {
                 semantic_content_integrity_trap();return;
             }
             const auto* original=publication_range_bytes(control,*range);
@@ -3921,7 +3945,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 }
                 bool sealed=false;
                 for(uint64_t i=0;i+1<cursor;++i) {
-                    const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index);
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                    const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index,work);
                     if(previous->storage_slot==range->storage_slot) {
                         if(bindings[i].backing!=binding.backing || bindings[i].backing_bytes!=binding.backing_bytes ||
                            !publication_identity_equal(previous->backing_digest,range->backing_digest)) {
@@ -3930,15 +3955,17 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                         sealed=true;break;
                     }
                 }
-                if(!sealed && (publication_backing_digest(control,*range,digest) ||
+                if(!sealed && (publication_backing_digest(control,*range,digest,work) ||
                    !publication_identity_equal(digest,range->backing_digest))) { semantic_content_integrity_trap();return; }
             } else if(binding.backing!=binding.destination || binding.backing_bytes!=binding.capacity_bytes) {
                 semantic_content_integrity_trap();return;
             }
             if(role==3 || (role>=15 && role<=17) || role==44) {
                 const auto* words=reinterpret_cast<const uint64_t*>(&binding.layout);
-                for(uint64_t word=0;word<sizeof(binding.layout)/8;++word)
+                for(uint64_t word=0;word<sizeof(binding.layout)/8;++word) {
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     if(words[word]) { semantic_content_integrity_trap();return; }
+                }
                 if(range->logical_begin || (role!=15 && range->logical_end) || binding.capacity_bytes!=range->length_bytes ||
                    (role==15 && (range->length_bytes%sizeof(RawFeedbackRecord) ||
                        range->logical_end>range->length_bytes/sizeof(RawFeedbackRecord))) ||
@@ -3956,8 +3983,10 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 } else original_layout=*layout;
                 const auto* actual=reinterpret_cast<const uint64_t*>(&binding.layout);
                 const auto* sealed=reinterpret_cast<const uint64_t*>(&original_layout);
-                for(uint64_t word=0;word<sizeof(original_layout)/8;++word)
+                for(uint64_t word=0;word<sizeof(original_layout)/8;++word) {
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     if(actual[word]!=sealed[word]) { semantic_content_integrity_trap();return; }
+                }
                 uint64_t capacity=0;
                 if(model)capacity=range->length_bytes;
                 if((!model && !publication_step_layout_capacity(original_layout,&capacity)) || binding.capacity_bytes!=capacity ||
@@ -3976,16 +4005,19 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
             }
             if(alias)continue;
             if(binding.backing_bytes &&
-               (!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,binding.backing,binding.backing_bytes) ||
-                !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,binding.backing,binding.backing_bytes))) {
+               (!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,binding.backing,binding.backing_bytes,work) ||
+                !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,binding.backing,binding.backing_bytes,work))) {
                 semantic_content_integrity_trap();return;
             }
-            for(uint64_t i=0;i<4;++i)
+            for(uint64_t i=0;i<4;++i) {
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                 if(publication_spans_overlap(binding.backing,binding.backing_bytes,output_pointers[i],output_bytes[i])) {
                     semantic_content_integrity_trap();return;
                 }
+            }
             for(uint64_t i=0;i+1<cursor;++i) {
-                const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index);
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index,work);
                 const bool same_model=model && bindings[i].role>=18 && previous->storage_slot==range->storage_slot;
                 if(!same_model && publication_spans_overlap(binding.backing,binding.backing_bytes,bindings[i].backing,bindings[i].backing_bytes)) {
                     semantic_content_integrity_trap();return;
@@ -3994,16 +4026,19 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
         }
     }
     uint64_t metadata[2][4];
-    if(publication_step_metadata_digest(bank->header,bank->source,binding_count,metadata)) { semantic_content_integrity_trap();return; }
-    publication_copy_bytes(reinterpret_cast<uint8_t*>(metadata_digests_ptr),reinterpret_cast<const uint8_t*>(metadata),sizeof(metadata));
+    if(publication_step_metadata_digest(bank->header,bank->source,binding_count,metadata,work)) { semantic_content_integrity_trap();return; }
+    publication_copy_bytes(reinterpret_cast<uint8_t*>(metadata_digests_ptr),reinterpret_cast<const uint8_t*>(metadata),sizeof(metadata),work);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationHeader));
     *reinterpret_cast<PublicationHeader*>(header_output_ptr)=bank->header;
-    publication_copy_bytes(reinterpret_cast<uint8_t*>(source_output_ptr),reinterpret_cast<const uint8_t*>(bank->source),sizeof(bank->source));
+    publication_copy_bytes(reinterpret_cast<uint8_t*>(source_output_ptr),reinterpret_cast<const uint8_t*>(bank->source),sizeof(bank->source),work);
     auto* output_ranges=reinterpret_cast<PublicationRange*>(range_output_ptr);
     for(uint64_t i=0;i<binding_count;++i) {
-        const auto& binding=bindings[i];const auto* range=publication_find_range(ranges,count,binding.role,binding.index);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        const auto& binding=bindings[i];const auto* range=publication_find_range(ranges,count,binding.role,binding.index,work);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
         output_ranges[i]=*range;
         if(binding.role==3 || (binding.role>=6 && (binding.role<18 || binding.role>25)))
-            publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.destination),publication_range_bytes(control,*range),range->length_bytes);
+            publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.destination),publication_range_bytes(control,*range),range->length_bytes,work);
     }
 }
 
