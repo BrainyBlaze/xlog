@@ -524,10 +524,7 @@ impl PySemanticTransitionColdTask {
         )?;
         let import_owners = || {
             (
-                Arc::new(Mutex::new(ProposalExpense {
-                    capacity: None,
-                    spent: 0,
-                })),
+                Arc::new(Mutex::new(ProposalExpense::default())),
                 Arc::new(Mutex::new(CheckpointSources::default())),
             )
         };

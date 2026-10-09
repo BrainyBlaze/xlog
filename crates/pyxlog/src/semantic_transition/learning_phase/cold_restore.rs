@@ -657,6 +657,7 @@ fn require_private_expense(
         || source_seed.original_training_roster()? != private_seed.original_training_roster()?
         || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
         || source_seed.proposal_expense()?.capacity != expense.capacity
+        || source_seed.proposal_expense()?.original_admission != expense.original_admission
         || source_seed.proposal_expense()?.spent > expense.spent
     {
         return Err(invalid(
@@ -1329,6 +1330,7 @@ impl VerifiedClosure {
             || source_seed.original_training_roster()? != final_seed.original_training_roster()?
             || source_seed.checkpoint_source_limits()? != final_seed.checkpoint_source_limits()?
             || source_seed.proposal_expense()?.capacity != final_seed.proposal_expense()?.capacity
+            || source_seed.proposal_expense()?.original_admission != final_seed.proposal_expense()?.original_admission
             || source_seed.proposal_expense()?.spent > final_seed.proposal_expense()?.spent
         {
             return Err(invalid(
@@ -1553,6 +1555,7 @@ impl CheckpointCustody {
             let expense = seed.proposal_expense()?;
             phases == original
                 && expense.capacity == refusal.expense.capacity
+                && expense.original_admission == refusal.expense.original_admission
                 && expense.spent >= refusal.expense.spent
         } else {
             phases
@@ -1661,10 +1664,12 @@ impl VerifiedClosure {
             || saved.replay_capacity != current.replay_capacity
             || saved.checkpoint_source_limits()? != current.checkpoint_source_limits()?
             || saved.proposal_expense()?.capacity != current_expense.capacity
+            || saved.proposal_expense()?.original_admission != current_expense.original_admission
             || saved.proposal_expense()?.spent > current_expense.spent
             || saved_parent.model_generation > current_parent.model_generation
             || self.refusal.as_ref().is_some_and(|refusal| {
                 current_expense.capacity != refusal.expense.capacity
+                    || current_expense.original_admission != refusal.expense.original_admission
                     || current_expense.spent < refusal.expense.spent
             })
         {
@@ -1729,7 +1734,9 @@ impl VerifiedClosure {
         let manifest = SemanticCheckpointManifest::decode(checkpoint)?;
         let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
         let mut expense = seed.proposal_expense()?;
-        if expense.capacity != refusal.expense.capacity {
+        if expense.capacity != refusal.expense.capacity
+            || expense.original_admission != refusal.expense.original_admission
+        {
             return Err(invalid(
                 "terminal Source restore changed its original Proposal capacity",
             ));

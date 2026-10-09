@@ -536,7 +536,8 @@ exception, or unwind before the post-callback checks. A saved task reference
 does not retain that temporary permission.
 
 `SemanticTransitionSession.restore_checkpoint(checkpoint, *, device_ordinal,
-snapshot, restore_model, training_domain)` validates every section and the retained
+snapshot, restore_model, training_domain, training_canary_source,
+original_program=None)` validates every section and the retained
 authority before allocating a fresh, never-reused native owner. `snapshot` must be newer than the
 snapshot sealed into the checkpoint. The application must project its original
 sealed input set and loader again into `training_domain`; it must exactly match
@@ -549,6 +550,14 @@ must return its reconstructed semantic runtime. The frozen
 `SemanticTransitionRestoredCheckpoint` exposes that same `session`, `controller`,
 `task_use`, `parent`, and returned `model` through read-only properties; none is a
 replacement or second acquisition.
+
+For a Program-bound task, `original_program` must be the exact complete bytes
+supplied at first import, not a re-encoded schedule or a prefix. Missing or
+different expected bytes refuse before native allocation or the model factory.
+The original initial kit, byte limits and native-issued Proposal assignment map
+are restored from the same authenticated task capsule. An issued assignment whose
+full episode has not yet materialized remains unresolved; it cannot authorize an
+actor draw until joined with its exact original replay material and batch receipt.
 
 Phase custody uses this same loader with all four original cold proof
 keywords together: `learning_phase_issuer` is the independently pinned 32-byte
@@ -823,6 +832,38 @@ provide the same original bound and retains its already spent places. Neither
 the limit nor expense is inferred from fuel or effective RNG draws. This is
 not a phase-program budget. The native-issued `task_use.proposal_expense`
 returns `(capacity, spent)`.
+The same first import accepts `original_program=bytes` and
+`actor_refresh_initial_kit=(index_bytes, episode_rows)`. Supply both together
+before the first Proposal. Program bytes are bounded by 16 MiB and are retained
+unchanged; native code derives the complete physical Proposal and Update roster.
+`proposal_capacity` must equal that original Proposal count. The initial kit
+contains every original episode in the sealed kit's supplied order, not anchors
+or a success-filtered subset. Its evidence identities must cover the original
+index exactly, and each episode's required material digest must occur in that
+index. The existing replay byte limits bound its actual material and evidence
+bytes. Native classifies original actor eligibility from the full original
+action-batch receipts; omission does not mean zero actors. The immutable
+`task_use.original_program` property returns those exact admitted bytes.
+
+Both keywords may be `None` only for nonlearning, read-only tasks. Such an import
+cannot later replace missing admission with a Program, perform a Proposal draw,
+or enter training. Private children inherit the same original admission owner;
+ordinary restore compares the caller's expected Program before rebinding its
+exact saved bytes. Neither restore nor materialization creates a new allowance.
+
+For a Program-bound task, the existing `build_segment` additionally requires
+`parent=original_parent`, `instruction_bytes=original_instruction` and
+`first_program_ordinal=original_ordinal`. Forward the complete finalized bytes
+from the original instruction decoder and its Program-wide first step address,
+not a local ordinal or a new serialization. Native authenticates the same
+released parent as immutable provenance and compares the complete contiguous
+prepared roster and instruction against the frozen Program before calling
+`producer.prepare_segment`. Only the original reset recipe's physical
+`phase_index`, `completed_updates_index` and `views` fields are excluded from
+that comparison. This structural binding alone does not certify the producer's
+numerical parameters, original Program progress or paired random consumption;
+those require their actual native execution owners. The parent and prepared resources stay retained together;
+released provenance does not grant a new live reader or execution authority.
 The complete nominal Proposal roster is charged before segment construction
 enters any producer callback, not from successful RNG draws or published
 results. The single-transition admission path charges its nominal Proposal
@@ -1861,6 +1902,12 @@ pair is not a replacement for model architecture, names, executable attributes,
 Tensor-object/version-counter classes, or their complete restoration contract.
 It confers no independent authority. This is a cold acquired-context projection,
 not a host read permitted inside the measured resident loop.
+
+`parent.resolve_model_context_preparation()` joins only that parent's original
+submitted context preparation. `True` means its original kernel completed;
+`False` means the kernel never entered after any entered metadata transfer joined.
+An error retains the original unknown owner. Resolution exports no data, submits
+no unentered suffix and does not clear historical poison or acquire a new parent.
 
 For cold execution reconstruction, the same acquired parent also exposes
 `terminal_state(consumer_stream=...)`: a single-consumer CUDA DLPack capsule of

@@ -1716,10 +1716,7 @@ impl PySemanticTransitionSession {
             admission_limits,
             device_ordinal,
             memory_bytes,
-            Arc::new(Mutex::new(ProposalExpense {
-                capacity: None,
-                spent: 0,
-            })),
+            Arc::new(Mutex::new(ProposalExpense::default())),
             Arc::new(Mutex::new(CheckpointSources::default())),
             None,
             None,
@@ -1979,7 +1976,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, original_program=None, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -1992,6 +1989,7 @@ impl PySemanticTransitionSession {
         restore_model: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
         training_canary_source: &Bound<'_, PyAny>,
+        original_program: Option<&Bound<'_, PyAny>>,
         referent: Option<&Bound<'_, PyAny>>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
@@ -2007,6 +2005,13 @@ impl PySemanticTransitionSession {
             return Err(invalid("checkpoint restore requires exact builtin bytes"));
         }
         let raw = checkpoint.cast::<PyBytes>()?.as_bytes();
+        let manifest = SemanticCheckpointManifest::decode(raw)?;
+        let (seed, _, _, _) = TaskCheckpointSeed::decode(&manifest.task)?;
+        let expense = seed.proposal_expense()?;
+        let expected_program = original_program.map(exact_replay_bytes).transpose()?;
+        if expected_program != expense.original_admission.as_ref().map(|admission| admission.program.as_ref()) {
+            return Err(invalid("checkpoint original Program differs from the expected complete bytes"));
+        }
         let closure = match (
             learning_phase_issuer,
             learning_phase_records,
@@ -2254,10 +2259,13 @@ impl PySemanticTransitionSession {
         seed.training_canary_owner = canary_owner.clone();
         if let Some(shared) = shared_proposal_expense {
             let saved = seed.proposal_expense()?;
-            let current = *shared
+            let current = shared
                 .lock()
-                .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?;
-            if saved.capacity != current.capacity || saved.spent > current.spent {
+                .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?
+                .clone();
+            if saved.capacity != current.capacity || saved.spent > current.spent
+                || saved.original_admission != current.original_admission
+            {
                 return Err(invalid(
                     "private restore changed its original Proposal limit or irreversible expense",
                 ));
@@ -2483,6 +2491,16 @@ impl PySemanticTransitionSession {
             owner
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
+            let expense = seed.proposal_expense()?;
+            if let Some(admission) = &expense.original_admission {
+                admission.bind_native(py, &mut owner, &authority.live,
+                    expense.capacity.ok_or_else(|| invalid("restored original Proposal limit is absent"))?)?;
+                #[cfg(feature = "semantic-policy")]
+                owner.restore_actor_refresh_assignments(
+                    seed.actor_refresh_assignments.as_deref()
+                        .ok_or_else(|| invalid("restored original Proposal assignment map is absent"))?,
+                    &seed.actor_refresh_episodes()?).map_err(xlog_err)?;
+            }
             if training_objective.is_some() || replay_capacity.is_some() {
                 owner.bind_training_canary_source(canary_source.clone().ok_or_else(|| invalid(
                     "restored training reservation requires its original Logical canary source"))?).map_err(xlog_err)?;
@@ -5336,6 +5354,18 @@ impl ReplayRow {
         replay_digest_identity(&action.identity)
     }
 
+    fn actor_refresh_episode(&self) -> PyResult<(xlog_cuda::SemanticReplayMaterial, Identity256, Vec<u8>)> {
+        let trace = replay_json_object(replay_json_field(&self.record, "action_trace")?)?;
+        let batch = replay_json_value(replay_json_field(&trace, "batch_root")?)?;
+        let batch = batch.as_str().ok_or_else(|| invalid("original action batch root is absent"))?;
+        let material = self.materials.iter().find(|material|
+            material.identity == batch && material.kind == "receipt")
+            .ok_or_else(|| invalid("episode does not retain its original action batch receipt"))?;
+        let bytes = material.bytes.as_ref()
+            .ok_or_else(|| invalid("original action batch receipt bytes are absent"))?;
+        Ok((self.native_replay()?.material, replay_digest_identity(batch)?, bytes.to_vec()))
+    }
+
     fn recovered_prefill_referent(&self) -> PyResult<Option<CheckpointReferent>> {
         if !matches!(self.basis, ReplayBasis::Episode { .. }) {
             return Ok(None);
@@ -7753,16 +7783,292 @@ struct TaskUseState {
     snapshot: AuthoritySnapshot,
 }
 
-/// Irreversible nominal places, independent of RNG draws or publication success.
-/// Cold arena/phase successors share the same owner; ordinary restore decodes
-/// the complete saved owner rather than deriving expense from effective draws.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OriginalActorRefreshAdmission {
+    program: Arc<[u8]>,
+    initial_kit: ColdValue,
+    replay_limits: [usize; 3],
+}
+
+impl OriginalActorRefreshAdmission {
+    fn value(&self) -> ColdValue {
+        ColdValue::Sequence(vec![
+            ColdValue::Bytes(Arc::clone(&self.program)),
+            self.initial_kit.clone(),
+            ColdValue::Sequence(
+                self.replay_limits
+                    .iter()
+                    .map(|value| ColdValue::Integer(value.to_string()))
+                    .collect(),
+            ),
+        ])
+    }
+
+    fn parse(value: &ColdValue) -> PyResult<Option<Arc<Self>>> {
+        if *value == ColdValue::None {
+            return Ok(None);
+        }
+        let fields = value.fields(3)?;
+        let ColdValue::Bytes(program) = &fields[0] else {
+            return Err(invalid("original Program requires complete bytes"));
+        };
+        if program.is_empty() || program.len() > 16 * 1024 * 1024 {
+            return Err(invalid("original Program exceeds its bounded transport"));
+        }
+        let kit = fields[1].fields(2)?;
+        let ColdValue::Bytes(index) = &kit[0] else {
+            return Err(invalid(
+                "initial replay kit requires its original index bytes",
+            ));
+        };
+        if index.is_empty() || index.len() > 16 * 1024 * 1024 {
+            return Err(invalid(
+                "initial replay index exceeds its bounded transport",
+            ));
+        }
+        kit[1].sequence()?;
+        let limits = fields[2].fields(3)?;
+        let replay_limits = [limits[0].index()?, limits[1].index()?, limits[2].index()?];
+        if replay_limits.contains(&0) {
+            return Err(invalid("initial replay byte limits must be positive"));
+        }
+        Ok(Some(Arc::new(Self {
+            program: Arc::clone(program),
+            initial_kit: fields[1].clone(),
+            replay_limits,
+        })))
+    }
+
+    fn bind_native(
+        &self,
+        py: Python<'_>,
+        owner: &mut SemanticTransitionSession,
+        live: &[LiveAuthority],
+        proposal_capacity: u64,
+    ) -> PyResult<()> {
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = (py, owner, live, proposal_capacity);
+            Err(invalid("original Program admission requires a semantic-policy build"))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let kit = self.initial_kit.fields(2)?;
+            let ColdValue::Bytes(index_bytes) = &kit[0] else {
+                return Err(invalid("initial replay index bytes are absent"));
+            };
+            let mut budget = (16usize * 1024 * 1024)
+                .checked_sub(index_bytes.len())
+                .ok_or_else(|| invalid("initial replay index exceeds its metadata limit"))?;
+            let rows = kit[1].python_value(py)?;
+            let bounded = read_replay_rows(
+                rows.bind(py),
+                &mut budget,
+                self.replay_limits[0],
+                self.replay_limits[1],
+                self.replay_limits[2],
+            )?;
+            if bounded != kit[1] {
+                return Err(invalid(
+                    "initial replay kit changed its original row projection",
+                ));
+            }
+            let index_text = std::str::from_utf8(index_bytes)
+                .map_err(|_| invalid("initial replay index is not UTF-8"))?;
+            validate_replay_json_structure(index_text, 0)?;
+            let index = replay_json_value(index_text)?;
+            let index = index
+                .as_object()
+                .ok_or_else(|| invalid("initial replay index is not an object"))?;
+            let fields = [
+                "schema",
+                "episodes",
+                "anchors",
+                "materials",
+                "evidence",
+                "obligations",
+            ];
+            if index.len() != fields.len()
+                || fields.iter().any(|field| !index.contains_key(*field))
+                || index["schema"] != "dlm-new/replay-kit/v2"
+                || index["episodes"] != "episodes.jsonl"
+                || index["anchors"] != "anchors.jsonl"
+                || !index["obligations"].is_object()
+            {
+                return Err(invalid(
+                    "initial replay index differs from its canonical kit format",
+                ));
+            }
+            let evidence = index["evidence"]
+                .as_object()
+                .ok_or_else(|| invalid("initial replay evidence roster is absent"))?;
+            let materials = index["materials"]
+                .as_array()
+                .ok_or_else(|| invalid("initial replay material roster is absent"))?;
+            let mut material_digests = BTreeSet::new();
+            let mut previous = None;
+            for material in materials {
+                let digest = material
+                    .as_str()
+                    .ok_or_else(|| invalid("initial replay material digest is invalid"))?;
+                replay_digest_identity(digest)?;
+                if previous.is_some_and(|previous| previous >= digest) {
+                    return Err(invalid(
+                        "initial replay material keys must be unique and ordered",
+                    ));
+                }
+                previous = Some(digest);
+                material_digests.insert(digest.to_owned());
+            }
+            // Episode parsing authenticates original record and evidence without consulting
+            // live grants. Anchors alone consult them and are rejected below; this kit
+            // therefore grants no permissions from a source or target live projection.
+            let rows = parse_replay_rows_with_live(&bounded, live)?;
+            if evidence.len() != rows.len() {
+                return Err(invalid(
+                    "initial replay episodes do not cover the sealed index",
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            let mut episodes = Vec::with_capacity(rows.len());
+            for row in rows {
+                if !matches!(&row.basis, ReplayBasis::Episode { .. }) {
+                    return Err(invalid(
+                        "initial actor membership requires original episode rows, not anchors",
+                    ));
+                }
+                let content = row.identity.fields(6)?[2].text()?;
+                if !seen.insert(content.to_owned())
+                    || evidence.get(content).and_then(serde_json::Value::as_str)
+                        != Some(replay_hash(&row.evidence).as_str())
+                {
+                    return Err(invalid(
+                        "initial replay episode or evidence differs from the sealed index",
+                    ));
+                }
+                for material in &row.materials {
+                    if material
+                        .bytes_sha256
+                        .as_ref()
+                        .is_some_and(|digest| !material_digests.contains(digest))
+                    {
+                        return Err(invalid(
+                            "initial replay material is absent from the sealed index",
+                        ));
+                    }
+                }
+                episodes.push(row.actor_refresh_episode()?);
+            }
+            let [proposals, _updates] = owner
+                .bind_actor_refresh_program(&self.program)
+                .map_err(xlog_err)?;
+            if proposals != proposal_capacity {
+                return Err(invalid(
+                    "nominal Proposal capacity differs from the original Program",
+                ));
+            }
+            owner
+                .bind_actor_refresh_initial_episodes(
+                    replay_digest_identity(&replay_hash(index_bytes))?,
+                    &episodes,
+                )
+                .map_err(xlog_err)?;
+            Ok(())
+        }
+    }
+}
+
+fn read_original_actor_refresh_admission(
+    program: Option<&Bound<'_, PyAny>>,
+    initial_kit: Option<&Bound<'_, PyAny>>,
+    replay_limits: [usize; 3],
+    budget: &mut usize,
+) -> PyResult<Option<Arc<OriginalActorRefreshAdmission>>> {
+    match (program, initial_kit) {
+        (None, None) => Ok(None),
+        (Some(program), Some(kit)) => {
+            let program = exact_replay_bytes(program)?;
+            if program.is_empty() || program.len() > 16 * 1024 * 1024 {
+                return Err(invalid("original Program exceeds its bounded transport"));
+            }
+            if !kit.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "initial replay kit requires an immutable index and episode tuple",
+                ));
+            }
+            let kit = kit.cast::<PyTuple>()?;
+            if kit.len() != 2 || !kit.get_item(1)?.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "initial replay kit requires index bytes and all original episode rows",
+                ));
+            }
+            let index = kit.get_item(0)?;
+            let index = exact_replay_bytes(&index)?;
+            *budget = budget
+                .checked_sub(index.len())
+                .ok_or_else(|| invalid("initial replay index exceeds its metadata limit"))?;
+            let rows = read_replay_rows(
+                &kit.get_item(1)?,
+                budget,
+                replay_limits[0],
+                replay_limits[1],
+                replay_limits[2],
+            )?;
+            OriginalActorRefreshAdmission::parse(&ColdValue::Sequence(vec![
+                ColdValue::Bytes(Arc::from(program)),
+                ColdValue::Sequence(vec![ColdValue::Bytes(Arc::from(index)), rows]),
+                ColdValue::Sequence(
+                    replay_limits
+                        .iter()
+                        .map(|value| ColdValue::Integer(value.to_string()))
+                        .collect(),
+                ),
+            ]))
+        }
+        _ => Err(invalid(
+            "original Program and initial replay kit must be admitted together",
+        )),
+    }
+}
+
+/// Irreversible nominal places and first-import carriers, shared by descendants.
+/// Restore retains the same original schedule and initial actor membership.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProposalExpense {
     capacity: Option<u64>,
     spent: u64,
+    original_admission: Option<Arc<OriginalActorRefreshAdmission>>,
+    original_admission_bound: bool,
 }
 
 impl ProposalExpense {
+    fn bind_original_admission(
+        &mut self,
+        admission: Option<Arc<OriginalActorRefreshAdmission>>,
+        inherit: bool,
+    ) -> PyResult<()> {
+        if self.original_admission_bound {
+            if !(inherit && admission.is_none()) && self.original_admission != admission {
+                return Err(invalid(
+                    "task import changed its original Program or initial replay kit",
+                ));
+            }
+        } else {
+            self.original_admission = admission;
+            self.original_admission_bound = true;
+        }
+        Ok(())
+    }
+
+    fn require_learning(&self) -> PyResult<()> {
+        if self.original_admission.is_none() {
+            return Err(invalid(
+                "learning and Proposal draws require the original Program and initial replay kit",
+            ));
+        }
+        Ok(())
+    }
+
     fn bind_capacity(&mut self, capacity: u64) -> PyResult<()> {
         if self.capacity.is_some_and(|original| original != capacity) || self.spent > capacity {
             return Err(invalid(
@@ -7774,6 +8080,9 @@ impl ProposalExpense {
     }
 
     fn charge(&mut self, count: u64) -> PyResult<()> {
+        if count != 0 {
+            self.require_learning()?;
+        }
         let capacity = self
             .capacity
             .ok_or_else(|| invalid("task has no original nominal Proposal limit"))?;
@@ -7821,6 +8130,7 @@ struct TaskCheckpointSeed {
     initial_sources: ColdValue,
     source_mapping: ColdValue,
     replay_selection: ColdValue,
+    actor_refresh_assignments: Option<Arc<[u8]>>,
     proposal_expense: Arc<Mutex<ProposalExpense>>,
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
 }
@@ -7926,7 +8236,7 @@ impl TaskCheckpointSeed {
     fn proposal_expense(&self) -> PyResult<ProposalExpense> {
         self.proposal_expense
             .lock()
-            .map(|expense| *expense)
+            .map(|expense| expense.clone())
             .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))
     }
 
@@ -7937,12 +8247,54 @@ impl TaskCheckpointSeed {
             .charge(count)
     }
 
+    fn actor_refresh_episodes(&self) -> PyResult<Vec<(xlog_cuda::SemanticReplayMaterial, Identity256, Vec<u8>)>> {
+        let authority = TaskAuthority::parse(&self.authority)?;
+        let roster = self.original_training_roster()?;
+        let roster = roster.fields(2)?;
+        let expense = self.proposal_expense()?;
+        let initial = expense.original_admission.as_ref()
+            .map(|admission| admission.initial_kit.fields(2).map(|kit| &kit[1]))
+            .transpose()?;
+        let mut rows = BTreeMap::<String, ColdValue>::new();
+        for value in std::iter::once(&self.authority[3]).chain(std::iter::once(&roster[0])).chain(initial) {
+            for row in value.sequence()? {
+                let fields = row.fields(5)?;
+                if fields[0].text()? != "episode" {
+                    continue;
+                }
+                let content = fields[1].fields(6)?[2].text()?.to_owned();
+                if let Some(previous) = rows.get(&content) {
+                    if previous != row {
+                        return Err(invalid("checkpoint episode registry has conflicting original row projections"));
+                    }
+                } else {
+                    rows.insert(content, row.clone());
+                }
+            }
+        }
+        rows.values().map(|row| ReplayRow::parse_with_live(row, &authority.live)?.actor_refresh_episode()).collect()
+    }
+
     fn encode(
         &self,
+        owner: &SemanticTransitionSession,
         snapshot: &AuthoritySnapshot,
         phase: &CheckpointTaskPhase,
         binding: &TaskCheckpointBinding,
     ) -> PyResult<Vec<u8>> {
+        let assignments = if self.proposal_expense()?.original_admission.is_some() {
+            #[cfg(not(feature = "semantic-policy"))]
+            {
+                let _ = owner;
+                return Err(invalid("original Program checkpoints require a semantic-policy build"));
+            }
+            #[cfg(feature = "semantic-policy")]
+            {
+                Some(Arc::from(owner.actor_refresh_assignment_material().map_err(xlog_err)?))
+            }
+        } else {
+            None
+        };
         let snapshot = ColdValue::from_canonical_bytes(&snapshot.canonical)?;
         let (phase, operation) = match phase {
             CheckpointTaskPhase::Imported => ("imported", ColdValue::None),
@@ -7981,6 +8333,8 @@ impl TaskCheckpointSeed {
             self.replay_capacity.clone(),
             self.original_training_roster()?,
             self.training_canary_source.clone(),
+            expense.original_admission.as_ref().map_or(ColdValue::None, |admission| admission.value()),
+            assignments.map_or(ColdValue::None, ColdValue::Bytes),
         ])))
     }
 
@@ -7993,7 +8347,15 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes, bytes.len())?;
-        let fields = value.fields(17)?;
+        let fields = value.fields(19)?;
+        let actor_refresh_assignments = match &fields[18] {
+            ColdValue::None => None,
+            ColdValue::Bytes(bytes) => Some(Arc::clone(bytes)),
+            _ => return Err(invalid("checkpoint original Proposal assignment map requires native bytes")),
+        };
+        if (fields[17] == ColdValue::None) != actor_refresh_assignments.is_none() {
+            return Err(invalid("checkpoint original Program and native assignment map differ in presence"));
+        }
         read_replay_capacity(&fields[14])?;
         let roster = fields[15].fields(2)?;
         roster[0].sequence()?;
@@ -8042,9 +8404,12 @@ impl TaskCheckpointSeed {
                 initial_sources: fields[3].clone(),
                 source_mapping: fields[4].clone(),
                 replay_selection: fields[5].clone(),
+                actor_refresh_assignments,
                 proposal_expense: Arc::new(Mutex::new(ProposalExpense {
                     capacity: Some(capacity),
                     spent,
+                    original_admission: OriginalActorRefreshAdmission::parse(&fields[17])?,
+                    original_admission_bound: true,
                 })),
                 checkpoint_sources: Arc::new(Mutex::new(CheckpointSources::restored(
                     source_limits,
@@ -8615,6 +8980,7 @@ impl PySemanticTransitionTaskUse {
         if operation != "training" {
             return Ok(());
         }
+        self.checkpoint.proposal_expense()?.require_learning()?;
         if let Some(record) = owner.learning_phase_history().last() {
             let purpose = match record.target {
                 xlog_cuda::SemanticLearningPhase::Fast => "current-request-fast-adaptation",
@@ -8719,6 +9085,14 @@ impl PySemanticTransitionTaskUse {
                 .ok_or_else(|| invalid("issued task has no original nominal Proposal limit"))?,
             expense.spent,
         ))
+    }
+
+    #[getter]
+    fn original_program(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
+        self.session.borrow(py).require_creator()?;
+        self.issuance.require_current()?;
+        Ok(self.checkpoint.proposal_expense()?.original_admission.as_ref()
+            .map(|admission| PyBytes::new(py, &admission.program).unbind()))
     }
 }
 
@@ -12110,11 +12484,16 @@ impl PySemanticPreparedStep {
         let operation = binding.0.as_ref().expect("completed original operation");
         let issued = self.task_use.borrow(py);
         issued.authority.check_use(operation, &snapshot, false)?;
-        let task = issued.checkpoint.encode(
-            &snapshot,
-            &CheckpointTaskPhase::Segment(operation.clone()),
-            &task_binding,
-        )?;
+        let task = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            issued.checkpoint.encode(
+                &owner,
+                &snapshot,
+                &CheckpointTaskPhase::Segment(operation.clone()),
+                &task_binding,
+            )?
+        };
         let native_digest = Identity256::from_bytes(Sha256::digest(&native).into());
         let checkpoint =
             self.session
@@ -15010,6 +15389,13 @@ impl PySemanticPublishedParent {
     fn release(&self, py: Python<'_>, consumer_streams: &Bound<'_, PyAny>) -> PyResult<()> {
         self.release_native_ownership(py, consumer_streams, false)
     }
+
+    fn resolve_model_context_preparation(&self, py: Python<'_>) -> PyResult<bool> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let result = session.owner()?.resolve_model_context_preparation(&*self.lease()?).map_err(xlog_err);
+        result
+    }
 }
 
 #[pymethods]
@@ -15454,7 +15840,7 @@ impl PySemanticTransitionController {
     /// Device DRAIN_REQUIRED overrides either nominal mode. Recompute binds the
     /// original model continuation without a policy or backward obligation.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes))]
+    #[pyo3(signature = (task_use, *, transitions, producer, tensor_content_capacity, model_work_capacity, segment_capacity_bytes, other_external_cuda_bytes, parent=None, instruction_bytes=None, first_program_ordinal=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "cold recording binds the original producer and four independent capacity obligations"
@@ -15469,6 +15855,9 @@ impl PySemanticTransitionController {
         model_work_capacity: &Bound<'_, PyAny>,
         segment_capacity_bytes: &Bound<'_, PyAny>,
         other_external_cuda_bytes: &Bound<'_, PyAny>,
+        parent: Option<Py<PySemanticPublishedParent>>,
+        instruction_bytes: Option<&Bound<'_, PyAny>>,
+        first_program_ordinal: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -15478,6 +15867,31 @@ impl PySemanticTransitionController {
             return Err(invalid("segment task belongs to another Session"));
         }
         let transitions = prepared_transitions(transitions)?;
+        let original_admission = issued.checkpoint.proposal_expense()?.original_admission;
+        let program_binding = match (original_admission, parent, instruction_bytes, first_program_ordinal) {
+            (Some(_), Some(parent), Some(instruction), Some(ordinal)) => {
+                let bytes = exact_replay_bytes(instruction)?;
+                if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+                    return Err(invalid("original segment instruction exceeds its bounded transport"));
+                }
+                let ordinal = ColdValue::read(ordinal, &mut 128, 0)?.unsigned()?;
+                let acquired = parent.borrow(py);
+                if acquired.session.as_ptr() != self.session.as_ptr() {
+                    return Err(invalid("original Program parent belongs to another Session"));
+                }
+                acquired.require_task(py, &issued)?;
+                drop(acquired);
+                Some((parent, bytes.to_vec(), ordinal))
+            }
+            (None, None, None, None) => {
+                if transitions.clone().any(|kind| matches!(kind,
+                    SemanticTransitionKind::Proposal | SemanticTransitionKind::Update)) {
+                    return Err(invalid("Proposal and Update recording require the original Program"));
+                }
+                None
+            }
+            _ => return Err(invalid("Program-bound segment requires its original parent, complete instruction and Program ordinal")),
+        };
         #[cfg(feature = "semantic-policy")]
         let private = private_execution_owner(py, &session)?;
         #[cfg(feature = "semantic-policy")]
@@ -15550,6 +15964,11 @@ impl PySemanticTransitionController {
             let handles = owner
                 .prepare_segment_steps(transitions, cold_capacity)
                 .map_err(xlog_err)?;
+            if let Some((parent, instruction, ordinal)) = &program_binding {
+                let parent = parent.borrow(py);
+                owner.bind_prepared_actor_refresh_program(
+                    &handles, &*parent.lease()?, *ordinal, instruction).map_err(xlog_err)?;
+            }
             let stream = owner.prepared_stream(&handles[0]).map_err(xlog_err)?;
             (
                 scope,
@@ -15586,6 +16005,11 @@ impl PySemanticTransitionController {
             producers: Mutex::new(vec![producer.clone_ref(py)]),
             owner_thread: session.owner_thread,
         });
+        if let Some((parent, _, _)) = &program_binding {
+            resources.producers.lock()
+                .map_err(|_| invalid("prepared producer owner mutex is poisoned"))?
+                .push(parent.clone_ref(py).into_any());
+        }
         *session
             .prepared_segment
             .lock()
@@ -16860,7 +17284,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, original_program=None, actor_refresh_initial_kit=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -16903,6 +17327,8 @@ impl PySemanticTransitionController {
         finish_invocation: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
         proposal_capacity: &Bound<'_, PyAny>,
+        original_program: Option<&Bound<'_, PyAny>>,
+        actor_refresh_initial_kit: Option<&Bound<'_, PyAny>>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
         max_total_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
@@ -16939,6 +17365,16 @@ impl PySemanticTransitionController {
             max_evidence_bytes,
             &mut budget,
         )?;
+        let original_admission = read_original_actor_refresh_admission(
+            original_program, actor_refresh_initial_kit,
+            [material_limit, total_material_limit, evidence_limit], &mut budget)?;
+        #[cfg(feature = "semantic-policy")]
+        let inherit_original_admission = private_child.is_some();
+        #[cfg(not(feature = "semantic-policy"))]
+        let inherit_original_admission = false;
+        session.proposal_expense.lock()
+            .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?
+            .bind_original_admission(original_admission, inherit_original_admission)?;
         let values = [
             task_ref,
             task_scope,
@@ -17170,6 +17606,12 @@ impl PySemanticTransitionController {
             owner
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
+            let expense = session.proposal_expense.lock()
+                .map_err(|_| invalid("nominal Proposal expense owner mutex is poisoned"))?
+                .clone();
+            if let Some(admission) = &expense.original_admission {
+                admission.bind_native(py, &mut owner, &authority.live, proposal_capacity)?;
+            }
             if !checkpoint_referents.is_empty() || source_checkpoint.is_some() {
                 let native_task = TaskCheckpointBinding::from_owner(&owner)?;
                 #[cfg(feature = "semantic-policy")]
@@ -17247,6 +17689,7 @@ impl PySemanticTransitionController {
                 initial_sources,
                 source_mapping,
                 replay_selection,
+                actor_refresh_assignments: None,
                 proposal_expense: Arc::clone(&session.proposal_expense),
                 checkpoint_sources: Arc::clone(&session.checkpoint_sources),
             }
@@ -17694,9 +18137,11 @@ impl PySemanticTransitionController {
         let model = model?;
         let (native, initial_prefill) =
             materials.expect("successful model serialization exports native state");
-        let task = task_use
-            .checkpoint
-            .encode(&snapshot, &phase, &task_binding)?;
+        let task = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            task_use.checkpoint.encode(&owner, &snapshot, &phase, &task_binding)?
+        };
         let session = config.encode()?;
         let checkpoint =
             self.session
@@ -17910,6 +18355,9 @@ impl PySemanticTransitionController {
             .to_owned();
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         task_use.require_learning_operation(&owner, &operation)?;
+        if kind == SemanticTransitionKind::Update {
+            task_use.checkpoint.proposal_expense()?.require_learning()?;
+        }
         let mut state = task_use.state()?;
         state.admit_segment(&task_use.authority, operation, snapshot)?;
         if kind == SemanticTransitionKind::Proposal {

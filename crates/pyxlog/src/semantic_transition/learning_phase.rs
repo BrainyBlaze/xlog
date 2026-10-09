@@ -625,7 +625,7 @@ fn verify_phase_checkpoint(
     task.require_current(&owner)?;
     let phase = checkpoint_task_phase(&*task.state()?)?;
     let binding = TaskCheckpointBinding::from_owner(&owner)?;
-    if task.checkpoint.encode(saved_snapshot, &phase, &binding)? != manifest.task {
+    if task.checkpoint.encode(&owner, saved_snapshot, &phase, &binding)? != manifest.task {
         return Err(invalid(
             "phase checkpoint differs from its original live task capsule",
         ));

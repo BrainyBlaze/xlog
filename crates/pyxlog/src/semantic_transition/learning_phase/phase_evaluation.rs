@@ -1403,6 +1403,7 @@ impl PySemanticLearningPhaseTransition {
         };
         if expected_expense != live_expense
             || seed.proposal_expense()?.capacity != live_expense.capacity
+            || seed.proposal_expense()?.original_admission != live_expense.original_admission
             || seed.proposal_expense()?.spent > live_expense.spent
         {
             return Err(invalid(

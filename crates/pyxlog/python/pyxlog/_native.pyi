@@ -326,6 +326,11 @@ class SemanticTransitionColdTask:
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
 
+    @property
+    def original_program(self) -> Optional[bytes]:
+        """Exact immutable first-import Program bytes, never a regenerated schedule."""
+        ...
+
     def task_ground(self) -> tuple[str, tuple[Any, ...]]:
         """Original tagged ground and full ordered verification bindings."""
         ...
@@ -354,6 +359,24 @@ class SemanticCompletedSegmentPending(RuntimeError):
     Retain the original Runtime and resolve its result, never resubmit.
     """
 
+class SemanticPublishedParent:
+    def resolve_model_context_preparation(self) -> bool:
+        """Join only the original submitted context preparation; never submit a suffix."""
+        ...
+
+class SemanticTransitionSession:
+    @staticmethod
+    def restore_checkpoint(
+        checkpoint: bytes, *, device_ordinal: int, snapshot: Any,
+        restore_model: Any, training_domain: Any, training_canary_source: Any,
+        original_program: Optional[bytes] = None, referent: Any = None,
+        resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
+        max_total_checkpoint_bytes: Any = None, refresh_snapshot: Any = None,
+        learning_phase_issuer: Any = None, learning_phase_records: Any = None,
+        learning_phase_record_limits: Any = None, learning_phase_fence: Any = None,
+        learning_phase_checkpoint_issuer: Any = None,
+    ) -> Any: ...
+
 class SemanticTransitionController:
     def import_task(
         self, *, task_ref: Any, task_scope: Any, statement_records: Any,
@@ -370,9 +393,20 @@ class SemanticTransitionController:
         replay_selection: Any, replay_operation: Any, restore_invocation: Any,
         pack_policy: Any, finish_invocation: Any, refresh_snapshot: Any,
         proposal_capacity: int,
+        original_program: Optional[bytes] = None,
+        actor_refresh_initial_kit: Optional[tuple[bytes, tuple[Any, ...]]] = None,
         resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
         max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
     ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
+
+    def build_segment(
+        self, task_use: SemanticTransitionTaskUse, *, transitions: Any,
+        producer: Any, tensor_content_capacity: int, model_work_capacity: int,
+        segment_capacity_bytes: int, other_external_cuda_bytes: int,
+        parent: Optional[SemanticPublishedParent] = None,
+        instruction_bytes: Optional[bytes] = None,
+        first_program_ordinal: Optional[int] = None,
+    ) -> None: ...
 
     def close(self, parent: SemanticPublishedParent) -> None:
         """Confirm terminal native release after the original parent and steps retire."""
