@@ -976,6 +976,30 @@ fn require_checkpoint_referent_task(
     Ok(())
 }
 
+fn require_selected_checkpoint_referent_task(
+    rows: &[ReplayRow],
+    selection: Option<usize>,
+    current: TaskCheckpointBinding,
+) -> PyResult<()> {
+    let Some(ordinal) = selection else {
+        return Ok(());
+    };
+    let row = rows
+        .get(ordinal)
+        .ok_or_else(|| invalid("selected checkpoint source has no original replay row"))?;
+    let mut referents = Vec::new();
+    if let Some(referent) = row
+        .checkpoint_referent()?
+        .or(row.pre_action_checkpoint_referent()?)
+    {
+        referents.push(referent);
+    }
+    if let Some(referent) = row.recovered_prefill_referent()? {
+        referents.push(referent);
+    }
+    require_checkpoint_referent_task(&referents, current)
+}
+
 fn checkpoint_publication_bytes(identity: xlog_cuda::SemanticPublishedIdentity) -> [u8; 104] {
     let mut bytes = [0u8; 104];
     bytes[..32].copy_from_slice(identity.instance.as_bytes());
@@ -2201,7 +2225,7 @@ impl PySemanticTransitionSession {
             editable_program.clone(),
             &seed.training_domain,
         )?;
-        let (_, selected_material) =
+        let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
         let retained_roster = seed.original_training_roster()?;
         let retained_roster = retained_roster.fields(2)?;
@@ -2247,7 +2271,7 @@ impl PySemanticTransitionSession {
             AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         current_snapshot.newer_than(&saved_snapshot)?;
         let no_refresh = py.None();
-        let checkpoint_referents = resolve_replay_checkpoint_referents(
+        resolve_replay_checkpoint_referents(
             py,
             &authority,
             &mut current_snapshot,
@@ -2353,7 +2377,11 @@ impl PySemanticTransitionSession {
                     "checkpoint restore changed its original native task content or scoring law",
                 ));
             }
-            require_checkpoint_referent_task(&checkpoint_referents, native_binding)?;
+            require_selected_checkpoint_referent_task(
+                &authority.replay,
+                selection,
+                native_binding,
+            )?;
             Ok(native_binding)
         })()?;
         let controller_identity = Arc::new(());
@@ -16732,7 +16760,11 @@ impl PySemanticTransitionController {
                 .map_err(xlog_err)?;
             if !checkpoint_referents.is_empty() {
                 let native_task = TaskCheckpointBinding::from_owner(&owner)?;
-                require_checkpoint_referent_task(&checkpoint_referents, native_task)?;
+                require_selected_checkpoint_referent_task(
+                    &authority.replay,
+                    selection,
+                    native_task,
+                )?;
             }
             if training_objective.is_some() || replay_capacity.is_some() {
                 owner
@@ -16931,7 +16963,7 @@ impl PySemanticTransitionController {
         current.newer_than(&issued.state()?.snapshot)?;
         issued.authority.check_use("training", &current, false)?;
         validation.check_use("training", &current, false)?;
-        let referents = resolve_replay_checkpoint_referents(
+        resolve_replay_checkpoint_referents(
             py,
             &validation,
             &mut current,
@@ -16954,10 +16986,6 @@ impl PySemanticTransitionController {
             let session = controlled.session.borrow(py);
             let owner = session.owner()?;
             issued.require_current(&owner)?;
-            require_checkpoint_referent_task(
-                &referents,
-                TaskCheckpointBinding::from_owner(&owner)?,
-            )?;
             let slot = owner
                 .training_arena_handoff_slot(&*acquired.lease()?)
                 .map_err(xlog_err)?;
