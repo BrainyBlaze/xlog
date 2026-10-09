@@ -139,6 +139,13 @@ class SemanticCompletedExecutionObservation:
     @property
     def model_calls(self) -> int: ...
 
+class SemanticPrivateExecutionContinuation:
+    """Native-issued custody of one original private execution resolver.
+
+    Issued by bind_private_execution_continuation before segment effects.
+    Only the retained native phase may invoke the original resolver.
+    """
+
 class SemanticPreparedActorRefresh:
     """Native-issued CURRENT actor member with two original embedded children.
 

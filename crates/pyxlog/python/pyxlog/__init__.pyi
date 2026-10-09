@@ -24,6 +24,7 @@ from pyxlog._native import (
     SemanticPreparedSegmentPending as SemanticPreparedSegmentPending,
     SemanticPreparedSegmentCancelled as SemanticPreparedSegmentCancelled,
     SemanticPreparedActorRefresh as SemanticPreparedActorRefresh,
+    SemanticPrivateExecutionContinuation as SemanticPrivateExecutionContinuation,
     SemanticRetainedFinalUsePending as SemanticRetainedFinalUsePending,
     SemanticTransitionColdTask as SemanticTransitionColdTask,
     SOLVER_ABI_IDENTITY as SOLVER_ABI_IDENTITY,
