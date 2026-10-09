@@ -8,6 +8,7 @@
 #include "semantic_transition_catalogue.cuh"
 #include "semantic_feedback_encoding.cuh"
 #include "semantic_program.cuh"
+#include "semantic_task_ground.cuh"
 #include "semantic_rule_action.cuh"
 #ifdef XLOG_SEMANTIC_POLICY
 #include "semantic_policy_binding.cuh"
@@ -341,13 +342,12 @@ extern "C" __global__ void semantic_model_cancellation_work_result(
     output[3]=work.model_bound;output[4]=calls;
 }
 struct TaskFacts {
-    uint64_t truth[3],correct[3],g,p,c;
+    uint64_t g,p,c;
     int64_t v;
     uint64_t eligible;
 };
 struct TaskEvaluation {
     uint64_t lane_refusal[2]; // 0 accepted, 1 scope, 2 hard constraint, 3 fact cap, 4 fuel.
-    semantic_graph::Receipt query_receipts[3][3];
     uint64_t query_count,winner;
     int64_t return_value;
     TaskFacts facts[3]; // Base, first learned lane, second learned lane.
@@ -431,6 +431,11 @@ struct ModelContractLayout {
 struct PublicationContract {
     uint64_t abi,range_capacity,prefix_capacity,window_capacity,feedback_capacity,max_position,pad_token;
     uint64_t terminal_tokens,terminal_token_count,final_intent_payload_bytes;
+    uint64_t nonterminal_intent_mode,nonterminal_intent_plan_digest[4];
+    uint64_t nonterminal_intent_prefix_begin,nonterminal_intent_prefix_end;
+    uint64_t replay_row_capacity,replay_original_slot_boundary,replay_raw_capacity_bytes,replay_payload_capacity_bytes;
+    uint64_t replay_metadata_bytes,replay_max_material_bytes,replay_total_material_bytes,replay_max_evidence_bytes;
+    uint64_t replay_reservation_identity[4];
     uint64_t model_generation,policy_generation,authority_generation,semantic_owner;
     uint64_t task_identity[4],topology_identity[4],table_identity[4],role_counts,role_count;
     ModelContractLayout model_contract_layout;
@@ -443,7 +448,7 @@ struct PendingContinuation {
     uint64_t model_update_admissibility,model_update_refusal,model_update_canary_results;
     uint64_t numerical_blocks,physical_blocks,model_schema_digest[4],model_identity[4];
 };
-struct PublicationCommand { uint64_t control,lease,operation; };
+struct PublicationCommand { uint64_t control,lease,operation,native_work; };
 struct PublicationDeliveryInput {
     uint64_t lease,receipt,receipt_len,recipient_id[4],receipt_digest[4];
 };
@@ -456,6 +461,36 @@ struct SemanticTrainingViewOriginRecord {
     uint64_t model_generation,stream_serial,family_id,proposal;
     uint64_t model_geometry_digest[4],model_numerical_digest[4];
 };
+struct TrainingViewRowDescriptor {
+    uint64_t ordinal,basis,raw_offset,raw_bytes,window,source_length,block_size,prefix_extent,answer_start;
+    uint64_t identity[4],source_identity[4],content_identity[4],task_query_identity[4];
+    uint64_t task_theory_program_identity[4],task_result_identity[4];
+    SemanticTrainingViewOriginRecord origin;
+};
+struct SemanticTrainingReplayAppendHeader {
+    uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count;
+    uint64_t original_stage,original_count,original_prefix_identity[4],chain_head[4];
+};
+struct SemanticTrainingReplayAppendEntry {
+    uint64_t row_ordinal,content_identity[4];
+    SemanticTrainingViewOriginRecord original_origin;
+    uint64_t stable_intent[4],result_receipt_digest[4],payload_offset_bytes,payload_length_bytes,disposition;
+};
+struct PublicationReplayDeliveryInput {
+    PublicationDeliveryInput delivery;
+    SemanticTrainingReplayAppendEntry entry;
+    uint64_t payload,payload_bytes;
+    TrainingViewRowDescriptor row_descriptor;
+    uint64_t row_bytes,row_bytes_len,arena_descriptors,arena_descriptor_count,arena_raw,arena_raw_bytes;
+    uint64_t observations,observation_count,statements,supports,native_work;
+};
+struct TrainingOriginalMaterializationInput {
+    uint64_t lease,source,source_bytes,destinations[7],lengths[7],original_count,original_prefix_identity[4];
+};
+static_assert(sizeof(TrainingOriginalMaterializationInput)==176,"original training materialization ABI");
+static_assert(sizeof(SemanticTrainingReplayAppendHeader)==128 && sizeof(SemanticTrainingReplayAppendEntry)==480 &&
+    sizeof(PublicationReplayDeliveryInput)==1288,
+    "replay append queue ABI");
 struct PublicationTensorLayout {
     uint64_t role,index,element_bytes,scalar_type,rank,logical_axis,dimensions[4],strides_bytes[4];
 };
@@ -769,6 +804,7 @@ struct SemanticTrainingObjectiveRecord {
     uint64_t row_count,capacity,group_count,group_member_count,canary_count,protected_member_count;
     uint64_t evaluator_min_bits,evaluator_max_bits,coefficient_bits[9],cost_unit[4],cost_cap;
     uint64_t truth_tokens[4];
+    uint64_t canary_source_offset,canary_source_words;
 };
 struct SemanticTrainingObjectiveGroupRecord {
     uint64_t kind,denominator,member_offset,member_count;
@@ -780,7 +816,7 @@ struct SemanticTrainingRosterRow {
 };
 struct SemanticTrainingCanaryRecord {
     uint64_t evaluator_abi,kind,row_ordinal,lower_bound_bits,upper_bound_bits,memory_limit,work_limit;
-    uint64_t obligation_positions[3],protected_member_offset,protected_member_count;
+    uint64_t obligation_member_offset,obligation_member_count,protected_member_offset,protected_member_count;
     uint64_t row_identity[4],row_content_identity[4],task_identity[4],identity[4];
 };
 struct SemanticTrainingCanaryResultRecord {
@@ -826,7 +862,7 @@ struct PolicyAdjointNumericalDescriptor {
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,roster_rows,origin_candidate;
-    uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term;
+    uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term,target_header;
     PolicyAdjointNumericalDescriptor numerical;
 };
 struct Descriptor {
@@ -834,6 +870,7 @@ struct Descriptor {
     PolicyDescriptor policy;
     PolicyBackward backward;
     uint64_t task,task_words,task_return_bound;
+    uint64_t task_ground,task_ground_bytes,task_support_truths,task_support_lineage,task_support_lineage_words;
     PublicationCommand publication;
     TextBinding text;
     ModelWorkInput model_work;
@@ -958,10 +995,12 @@ extern "C" __global__ void semantic_prepared_replay_parent(uint64_t control_ptr,
 struct TaskProgramBank {
     semantic_program::Bank program;
     bool editable;
+    semantic_task_ground::Task task;
+    uint32_t selected_rule_count;
 };
 
 static constexpr uint32_t PROGRAM_FACT_CAPACITY=4096;
-static constexpr uint32_t PROGRAM_RULE_CAPACITY=256;
+static constexpr uint32_t PROGRAM_RULE_CAPACITY=semantic_program::kRuleCapacity;
 static constexpr uint64_t PROGRAM_FUEL=1000000;
 static constexpr uint64_t PROGRAM_SCRATCH_OFFSET=4*1024*1024;
 static_assert(PROGRAM_SCRATCH_OFFSET+2*PROGRAM_FACT_CAPACITY*sizeof(semantic_program::Fact)+
@@ -970,19 +1009,9 @@ static_assert(PROGRAM_SCRATCH_OFFSET+2*PROGRAM_FACT_CAPACITY*sizeof(semantic_pro
 
 __device__ bool task_program_bank(const uint64_t* task,uint64_t word_count,
         TaskProgramBank* result) {
-    if(!task || !result || word_count<66 || task[0]!=6 ||
-       task[21]>(UINT64_MAX-66)/5)return false;
-    const uint64_t ordinary_words=66+task[21]*5;
-    if(word_count==ordinary_words) {
-        *result=TaskProgramBank{};
-        return true;
-    }
-    if(ordinary_words>UINT64_MAX-2 || word_count<ordinary_words+2 || task[ordinary_words]!=1 ||
-       task[ordinary_words+1]!=word_count-ordinary_words-2)return false;
-    semantic_program::Bank program{};
-    if(!semantic_program::decode_bank(task+ordinary_words+2,
-           task[ordinary_words+1],&program))return false;
-    *result={program,true};
+    semantic_task_ground::Task view{};
+    if(!result || !semantic_task_ground::decode(task,word_count,&view))return false;
+    *result={view.program,view.editable,view};
     return true;
 }
 
@@ -1038,20 +1067,20 @@ __device__ void retain_policy_cell(const PolicyDescriptor& policy,const Componen
 static_assert(sizeof(U192)==24,"integer ABI");
 static_assert(sizeof(Receipt)==296,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
-static_assert(sizeof(TaskFacts)==88,"task facts ABI");
-static_assert(sizeof(TaskEvaluation)==3328,"task evaluation ABI");
+static_assert(sizeof(TaskFacts)==40,"task facts ABI");
+static_assert(sizeof(TaskEvaluation)==160,"task evaluation ABI");
 static_assert(sizeof(PolicyPwlCell)==160,"policy PWL cell ABI");
 static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
-static_assert(sizeof(State)==7568,"state ABI");
+static_assert(sizeof(State)==4400,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
 static_assert(sizeof(PolicyNumericalDescriptor)==96 && sizeof(PolicyDescriptor)==776,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==352,"training view origin ABI");
 static_assert(sizeof(SemanticTrainingViewSelection)==568,"training view selection ABI");
-static_assert(sizeof(SemanticTrainingObjectiveRecord)==280,"training objective ABI");
+static_assert(sizeof(SemanticTrainingObjectiveRecord)==296,"training objective ABI");
 static_assert(sizeof(SemanticTrainingObjectiveGroupRecord)==32,"training objective group ABI");
 static_assert(sizeof(SemanticTrainingRosterRow)==512,"training roster row ABI");
-static_assert(sizeof(SemanticTrainingCanaryRecord)==224,"training canary ABI");
+static_assert(sizeof(SemanticTrainingCanaryRecord)==216,"training canary ABI");
 static_assert(sizeof(SemanticTrainingCanaryResultRecord)==96,"training canary result ABI");
 static_assert(sizeof(SemanticTrainingCanaryRefusalRecord)==152,"training canary refusal ABI");
 static_assert(sizeof(ModelUpdateEvidenceSource)==48,"model update evidence ABI");
@@ -1060,7 +1089,7 @@ static_assert(sizeof(ModelForwardReceipt)==232,"model forward receipt ABI");
 static_assert(sizeof(ModelForwardReceiptInputs)==128,"model forward receipt input ABI");
 static_assert(sizeof(ModelUpdateCanaryInputs)==280,"training canary input ABI");
 static_assert(sizeof(PolicyAdjointNumericalDescriptor)==96,"policy adjoint numerical ABI");
-static_assert(sizeof(PolicyBackward)==256,"policy backward ABI");
+static_assert(sizeof(PolicyBackward)==264,"policy backward ABI");
 
 __device__ bool semantic_training_canary_refusal_valid(
         const SemanticTrainingCanaryRefusalRecord& refusal,
@@ -1118,9 +1147,9 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==128,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==488,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==50360,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==47192,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==48,"model contract byte layout ABI");
-static_assert(sizeof(PublicationContract)==272,"publication contract ABI");
+static_assert(sizeof(PublicationContract)==424,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==344,"pending continuation ABI");
 static_assert(sizeof(ContinuationInputs)==208,"continuation input ABI");
 static_assert(sizeof(TextRow)==16,"compact text row ABI");
@@ -1139,7 +1168,7 @@ static_assert(sizeof(IntentQueueHeader)==88,"intent queue ABI");
 static_assert(sizeof(IntentEntry)==344,"intent entry ABI");
 static_assert(sizeof(AcknowledgementQueueHeader)==72,"acknowledgement queue ABI");
 static_assert(sizeof(AcknowledgementEntry)==136,"acknowledgement entry ABI");
-static_assert(sizeof(Descriptor)==1368,"launch ABI");
+static_assert(sizeof(Descriptor)==1424,"launch ABI");
 static_assert((2*262144+4*65536)*sizeof(uint32_t)<=SCRATCH_BYTES,"serial scratch and completion witnesses");
 #ifdef XLOG_SEMANTIC_POLICY
 #include "semantic_policy_domains.cuh"
@@ -1366,8 +1395,12 @@ extern "C" __global__ void semantic_learning_fold(LearningFoldAssignment assignm
         }
     }
 }
-__device__ bool publication_identity_equal(const uint64_t* a,const uint64_t* b) {
-    for(uint32_t i=0;i<4;++i)if(a[i]!=b[i])return false;
+__device__ bool publication_identity_equal(const uint64_t* a,const uint64_t* b,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    for(uint32_t i=0;i<4;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(a[i]!=b[i])return false;
+    }
     return true;
 }
 __device__ bool publication_header_equal(const PublicationHeader& a,const PublicationHeader& b) {
@@ -1409,8 +1442,10 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     return bank.header.fuel<((transition_kind==1 || transition_kind==3) ? 2 : 1) ? 5 : 0;
 }
 __device__ uint64_t publication_acquire(PublicationControl& control,PublicationLease& lease,
-        uint64_t requested_kind=0,uint64_t expected_word=UINT64_MAX) {
+        uint64_t requested_kind=0,uint64_t expected_word=UINT64_MAX,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(control.abi!=1 || lease.active || !control.banks[0] || !control.banks[1])return 1;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     if(!publication_compare_exchange(control.reader_gate,0,1))return 2;
     const uint64_t word=publication_load(control.word),bank=word&1;
     uint64_t status=0;
@@ -1422,26 +1457,39 @@ __device__ uint64_t publication_acquire(PublicationControl& control,PublicationL
     if(!status &&
        control.reader_counts[bank]==UINT64_MAX)status=1;
     if(!status) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
+            sizeof(PublicationLease)+88);
         ++control.reader_counts[bank];
         lease=PublicationLease{};lease.abi=1;lease.word=word;lease.bank=bank;lease.epoch=word>>1;
         lease.transition_kind=kind;
         for(uint32_t i=0;i<4;++i)lease.instance[i]=control.instance[i];
         publication_store(lease.active,1);
     }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,16);
     publication_store(control.reader_gate,0);
     lease.status=status;
     return status;
 }
 // Session schedules this only after every consumer's stream join. A replayed or
 // foreign lease cannot decrement a later reader's count, including after reuse.
-__device__ uint64_t publication_release(PublicationControl& control,PublicationLease& lease) {
+__device__ uint64_t publication_release(PublicationControl& control,PublicationLease& lease,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(control.abi!=1 || lease.abi!=1 || lease.bank>1 || lease.bank!=(lease.word&1) ||
        lease.epoch!=lease.word>>1 || !publication_identity_equal(lease.instance,control.instance))return 1;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     if(!publication_compare_exchange(control.reader_gate,0,1))return 2;
     uint64_t status=0;
     if(!publication_bank_matches(control,*publication_bank(control,lease.word),lease.word) ||
-       !control.reader_counts[lease.bank] || !publication_compare_exchange(lease.active,1,0))status=1;
-    else --control.reader_counts[lease.bank];
+       !control.reader_counts[lease.bank])status=1;
+    else {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
+        if(!publication_compare_exchange(lease.active,1,0))status=1;
+        else {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
+            --control.reader_counts[lease.bank];
+        }
+    }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,16);
     publication_store(control.reader_gate,0);
     lease.status=status;
     return status;
@@ -1483,10 +1531,15 @@ __device__ bool publication_resolve_range(const PublicationControl& control,cons
     if(!storage.generation || storage.generation!=range.generation ||
        range.offset_bytes>storage.bytes || range.length_bytes>storage.bytes-range.offset_bytes ||
        storage.pointer>UINT64_MAX-storage.bytes)return false;
-    // A genuine empty model tensor has an owned zero-byte storage entry. Null
-    // is its data pointer, not an invalid owner and not an alias-class identity.
-    if(!storage.bytes)return !storage.pointer && range.role>=18 && range.role<=20 &&
-        !range.offset_bytes && !range.length_bytes && !range.logical_begin && !range.logical_end;
+    // Genuine empty model tensors and an unreserved replay payload retain an
+    // owned zero-byte entry. Null is their data pointer, not a missing owner.
+    if(!storage.bytes) {
+        const bool empty_model=range.role>=18 && range.role<=20;
+        const bool empty_payload=range.role==57 && !range.index && control.contract &&
+            !reinterpret_cast<const PublicationContract*>(control.contract)->replay_payload_capacity_bytes;
+        return !storage.pointer && (empty_model || empty_payload) &&
+            !range.offset_bytes && !range.length_bytes && !range.logical_begin && !range.logical_end;
+    }
     if(!storage.pointer)return false;
     *bytes=reinterpret_cast<uint8_t*>(storage.pointer+range.offset_bytes);
     return true;
@@ -1705,7 +1758,7 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
     uint8_t* bytes=nullptr;
     if(!publication_resolve_range(control,range,&bytes) ||
        publication_content_view(bytes,range.length_bytes,range,layout,view,content_bytes,work))return 1;
-    if(!layout)return bytes ? 0 : 1;
+    if(!layout)return bytes || (range.role==57 && !range.length_bytes) ? 0 : 1;
     const bool empty_model=range.role>=18 && range.role<=25 &&
         layout->logical_axis==UINT64_MAX && !*content_bytes;
     if(empty_model) {
@@ -1803,7 +1856,7 @@ extern "C" __global__ void semantic_publication_content_guard(uint64_t control_p
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     if(!control_ptr || control_ptr%alignof(PublicationControl) || control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
        !lease_ptr || lease_ptr%alignof(PublicationLease) || lease_ptr>UINT64_MAX-sizeof(PublicationLease) ||
-       !role || role>55 || has_layout>1 || has_layout!=uint64_t(publication_tensor_role(role))) {
+       !role || role>semantic_task_ground::kPublicationRole || has_layout>1 || has_layout!=uint64_t(publication_tensor_role(role))) {
         semantic_content_integrity_trap();return;
     }
     const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
@@ -1928,11 +1981,13 @@ extern "C" __global__ void semantic_initial_prefill_input_guard(uint64_t expecte
         }
 }
 __device__ uint64_t publication_validate_directory(const PublicationControl& control,
-        const PublicationContract& contract,PublicationRange* ranges,uint64_t count,bool seal) {
-    if(!ranges || count>contract.range_capacity || contract.role_count!=55 || !contract.role_counts)return 1;
+        const PublicationContract& contract,PublicationRange* ranges,uint64_t count,bool seal,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    if(!ranges || count>contract.range_capacity || contract.role_count!=semantic_task_ground::kPublicationRole || !contract.role_counts)return 1;
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     uint64_t expected=0,tensor_count=0;
-    for(uint64_t i=0;i<55;++i) {
+    for(uint64_t i=0;i<semantic_task_ground::kPublicationRole;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(roles[i].role!=i+1 || !semantic_graph::checked_add(expected,roles[i].count,&expected))return 1;
         if(publication_tensor_role(i+1))tensor_count+=roles[i].count;
         else if(roles[i].count!=(i+1==16 ? 3 : 1))return 1;
@@ -1942,23 +1997,27 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
        roles[52].count!=roles[5].count || roles[53].count!=roles[6].count || !roles[17].count)return 1;
     for(uint64_t role=8;role<=13;++role)if(roles[role-1].count!=1)return 1;
     TensorLayoutTableView table{};
-    if(!publication_tensor_table(control,ranges,count,&table) || table.header->layout_count!=tensor_count ||
-       !publication_active_map_shape(table,contract))return 1;
+    if(!publication_tensor_table(control,ranges,count,&table,work) || table.header->layout_count!=tensor_count ||
+       !publication_active_map_shape(table,contract,work))return 1;
     const auto* layouts=table.layouts;
     for(uint64_t i=0;i<tensor_count;++i) {
-        if(!publication_tensor_role(layouts[i].role) || !publication_find_range(ranges,count,layouts[i].role,layouts[i].index))return 1;
-        for(uint64_t j=0;j<i;++j)
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(!publication_tensor_role(layouts[i].role) || !publication_find_range(ranges,count,layouts[i].role,layouts[i].index,work))return 1;
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(layouts[j].role==layouts[i].role && layouts[j].index==layouts[i].index)return 1;
+        }
     }
     uint64_t cursor=0;
-    for(uint64_t role=1;role<=55;++role)for(uint64_t index=0;index<roles[role-1].count;++index) {
+    for(uint64_t role=1;role<=semantic_task_ground::kPublicationRole;++role)for(uint64_t index=0;index<roles[role-1].count;++index) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         PublicationRange& range=ranges[cursor++];
         if(range.role!=role || range.index!=index)return 1;
-        const auto* layout=publication_find_layout(control,ranges,count,role,index);
+        const auto* layout=publication_find_layout(control,ranges,count,role,index,work);
         if(publication_tensor_role(role)!=bool(layout))return 1;
-        if(!publication_tensor_role(role) && role!=1 && role!=2 && !range.length_bytes)return 1;
+        if(!publication_tensor_role(role) && role!=1 && role!=2 && role!=57 && !range.length_bytes)return 1;
         if(role==14 && range.length_bytes!=sizeof(CompletionCoverage))return 1;
-        if(role==15 && (contract.feedback_capacity<3 || contract.feedback_capacity>UINT64_MAX/sizeof(RawFeedbackRecord) ||
+        if(role==15 && (contract.feedback_capacity<roles[15].count || contract.feedback_capacity>UINT64_MAX/sizeof(RawFeedbackRecord) ||
             range.length_bytes!=contract.feedback_capacity*sizeof(RawFeedbackRecord)))return 1;
         if(role==33 && range.length_bytes!=sizeof(AttemptReceipt))return 1;
         if(layout && (role==4 || role==5 || role==51 || role==52) &&
@@ -1972,24 +2031,28 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
             range.logical_begin || range.logical_end!=table.header->active_row_count ||
             ((range.length_bytes==0)!=(table.header->active_row_count==0))))return 1;
         PublicationTensorBytes view{};uint64_t bytes=0;
-        if(publication_tensor_view(control,range,layout,&view,&bytes,&table))return 1;
-        if(seal && publication_range_digest(control,range,layout,range.digest,&table))return 1;
+        if(publication_tensor_view(control,range,layout,&view,&bytes,&table,work))return 1;
+        if(seal && publication_range_digest(control,range,layout,range.digest,&table,work))return 1;
     }
     return 0;
 }
 __device__ bool publication_mutable_role(uint64_t role) {
     return role==1 || role==2 || role==3 || (role>=4 && role<=15) || (role>=18 && role<=25) || role==30 || role==31 || role==32 || role==33 || role==39 || role==44 ||
-        (role>=51 && role<=55);
+        (role>=51 && role<=semantic_task_ground::kPublicationRole);
 }
-__device__ uint64_t publication_validate_storage(const PublicationControl& control) {
+__device__ uint64_t publication_validate_storage(const PublicationControl& control,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(!control.storage || !control.storage_count)return 1;
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
     for(uint64_t i=0;i<control.storage_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if((!storage[i].pointer != !storage[i].bytes) || !storage[i].generation ||
            storage[i].pointer>UINT64_MAX-storage[i].bytes)return 1;
-        for(uint64_t j=0;j<i;++j)
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(storage[i].pointer<storage[j].pointer+storage[j].bytes &&
                storage[j].pointer<storage[i].pointer+storage[i].bytes)return 1;
+        }
     }
     return 0;
 }
@@ -2540,15 +2603,28 @@ __device__ bool semantic_task_canary_evidence(const ModelUpdateCanaryInputs& inp
         const SemanticTrainingCanaryRecord& canary,const uint64_t* task,
         const SemanticTrainingObjectiveRecord& objective,uint64_t window,uint64_t& baseline_correct,
         uint64_t& candidate_correct,uint64_t& lost) {
-    const uint64_t goal=34+task[21]*5;
+    TaskProgramBank bank{};
+    if(!task_program_bank(task,inputs.task_words,&bank))return false;
+    const uint64_t* goal=bank.task.goal_witness;
     bool roots[4]={false,false,false,false};
     for(uint32_t root=0;root<4;++root)
-        for(uint32_t word=0;word<4;++word)roots[root]|=task[goal+root*4+word]!=0;
+        for(uint32_t word=0;word<4;++word)roots[root]|=goal[root*4+word]!=0;
     if(!roots[0] || !roots[1] || !roots[2] || !roots[3] ||
-       !task[goal+16] || !task[goal+17])return false;
+       !goal[16] || !goal[17])return false;
+    if(objective.canary_source_offset>inputs.protected_member_count ||
+       objective.canary_source_words>inputs.protected_member_count-objective.canary_source_offset ||
+       objective.canary_source_words<13 || canary.obligation_member_offset>inputs.protected_member_count ||
+       canary.obligation_member_count>inputs.protected_member_count-canary.obligation_member_offset)return false;
+    const auto* members=reinterpret_cast<const uint64_t*>(inputs.protected_members);
+    const auto* source=members+objective.canary_source_offset;
+    const uint64_t queries=source[12];
+    if(!queries || queries>(UINT64_MAX-13)/5 || objective.canary_source_words!=13+5*queries ||
+       canary.obligation_member_count!=queries)return false;
+    for(uint32_t identity=0;identity<3;++identity)
+        if(!(source[identity*4]|source[identity*4+1]|source[identity*4+2]|source[identity*4+3]))return false;
     baseline_correct=0;candidate_correct=0;lost=0;
-    for(uint32_t obligation=0;obligation<3;++obligation) {
-        const uint64_t position=canary.obligation_positions[obligation];
+    for(uint64_t obligation=0;obligation<queries;++obligation) {
+        const uint64_t position=members[canary.obligation_member_offset+obligation];
         if(position==UINT64_MAX || position>=window)return false;
         uint64_t baseline_token{};
         uint64_t candidate_token{};
@@ -2556,7 +2632,9 @@ __device__ bool semantic_task_canary_evidence(const ModelUpdateCanaryInputs& inp
                 position,baseline_token) ||
            !semantic_canary_argmax(inputs,inputs.candidate_logits,canary.row_ordinal,
                 position,candidate_token))return false;
-        const uint64_t truth=task[18+obligation];
+        const uint64_t* statement=source+13+obligation*5;
+        if(!(statement[0]|statement[1]|statement[2]|statement[3]) || statement[4]>3)return false;
+        const uint64_t truth=statement[4];
         const uint64_t expected=objective.truth_tokens[truth];
         const bool baseline_ok=baseline_token==expected;
         const bool candidate_ok=candidate_token==expected;
@@ -2575,7 +2653,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        !inputs.roster_rows || inputs.roster_rows%alignof(SemanticTrainingRosterRow) ||
        !inputs.objective || inputs.objective%alignof(SemanticTrainingObjectiveRecord) ||
        !inputs.canaries || inputs.canaries%alignof(SemanticTrainingCanaryRecord) || inputs.canary_count!=5 ||
-       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<66 ||
+       !inputs.task || inputs.task%alignof(uint64_t) || inputs.task_words<38 ||
        (inputs.protected_member_count && (!inputs.protected_members ||
         inputs.protected_members%alignof(uint64_t))) ||
        !inputs.forward_receipts || inputs.forward_receipts%alignof(ModelForwardReceipt) ||
@@ -2618,15 +2696,13 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     const auto* kinds=reinterpret_cast<const int64_t*>(inputs.kinds);
     auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(inputs.results);
     const uint8_t numerical=*reinterpret_cast<const uint8_t*>(inputs.admissibility_source);
-    const uint64_t support_count=task[21];
     TaskProgramBank program_bank{};
     if(numerical>1 || objective.evaluator_abi!=3 || objective.canary_count!=5 ||
-       objective.row_count!=inputs.row_count || objective.capacity!=inputs.capacity ||
+       objective.row_count!=selection.row_count || objective.capacity!=inputs.capacity ||
        objective.protected_member_count!=inputs.protected_member_count ||
-       selection.row_count!=inputs.row_count || selection.capacity!=inputs.capacity ||
-        task[0]!=6 || !task[1] || support_count>(UINT64_MAX-66)/5 ||
+       !selection.row_count || selection.row_count>inputs.row_count || selection.capacity!=inputs.capacity ||
+        task[0]!=7 || !task[1] ||
         !task_program_bank(task,inputs.task_words,&program_bank) ||
-        task[52+support_count*5]>1 ||
        !publication_identity_equal(objective.task_identity,task+2)) {
         semantic_content_integrity_trap();return;
     }
@@ -2680,7 +2756,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
     for(uint64_t item=0;item<inputs.canary_count;++item) {
         const auto& canary=canaries[item];
         if(canary.evaluator_abi!=3 || canary.kind!=item+1 ||
-           canary.row_ordinal>=inputs.row_count || (seen&(uint64_t(1)<<(canary.kind-1))) ||
+           canary.row_ordinal>=selection.row_count || (seen&(uint64_t(1)<<(canary.kind-1))) ||
            !publication_identity_equal(canary.task_identity,objective.task_identity)) {
             semantic_content_integrity_trap();return;
         }
@@ -2691,10 +2767,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
            !publication_identity_equal(row.content_identity,canary.row_content_identity)) {
             semantic_content_integrity_trap();return;
         }
-        if(canary.kind!=1 && canary.kind!=4 &&
-           (canary.obligation_positions[0]!=UINT64_MAX ||
-            canary.obligation_positions[1]!=UINT64_MAX ||
-            canary.obligation_positions[2]!=UINT64_MAX)) {
+        if(canary.kind!=1 && canary.kind!=4 && canary.obligation_member_count) {
             semantic_content_integrity_trap();return;
         }
         if(canary.kind==2) {
@@ -2729,15 +2802,21 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
         const uint64_t row_offset=canary.row_ordinal*inputs.capacity;
         if(!reason && (canary.kind==1 || canary.kind==4)) {
             uint64_t baseline_correct=0,candidate_correct=0,lost=0;
-            semantic_canary_charge(work,6*inputs.vocabulary,6);
+            uint64_t argmaxes=0,charged=0;
+            if(!canary.obligation_member_count ||
+               !semantic_graph::checked_mul(canary.obligation_member_count,2,&argmaxes) ||
+               !semantic_graph::checked_mul(argmaxes,inputs.vocabulary,&charged)) {
+                semantic_content_integrity_trap();return;
+            }
+            semantic_canary_charge(work,charged,argmaxes);
             if(!semantic_task_canary_evidence(inputs,canary,task,objective,row.window,baseline_correct,
                     candidate_correct,lost))reason=7;
             else if(!reason && canary.kind==1) {
-                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),3.0);
+                measurement=__ddiv_rn(double(int64_t(candidate_correct)-int64_t(baseline_correct)),double(canary.obligation_member_count));
                 availability=2;
             }
             else if(!reason) {
-                measurement=-__ddiv_rn(double(lost),3.0);
+                measurement=-__ddiv_rn(double(lost),double(canary.obligation_member_count));
                 availability=2;
                 if(lost)reason=7;
             }
@@ -2907,8 +2986,39 @@ __device__ void publication_copy_bytes(uint8_t* to,const uint8_t* from,uint64_t 
         semantic_graph::NativeWorkTally* work=nullptr) {
     for(uint64_t i=0;i<count;++i)to[i]=semantic_graph::written_byte(from[i],work);
 }
+__device__ uint64_t publication_preserve_range(const PublicationControl& control,
+        const PublicationRange* original,uint64_t range_count,
+        const PublicationRange& source,PublicationRange& destination,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    if(source.role!=destination.role || source.index!=destination.index ||
+       source.storage_slot>=control.storage_count || destination.storage_slot>=control.storage_count ||
+       source.storage_slot==destination.storage_slot || source.offset_bytes!=destination.offset_bytes)return 1;
+    const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+    const auto& from=storage[source.storage_slot];
+    const auto& to=storage[destination.storage_slot];
+    if(from.bytes!=to.bytes || source.offset_bytes>from.bytes ||
+       destination.generation!=to.generation || (from.bytes && from.pointer==to.pointer))return 1;
+    const auto* layout=publication_find_layout(control,original,range_count,source.role,source.index);
+    TensorLayoutTableView table{};
+    const bool tensor=(source.role>=4 && source.role<=13) ||
+        (source.role>=18 && source.role<=25) || (source.role>=51 && source.role<=54);
+    if(tensor && (!layout || !publication_tensor_table(control,original,range_count,&table)))return 1;
+    uint64_t digest[4];
+    if(publication_range_digest(control,source,layout,digest,tensor ? &table : nullptr,work) ||
+       !publication_identity_equal(digest,source.digest))return 1;
+    const uint64_t slot=destination.storage_slot,generation=destination.generation;
+    destination=source;destination.storage_slot=slot;destination.generation=generation;
+    uint8_t *source_bytes=nullptr,*destination_bytes=nullptr;
+    if(!publication_resolve_range(control,source,&source_bytes) ||
+       !publication_resolve_range(control,destination,&destination_bytes))return 1;
+    // Retain padding and unused capacity as well as the visible logical bytes;
+    // future native producers own the same frozen backing, not a short prefix.
+    publication_copy_bytes(destination_bytes,source_bytes,from.bytes-source.offset_bytes,work);
+    return 0;
+}
 __device__ uint64_t publication_apply_continuation(const PublicationControl& control,
-        const PublicationBank& base,PublicationBank& next,const PendingContinuation& pending) {
+        const PublicationBank& base,PublicationBank& next,const PendingContinuation& pending,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const auto* from=reinterpret_cast<const PublicationRange*>(pending.ranges);
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     auto* to=reinterpret_cast<PublicationRange*>(control.directories[(pending.base_word&1)^1]);
@@ -2928,19 +3038,9 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
             publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
                 reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
         }
-        if(old[i].role==44) {
-            // Ordinary continuations preserve the model schema. The selected
-            // record stays read-leased; only this bank's private copy is sealed.
-            uint64_t digest[4];
-            if(to[i].storage_slot==old[i].storage_slot || publication_range_digest(control,old[i],nullptr,digest) ||
-               !publication_identity_equal(digest,old[i].digest))return 1;
-            to[i].length_bytes=old[i].length_bytes;
-            to[i].logical_begin=old[i].logical_begin;to[i].logical_end=old[i].logical_end;
-            auto* destination=publication_range_bytes(control,to[i]);
-            const auto* source=publication_range_bytes(control,old[i]);
-            if(!destination || !source)return 1;
-            publication_copy_bytes(destination,source,old[i].length_bytes);
-        }
+        if(old[i].role==32 || old[i].role==44 || old[i].role==56 || old[i].role==57 ||
+           old[i].role==semantic_task_ground::kPublicationRole)
+            if(publication_preserve_range(control,old,base.header.range_count,old[i],to[i],work))return 1;
         if(old[i].role>=18 && old[i].role<=25) {
             if(pending.transition_kind!=4) {
                 to[i]=old[i];
@@ -3038,16 +3138,17 @@ struct PublicationCodebookBytes {
         return uint8_t(value>>(8*(index%8)));
     }
 };
-__device__ uint64_t publication_logical_codebook_digest(const uint64_t* words,uint64_t count,uint64_t* digest) {
+__device__ uint64_t publication_logical_codebook_digest(const uint64_t* words,uint64_t count,uint64_t* digest,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(!words || count<25 || count>UINT64_MAX/8 || words[8]%8 || words[8]>count*8 ||
        words[9]>count*8-words[8] || (words[8]+words[9]+7)/8!=count)return 1;
     PublicationCodebookBytes bytes{};bytes.words=words;
     const char domain[]="xlog.semantic.logical-codebooks.v1";
-    for(uint32_t i=0;i<sizeof(domain);++i)bytes.prefix[bytes.prefix_bytes++]=domain[i];
-    for(uint32_t i=0;i<32;++i)bytes.prefix[bytes.prefix_bytes++]=CATALOGUE_DIGEST[i];
-    for(uint32_t i=0;i<8;++i)bytes.prefix[bytes.prefix_bytes++]=uint8_t(count>>(8*i));
+    for(uint32_t i=0;i<sizeof(domain);++i)bytes.prefix[bytes.prefix_bytes++]=semantic_graph::written_byte(domain[i],work);
+    for(uint32_t i=0;i<32;++i)bytes.prefix[bytes.prefix_bytes++]=semantic_graph::written_byte(CATALOGUE_DIGEST[i],work);
+    for(uint32_t i=0;i<8;++i)bytes.prefix[bytes.prefix_bytes++]=semantic_graph::written_byte(uint8_t(count>>(8*i)),work);
     if(count>(UINT64_MAX/8-bytes.prefix_bytes)/8)return 1;
-    semantic_graph::sha256(bytes,bytes.prefix_bytes+count*8,digest);
+    semantic_graph::sha256(bytes,bytes.prefix_bytes+count*8,digest,work);
     return 0;
 }
 struct PublicationActionReceiptBytes {
@@ -3061,14 +3162,14 @@ struct PublicationActionReceiptBytes {
     }
 };
 __device__ uint64_t publication_action_digest(const PublicationControl& control,const PublicationBank& bank,
-        const Receipt* receipts,uint64_t count,uint64_t* digest) {
+        const Receipt* receipts,uint64_t count,uint64_t* digest,semantic_graph::NativeWorkTally* work=nullptr) {
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
-    const auto* codebook=publication_find_range(ranges,bank.header.range_count,48);
+    const auto* codebook=publication_find_range(ranges,bank.header.range_count,48,0,work);
     if(!codebook || codebook->length_bytes%8)return 1;
     PublicationActionReceiptBytes bytes{};bytes.receipts=receipts;
     if(publication_logical_codebook_digest(reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*codebook)),
-        codebook->length_bytes/8,bytes.logical_binding))return 1;
-    semantic_graph::sha256(bytes,count*sizeof(Receipt),digest);
+        codebook->length_bytes/8,bytes.logical_binding,work))return 1;
+    semantic_graph::sha256(bytes,count*sizeof(Receipt),digest,work);
     return 0;
 }
 struct PublicationLogicalBytes {
@@ -3091,14 +3192,15 @@ struct PublicationLogicalBytes {
     }
 };
 __device__ uint64_t publication_logical_range_digest(const PublicationControl& control,
-        const PublicationRange& range,const PublicationTensorLayout* layout,uint64_t* digest) {
+        const PublicationRange& range,const PublicationTensorLayout* layout,uint64_t* digest,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     if(range.role==48) {
         if(range.length_bytes%8)return 1;
-        return publication_logical_codebook_digest(reinterpret_cast<const uint64_t*>(publication_range_bytes(control,range)),range.length_bytes/8,digest);
+        return publication_logical_codebook_digest(reinterpret_cast<const uint64_t*>(publication_range_bytes(control,range)),range.length_bytes/8,digest,work);
     }
     PublicationLogicalBytes input{};uint64_t bytes=0;input.role=range.role;
-    if(publication_tensor_view(control,range,layout,&input.view,&bytes) || bytes>UINT64_MAX/8-128)return 1;
-    semantic_graph::sha256(input,128+bytes,digest);
+    if(publication_tensor_view(control,range,layout,&input.view,&bytes,nullptr,work) || bytes>UINT64_MAX/8-128)return 1;
+    semantic_graph::sha256(input,128+bytes,digest,work);
     return 0;
 }
 __device__ void publication_fold(uint64_t* digest,uint64_t role,uint64_t index,const uint64_t* content,
@@ -3231,33 +3333,40 @@ __device__ uint64_t publication_seal_ranges(const PublicationControl& control,Pu
     for(uint32_t word=0;word<4;++word)model->backing_digest[word]=0;
     return publication_range_digest(control,*model,nullptr,model->digest,&table);
 }
-__device__ uint64_t publication_logical_digest(const PublicationControl& control,PublicationBank& bank) {
+__device__ uint64_t publication_logical_digest(const PublicationControl& control,PublicationBank& bank,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     PublicationHeader logical=bank.header;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(logical));
     // Cold initialization hashes the sealed representation before exposing ABI 1.
-    logical.abi=1;
-    for(uint32_t i=0;i<4;++i)logical.instance[i]=logical.recovered_instance[i]=0;
+    logical.abi=semantic_graph::written_word(1,work);
+    for(uint32_t i=0;i<4;++i) {
+        logical.instance[i]=semantic_graph::written_word(0,work);
+        logical.recovered_instance[i]=semantic_graph::written_word(0,work);
+    }
     logical.sealed_epoch=logical.base_word=logical.publication_word=0;
     logical.semantic_owner=logical.semantic_slot=logical.semantic_generation=logical.neural_bank=0;
     for(uint32_t i=0;i<4;++i)logical.logical_digest[i]=logical.state_digest[i]=logical.descriptor_digest[i]=0;
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&logical),sizeof(logical),bank.header.logical_digest);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,19*sizeof(uint64_t));
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&logical),sizeof(logical),bank.header.logical_digest,work);
     uint64_t digest[4];
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(bank.source),sizeof(bank.source),digest);
-    publication_fold(bank.header.logical_digest,0,1,digest);
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(bank.source),sizeof(bank.source),digest,work);
+    publication_fold(bank.header.logical_digest,0,1,digest,work);
     if(bank.state.action_batch_root[0] || bank.state.action_batch_root[1] ||
        bank.state.action_batch_root[2] || bank.state.action_batch_root[3])
-        semantic_graph::copy_identity(digest,bank.state.action_batch_root);
-    else if(publication_action_digest(control,bank,bank.receipts,136,digest))return 1;
-    publication_fold(bank.header.logical_digest,0,2,digest);
+        semantic_graph::copy_identity(digest,bank.state.action_batch_root,work);
+    else if(publication_action_digest(control,bank,bank.receipts,136,digest,work))return 1;
+    publication_fold(bank.header.logical_digest,0,2,digest,work);
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
     for(uint64_t i=0;i<bank.header.range_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         const auto& range=ranges[i];
         if(range.role==27 || range.role==28 || range.role==30 || range.role==31 || range.role==32 || range.role==33)continue;
         if(range.role==2 || range.role==14 || range.role==15 || range.role==48) {
-            if(publication_logical_range_digest(control,range,nullptr,digest))return 1;
-        } else semantic_graph::copy_identity(digest,range.digest);
-        publication_fold(bank.header.logical_digest,range.role,range.index,digest);
+            if(publication_logical_range_digest(control,range,nullptr,digest,work))return 1;
+        } else semantic_graph::copy_identity(digest,range.digest,work);
+        publication_fold(bank.header.logical_digest,range.role,range.index,digest,work);
         if(range.role>=18 && range.role<=25)
-            publication_fold(bank.header.logical_digest,range.role,range.index,range.backing_digest);
+            publication_fold(bank.header.logical_digest,range.role,range.index,range.backing_digest,work);
     }
     return 0;
 }
@@ -3316,17 +3425,19 @@ __device__ uint64_t publication_validate_selected_model(const PublicationControl
     }
     return publication_identity_equal(digest,header.model_numerical_digest) ? 0 : 1;
 }
-__device__ uint64_t publication_descriptor_digest(const PublicationControl& control,PublicationBank& bank) {
-    semantic_graph::copy_identity(bank.header.state_digest,bank.header.logical_digest);
+__device__ uint64_t publication_descriptor_digest(const PublicationControl& control,PublicationBank& bank,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    semantic_graph::copy_identity(bank.header.state_digest,bank.header.logical_digest,work);
     const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank.header.publication_word&1]);
     uint64_t digest[4];
     for(uint64_t i=0;i<bank.header.range_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(ranges[i].role!=27 && ranges[i].role!=28 && ranges[i].role!=30 && ranges[i].role!=31 &&
            ranges[i].role!=32 && ranges[i].role!=33)continue;
-        if(publication_logical_range_digest(control,ranges[i],nullptr,digest))return 1;
-        publication_fold(bank.header.state_digest,ranges[i].role,ranges[i].index,digest);
+        if(publication_logical_range_digest(control,ranges[i],nullptr,digest,work))return 1;
+        publication_fold(bank.header.state_digest,ranges[i].role,ranges[i].index,digest,work);
     }
-    publication_original_descriptor_digest(control,bank,bank.header.descriptor_digest);
+    publication_original_descriptor_digest(control,bank,bank.header.descriptor_digest,work);
     return 0;
 }
 
@@ -3337,21 +3448,26 @@ __device__ bool publication_spans_overlap(uint64_t a,uint64_t a_bytes,uint64_t b
     return a<b+b_bytes && b<a+a_bytes;
 }
 __device__ bool publication_step_output_span(const PublicationControl& control,uint64_t lease,
-        uint64_t bindings,uint64_t binding_bytes,uint64_t pointer,uint64_t bytes) {
+        uint64_t bindings,uint64_t binding_bytes,uint64_t pointer,uint64_t bytes,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
     if(!publication_pointer_span(pointer,bytes) ||
        publication_spans_overlap(pointer,bytes,reinterpret_cast<uint64_t>(&control),sizeof(control)) ||
        publication_spans_overlap(pointer,bytes,lease,sizeof(PublicationLease)) ||
        publication_spans_overlap(pointer,bytes,bindings,binding_bytes) ||
        publication_spans_overlap(pointer,bytes,control.contract,sizeof(contract)) ||
-       publication_spans_overlap(pointer,bytes,contract.role_counts,55*sizeof(PublicationRoleCount)) ||
+       publication_spans_overlap(pointer,bytes,contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount)) ||
        publication_spans_overlap(pointer,bytes,control.storage,control.storage_count*sizeof(PublicationStorageEntry)))return false;
-    for(uint64_t bank=0;bank<2;++bank)
+    for(uint64_t bank=0;bank<2;++bank) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(publication_spans_overlap(pointer,bytes,control.banks[bank],sizeof(PublicationBank)) ||
            publication_spans_overlap(pointer,bytes,control.directories[bank],contract.range_capacity*sizeof(PublicationRange)))return false;
+    }
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
-    for(uint64_t i=0;i<control.storage_count;++i)
+    for(uint64_t i=0;i<control.storage_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(publication_spans_overlap(pointer,bytes,storage[i].pointer,storage[i].bytes))return false;
+    }
     return true;
 }
 __device__ bool publication_step_layout_capacity(const PublicationTensorLayout& layout,uint64_t* capacity) {
@@ -3366,7 +3482,7 @@ __device__ bool publication_step_layout_capacity(const PublicationTensorLayout& 
 }
 
 __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& header,const SourceSlot* source,
-        uint64_t binding_count,uint64_t output[2][4]) {
+        uint64_t binding_count,uint64_t output[2][4],semantic_graph::NativeWorkTally* work=nullptr) {
     for(uint64_t index=0;index<2;++index) {
         PublicationRange range{};range.index=index;
         range.length_bytes=index ? 32*sizeof(SourceSlot) : sizeof(PublicationHeader);
@@ -3378,11 +3494,11 @@ __device__ uint64_t publication_step_metadata_digest(const PublicationHeader& he
         layout.strides_bytes[1]=index ? 8 : 0;
         const auto* bytes=index ? reinterpret_cast<const uint8_t*>(source) : reinterpret_cast<const uint8_t*>(&header);
         PublicationTensorBytes view{};uint64_t content_bytes=0;
-        if(publication_content_view(bytes,range.length_bytes,range,&layout,&view,&content_bytes) ||
-           publication_content_digest(view,content_bytes,output[index]))return 1;
+        if(publication_content_view(bytes,range.length_bytes,range,&layout,&view,&content_bytes,work) ||
+           publication_content_digest(view,content_bytes,output[index],work))return 1;
     }
     const uint64_t roster_extent[4]={binding_count,0,0,0};
-    publication_fold(output[0],0,0,roster_extent);
+    publication_fold(output[0],0,0,roster_extent,work);
     return 0;
 }
 
@@ -3552,8 +3668,8 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
         semantic_content_integrity_trap();return;
     }
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
-    if(contract.abi!=1 || contract.role_count!=55 ||
-       !publication_pointer_span(contract.role_counts,55*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
+    if(contract.abi!=1 || contract.role_count!=semantic_task_ground::kPublicationRole ||
+       !publication_pointer_span(contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
@@ -3670,8 +3786,8 @@ extern "C" __global__ void semantic_publication_model_seals(uint64_t control_ptr
         semantic_content_integrity_trap();return;
     }
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
-    if(contract.abi!=1 || contract.role_count!=55 ||
-       !publication_pointer_span(contract.role_counts,55*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
+    if(contract.abi!=1 || contract.role_count!=semantic_task_ground::kPublicationRole ||
+       !publication_pointer_span(contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
@@ -3723,8 +3839,10 @@ extern "C" __global__ void semantic_publication_model_seals(uint64_t control_ptr
 // Source, feedback records, header and seals are retained private snapshots.
 extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr,uint64_t lease_ptr,
         uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t header_output_ptr,
-        uint64_t source_output_ptr,uint64_t range_output_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t source_output_ptr,uint64_t range_output_ptr,uint64_t metadata_digests_ptr,uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(control_ptr,sizeof(PublicationControl),alignof(PublicationControl)) ||
        !publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
@@ -3749,8 +3867,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
     }
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
     uint64_t directory_bytes=0;
-    if(contract.abi!=1 || contract.role_count!=55 ||
-       !publication_pointer_span(contract.role_counts,55*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
+    if(contract.abi!=1 || contract.role_count!=semantic_task_ground::kPublicationRole ||
+       !publication_pointer_span(contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
@@ -3760,50 +3878,57 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
             semantic_content_integrity_trap();return;
         }
     const auto* bank=publication_acquired_bank(control,lease);
-    if(!bank || bank->header.range_count>contract.range_capacity || publication_validate_storage(control)) {
+    if(!bank || bank->header.range_count>contract.range_capacity || publication_validate_storage(control,work)) {
         semantic_content_integrity_trap();return;
     }
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[lease.bank]);
     const uint64_t count=bank->header.range_count;
     uint64_t digest[4];
-    if(publication_validate_selected_model(control,*bank)) { semantic_content_integrity_trap();return; }
-    const auto* table_range=publication_find_range(ranges,count,55);
-    if(!table_range || publication_range_digest(control,*table_range,nullptr,digest) ||
-       !publication_identity_equal(digest,table_range->digest) || publication_validate_directory(control,contract,ranges,count,false)) {
+    if(publication_validate_selected_model(control,*bank,work)) { semantic_content_integrity_trap();return; }
+    const auto* table_range=publication_find_range(ranges,count,55,0,work);
+    if(!table_range || publication_range_digest(control,*table_range,nullptr,digest,nullptr,work) ||
+       !publication_identity_equal(digest,table_range->digest) || publication_validate_directory(control,contract,ranges,count,false,work)) {
         semantic_content_integrity_trap();return;
     }
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     uint64_t expected=3;
-    for(uint64_t role=4;role<=25;++role)
+    for(uint64_t role=4;role<=25;++role) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(role!=14 && !semantic_graph::checked_add(expected,roles[role-1].count,&expected)) {
             semantic_content_integrity_trap();return;
         }
+    }
     if(roles[43].count!=1 || binding_count!=expected) { semantic_content_integrity_trap();return; }
     const uint64_t output_pointers[]={header_output_ptr,source_output_ptr,range_output_ptr,metadata_digests_ptr};
     const uint64_t output_bytes[]={sizeof(PublicationHeader),32*sizeof(SourceSlot),range_bytes,8*sizeof(uint64_t)};
     for(uint64_t i=0;i<4;++i) {
-        if(!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,output_pointers[i],output_bytes[i]) ||
-           !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,output_pointers[i],output_bytes[i])) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,output_pointers[i],output_bytes[i],work) ||
+           !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,output_pointers[i],output_bytes[i],work)) {
             semantic_content_integrity_trap();return;
         }
-        for(uint64_t j=0;j<i;++j)
+        for(uint64_t j=0;j<i;++j) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(publication_spans_overlap(output_pointers[i],output_bytes[i],output_pointers[j],output_bytes[j])) {
                 semantic_content_integrity_trap();return;
             }
+        }
     }
     const auto* bindings=reinterpret_cast<const PublicationStepInput*>(bindings_ptr);
     const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
     uint64_t cursor=0;
     for(uint64_t role=1;role<=44;++role) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(role==2 || role==14 || (role>25 && role!=44))continue;
         const bool model=role>=18 && role<=25;
         for(uint64_t index=0;index<roles[role-1].count;++index) {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
             const auto& binding=bindings[cursor++];
-            const auto* range=publication_find_range(ranges,count,role,index);
-            const auto* layout=publication_find_layout(control,ranges,count,role,index);
+            const auto* range=publication_find_range(ranges,count,role,index,work);
+            const auto* layout=publication_find_layout(control,ranges,count,role,index,work);
             if(!range || binding.role!=role || binding.index!=index ||
                ((!model || binding.capacity_bytes) && !publication_pointer_span(binding.destination,binding.capacity_bytes)) ||
-               publication_range_digest(control,*range,layout,digest) || !publication_identity_equal(digest,range->digest)) {
+               publication_range_digest(control,*range,layout,digest,nullptr,work) || !publication_identity_equal(digest,range->digest)) {
                 semantic_content_integrity_trap();return;
             }
             const auto* original=publication_range_bytes(control,*range);
@@ -3820,7 +3945,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 }
                 bool sealed=false;
                 for(uint64_t i=0;i+1<cursor;++i) {
-                    const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index);
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                    const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index,work);
                     if(previous->storage_slot==range->storage_slot) {
                         if(bindings[i].backing!=binding.backing || bindings[i].backing_bytes!=binding.backing_bytes ||
                            !publication_identity_equal(previous->backing_digest,range->backing_digest)) {
@@ -3829,15 +3955,17 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                         sealed=true;break;
                     }
                 }
-                if(!sealed && (publication_backing_digest(control,*range,digest) ||
+                if(!sealed && (publication_backing_digest(control,*range,digest,work) ||
                    !publication_identity_equal(digest,range->backing_digest))) { semantic_content_integrity_trap();return; }
             } else if(binding.backing!=binding.destination || binding.backing_bytes!=binding.capacity_bytes) {
                 semantic_content_integrity_trap();return;
             }
             if(role==3 || (role>=15 && role<=17) || role==44) {
                 const auto* words=reinterpret_cast<const uint64_t*>(&binding.layout);
-                for(uint64_t word=0;word<sizeof(binding.layout)/8;++word)
+                for(uint64_t word=0;word<sizeof(binding.layout)/8;++word) {
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     if(words[word]) { semantic_content_integrity_trap();return; }
+                }
                 if(range->logical_begin || (role!=15 && range->logical_end) || binding.capacity_bytes!=range->length_bytes ||
                    (role==15 && (range->length_bytes%sizeof(RawFeedbackRecord) ||
                        range->logical_end>range->length_bytes/sizeof(RawFeedbackRecord))) ||
@@ -3855,8 +3983,10 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
                 } else original_layout=*layout;
                 const auto* actual=reinterpret_cast<const uint64_t*>(&binding.layout);
                 const auto* sealed=reinterpret_cast<const uint64_t*>(&original_layout);
-                for(uint64_t word=0;word<sizeof(original_layout)/8;++word)
+                for(uint64_t word=0;word<sizeof(original_layout)/8;++word) {
+                    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     if(actual[word]!=sealed[word]) { semantic_content_integrity_trap();return; }
+                }
                 uint64_t capacity=0;
                 if(model)capacity=range->length_bytes;
                 if((!model && !publication_step_layout_capacity(original_layout,&capacity)) || binding.capacity_bytes!=capacity ||
@@ -3875,16 +4005,19 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
             }
             if(alias)continue;
             if(binding.backing_bytes &&
-               (!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,binding.backing,binding.backing_bytes) ||
-                !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,binding.backing,binding.backing_bytes))) {
+               (!publication_step_output_span(control,lease_ptr,bindings0_ptr,binding_bytes,binding.backing,binding.backing_bytes,work) ||
+                !publication_step_output_span(control,lease_ptr,bindings1_ptr,binding_bytes,binding.backing,binding.backing_bytes,work))) {
                 semantic_content_integrity_trap();return;
             }
-            for(uint64_t i=0;i<4;++i)
+            for(uint64_t i=0;i<4;++i) {
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                 if(publication_spans_overlap(binding.backing,binding.backing_bytes,output_pointers[i],output_bytes[i])) {
                     semantic_content_integrity_trap();return;
                 }
+            }
             for(uint64_t i=0;i+1<cursor;++i) {
-                const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index);
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                const auto* previous=publication_find_range(ranges,count,bindings[i].role,bindings[i].index,work);
                 const bool same_model=model && bindings[i].role>=18 && previous->storage_slot==range->storage_slot;
                 if(!same_model && publication_spans_overlap(binding.backing,binding.backing_bytes,bindings[i].backing,bindings[i].backing_bytes)) {
                     semantic_content_integrity_trap();return;
@@ -3893,16 +4026,19 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
         }
     }
     uint64_t metadata[2][4];
-    if(publication_step_metadata_digest(bank->header,bank->source,binding_count,metadata)) { semantic_content_integrity_trap();return; }
-    publication_copy_bytes(reinterpret_cast<uint8_t*>(metadata_digests_ptr),reinterpret_cast<const uint8_t*>(metadata),sizeof(metadata));
+    if(publication_step_metadata_digest(bank->header,bank->source,binding_count,metadata,work)) { semantic_content_integrity_trap();return; }
+    publication_copy_bytes(reinterpret_cast<uint8_t*>(metadata_digests_ptr),reinterpret_cast<const uint8_t*>(metadata),sizeof(metadata),work);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationHeader));
     *reinterpret_cast<PublicationHeader*>(header_output_ptr)=bank->header;
-    publication_copy_bytes(reinterpret_cast<uint8_t*>(source_output_ptr),reinterpret_cast<const uint8_t*>(bank->source),sizeof(bank->source));
+    publication_copy_bytes(reinterpret_cast<uint8_t*>(source_output_ptr),reinterpret_cast<const uint8_t*>(bank->source),sizeof(bank->source),work);
     auto* output_ranges=reinterpret_cast<PublicationRange*>(range_output_ptr);
     for(uint64_t i=0;i<binding_count;++i) {
-        const auto& binding=bindings[i];const auto* range=publication_find_range(ranges,count,binding.role,binding.index);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        const auto& binding=bindings[i];const auto* range=publication_find_range(ranges,count,binding.role,binding.index,work);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
         output_ranges[i]=*range;
         if(binding.role==3 || (binding.role>=6 && (binding.role<18 || binding.role>25)))
-            publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.destination),publication_range_bytes(control,*range),range->length_bytes);
+            publication_copy_bytes(reinterpret_cast<uint8_t*>(binding.destination),publication_range_bytes(control,*range),range->length_bytes,work);
     }
 }
 
@@ -3911,7 +4047,7 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
 // through the original logical interval.
 __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
         uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
-        uint64_t expected_active) {
+        uint64_t expected_active,semantic_graph::NativeWorkTally* work=nullptr) {
     uint64_t binding_bytes=0,range_bytes=0;
     if(!publication_pointer_span(lease_ptr,sizeof(PublicationLease),alignof(PublicationLease)) ||
        !publication_pointer_span(header_ptr,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
@@ -3934,7 +4070,7 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
     const auto* expected=reinterpret_cast<const uint64_t*>(metadata_digests_ptr);
     if(header.abi!=1 || header.publication_word!=lease.word || header.sealed_epoch!=lease.epoch ||
        !publication_identity_equal(header.instance,lease.instance) || binding_count<9 || binding_count>header.range_count ||
-       publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual) ||
+       publication_step_metadata_digest(header,reinterpret_cast<const SourceSlot*>(source_ptr),binding_count,actual,work) ||
        !publication_identity_equal(actual[0],expected) || !publication_identity_equal(actual[1],expected+4)) {
         semantic_content_integrity_trap();return;
     }
@@ -3942,6 +4078,7 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
     const auto* ranges=reinterpret_cast<const PublicationRange*>(ranges_ptr);
     uint64_t fixed_role=8;
     for(uint64_t i=0;i<binding_count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         const auto& binding=bindings[i];const auto& range=ranges[i];
         if(range.role>=8 && range.role<=13 && (range.role!=fixed_role++ || range.index)) { semantic_content_integrity_trap();return; }
         const bool alias=range.role==1 || range.role==4 || range.role==5;
@@ -3972,7 +4109,8 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
                 semantic_content_integrity_trap();return;
             }
             bool sealed=false;
-            for(uint64_t previous=0;previous<i;++previous)
+            for(uint64_t previous=0;previous<i;++previous) {
+                semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                 if(ranges[previous].storage_slot==range.storage_slot) {
                     if(bindings[previous].backing!=binding.backing || bindings[previous].backing_bytes!=binding.backing_bytes ||
                        !publication_identity_equal(ranges[previous].backing_digest,range.backing_digest)) {
@@ -3980,9 +4118,10 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
                     }
                     sealed=true;break;
                 }
+            }
             if(!sealed) {
                 uint64_t digest[4];
-                semantic_graph::sha256(reinterpret_cast<const uint8_t*>(binding.backing),binding.backing_bytes,digest);
+                semantic_graph::sha256(reinterpret_cast<const uint8_t*>(binding.backing),binding.backing_bytes,digest,work);
                 if(!publication_identity_equal(digest,range.backing_digest)) { semantic_content_integrity_trap();return; }
             }
         } else if(binding.backing!=binding.destination || binding.backing_bytes!=binding.capacity_bytes) {
@@ -3990,37 +4129,58 @@ __device__ void publication_step_input_guard(uint64_t lease_ptr,uint64_t header_
         }
         PublicationTensorBytes view{};uint64_t bytes=0,digest[4];
         const auto* layout=publication_tensor_role(range.role) ? &binding.layout : nullptr;
-        if(publication_content_view(reinterpret_cast<const uint8_t*>(binding.destination),range.length_bytes,range,layout,&view,&bytes) ||
-           publication_content_digest(view,bytes,digest) || !publication_identity_equal(digest,range.digest)) {
+        if(publication_content_view(reinterpret_cast<const uint8_t*>(binding.destination),range.length_bytes,range,layout,&view,&bytes,work) ||
+           publication_content_digest(view,bytes,digest,work) || !publication_identity_equal(digest,range.digest)) {
            semantic_content_integrity_trap();return;
         }
     }
     if(fixed_role!=14 || ranges[binding_count-1].role!=44 || ranges[binding_count-1].index)semantic_content_integrity_trap();
 }
 extern "C" __global__ void semantic_publication_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
-        ranges_ptr,metadata_digests_ptr,1);
+        ranges_ptr,metadata_digests_ptr,1,work);
 }
 // Cold verification authenticates a completed original lease, never a current
 // acquired bank. Its fixed bindings point into the private pre-mutation copy.
 extern "C" __global__ void semantic_completed_step_input_guard(uint64_t lease_ptr,uint64_t header_ptr,uint64_t source_ptr,
-        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr) {
+        uint64_t bindings0_ptr,uint64_t bindings1_ptr,uint64_t binding_count,uint64_t ranges_ptr,uint64_t metadata_digests_ptr,
+        uint64_t cold_work_ptr) {
     if(blockIdx.x || threadIdx.x)return;
+    auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     publication_step_input_guard(lease_ptr,header_ptr,source_ptr,bindings0_ptr,bindings1_ptr,binding_count,
-        ranges_ptr,metadata_digests_ptr,0);
+        ranges_ptr,metadata_digests_ptr,0,work);
 }
-__device__ void publication_intent_identity(const IntentEntry& entry,uint64_t* identity) {
+__device__ void publication_intent_identity(const IntentEntry& entry,uint64_t* identity,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     uint64_t words[25];words[0]=0x786c6f67696e7431ULL;
     const uint64_t* content=entry.checkpoint_lineage;
     for(uint32_t i=0;i<24;++i)words[i+1]=content[i];
-    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(words),sizeof(words),identity);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(words));
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(words),sizeof(words),identity,work);
+}
+__device__ bool publication_nonterminal_intent_binding_valid(const PublicationContract& contract) {
+    const bool plan=contract.nonterminal_intent_plan_digest[0] || contract.nonterminal_intent_plan_digest[1] ||
+        contract.nonterminal_intent_plan_digest[2] || contract.nonterminal_intent_plan_digest[3];
+    if(!contract.nonterminal_intent_mode)return !plan && !contract.nonterminal_intent_prefix_begin &&
+        !contract.nonterminal_intent_prefix_end;
+    return contract.nonterminal_intent_mode==1 && plan &&
+        contract.nonterminal_intent_prefix_begin<contract.nonterminal_intent_prefix_end &&
+        contract.nonterminal_intent_prefix_end<=contract.prefix_capacity &&
+        contract.nonterminal_intent_prefix_end-contract.nonterminal_intent_prefix_begin<=(UINT64_MAX-48)/8;
 }
 __device__ uint64_t publication_validate_intents(const PublicationControl& control,
-        const PublicationRange* ranges,uint64_t count,uint64_t terminal_position=UINT64_MAX) {
-    const auto* entry_range=publication_find_range(ranges,count,30);
-    const auto* payload_range=publication_find_range(ranges,count,31);
+        const PublicationRange* ranges,uint64_t count,uint64_t terminal_position=UINT64_MAX,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    if(!publication_nonterminal_intent_binding_valid(
+            *reinterpret_cast<const PublicationContract*>(control.contract)))return 1;
+    const auto* entry_range=publication_find_range(ranges,count,30,0,work);
+    const auto* payload_range=publication_find_range(ranges,count,31,0,work);
     if(!entry_range || !payload_range || entry_range->length_bytes<sizeof(IntentQueueHeader))return 1;
     const auto* queue=reinterpret_cast<const IntentQueueHeader*>(publication_range_bytes(control,*entry_range));
     const auto* payload=publication_range_bytes(control,*payload_range);
@@ -4035,20 +4195,21 @@ __device__ uint64_t publication_validate_intents(const PublicationControl& contr
        storage[payload_range->storage_slot].bytes-payload_range->offset_bytes!=queue->payload_capacity_bytes)return 1;
     const auto* entries=reinterpret_cast<const IntentEntry*>(queue+1);
     uint64_t chain[4]={},effect[4],cursor=queue->effect_length_bytes;
-    semantic_graph::sha256(payload,queue->effect_length_bytes,effect);
+    semantic_graph::sha256(payload,queue->effect_length_bytes,effect,work);
     for(uint64_t i=0;i<queue->count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         const IntentEntry& entry=entries[i];uint64_t digest[4];
         if(entry.payload_offset!=cursor || entry.payload_len>queue->payload_used_bytes-cursor ||
-           !publication_identity_equal(entry.effect_digest,effect) || !publication_identity_equal(entry.previous_chain,chain))return 1;
-        semantic_graph::sha256(payload+cursor,entry.payload_len,digest);
-        if(!publication_identity_equal(digest,entry.payload_digest))return 1;
-        publication_intent_identity(entry,digest);
-        if(!publication_identity_equal(digest,entry.stable_identity))return 1;
-        publication_fold(chain,30,i,digest);
-        if(!publication_identity_equal(chain,entry.chain))return 1;
+           !publication_identity_equal(entry.effect_digest,effect,work) || !publication_identity_equal(entry.previous_chain,chain,work))return 1;
+        semantic_graph::sha256(payload+cursor,entry.payload_len,digest,work);
+        if(!publication_identity_equal(digest,entry.payload_digest,work))return 1;
+        publication_intent_identity(entry,digest,work);
+        if(!publication_identity_equal(digest,entry.stable_identity,work))return 1;
+        publication_fold(chain,30,i,digest,work);
+        if(!publication_identity_equal(chain,entry.chain,work))return 1;
         cursor+=entry.payload_len;
     }
-    if(cursor!=queue->payload_used_bytes || !publication_identity_equal(queue->chain_head,chain))return 1;
+    if(cursor!=queue->payload_used_bytes || !publication_identity_equal(queue->chain_head,chain,work))return 1;
     if(terminal_position!=UINT64_MAX) {
         if(queue->count==queue->capacity || terminal_position>(UINT64_MAX-16)/8)return 5;
         const uint64_t needed=16+terminal_position*8;
@@ -4164,7 +4325,9 @@ __device__ bool action_completes(const uint64_t* books,const Component* componen
         return true;
     }
     if(opcode==2) {
-        if(!program_bank.editable || !supported(components,support,start,1,2,work))return false;
+        if(!program_bank.editable ||
+           uint64_t(program_bank.program.rule_count)+program_bank.selected_rule_count>=PROGRAM_RULE_CAPACITY ||
+           !supported(components,support,start,1,2,work))return false;
         uint32_t empty_choices[18]={};
         empty_choices[1]=2;
         return semantic_rule_action::prefix_completes(books,components,support,start,
@@ -4258,24 +4421,25 @@ __device__ void decode_action(const uint64_t* books,const uint32_t* choices,
 
 // The private cold task bank binds full qualified keys and statement-specific
 // support identities. It is not part of the sampler's categorical codebooks.
-__device__ bool task_allows(const uint64_t* task,
+__device__ bool task_allows(const semantic_task_ground::Task& task,
         semantic_graph::DecodedStatement& statement,
         const semantic_graph::DecodedSupport& support) {
-    if(!task || task[0]!=6)return false;
     uint64_t identity[4];semantic_graph::decode_identity(statement.identity_words,identity);
-    uint32_t query_index=3;
-    for(uint32_t query=0;query<3 && query_index==3;++query) {
+    uint32_t query_index=task.queries;
+    for(uint32_t query=0;query<task.queries && query_index==task.queries;++query) {
         bool equal=true;
-        for(uint32_t i=0;i<4;++i)equal &= identity[i]==task[6+4*query+i];
+        for(uint32_t i=0;i<4;++i)equal &= identity[i]==task.query(query)[i];
         if(equal)query_index=query;
     }
-    if(query_index==3)return false;
+    if(query_index==task.queries)return false;
+    if(task.coding)for(uint32_t binding=0;binding<task.bindings;++binding)
+        if(task.binding(binding)[1]==task.query(query_index)[4])return false;
     uint64_t digest[4];semantic_graph::support_digest(identity,support,digest);
-    for(uint64_t event=0;event<task[21];++event) {
-        bool equal=task[34+5*event]==support.record;
-        for(uint32_t i=0;i<4;++i)equal &= digest[i]==task[35+5*event+i];
+    for(uint64_t event=0;event<task.support_count;++event) {
+        bool equal=task.supports[5*event]==support.record;
+        for(uint32_t i=0;i<4;++i)equal &= digest[i]==task.supports[5*event+1+i];
         if(equal) {
-            statement.record=uint32_t(task[22+query_index]);
+            statement.record=uint32_t(task.query(query_index)[4]);
             for(uint32_t i=0;i<10;++i)statement.reconstruction[i]=0;
             return true;
         }
@@ -4283,13 +4447,13 @@ __device__ bool task_allows(const uint64_t* task,
     return false;
 }
 
-__device__ void task_cost(State* state,uint32_t slot,const uint64_t* task) {
+__device__ void task_cost(State* state,uint32_t slot,const semantic_task_ground::Task& task) {
     auto& facts=state->task_evaluation.facts[slot];
     if(slot) {
         const auto& work=state->work[slot-1];
         facts.c=work.edit_commands+work.added_supports+work.defined_truth_changes;
     }
-    facts.v=int64_t(task[25]*facts.g+task[26]*facts.p)-int64_t(task[27]*facts.c);
+    facts.v=int64_t(task.scoring[0]*facts.g+task.scoring[1]*facts.p)-int64_t(task.scoring[2]*facts.c);
 }
 
 __device__ bool selected_task_cost_matches(const State* state,uint64_t cap) {
@@ -4310,27 +4474,31 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
         const semantic_graph::Receipt* candidate,State* state) {
     auto& evaluation=state->task_evaluation;
     auto& facts=evaluation.facts[slot];
+    semantic_task_ground::Task view{};semantic_task_ground::Plane plane{};
+    if(!semantic_task_ground::decode(task,d.task_words,&view) || view.coding ||
+       !semantic_task_ground::decode_plane(d.task_ground,d.task_ground_bytes,view,&plane))return false;
     bool valid=true,hard=true;
-    for(uint32_t query=0;query<3;++query) {
+    for(uint32_t query=0;query<view.queries;++query) {
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[22+query]);
+        const uint64_t* row=view.query(query);
+        statement.record=uint32_t(row[4]);
         for(uint32_t i=0;i<8;++i)
-            statement.identity_words[i]=uint32_t(task[6+4*query+i/2]>>(32*(i%2)));
-        auto output=&evaluation.query_receipts[slot][query];
+            statement.identity_words[i]=uint32_t(row[i/2]>>(32*(i%2)));
+        auto& record=plane.query(slot,query);
+        auto output=reinterpret_cast<semantic_graph::Receipt*>(record.receipt);
         ++evaluation.query_count;
         // All three queries use the original view receipt, never a preceding truth result.
         semantic_call(d,slot ? semantic_graph::kResidentForkTruthAdmission :
             semantic_graph::kResidentRootTruthAdmission,root,candidate,output,&statement,nullptr,&state->execution_work);
         valid &= output->words[0]==semantic_graph::kOk && output->words[2]<=3;
-        hard &= output->words[2]<=3 && (task[31+query] & (uint64_t(1)<<output->words[2]))!=0;
-        facts.truth[query]=output->words[2];
-        facts.correct[query]=output->words[0]==semantic_graph::kOk &&
-            output->words[2]==task[18+query];
+        hard &= output->words[2]<=3 && (row[6] & (uint64_t(1)<<output->words[2]))!=0;
+        record.truth=output->words[2];
+        record.attained=output->words[0]==semantic_graph::kOk && record.truth==row[5];
+        facts.g+=record.attained;
     }
-    facts.g=facts.correct[0]+facts.correct[1]+facts.correct[2];
-    facts.p=facts.correct[0] && facts.correct[1] && facts.correct[2];
+    facts.p=facts.g==view.queries;
     facts.eligible=valid && hard;
-    task_cost(state,slot,task);
+    task_cost(state,slot,view);
     return valid;
 }
 
@@ -4338,43 +4506,79 @@ enum class TaskProgramQueryOutcome : uint32_t {
     Ok,
     FactCapacity,
     FuelExhausted,
+    Scope,
     Failure,
 };
+
+// Query execution and feedback lineage use the same original program
+// materializer and the same finite native support scratch.
+__device__ semantic_program::Result task_program_closure(const Descriptor& descriptor,
+        const TaskProgramBank& bank,const semantic_task_ground::Plane& plane,uint32_t slot,
+        const semantic_program::Rule* inserted,uint32_t inserted_count,
+        semantic_program::DualSupport* support,semantic_program::Fact** output,
+        ExecutionWork* work=nullptr) {
+    const uint64_t lineage_words=(uint64_t(bank.task.bindings)+63)/64;
+    if(slot>2 || !descriptor.task_support_truths ||
+       descriptor.task_support_lineage_words!=3*PROGRAM_FACT_CAPACITY*2*lineage_words ||
+       (lineage_words && !descriptor.task_support_lineage))
+        return {semantic_program::Status::InvalidProgram,0,0,0};
+    *support={reinterpret_cast<uint8_t*>(descriptor.task_support_truths)+uint64_t(slot)*PROGRAM_FACT_CAPACITY,
+        lineage_words ? reinterpret_cast<uint64_t*>(descriptor.task_support_lineage)+
+            uint64_t(slot)*PROGRAM_FACT_CAPACITY*2*lineage_words : nullptr,uint32_t(lineage_words)};
+    auto* scratch=reinterpret_cast<uint8_t*>(descriptor.scratch)+PROGRAM_SCRATCH_OFFSET;
+    auto* input=reinterpret_cast<semantic_program::Fact*>(scratch);
+    auto* rules=reinterpret_cast<semantic_program::Rule*>(input+PROGRAM_FACT_CAPACITY);
+    *output=reinterpret_cast<semantic_program::Fact*>(rules+PROGRAM_RULE_CAPACITY);
+    const auto closure=semantic_program::materialize_bank(bank.program,inserted,inserted_count,
+        input,PROGRAM_FACT_CAPACITY,rules,PROGRAM_RULE_CAPACITY,*output,PROGRAM_FACT_CAPACITY,
+        PROGRAM_FUEL,plane.selected_rules,uint32_t(plane.header[6]),support,
+        semantic_task_ground::Observations{bank.task,plane});
+    if(work) {
+        semantic_graph::NativeWorkTally native{};
+        semantic_graph::charge_native(&native,semantic_graph::NativeWorkEvent::TableSlot,closure.charged_pairs);
+        execution_work_merge_native(*work,native);
+    }
+    return closure;
+}
 
 __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descriptor,const uint64_t* task,
         const TaskProgramBank& bank,uint32_t slot,const semantic_program::Rule* inserted,
         uint32_t inserted_count,uint32_t baseline_derived,State* state,
         uint32_t* derived_count) {
     if(!bank.editable || inserted_count>2 || !derived_count)return TaskProgramQueryOutcome::Failure;
-    auto* scratch=reinterpret_cast<uint8_t*>(descriptor.scratch)+PROGRAM_SCRATCH_OFFSET;
-    auto* input=reinterpret_cast<semantic_program::Fact*>(scratch);
-    auto* rules=reinterpret_cast<semantic_program::Rule*>(input+PROGRAM_FACT_CAPACITY);
-    auto* output=reinterpret_cast<semantic_program::Fact*>(rules+PROGRAM_RULE_CAPACITY);
-    const auto evaluation=semantic_rule_action::evaluate(bank.program,inserted,inserted_count,
-        input,PROGRAM_FACT_CAPACITY,rules,PROGRAM_RULE_CAPACITY,output,PROGRAM_FACT_CAPACITY,
-        PROGRAM_FUEL);
+    const auto& view=bank.task;
+    semantic_task_ground::Plane plane{};
+    if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,view,&plane))
+        return TaskProgramQueryOutcome::Failure;
+    semantic_program::DualSupport support{};
+    semantic_program::Fact* output=nullptr;
+    const auto closure=task_program_closure(descriptor,bank,plane,slot,inserted,inserted_count,
+        &support,&output,&state->execution_work);
     semantic_graph::NativeWorkTally work{};
-    semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,
-        evaluation.closure.charged_pairs);
-    execution_work_merge_native(state->execution_work,work);
     if(state->execution_work.overflow)return TaskProgramQueryOutcome::Failure;
-    if(evaluation.closure.status!=semantic_program::Status::Ok) {
-        if(slot && evaluation.closure.status==semantic_program::Status::FactCapacity)
+    if(closure.status!=semantic_program::Status::Ok) {
+        if(slot && closure.status==semantic_program::Status::ProtectedObservation)
+            return TaskProgramQueryOutcome::Scope;
+        if(slot && (closure.status==semantic_program::Status::FactCapacity || closure.status==semantic_program::Status::RuleCapacity))
             return TaskProgramQueryOutcome::FactCapacity;
-        if(slot && evaluation.closure.status==semantic_program::Status::FuelExhausted)
+        if(slot && closure.status==semantic_program::Status::FuelExhausted)
             return TaskProgramQueryOutcome::FuelExhausted;
         return TaskProgramQueryOutcome::Failure;
     }
     work=semantic_graph::NativeWorkTally{};
-    *derived_count=evaluation.closure.derived_count;
+    *derived_count=closure.derived_count;
     auto& facts=state->task_evaluation.facts[slot];
     bool hard=true;
-    for(uint32_t query=0;query<3;++query) {
-        auto* receipt=&state->task_evaluation.query_receipts[slot][query];
+    for(uint32_t query=0;query<view.queries;++query) {
+        const auto query_fact=semantic_program::bank_fact(bank.program,query);
+        const uint32_t fact_index=semantic_program::find_fact(output,closure.fact_count,query_fact);
+        const uint64_t truth=fact_index==closure.fact_count ? 0 : support.truth[fact_index];
+        auto& record=plane.query(slot,query);
+        auto* receipt=reinterpret_cast<semantic_graph::Receipt*>(record.receipt);
         for(uint32_t word=0;word<42;++word)receipt->words[word]=0;
         receipt->words[0]=semantic_graph::kOk;
         receipt->words[1]=0x5850524f47515545ULL;
-        receipt->words[2]=evaluation.truth[query];
+        receipt->words[2]=truth;
         receipt->words[3]=slot;
         receipt->words[4]=query;
         for(uint32_t word=0;word<4;++word) {
@@ -4393,21 +4597,22 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
                 rule.right_variables[0],rule.right_variables[1]};
             for(uint32_t word=0;word<10;++word)receipt->words[14+edit*10+word]=fields[word];
         }
-        const auto query_fact=semantic_program::bank_fact(bank.program,query);
         receipt->words[34]=query_fact.predicate;
         receipt->words[35]=query_fact.first;
         receipt->words[36]=query_fact.second;
-        receipt->words[37]=evaluation.closure.charged_pairs;
-        receipt->words[38]=evaluation.closure.fact_count;
-        receipt->words[39]=evaluation.closure.derived_count;
-        receipt->words[40]=bank.program.rule_count;
+        receipt->words[37]=closure.charged_pairs;
+        receipt->words[38]=closure.fact_count;
+        receipt->words[39]=closure.derived_count;
+        receipt->words[40]=bank.program.rule_count+plane.header[6];
         receipt->words[41]=bank.program.initial_count;
         semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::CanonicalByte,
             sizeof(semantic_graph::Receipt));
         ++state->task_evaluation.query_count;
-        hard&=(task[31+query] & (uint64_t(1)<<evaluation.truth[query]))!=0;
-        facts.truth[query]=evaluation.truth[query];
-        facts.correct[query]=evaluation.truth[query]==task[18+query];
+        hard&=(view.query(query)[6] & (uint64_t(1)<<truth))!=0;
+        record.truth=truth;
+        record.attained=view.coding ? semantic_task_ground::attained(view,plane,query,truth,
+            fact_index,closure.fact_count,support) : truth==view.query(query)[5];
+        facts.g+=record.attained;
     }
     execution_work_merge_native(state->execution_work,work);
     if(state->execution_work.overflow)return TaskProgramQueryOutcome::Failure;
@@ -4417,14 +4622,12 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         if(*derived_count<baseline_derived)return TaskProgramQueryOutcome::Failure;
         auto& lane_work=state->work[slot-1];
         lane_work.added_supports=*derived_count-baseline_derived;
-        for(uint32_t query=0;query<3;++query)
-            lane_work.defined_truth_changes+=facts.truth[query]!=
-                state->task_evaluation.facts[0].truth[query];
+        for(uint32_t query=0;query<view.queries;++query)
+            lane_work.defined_truth_changes+=plane.query(slot,query).truth!=plane.query(0,query).truth;
     }
-    facts.g=facts.correct[0]+facts.correct[1]+facts.correct[2];
-    facts.p=facts.correct[0] && facts.correct[1] && facts.correct[2];
+    facts.p=view.coding ? view.goal_count && facts.g==view.goal_count : facts.g==view.queries;
     facts.eligible=hard;
-    task_cost(state,slot,task);
+    task_cost(state,slot,view);
     return TaskProgramQueryOutcome::Ok;
 }
 
@@ -4462,68 +4665,49 @@ __device__ void program_rule_receipt(semantic_graph::Receipt* receipt,const uint
     }
 }
 
-__device__ bool task_priorities_valid(const uint64_t* task) {
-    const uint64_t* priority=task+53+task[21]*5;
-    const uint64_t level_count=priority[0];
-    if(level_count>3)return false;
-    uint64_t goal_count=0,seen=0;
-    for(uint32_t level=0;level<3;++level) {
-        const uint64_t count=priority[1+level];
-        if(level<level_count ? count==0 : count!=0)return false;
-        if(count>3-goal_count)return false;
-        goal_count+=count;
-    }
-    for(uint32_t goal=0;goal<3;++goal) {
-        const uint64_t query=priority[4+goal*3];
-        const uint64_t truth=priority[5+goal*3];
-        const uint64_t weight=priority[6+goal*3];
-        if(goal<goal_count) {
-            if(query>=3 || truth>3 || !weight || weight>UINT32_MAX ||
-               (seen & (uint64_t(1)<<query)) ||
-               !(task[31+query] & (uint64_t(1)<<truth)))return false;
-            seen|=uint64_t(1)<<query;
-        } else if(query || truth || weight)return false;
-    }
-    return true;
-}
-
-__device__ bool task_candidate_better(const uint64_t* task,
-        const TaskFacts& candidate,const TaskFacts& incumbent,const TaskFacts& base) {
-    const uint64_t* priority=task+53+task[21]*5;
-    uint32_t goal_offset=0;
-    for(uint32_t level=0;level<priority[0];++level) {
+__device__ bool task_candidate_better(const semantic_task_ground::Task& task,
+        const semantic_task_ground::Plane& plane,uint32_t candidate_index,uint32_t incumbent_index,
+        const TaskFacts& candidate,const TaskFacts& incumbent) {
+    uint64_t goal_offset=0;
+    for(uint64_t level=0;level<task.level_count;++level) {
         int64_t candidate_score=0,incumbent_score=0;
-        for(uint32_t i=0;i<priority[1+level];++i) {
-            const uint64_t* goal=priority+4+(goal_offset+i)*3;
+        for(uint64_t i=0;i<task.levels[level];++i) {
+            const uint64_t* goal=task.goals+(goal_offset+i)*3;
             const uint32_t query=uint32_t(goal[0]);
             const uint64_t target=goal[1];
-            const int64_t base_value=base.truth[query]==target;
-            candidate_score+=int64_t(goal[2])*(int64_t(candidate.truth[query]==target)-base_value);
-            incumbent_score+=int64_t(goal[2])*(int64_t(incumbent.truth[query]==target)-base_value);
+            const auto& base=plane.query(0,query);
+            const auto& current=plane.query(candidate_index,query);
+            const auto& previous=plane.query(incumbent_index,query);
+            const int64_t base_value=task.coding ? base.attained : base.truth==target;
+            candidate_score+=int64_t(goal[2])*(int64_t(task.coding ? current.attained : current.truth==target)-base_value);
+            incumbent_score+=int64_t(goal[2])*(int64_t(task.coding ? previous.attained : previous.truth==target)-base_value);
         }
         if(candidate_score!=incumbent_score)return candidate_score>incumbent_score;
-        goal_offset+=uint32_t(priority[1+level]);
+        goal_offset+=task.levels[level];
     }
     return candidate.g>incumbent.g ||
         (candidate.g==incumbent.g && candidate.c<incumbent.c);
 }
 
-__device__ void select_task(State* state,const uint64_t* task) {
+__device__ bool select_task(const Descriptor& descriptor,State* state,const semantic_task_ground::Task& task) {
+    semantic_task_ground::Plane plane{};
+    if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,task,&plane))return false;
     auto& evaluation=state->task_evaluation;
     uint64_t winner=0,refusals=0,spent=evaluation.query_count;
     for(uint32_t slot=1;slot<3;++slot) {
         const auto& current=evaluation.facts[slot];
         const auto& best=evaluation.facts[winner];
         if(current.eligible && (!best.eligible ||
-           task_candidate_better(task,current,best,evaluation.facts[0])))winner=slot;
+           task_candidate_better(task,plane,slot,uint32_t(winner),current,best)))winner=slot;
     }
     for(uint32_t lane=0;lane<2;++lane) {
         refusals+=evaluation.lane_refusal[lane]!=0;
         if(lane+1!=winner)spent+=state->work[lane].edit_commands+state->work[lane].defined_truth_changes;
     }
     evaluation.winner=winner;
-    evaluation.return_value=int64_t(task[28])*(evaluation.facts[winner].v-evaluation.facts[0].v)
-        -int64_t(task[29])*int64_t(refusals)-int64_t(task[30])*int64_t(spent);
+    evaluation.return_value=int64_t(task.scoring[3])*(evaluation.facts[winner].v-evaluation.facts[0].v)
+        -int64_t(task.scoring[4])*int64_t(refusals)-int64_t(task.scoring[5])*int64_t(spent);
+    return true;
 }
 __device__ void semantic_policy_backward_status_guard(uint64_t status_ptr) {
     if(!status_ptr || status_ptr%alignof(uint64_t) || status_ptr>UINT64_MAX-sizeof(uint64_t) ||
@@ -4577,6 +4761,20 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
             if(!descriptor.task || descriptor.task%alignof(uint64_t) ||
                !task_program_bank(reinterpret_cast<const uint64_t*>(descriptor.task),
                                   descriptor.task_words,&backward_program_bank))*status=1;
+            else if(backward_program_bank.editable && b.mode!=0) {
+                semantic_task_ground::Plane ground{};
+                if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,
+                        backward_program_bank.task,&ground)) *status=1;
+                else {
+                    const auto& baseline=ground.query(0,0);
+                    if(baseline.receipt[0]!=semantic_graph::kOk ||
+                       baseline.receipt[1]!=0x5850524f47515545ULL ||
+                       baseline.receipt[40]<backward_program_bank.program.rule_count ||
+                       baseline.receipt[40]-backward_program_bank.program.rule_count>ground.header[7]) *status=1;
+                    else backward_program_bank.selected_rule_count=uint32_t(
+                        baseline.receipt[40]-backward_program_bank.program.rule_count);
+                }
+            }
         }
         apply_selected=1;
         apply_actor=apply_edit=0;
@@ -4603,8 +4801,10 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                 const auto* groups=reinterpret_cast<const SemanticTrainingObjectiveGroupRecord*>(b.objective_groups);
                 const auto* members=reinterpret_cast<const uint64_t*>(b.objective_group_members);
                 const auto* roster=reinterpret_cast<const SemanticTrainingRosterRow*>(b.roster_rows);
+                constexpr uint64_t committed_append_origin=UINT64_MAX-1;
+                const bool committed_append=selection.origin_candidate==committed_append_origin;
                 if(selection.status || selection.basis!=1 || selection.origin.present!=1 ||
-                   selection.origin.transition!=1 || selection.origin_candidate==UINT64_MAX ||
+                   (!committed_append && selection.origin.transition!=1) || selection.origin_candidate==UINT64_MAX ||
                    selection.ordinal>=selection.row_count ||
                    selection.row_count!=objective.row_count ||
                    selection.capacity!=objective.capacity || objective.group_count!=8 ||
@@ -4641,6 +4841,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                         for(uint64_t member=0;member<group.member_count;++member) {
                             const uint64_t ordinal=members[group.member_offset+member];
                             if(ordinal>=objective.row_count) {*status=1;break;}
+                            if(roster[ordinal].origin_candidate==committed_append_origin) {*status=1;break;}
                             selected_member |= ordinal==selection.ordinal;
                             group_member |= b.mode==2 && ordinal==b.member_ordinal;
                         }
@@ -4651,6 +4852,10 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                             const uint64_t ordinal=members[group.member_offset+member];
                             if(ordinal>=objective.row_count) {*status=1;break;}
                             const auto& row=roster[ordinal];
+                            if(row.origin_candidate==committed_append_origin) {
+                                if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1)*status=1;
+                                continue;
+                            }
                             if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1 ||
                                row.origin.transition!=1 ||
                                (b.mode==1 && row.origin_candidate==UINT64_MAX)) {
@@ -4664,7 +4869,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                         }
                     }
                 }
-                if(actor_groups!=1 || edit_groups!=1 || !selected_member ||
+                if(actor_groups!=1 || edit_groups!=1 ||
+                   (!selected_member && !committed_append) || (selected_member && committed_append) ||
                    (b.mode==2 && (!group_member || b.member_ordinal>=objective.row_count ||
                     !b.critic_term || b.critic_term%alignof(float) ||
                     !publication_pointer_span(b.critic_term,sizeof(float),alignof(float)))) ||
@@ -4679,16 +4885,26 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                 const auto* state=reinterpret_cast<const State*>(descriptor.state);
                 const bool owned=origin_lease && origin_lease->bank==b.origin_bank;
                 apply_actor=owned && (b.mode==1
-                    ? b.origin_candidate==selection.origin_candidate
+                    ? !committed_append && b.origin_candidate==selection.origin_candidate
                     : (b.mode==2 && group_member));
                 apply_edit=owned && matching_edit_rows==1;
                 apply_selected=apply_actor || apply_edit;
+                if(apply_selected && !*status) {
+                    const auto* target=reinterpret_cast<const PublicationHeader*>(b.target_header);
+                    const auto& origin=b.mode==1 ? selection.origin : roster[b.member_ordinal].origin;
+                    if(!publication_pointer_span(b.target_header,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
+                       target->abi!=1 || origin.present!=1 ||
+                       !publication_identity_equal(origin.model_geometry_digest,target->model_geometry_digest) ||
+                       !publication_identity_equal(origin.model_numerical_digest,target->model_numerical_digest))
+                        *status=1;
+                }
                 if((apply_actor || apply_edit) && (!state || state->status))*status=1;
                 if((b.mode==2 || b.mode==3) && (!owned || !state || state->status))*status=1;
                 if((b.mode==2 || b.mode==3) && !*status) {
                     const auto& row=roster[b.member_ordinal];
                     const auto& origin=row.origin;
                     if(row.ordinal!=b.member_ordinal || row.basis!=1 ||
+                       row.origin_candidate==committed_append_origin ||
                        origin.present!=1 || origin.transition!=1 ||
                        row.origin_candidate!=b.origin_candidate ||
                        state->model_generation!=origin.model_generation ||
@@ -4704,20 +4920,19 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                         *status=1;
                     } else {
                         const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
-                        if(!task || task[0]!=6) {
+                        if(!task || task[0]!=7) {
                             *status=1;
                         } else {
-                            const uint64_t goal=34+task[21]*5;
+                            const auto* goal=backward_program_bank.task.goal_witness;
                             bool complete_goal=true;
                             for(uint32_t root=0;root<4;++root) {
                                 bool present=false;
-                                for(uint32_t word=0;word<4;++word)present|=task[goal+root*4+word]!=0;
+                                for(uint32_t word=0;word<4;++word)present|=goal[root*4+word]!=0;
                                 complete_goal&=present;
                             }
-                            complete_goal&=task[goal+16]!=0 && task[goal+17]!=0;
+                            complete_goal&=goal[16]!=0 && goal[17]!=0;
                             const auto& base=state->task_evaluation.facts[0];
-                            const bool base_solves=base.eligible==1 && base.p==1 &&
-                                base.correct[0]==1 && base.correct[1]==1 && base.correct[2]==1;
+                            const bool base_solves=base.eligible==1 && base.p==1;
                             for(uint32_t lane=0;lane<2 && edit_lane==UINT32_MAX;++lane) {
                                 const auto& facts=state->task_evaluation.facts[lane+1];
                                 const auto& admission=state->semantic_receipts[3+lane*3];
@@ -4725,9 +4940,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                                    state->task_evaluation.lane_refusal[lane]==0 &&
                                    admission.words[0]==semantic_graph::kOk &&
                                    state->work[lane].added_supports>0 &&
-                                   facts.eligible==1 && facts.p==1 &&
-                                   facts.correct[0]==1 && facts.correct[1]==1 &&
-                                   facts.correct[2]==1)edit_lane=lane;
+                                   facts.eligible==1 && facts.p==1)edit_lane=lane;
                             }
                             if(edit_lane==UINT32_MAX)*status=1;
                         }
@@ -5071,28 +5284,43 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[bank.header.publication_word&1]);
     auto* output_range=const_cast<PublicationRange*>(publication_find_range(ranges,bank.header.range_count,15));
     if(!output_range)return 1;
+    const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
+    TaskProgramBank program{};
+    if(!task_program_bank(task,descriptor.task_words,&program))return 1;
+    const auto& view=program.task;
+    const auto* ground_range=publication_find_range(ranges,bank.header.range_count,semantic_task_ground::kPublicationRole);
+    semantic_task_ground::Plane plane{};
+    if(!ground_range || !semantic_task_ground::decode_plane(
+        reinterpret_cast<uint64_t>(publication_range_bytes(control,*ground_range)),ground_range->length_bytes,view,&plane) ||
+        bank.state.task_evaluation.winner>2)return 1;
+    const uint32_t selected=uint32_t(bank.state.task_evaluation.winner);
     auto* output=reinterpret_cast<RawFeedbackRecord*>(publication_range_bytes(control,*output_range));
-    if(!output || output_range->length_bytes<3*sizeof(RawFeedbackRecord) ||
+    if(!output || output_range->length_bytes<uint64_t(view.queries)*sizeof(RawFeedbackRecord) ||
        output_range->length_bytes%sizeof(RawFeedbackRecord))return 1;
     if(restored) {
-        if(output_range->logical_begin || output_range->logical_end!=3)return 1;
-        for(uint64_t i=3;i<output_range->length_bytes/sizeof(RawFeedbackRecord);++i) {
+        if(output_range->logical_begin || output_range->logical_end!=view.queries)return 1;
+        for(uint64_t i=view.queries;i<output_range->length_bytes/sizeof(RawFeedbackRecord);++i) {
             const auto* bytes=reinterpret_cast<const uint8_t*>(&output[i]);
             for(uint64_t byte=0;byte<sizeof(RawFeedbackRecord);++byte)if(bytes[byte])return 1;
         }
     } else {
         for(uint64_t i=0;i<output_range->length_bytes/sizeof(RawFeedbackRecord);++i)output[i]=RawFeedbackRecord{};
     }
-    const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
-    if(!task)return 1;
-    for(uint32_t index=0;index<3;++index) {
+    for(uint32_t index=0;index<view.queries;++index) {
         const auto* statement_range=publication_find_range(ranges,bank.header.range_count,16,index);
         if(!statement_range || !publication_range_bytes(control,*statement_range))return 1;
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[22+index]);
-        for(uint32_t word=0;word<8;++word)statement.identity_words[word]=uint32_t(task[6+index*4+word/2]>>(32*(word%2)));
+        statement.record=uint32_t(view.query(index)[4]);
+        for(uint32_t word=0;word<8;++word)statement.identity_words[word]=uint32_t(view.query(index)[word/2]>>(32*(word%2)));
         RawFeedbackRecord expected{};
-        semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&expected.query_receipt,&statement,nullptr,work);
+        if(program.editable) {
+            const auto& actual=plane.query(selected,index);
+            if(actual.truth>3 || actual.receipt[1]!=0x5850524f47515545ULL ||
+               actual.receipt[2]!=actual.truth || actual.receipt[3]!=selected || actual.receipt[4]!=index)return 6;
+            for(uint32_t word=0;word<42;++word)expected.query_receipt.words[word]=actual.receipt[word];
+        } else {
+            semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&expected.query_receipt,&statement,nullptr,work);
+        }
         if(expected.query_receipt.words[0]!=semantic_graph::kOk || expected.query_receipt.words[2]>3)return 6;
         expected.valid=1;expected.statement_index=index;
         expected.statement_length_bytes=statement_range->length_bytes;
@@ -5104,11 +5332,11 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
                saved.statement_offset_bytes || saved.statement_length_bytes!=expected.statement_length_bytes ||
                saved.pro!=expected.pro || saved.contra!=expected.contra)return 1;
             for(uint32_t word=0;word<42;++word)
-                if(!publication_receipt_runtime_word(word) &&
+                if((program.editable || !publication_receipt_runtime_word(word)) &&
                    saved.query_receipt.words[word]!=expected.query_receipt.words[word])return 6;
         } else output[index]=expected;
     }
-    output_range->logical_begin=0;output_range->logical_end=3;
+    output_range->logical_begin=0;output_range->logical_end=view.queries;
     return 0;
 }
 __device__ uint64_t publication_write_coverage(const PublicationControl& control,const PublicationContract& contract,
@@ -5146,38 +5374,42 @@ __device__ uint64_t publication_write_coverage(const PublicationControl& control
     return publication_logical_range_digest(control,*range,nullptr,coverage->receipt_digest);
 }
 __device__ uint64_t publication_write_attempt(const PublicationControl& control,PublicationBank& bank,
-        const PublicationBank& base,uint64_t transition_kind) {
+        const PublicationBank& base,uint64_t transition_kind,semantic_graph::NativeWorkTally* work=nullptr) {
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[bank.header.publication_word&1]);
     const auto* previous=reinterpret_cast<const PublicationRange*>(control.directories[base.header.publication_word&1]);
-    const auto* target=publication_find_range(ranges,bank.header.range_count,33);
+    const auto* target=publication_find_range(ranges,bank.header.range_count,33,0,work);
     if(!target)return 1;
     auto* attempt=reinterpret_cast<AttemptReceipt*>(publication_range_bytes(control,*target));
     if(!attempt || target->length_bytes!=sizeof(AttemptReceipt))return 1;
     if(transition_kind<1 || transition_kind>5)return 1;
-    *attempt=AttemptReceipt{};attempt->abi=2;attempt->transition_kind=transition_kind;
-    semantic_graph::copy_identity(attempt->instance,bank.header.instance);
-    attempt->base_word=base.header.publication_word;attempt->next_word=bank.header.publication_word;
-    semantic_graph::copy_identity(attempt->logical_digest,bank.header.logical_digest);
+    *attempt=AttemptReceipt{};
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(*attempt));
+    attempt->abi=semantic_graph::written_word(2,work);
+    attempt->transition_kind=semantic_graph::written_word(transition_kind,work);
+    semantic_graph::copy_identity(attempt->instance,bank.header.instance,work);
+    attempt->base_word=semantic_graph::written_word(base.header.publication_word,work);
+    attempt->next_word=semantic_graph::written_word(bank.header.publication_word,work);
+    semantic_graph::copy_identity(attempt->logical_digest,bank.header.logical_digest,work);
     if(transition_kind!=1) {
         if(publication_action_digest(control,bank,bank.receipts,0,
-                attempt->action_receipts_digest))return 1;
+                attempt->action_receipts_digest,work))return 1;
     } else {
         uint64_t root[4];
         semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&bank.state.action_batch),
-            sizeof(bank.state.action_batch),root);
+            sizeof(bank.state.action_batch),root,work);
         if(bank.state.action_batch.abi!=1 || bank.state.action_batch.component_count!=COMPONENT_COUNT ||
-           !publication_identity_equal(root,bank.state.action_batch_root))return 1;
-        semantic_graph::copy_identity(attempt->action_receipts_digest,root);
+           !publication_identity_equal(root,bank.state.action_batch_root,work))return 1;
+        semantic_graph::copy_identity(attempt->action_receipts_digest,root,work);
     }
-    semantic_graph::sha256(PublicationSemanticReceiptBytes{bank.state.semantic_receipts},sizeof(bank.state.semantic_receipts),attempt->semantic_receipts_digest);
+    semantic_graph::sha256(PublicationSemanticReceiptBytes{bank.state.semantic_receipts},sizeof(bank.state.semantic_receipts),attempt->semantic_receipts_digest,work);
     const uint64_t role[5]={14,27,30,32,33};
     uint64_t* output[5]={attempt->coverage_digest,attempt->replay_head_digest,attempt->intent_head_digest,
         attempt->acknowledgement_head_digest,attempt->previous_attempt_digest};
     for(uint32_t i=0;i<5;++i) {
-        const auto* source=publication_find_range(i==4 ? previous : ranges,bank.header.range_count,role[i]);
-        if(!source || publication_logical_range_digest(control,*source,nullptr,output[i]))return 1;
+        const auto* source=publication_find_range(i==4 ? previous : ranges,bank.header.range_count,role[i],0,work);
+        if(!source || publication_logical_range_digest(control,*source,nullptr,output[i],work))return 1;
     }
-    return publication_logical_range_digest(control,*target,nullptr,attempt->receipt_digest);
+    return publication_logical_range_digest(control,*target,nullptr,attempt->receipt_digest,work);
 }
 __device__ uint64_t publication_initialize(const Descriptor& descriptor,PublicationControl& control,uint64_t operation) {
     const bool restored=operation!=1;
@@ -5194,7 +5426,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
        !contract.model_generation || bank.header.model_generation>UINT32_MAX ||
        (restored ? bank.header.model_generation<contract.model_generation : bank.header.model_generation!=contract.model_generation) ||
        bank.header.authority_generation!=contract.authority_generation ||
-        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=6 || task[1]!=descriptor.arena[1] ||
+        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=7 || task[1]!=descriptor.arena[1] ||
        !publication_identity_equal(control.instance,bank.header.instance) || bank.header.range_count!=inactive.header.range_count ||
        (contract.terminal_token_count && !contract.terminal_tokens))return 1;
     uint64_t end=0;
@@ -5226,7 +5458,24 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
         if(restored && bank.header.semantic_extents[i]!=extent)return 6;
         if(!restored)bank.header.semantic_extents[i]=extent;
     }
-    if(!task_queries(descriptor,task,0,&root,nullptr,checked))return 6;
+    TaskProgramBank program{};
+    if(!task_program_bank(task,descriptor.task_words,&program))return 6;
+    if(program.editable) {
+        if(restored) {
+            // Historical query receipts retain their original full invocation.
+            // Restored external supports are authenticated before hot execution.
+            checked->task_evaluation=bank.state.task_evaluation;
+        } else {
+            const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[0]);
+            const auto* ground=publication_find_range(ranges,bank.header.range_count,semantic_task_ground::kPublicationRole);
+            auto* bytes=ground ? publication_range_bytes(control,*ground) : nullptr;
+            if(!ground || !bytes || ground->length_bytes!=descriptor.task_ground_bytes)return 1;
+            Descriptor initial=descriptor;initial.task_ground=reinterpret_cast<uint64_t>(bytes);
+            initial.task_ground_bytes=ground->length_bytes;
+            uint32_t derived=0;
+            if(task_program_queries(initial,task,program,0,nullptr,0,0,checked,&derived)!=TaskProgramQueryOutcome::Ok)return 6;
+        }
+    } else if(!task_queries(descriptor,task,0,&root,nullptr,checked))return 6;
     if(!checked->task_evaluation.facts[0].eligible)return 1;
     if(!restored) {
         const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[0]);
@@ -5253,29 +5502,204 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
         !publication_identity_equal(expected_state,bank.header.state_digest))){bank.header.abi=0;return 1;}
     return 0;
 }
+// These destinations remain inert until the original publication word commits.
+// The same transaction publishes the acknowledgement and the complete replay payload.
+__device__ uint64_t publication_append_replay(PublicationControl& control,const PublicationBank& base,
+        const PublicationRange* old,PublicationRange* next_ranges,const PublicationRange& entries_template,
+        const PublicationRange& payload_template,const PublicationReplayDeliveryInput& input,
+        const IntentEntry& intent,semantic_graph::NativeWorkTally* work=nullptr) {
+    const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+    const auto* prior_entries=publication_find_range(old,base.header.range_count,56,0,work);
+    const auto* prior_payload=publication_find_range(old,base.header.range_count,57,0,work);
+    auto* next_entries=const_cast<PublicationRange*>(publication_find_range(next_ranges,base.header.range_count,56,0,work));
+    auto* next_payload=const_cast<PublicationRange*>(publication_find_range(next_ranges,base.header.range_count,57,0,work));
+    if(!prior_entries || !prior_payload || !next_entries || !next_payload ||
+       prior_entries->length_bytes<sizeof(SemanticTrainingReplayAppendHeader) ||
+       entries_template.storage_slot>=control.storage_count || payload_template.storage_slot>=control.storage_count ||
+       entries_template.storage_slot==prior_entries->storage_slot || payload_template.storage_slot==prior_payload->storage_slot ||
+       entries_template.storage_slot==payload_template.storage_slot)return 1;
+    const auto* old_bytes=publication_range_bytes(control,*prior_entries);
+    const auto* old_payload=publication_range_bytes(control,*prior_payload);
+    if(!old_bytes || (prior_payload->length_bytes && !old_payload))return 1;
+    const auto& header=*reinterpret_cast<const SemanticTrainingReplayAppendHeader*>(old_bytes);
+    const auto& added=input.entry;
+    const auto& row=input.row_descriptor;
+    const bool eligible=added.disposition==1;
+    if(header.abi!=1 || header.original_stage!=1 || header.original_count>contract.replay_original_slot_boundary ||
+       !(header.original_prefix_identity[0]|header.original_prefix_identity[1]|header.original_prefix_identity[2]|header.original_prefix_identity[3]) ||
+       header.eligible_count>header.count || header.count>=header.capacity ||
+       (added.disposition!=1 && added.disposition!=2) || contract.replay_original_slot_boundary>contract.replay_row_capacity ||
+       header.capacity!=contract.replay_row_capacity-contract.replay_original_slot_boundary ||
+       header.capacity>(UINT64_MAX-sizeof(header))/sizeof(SemanticTrainingReplayAppendEntry) ||
+       prior_entries->length_bytes!=sizeof(header)+header.count*sizeof(SemanticTrainingReplayAppendEntry) ||
+       prior_payload->length_bytes!=header.payload_used_bytes || header.payload_used_bytes>header.payload_capacity_bytes ||
+       header.payload_capacity_bytes!=contract.replay_payload_capacity_bytes ||
+       added.row_ordinal!=(eligible ? header.original_count+header.eligible_count : UINT64_MAX) ||
+       input.arena_descriptor_count!=contract.replay_row_capacity || input.arena_raw_bytes!=contract.replay_raw_capacity_bytes ||
+       row.ordinal!=added.row_ordinal || row.basis!=1 || row.origin.present!=1 ||
+       row.raw_bytes!=input.row_bytes_len || !row.raw_bytes ||
+       (eligible && (contract.replay_original_slot_boundary+header.eligible_count>UINT64_MAX/row.raw_bytes ||
+                     row.raw_offset!=(contract.replay_original_slot_boundary+header.eligible_count)*row.raw_bytes ||
+                     row.raw_offset>input.arena_raw_bytes || row.raw_bytes>input.arena_raw_bytes-row.raw_offset)) ||
+       (!eligible && row.raw_offset!=0) ||
+       !publication_identity_equal(row.content_identity,added.content_identity,work) ||
+       !publication_identity_equal(added.stable_intent,intent.stable_identity,work) ||
+       !publication_identity_equal(row.origin.predecessor_logical,intent.base_logical,work) ||
+       !publication_identity_equal(row.origin.successor_logical,intent.result_logical,work) ||
+       !publication_identity_equal(added.original_origin.predecessor_logical,intent.base_logical,work) ||
+       !publication_identity_equal(added.original_origin.successor_logical,intent.result_logical,work) ||
+       !(added.result_receipt_digest[0]|added.result_receipt_digest[1]|added.result_receipt_digest[2]|added.result_receipt_digest[3]) ||
+       added.payload_offset_bytes!=header.payload_used_bytes || added.payload_length_bytes!=input.payload_bytes ||
+       input.payload_bytes>header.payload_capacity_bytes-header.payload_used_bytes ||
+       !publication_pointer_span(input.payload,input.payload_bytes,1) ||
+       !publication_pointer_span(input.row_bytes,input.row_bytes_len,1) ||
+       input.arena_descriptor_count>UINT64_MAX/sizeof(TrainingViewRowDescriptor) ||
+       !publication_pointer_span(input.arena_descriptors,input.arena_descriptor_count*sizeof(TrainingViewRowDescriptor),alignof(TrainingViewRowDescriptor)) ||
+       !publication_pointer_span(input.arena_raw,input.arena_raw_bytes,1))return 1;
+    const auto* origin_words=reinterpret_cast<const uint64_t*>(&row.origin);
+    const auto* entry_origin=reinterpret_cast<const uint64_t*>(&added.original_origin);
+    for(uint32_t i=0;i<sizeof(row.origin)/8;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        if(origin_words[i]!=entry_origin[i])return 1;
+    }
+    const auto* items=reinterpret_cast<const SemanticTrainingReplayAppendEntry*>(old_bytes+sizeof(header));
+    uint64_t chain[4]={},used=0,eligible_seen=0;
+    for(uint64_t i=0;i<header.count;++i) {
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::ChainLink,1);
+        const auto& item=items[i];
+        if((item.disposition!=1 && item.disposition!=2) ||
+           item.row_ordinal!=(item.disposition==1 ? header.original_count+eligible_seen : UINT64_MAX) ||
+           item.payload_offset_bytes!=used ||
+           item.payload_length_bytes>header.payload_used_bytes-used ||
+           publication_identity_equal(item.stable_intent,added.stable_intent,work) ||
+           !(item.result_receipt_digest[0]|item.result_receipt_digest[1]|item.result_receipt_digest[2]|item.result_receipt_digest[3]))return 1;
+        uint64_t digest[4];
+        semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&item),sizeof(item),digest,work);
+        publication_fold(chain,56,i,digest,work);
+        semantic_graph::sha256(old_payload+used,item.payload_length_bytes,digest,work);
+        publication_fold(chain,57,i,digest,work);
+        used+=item.payload_length_bytes;
+        eligible_seen+=item.disposition==1;
+    }
+    if(used!=header.payload_used_bytes || eligible_seen!=header.eligible_count ||
+       !publication_identity_equal(chain,header.chain_head,work))return 1;
+    const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+    const uint64_t entries_length=prior_entries->length_bytes+sizeof(added);
+    const uint64_t payload_length=header.payload_used_bytes+input.payload_bytes;
+    if(entries_length>storage[entries_template.storage_slot].bytes || payload_length>storage[payload_template.storage_slot].bytes)return 1;
+    next_entries->storage_slot=entries_template.storage_slot;
+    next_entries->length_bytes=entries_length;next_entries->logical_begin=0;next_entries->logical_end=header.count+1;
+    next_payload->storage_slot=payload_template.storage_slot;
+    next_payload->length_bytes=payload_length;next_payload->logical_begin=0;next_payload->logical_end=payload_length;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8*sizeof(uint64_t));
+    auto* target_entries=publication_range_bytes(control,*next_entries);
+    auto* target_payload=publication_range_bytes(control,*next_payload);
+    if(!target_entries || !target_payload)return 1;
+    publication_copy_bytes(target_entries,old_bytes,prior_entries->length_bytes,work);
+    if(used)publication_copy_bytes(target_payload,old_payload,used,work);
+    publication_copy_bytes(target_payload+used,reinterpret_cast<const uint8_t*>(input.payload),input.payload_bytes,work);
+    *reinterpret_cast<SemanticTrainingReplayAppendEntry*>(target_entries+prior_entries->length_bytes)=added;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(added));
+    auto* next_header=reinterpret_cast<SemanticTrainingReplayAppendHeader*>(target_entries);
+    ++next_header->count;next_header->payload_used_bytes=payload_length;
+    next_header->eligible_count+=eligible;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,3*sizeof(uint64_t));
+    uint64_t digest[4];semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&added),sizeof(added),digest,work);
+    publication_fold(chain,56,header.count,digest,work);
+    semantic_graph::sha256(reinterpret_cast<const uint8_t*>(input.payload),input.payload_bytes,digest,work);
+    publication_fold(chain,57,header.count,digest,work);
+    semantic_graph::copy_identity(next_header->chain_head,chain,work);
+    if(eligible) {
+        publication_copy_bytes(reinterpret_cast<uint8_t*>(input.arena_raw+row.raw_offset),
+            reinterpret_cast<const uint8_t*>(input.row_bytes),row.raw_bytes,work);
+        reinterpret_cast<TrainingViewRowDescriptor*>(input.arena_descriptors)[contract.replay_original_slot_boundary+header.eligible_count]=row;
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(row));
+    }
+    if(publication_range_digest(control,*next_entries,nullptr,next_entries->digest,nullptr,work) ||
+       publication_range_digest(control,*next_payload,nullptr,next_payload->digest,nullptr,work))return 1;
+    return 0;
+}
+// Reuse the semantic owner's retirement operation only after the publication
+// reader gate proves this backing is inactive. The live base remains protected.
+__device__ bool publication_retire_root(const Descriptor& descriptor,
+        const semantic_graph::ResidentHandle& root,const semantic_graph::ResidentHandle& protected_root,
+        ExecutionWork* work) {
+    if(root.slot==0 || (root.slot==protected_root.slot && root.generation==protected_root.generation))return true;
+    if(root.owner!=protected_root.owner || root.owner!=descriptor.arena[1])return false;
+    semantic_graph::Command command{};command.words[0]=semantic_graph::kRetireRoot;
+    command.words[1]=root.owner;command.words[8]=root.slot;command.words[9]=root.generation;
+    command.words[10]=protected_root.slot;command.words[11]=protected_root.generation;
+    semantic_graph::Receipt receipt{};
+    semantic_graph::LaunchDescriptor launch{};
+    launch.expected_owner=descriptor.arena[1];launch.root_capacity=descriptor.arena[2];
+    launch.statement_capacity=descriptor.arena[3];launch.support_capacity=descriptor.arena[4];
+    launch.version_capacity=descriptor.arena[5];launch.arena_words=descriptor.arena[6];
+    launch.command_ptr=reinterpret_cast<uint64_t>(&command);
+    launch.receipt_ptr=reinterpret_cast<uint64_t>(&receipt);
+    launch.abi_generation=semantic_graph::kAbiGeneration;
+    semantic_graph::NativeWorkTally actual{};
+    semantic_graph::execute(reinterpret_cast<uint64_t*>(descriptor.arena[0]),launch,work ? &actual : nullptr);
+    if(work)execution_work_merge_native(*work,actual);
+    return receipt.words[0]==semantic_graph::kOk;
+}
+
+__device__ bool publication_charge_native_work(semantic_graph::NativeWorkTally* target,
+        const ExecutionWork& actual,uint64_t* charged) {
+    if(!target)return !actual.overflow;
+    for(uint32_t event=0;event<9;++event) {
+        if(actual.native_events[event]<charged[event])return false;
+        semantic_graph::charge_native(target,static_cast<semantic_graph::NativeWorkEvent>(event),
+            actual.native_events[event]-charged[event]);
+        charged[event]=actual.native_events[event];
+    }
+    if(actual.overflow)target->overflow=1;
+    return !target->overflow;
+}
+
 __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,PublicationControl& control,
-        const PublicationDeliveryInput& input) {
+        const PublicationDeliveryInput& input,const PublicationReplayDeliveryInput* replay=nullptr) {
+    auto* cold_work=replay && replay->native_work
+        ? reinterpret_cast<semantic_graph::NativeWorkTally*>(replay->native_work) : nullptr;
+    semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::Command,1);
     if(!input.lease || !input.receipt || input.receipt_len<169 || !control.contract ||
        !publication_compare_exchange(control.reader_gate,0,1))return 2;
+    semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(control.reader_gate));
     uint64_t status=1;
+    semantic_graph::ResidentHandle protected_root{};
+    semantic_graph::Receipt candidate{},sealed{};
+    ExecutionWork work{};
+    bool candidate_live=false,sealed_live=false;
+    PublicationBank* staged_bank=nullptr;
+    uint64_t charged_events[9]={};
     do {
         const auto& lease=*reinterpret_cast<const PublicationLease*>(input.lease);
         const uint64_t word=publication_load(control.word);
         const auto* base=publication_acquired_bank(control,lease);
-        if(!base || lease.word!=word || base->header.terminal!=2 || !base->header.fuel ||
+        if(!base || lease.word!=word || base->header.terminal!=(replay ? 0 : 2) || !base->header.fuel ||
            control.reader_counts[(word&1)^1] || (word>>1)==(UINT64_MAX>>1) ||
-           publication_validate_selected_model(control,*base)) { status=3;break; }
+           publication_validate_selected_model(control,*base,cold_work)) { status=3;break; }
+        protected_root={base->header.semantic_owner,semantic_graph::kRootKind,
+            base->header.semantic_slot,base->header.semantic_generation};
         const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
         auto* next_ranges=reinterpret_cast<PublicationRange*>(control.directories[(word&1)^1]);
-        if(!old || !next_ranges || publication_validate_intents(control,old,base->header.range_count))break;
-        const auto* intent_range=publication_find_range(old,base->header.range_count,30);
-        const auto* payload_range=publication_find_range(old,base->header.range_count,31);
-        const auto* prior_ack=publication_find_range(old,base->header.range_count,32);
-        auto* ack_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32));
-        auto* attempt_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33));
+        if(!old || !next_ranges || publication_validate_intents(control,old,base->header.range_count,UINT64_MAX,cold_work))break;
+        const auto* intent_range=publication_find_range(old,base->header.range_count,30,0,cold_work);
+        const auto* payload_range=publication_find_range(old,base->header.range_count,31,0,cold_work);
+        const auto* prior_ack=publication_find_range(old,base->header.range_count,32,0,cold_work);
+        auto* ack_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32,0,cold_work));
+        auto* attempt_target=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33,0,cold_work));
         if(!intent_range || !payload_range || !prior_ack || !ack_target || !attempt_target ||
            prior_ack->length_bytes<sizeof(AcknowledgementQueueHeader))break;
         const PublicationRange ack_template=*ack_target,attempt_template=*attempt_target;
+        PublicationRange append_entries_template{},append_payload_template{};
+        if(replay) {
+            const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+            const auto* entry_target=publication_find_range(next_ranges,base->header.range_count,56,0,cold_work);
+            const auto* payload_target=publication_find_range(next_ranges,base->header.range_count,57,0,cold_work);
+            if(contract.nonterminal_intent_mode!=1 || !entry_target || !payload_target)break;
+            append_entries_template=*entry_target;append_payload_template=*payload_target;
+        }
         const auto* intents=reinterpret_cast<const IntentQueueHeader*>(publication_range_bytes(control,*intent_range));
         const auto* payload=publication_range_bytes(control,*payload_range);
         const auto* old_queue=reinterpret_cast<const AcknowledgementQueueHeader*>(publication_range_bytes(control,*prior_ack));
@@ -5288,8 +5712,14 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
         const auto* receipt=reinterpret_cast<const uint8_t*>(input.receipt);
         const char domain[]="xlog.delivery.receipt.v1";
         bool exact=true;
-        for(uint32_t i=0;i<sizeof(domain);++i)exact &= receipt[i]==uint8_t(domain[i]);
-        for(uint32_t i=0;i<32;++i)exact &= receipt[57+i]==reinterpret_cast<const uint8_t*>(input.recipient_id)[i];
+        for(uint32_t i=0;i<sizeof(domain);++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            exact &= receipt[i]==uint8_t(domain[i]);
+        }
+        for(uint32_t i=0;i<32;++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            exact &= receipt[57+i]==reinterpret_cast<const uint8_t*>(input.recipient_id)[i];
+        }
         if(!exact)break;
         uint64_t effect_len=0;
         for(uint32_t i=0;i<8;++i)effect_len|=uint64_t(receipt[89+i])<<(8*i);
@@ -5299,41 +5729,91 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
         for(uint32_t i=0;i<8;++i)output_len|=uint64_t(receipt[payload_length_offset+i])<<(8*i);
         if(output_len>input.receipt_len-169-effect_len ||
            input.receipt_len!=169+effect_len+output_len)break;
-        for(uint64_t i=0;i<effect_len;++i)if(receipt[97+i]!=payload[i]){exact=false;break;}
+        for(uint64_t i=0;i<effect_len;++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            if(receipt[97+i]!=payload[i]){exact=false;break;}
+        }
         if(!exact)break;
         const IntentEntry* selected=nullptr;
         const auto* entries=reinterpret_cast<const IntentEntry*>(intents+1);
         for(uint64_t i=0;i<intents->count;++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
             const auto& entry=entries[i];
             if(entry.payload_len!=output_len)continue;
             bool same=true;
-            for(uint32_t b=0;b<32;++b)same &= receipt[25+b]==reinterpret_cast<const uint8_t*>(entry.stable_identity)[b];
+            for(uint32_t b=0;b<32;++b) {
+                semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                same &= receipt[25+b]==reinterpret_cast<const uint8_t*>(entry.stable_identity)[b];
+            }
             if(same){selected=&entry;break;}
         }
         if(!selected || output_len>intents->payload_used_bytes ||
            selected->payload_offset>intents->payload_used_bytes-output_len)break;
-        for(uint64_t i=0;i<output_len;++i)if(receipt[payload_length_offset+8+i]!=payload[selected->payload_offset+i]){
-            exact=false;break;
+        for(uint64_t i=0;i<output_len;++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            if(receipt[payload_length_offset+8+i]!=payload[selected->payload_offset+i]){exact=false;break;}
         }
         if(!exact)break;
-        uint64_t digest[4];semantic_graph::sha256(receipt,input.receipt_len,digest);
-        if(!publication_identity_equal(digest,input.receipt_digest))break;
+        semantic_task_ground::Task result_task{};
+        if(replay) {
+            if(!semantic_task_ground::decode(reinterpret_cast<const uint64_t*>(descriptor.task),
+                    descriptor.task_words,&result_task) || !result_task.coding ||
+               replay->observation_count!=result_task.bindings || !replay->observations ||
+               !replay->statements || !replay->supports)break;
+            const auto* observations=reinterpret_cast<const semantic_task_ground::Observation*>(replay->observations);
+            const auto* statements=reinterpret_cast<const semantic_graph::DecodedStatement*>(replay->statements);
+            const auto* supports=reinterpret_cast<const semantic_graph::DecodedSupport*>(replay->supports);
+            for(uint32_t ordinal=0;ordinal<result_task.bindings && exact;++ordinal) {
+                semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                const auto& observation=observations[ordinal];
+                const auto& statement=statements[ordinal];const auto& support=supports[ordinal];
+                if(observation.present!=1 || (observation.truth!=1 && observation.truth!=2) ||
+                   statement.record!=result_task.binding(ordinal)[1] || support.record!=UINT32_MAX ||
+                   support.polarity!=observation.truth ||
+                   !publication_identity_equal(observation.intent,selected->stable_identity,cold_work)) { exact=false;break; }
+                for(uint32_t field=0;field<10;++field) {
+                    semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                    if(statement.reconstruction[field])exact=false;
+                }
+                const uint64_t* identities[]={observation.receipt,observation.action,observation.intent,observation.support};
+                const uint32_t* decoded[]={support.provenance_words,support.source_words,support.context_words,support.scope_words};
+                for(uint32_t identity=0;identity<4;++identity) {
+                    if(!(identities[identity][0]|identities[identity][1]|identities[identity][2]|identities[identity][3]))exact=false;
+                    for(uint32_t word=0;word<4;++word) {
+                        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                        if(identities[identity][word]!=(uint64_t(decoded[identity][word*2])|
+                            (uint64_t(decoded[identity][word*2+1])<<32)))exact=false;
+                    }
+                }
+                const auto* original=result_task.observation(ordinal);
+                for(uint32_t word=0;word<4;++word) {
+                    semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                    if(original[word]!=(uint64_t(statement.identity_words[word*2])|
+                        (uint64_t(statement.identity_words[word*2+1])<<32)))exact=false;
+                }
+            }
+            if(!exact)break;
+        }
+        uint64_t digest[4];semantic_graph::sha256(receipt,input.receipt_len,digest,cold_work);
+        if(!publication_identity_equal(digest,input.receipt_digest,cold_work))break;
         const uint8_t* old_bytes=publication_range_bytes(control,*prior_ack);
         uint64_t cursor=sizeof(AcknowledgementQueueHeader),chain[4]={},receipt_used=0;
         for(uint64_t ordinal=0;ordinal<old_queue->count;++ordinal) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::ChainLink,1);
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
             if(cursor>prior_ack->length_bytes ||
                prior_ack->length_bytes-cursor<sizeof(AcknowledgementEntry)) { exact=false;break; }
             const auto* item=reinterpret_cast<const AcknowledgementEntry*>(old_bytes+cursor);
             if(item->receipt_len>prior_ack->length_bytes-cursor-sizeof(AcknowledgementEntry) ||
-               !publication_identity_equal(item->previous_chain,chain)) { exact=false;break; }
+               !publication_identity_equal(item->previous_chain,chain,cold_work)) { exact=false;break; }
             uint64_t item_digest[4];
-            semantic_graph::sha256(old_bytes+cursor+sizeof(AcknowledgementEntry),item->receipt_len,item_digest);
-            if(!publication_identity_equal(item_digest,item->receipt_digest)) { exact=false;break; }
-            publication_fold(chain,32,ordinal,item->stable_identity);
-            publication_fold(chain,32,ordinal,item->receipt_digest);
-            if(!publication_identity_equal(chain,item->chain)) { exact=false;break; }
-            if(publication_identity_equal(item->stable_identity,selected->stable_identity)) {
-                status=publication_identity_equal(item->receipt_digest,digest) ? 7 : 1;
+            semantic_graph::sha256(old_bytes+cursor+sizeof(AcknowledgementEntry),item->receipt_len,item_digest,cold_work);
+            if(!publication_identity_equal(item_digest,item->receipt_digest,cold_work)) { exact=false;break; }
+            publication_fold(chain,32,ordinal,item->stable_identity,cold_work);
+            publication_fold(chain,32,ordinal,item->receipt_digest,cold_work);
+            if(!publication_identity_equal(chain,item->chain,cold_work)) { exact=false;break; }
+            if(publication_identity_equal(item->stable_identity,selected->stable_identity,cold_work)) {
+                status=publication_identity_equal(item->receipt_digest,digest,cold_work) ? 7 : 1;
                 exact=false;break;
             }
             if(receipt_used>old_queue->payload_capacity_bytes ||
@@ -5341,7 +5821,7 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
             receipt_used+=item->receipt_len;
             cursor+=sizeof(AcknowledgementEntry)+item->receipt_len;
         }
-        if(!exact || cursor!=prior_ack->length_bytes || !publication_identity_equal(chain,old_queue->chain_head) ||
+        if(!exact || cursor!=prior_ack->length_bytes || !publication_identity_equal(chain,old_queue->chain_head,cold_work) ||
            receipt_used>old_queue->payload_capacity_bytes ||
            input.receipt_len>old_queue->payload_capacity_bytes-receipt_used)break;
         const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
@@ -5351,47 +5831,255 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
            input.receipt_len>UINT64_MAX-sizeof(AcknowledgementEntry) ||
            cursor>storage[ack_template.storage_slot].bytes ||
            sizeof(AcknowledgementEntry)+input.receipt_len>storage[ack_template.storage_slot].bytes-cursor)break;
-        for(uint64_t i=0;i<base->header.range_count;++i)next_ranges[i]=old[i];
-        auto* next_ack=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32));
-        auto* next_attempt=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33));
+        for(uint64_t i=0;i<base->header.range_count;++i) {
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            PublicationRange target=next_ranges[i];
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
+            const uint64_t role=old[i].role;
+            next_ranges[i]=old[i];
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
+            // Keep every unchanged owned mutable range in its original inactive
+            // backing. Aliasing the acquired directory would strand the next
+            // ordinary continuation or overwrite its still-read-leased source.
+            if(publication_mutable_role(role) && role!=1 && role!=2 && role!=31 &&
+               !(role>=18 && role<=25) && role!=32 && role!=33 &&
+               !(replay && (role==56 || role==57))) {
+                if(publication_preserve_range(control,old,base->header.range_count,old[i],target,cold_work)) { exact=false;break; }
+                next_ranges[i]=target;
+                semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
+            }
+        }
+        if(!exact)break;
+        auto* next_ack=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32,0,cold_work));
+        auto* next_attempt=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33,0,cold_work));
         next_ack->storage_slot=ack_template.storage_slot;
         next_attempt->storage_slot=attempt_template.storage_slot;
         next_ack->length_bytes=cursor+sizeof(AcknowledgementEntry)+input.receipt_len;
         next_ack->logical_begin=0;next_ack->logical_end=old_queue->count+1;
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,5*sizeof(uint64_t));
         auto* next_bytes=publication_range_bytes(control,*next_ack);
         if(!next_bytes)break;
-        publication_copy_bytes(next_bytes,old_bytes,cursor);
+        publication_copy_bytes(next_bytes,old_bytes,cursor,cold_work);
         auto* queue=reinterpret_cast<AcknowledgementQueueHeader*>(next_bytes);
         auto* added=reinterpret_cast<AcknowledgementEntry*>(next_bytes+cursor);
         *added=AcknowledgementEntry{};
-        semantic_graph::copy_identity(added->stable_identity,selected->stable_identity);
-        semantic_graph::copy_identity(added->receipt_digest,digest);
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(*added));
+        semantic_graph::copy_identity(added->stable_identity,selected->stable_identity,cold_work);
+        semantic_graph::copy_identity(added->receipt_digest,digest,cold_work);
         added->receipt_len=input.receipt_len;
-        semantic_graph::copy_identity(added->previous_chain,chain);
-        publication_fold(chain,32,old_queue->count,added->stable_identity);
-        publication_fold(chain,32,old_queue->count,added->receipt_digest);
-        semantic_graph::copy_identity(added->chain,chain);
-        publication_copy_bytes(next_bytes+cursor+sizeof(AcknowledgementEntry),receipt,input.receipt_len);
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(added->receipt_len));
+        semantic_graph::copy_identity(added->previous_chain,chain,cold_work);
+        publication_fold(chain,32,old_queue->count,added->stable_identity,cold_work);
+        publication_fold(chain,32,old_queue->count,added->receipt_digest,cold_work);
+        semantic_graph::copy_identity(added->chain,chain,cold_work);
+        publication_copy_bytes(next_bytes+cursor+sizeof(AcknowledgementEntry),receipt,input.receipt_len,cold_work);
         ++queue->count;queue->payload_used_bytes+=sizeof(AcknowledgementEntry)+input.receipt_len;
-        semantic_graph::copy_identity(queue->chain_head,chain);
-        if(publication_range_digest(control,*next_ack,nullptr,next_ack->digest))break;
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,2*sizeof(uint64_t));
+        semantic_graph::copy_identity(queue->chain_head,chain,cold_work);
+        if(publication_range_digest(control,*next_ack,nullptr,next_ack->digest,nullptr,cold_work))break;
+        if(replay && publication_append_replay(control,*base,old,next_ranges,
+            append_entries_template,append_payload_template,*replay,*selected,cold_work))break;
         auto& next=*publication_bank(control,word^1);
+        if(replay && next.header.abi==1) {
+            const semantic_graph::ResidentHandle retired{next.header.semantic_owner,semantic_graph::kRootKind,
+                next.header.semantic_slot,next.header.semantic_generation};
+            if(!publication_retire_root(descriptor,retired,protected_root,&work)){status=6;break;}
+            // The same inactive backing no longer owns a root even if a later
+            // pre-publication check refuses this append.
+            next.header.abi=0;
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(next.header.abi));
+        }
         next=*base;
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(next));
+        if(replay) {
+            staged_bank=&next;
+            auto* ground_range=const_cast<PublicationRange*>(publication_find_range(next_ranges,
+                base->header.range_count,semantic_task_ground::kPublicationRole,0,cold_work));
+            auto* ground_bytes=ground_range ? publication_range_bytes(control,*ground_range) : nullptr;
+            semantic_task_ground::Plane plane{};
+            if(!ground_bytes || !semantic_task_ground::decode_plane(reinterpret_cast<uint64_t>(ground_bytes),
+                ground_range->length_bytes,result_task,&plane))break;
+            const auto* observations=reinterpret_cast<const semantic_task_ground::Observation*>(replay->observations);
+            for(uint32_t ordinal=0;ordinal<result_task.bindings;++ordinal) {
+                const uint64_t accumulated=plane.observations[ordinal].truth|observations[ordinal].truth;
+                plane.observations[ordinal]=observations[ordinal];
+                plane.observations[ordinal].truth=accumulated;
+                semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(semantic_task_ground::Observation));
+            }
+            semantic_call(descriptor,semantic_graph::kResidentForkAdmission,&protected_root,nullptr,&candidate,
+                nullptr,nullptr,&work);
+            candidate_live=candidate.words[41]!=0;
+            if(candidate.words[0]!=semantic_graph::kOk)break;
+            const auto* statements=reinterpret_cast<const semantic_graph::DecodedStatement*>(replay->statements);
+            const auto* supports=reinterpret_cast<const semantic_graph::DecodedSupport*>(replay->supports);
+            for(uint32_t ordinal=0;ordinal<result_task.bindings;++ordinal) {
+                semantic_call(descriptor,semantic_graph::kResidentInsertSupportAdmission,nullptr,&candidate,&candidate,
+                    statements+ordinal,supports+ordinal,&work);
+                if(candidate.words[0]!=semantic_graph::kOk)break;
+            }
+            if(candidate.words[0]!=semantic_graph::kOk)break;
+            semantic_call(descriptor,semantic_graph::kResidentSealAdmission,nullptr,&candidate,&sealed,
+                nullptr,nullptr,&work);
+            if(sealed.words[0]!=semantic_graph::kOk || sealed.words[33]!=semantic_graph::kRootKind)break;
+            candidate_live=false;sealed_live=sealed.words[1]!=semantic_graph::kOutcomeUnchanged;
+            next.header.semantic_owner=sealed.words[39];next.header.semantic_slot=sealed.words[34];
+            next.header.semantic_generation=sealed.words[35];
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,3*sizeof(uint64_t));
+            semantic_graph::copy_identity(next.header.semantic_digest,sealed.words+16,cold_work);
+            for(uint32_t extent=0;extent<3;++extent)next.header.semantic_extents[extent]=sealed.words[13+extent];
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(next.header.semantic_extents));
+            // Refresh the actual baseline through the same full program and
+            // authenticated dual-support engine used by ordinary execution.
+            // The other two candidate banks did not execute in this ingress.
+            next.state.task_evaluation={};next.state.execution_work=work;
+            semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(next.state.task_evaluation)+sizeof(next.state.execution_work));
+            for(uint64_t query=0;query<3*uint64_t(result_task.queries);++query) {
+                plane.query_rows[query]={};
+                semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(semantic_task_ground::Query));
+            }
+            Descriptor result_descriptor=descriptor;
+            result_descriptor.task_ground=reinterpret_cast<uint64_t>(ground_bytes);
+            result_descriptor.task_ground_bytes=ground_range->length_bytes;
+            TaskProgramBank program_bank{};uint32_t derived=0;
+            if(!task_program_bank(reinterpret_cast<const uint64_t*>(descriptor.task),descriptor.task_words,&program_bank) ||
+               task_program_queries(result_descriptor,reinterpret_cast<const uint64_t*>(descriptor.task),
+                    program_bank,0,nullptr,0,0,&next.state,&derived)!=TaskProgramQueryOutcome::Ok ||
+               next.state.execution_work.overflow)break;
+            work=next.state.execution_work;
+            if(publication_range_digest(control,*ground_range,nullptr,ground_range->digest,nullptr,cold_work))break;
+        }
         next.header.sealed_epoch=(word>>1)+1;
         next.header.base_word=word;
         next.header.publication_word=(next.header.sealed_epoch<<1)|((word&1)^1);
         --next.header.fuel;
-        if(publication_logical_digest(control,next) || publication_write_attempt(control,next,*base,5))break;
-        if(!next_attempt || publication_range_digest(control,*next_attempt,nullptr,next_attempt->digest) ||
-           publication_descriptor_digest(control,next))break;
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,4*sizeof(uint64_t));
+        if(publication_logical_digest(control,next,cold_work) || publication_write_attempt(control,next,*base,5,cold_work))break;
+        if(!next_attempt || publication_range_digest(control,*next_attempt,nullptr,next_attempt->digest,nullptr,cold_work) ||
+           publication_descriptor_digest(control,next,cold_work))break;
+        if(!publication_charge_native_work(cold_work,work,charged_events))break;
+        // The selector CAS, guaranteed gate retirement and caller's refusal
+        // record are the remaining canonical writes on success. Check their
+        // combined extent before exposing the successor, without charging an
+        // operation that has not yet reached its original write boundary.
+        if(cold_work && (cold_work->units>UINT64_MAX-3*sizeof(uint64_t) ||
+           cold_work->events[unsigned(semantic_graph::NativeWorkEvent::CanonicalByte)]>UINT64_MAX-3*sizeof(uint64_t))) {
+            cold_work->overflow=1;break;
+        }
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(control.word));
+        status=publication_compare_exchange(control.word,word,next.header.publication_word) ? 0 : 3;
+    } while(false);
+    if(status!=0 && sealed_live) {
+        const semantic_graph::ResidentHandle refused{sealed.words[39],semantic_graph::kRootKind,
+            sealed.words[34],sealed.words[35]};
+        if(!publication_retire_root(descriptor,refused,protected_root,&work))status=6;
+    } else if(status!=0 && candidate_live) {
+        semantic_graph::Receipt cleanup{};
+        semantic_call(descriptor,semantic_graph::kResidentDiscardAdmission,nullptr,&candidate,&cleanup,
+            nullptr,nullptr,&work);
+        if(cleanup.words[0]!=semantic_graph::kOk)status=6;
+    }
+    if(!publication_charge_native_work(cold_work,work,charged_events))status=6;
+    if(status!=0 && staged_bank) {
+        staged_bank->header.abi=0;
+        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(staged_bank->header.abi));
+    }
+    publication_store(control.reader_gate,0);
+    semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(control.reader_gate));
+    return status;
+}
+__device__ uint64_t publication_materialize_training(PublicationControl& control,
+        const TrainingOriginalMaterializationInput& input) {
+    if(!input.lease || !control.contract || !publication_compare_exchange(control.reader_gate,0,1))return 2;
+    uint64_t status=1;
+    do {
+        const auto& lease=*reinterpret_cast<const PublicationLease*>(input.lease);
+        const uint64_t word=publication_load(control.word);
+        const auto* base=publication_acquired_bank(control,lease);
+        const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+        if(!base || word!=lease.word || base->header.terminal!=0 ||
+           control.reader_counts[word&1]!=1 || control.reader_counts[(word&1)^1] ||
+           (word>>1)==(UINT64_MAX>>1) || !contract.replay_row_capacity ||
+           contract.replay_original_slot_boundary>contract.replay_row_capacity ||
+           !input.original_count || input.original_count>contract.replay_original_slot_boundary ||
+           !(input.original_prefix_identity[0]|input.original_prefix_identity[1]|input.original_prefix_identity[2]|input.original_prefix_identity[3]) ||
+           publication_validate_selected_model(control,*base))break;
+        const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
+        auto* next_ranges=reinterpret_cast<PublicationRange*>(control.directories[(word&1)^1]);
+        const auto* old_entries=publication_find_range(old,base->header.range_count,56);
+        const auto* target=publication_find_range(next_ranges,base->header.range_count,56);
+        if(!old_entries || !target || old_entries->length_bytes!=sizeof(SemanticTrainingReplayAppendHeader) ||
+           target->storage_slot==old_entries->storage_slot || target->storage_slot>=control.storage_count)break;
+        const auto* bytes=publication_range_bytes(control,*old_entries);
+        if(!bytes)break;
+        const auto& original=*reinterpret_cast<const SemanticTrainingReplayAppendHeader*>(bytes);
+        if(original.abi!=1 || original.original_stage || original.original_count || original.count || original.eligible_count ||
+           original.payload_used_bytes || original.capacity!=contract.replay_row_capacity-contract.replay_original_slot_boundary ||
+           original.payload_capacity_bytes!=contract.replay_payload_capacity_bytes ||
+           (original.original_prefix_identity[0]|original.original_prefix_identity[1]|original.original_prefix_identity[2]|original.original_prefix_identity[3]) ||
+           (original.chain_head[0]|original.chain_head[1]|original.chain_head[2]|original.chain_head[3]))break;
+        uint64_t total=0;bool valid=true;
+        for(uint32_t i=0;i<7;++i) {
+            if(input.lengths[i]>UINT64_MAX-total ||
+               (input.lengths[i] && !publication_pointer_span(input.destinations[i],input.lengths[i],8))) {valid=false;break;}
+            total+=input.lengths[i];
+        }
+        if(!valid || total!=input.source_bytes || !publication_pointer_span(input.source,total,8) ||
+           contract.replay_row_capacity>UINT64_MAX/sizeof(TrainingViewRowDescriptor) ||
+           input.lengths[0]!=contract.replay_row_capacity*sizeof(TrainingViewRowDescriptor) ||
+           input.lengths[1]!=contract.replay_raw_capacity_bytes || input.lengths[2]!=sizeof(SemanticTrainingObjectiveRecord) ||
+           input.lengths[3]!=8*sizeof(SemanticTrainingObjectiveGroupRecord) ||
+           contract.replay_row_capacity>UINT64_MAX/64 || input.lengths[4]!=contract.replay_row_capacity*64 ||
+           input.lengths[5]!=5*sizeof(SemanticTrainingCanaryRecord))break;
+        const auto* source=reinterpret_cast<const uint8_t*>(input.source);
+        const auto& objective=*reinterpret_cast<const SemanticTrainingObjectiveRecord*>(source+input.lengths[0]+input.lengths[1]);
+        if(objective.row_count!=input.original_count || objective.group_count!=8 || objective.canary_count!=5 ||
+           !objective.capacity || objective.capacity>UINT64_MAX/8 ||
+           (input.lengths[6] && input.lengths[6]!=objective.capacity*8) ||
+           !publication_identity_equal(objective.task_identity,contract.task_identity))break;
+        const PublicationRange target_template=*target;
+        valid=true;
+        for(uint64_t i=0;i<base->header.range_count;++i) {
+            const uint64_t role=old[i].role;
+            if(!publication_mutable_role(role) || role==56 || role==1 || role==2 || role==31 || (role>=18 && role<=25)) {
+                next_ranges[i]=old[i];
+            } else if(publication_preserve_range(control,old,base->header.range_count,old[i],next_ranges[i])) {
+                valid=false;break;
+            }
+        }
+        if(!valid)break;
+        auto* next_entries=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,56));
+        next_entries->storage_slot=target_template.storage_slot;
+        next_entries->generation=target_template.generation;
+        auto* next_bytes=publication_range_bytes(control,*next_entries);
+        if(!next_bytes)break;
+        uint64_t offset=0;
+        for(uint32_t i=0;i<7;++i) {
+            if(input.lengths[i])publication_copy_bytes(reinterpret_cast<uint8_t*>(input.destinations[i]),source+offset,input.lengths[i]);
+            offset+=input.lengths[i];
+        }
+        auto sealed=original;
+        sealed.original_stage=1;sealed.original_count=input.original_count;
+        semantic_graph::copy_identity(sealed.original_prefix_identity,input.original_prefix_identity);
+        *reinterpret_cast<SemanticTrainingReplayAppendHeader*>(next_bytes)=sealed;
+        if(publication_range_digest(control,*next_entries,nullptr,next_entries->digest))break;
+        auto& next=*publication_bank(control,word^1);next=*base;
+        next.header.sealed_epoch=(word>>1)+1;next.header.base_word=word;
+        next.header.publication_word=(next.header.sealed_epoch<<1)|((word&1)^1);
+        if(publication_logical_digest(control,next) || publication_descriptor_digest(control,next))break;
         status=publication_compare_exchange(control.word,word,next.header.publication_word) ? 0 : 3;
     } while(false);
     publication_store(control.reader_gate,0);
     return status;
 }
+
 __device__ void publication_command(const Descriptor& descriptor) {
     if(!descriptor.publication.control)return;
     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+    auto* work=descriptor.publication.operation==2 || descriptor.publication.operation==3 ?
+        reinterpret_cast<semantic_graph::NativeWorkTally*>(descriptor.publication.native_work) : nullptr;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
     uint64_t status=1;
     if(descriptor.publication.operation==1 || descriptor.publication.operation==4 ||
        descriptor.publication.operation==5 || descriptor.publication.operation==7) {
@@ -5400,12 +6088,25 @@ __device__ void publication_command(const Descriptor& descriptor) {
     } else if(descriptor.publication.operation==6 && descriptor.publication.lease) {
         status=publication_acknowledge(descriptor,control,
             *reinterpret_cast<const PublicationDeliveryInput*>(descriptor.publication.lease));
+    } else if(descriptor.publication.operation==8 && descriptor.publication.lease) {
+        const auto& input=*reinterpret_cast<const PublicationReplayDeliveryInput*>(descriptor.publication.lease);
+        status=publication_acknowledge(descriptor,control,input.delivery,&input);
+    } else if(descriptor.publication.operation==9 && descriptor.publication.lease) {
+        status=publication_materialize_training(control,
+            *reinterpret_cast<const TrainingOriginalMaterializationInput*>(descriptor.publication.lease));
     } else if(descriptor.publication.lease) {
         auto& lease=*reinterpret_cast<PublicationLease*>(descriptor.publication.lease);
-        if(descriptor.publication.operation==2)status=publication_acquire(control,lease);
-        if(descriptor.publication.operation==3)status=publication_release(control,lease);
+        if(descriptor.publication.operation==2)status=publication_acquire(control,lease,0,UINT64_MAX,work);
+        if(descriptor.publication.operation==3)status=publication_release(control,lease,work);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
         lease.status=status;
     }
+    if(descriptor.publication.operation==8 && descriptor.publication.lease) {
+        const auto& replay=*reinterpret_cast<const PublicationReplayDeliveryInput*>(descriptor.publication.lease);
+        auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(replay.native_work);
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(control.refusal));
+    }
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,8);
     control.refusal=status;
 }
 __device__ uint64_t publication_begin(const Descriptor& descriptor,State* state,PublicationBank** acquired,
@@ -5469,24 +6170,24 @@ __device__ uint64_t publication_begin(const Descriptor& descriptor,State* state,
     uint64_t intent_status=publication_validate_intents(control,ranges,bank.header.range_count,
         bank.header.terminal==1 ? bank.header.terminal_position : (terminal_possible ? terminal_bound : UINT64_MAX));
     if(intent_status)return intent_status;
+    if(contract.nonterminal_intent_mode==1 && bank.header.terminal==0 &&
+       bank.header.prefix_extent<contract.nonterminal_intent_prefix_end &&
+       *end>=contract.nonterminal_intent_prefix_end) {
+        const auto* intent_range=publication_find_range(ranges,bank.header.range_count,30);
+        const auto* queue=reinterpret_cast<const IntentQueueHeader*>(publication_range_bytes(control,*intent_range));
+        const uint64_t needed=48+8*(contract.nonterminal_intent_prefix_end-contract.nonterminal_intent_prefix_begin);
+        if(queue->capacity-queue->count<2 || needed>UINT64_MAX-contract.final_intent_payload_bytes ||
+           needed+contract.final_intent_payload_bytes>queue->payload_capacity_bytes-queue->payload_used_bytes)return 5;
+    }
     // The inactive bank and its exclusive semantic root can be reused only after
     // its reader count is zero. Remaining descendants are traced by the owner.
     if(next.header.abi==1 && next.header.semantic_slot!=0 &&
        (next.header.semantic_slot!=bank.header.semantic_slot || next.header.semantic_generation!=bank.header.semantic_generation)) {
-        semantic_graph::Command command{};command.words[0]=semantic_graph::kRetireRoot;
-        command.words[1]=descriptor.arena[1];command.words[8]=next.header.semantic_slot;command.words[9]=next.header.semantic_generation;
-        command.words[10]=bank.header.semantic_slot;command.words[11]=bank.header.semantic_generation;
-        semantic_graph::LaunchDescriptor launch{};
-        launch.expected_owner=descriptor.arena[1];launch.root_capacity=descriptor.arena[2];
-        launch.statement_capacity=descriptor.arena[3];launch.support_capacity=descriptor.arena[4];
-        launch.version_capacity=descriptor.arena[5];launch.arena_words=descriptor.arena[6];
-        launch.command_ptr=reinterpret_cast<uint64_t>(&command);
-        launch.receipt_ptr=reinterpret_cast<uint64_t>(&state->cleanup_receipts[0]);
-        launch.abi_generation=semantic_graph::kAbiGeneration;
-        semantic_graph::NativeWorkTally actual{};
-        semantic_graph::execute(reinterpret_cast<uint64_t*>(descriptor.arena[0]),launch,&actual);
-        execution_work_merge_native(state->execution_work,actual);
-        if(state->cleanup_receipts[0].words[0]!=semantic_graph::kOk)return 6;
+        const semantic_graph::ResidentHandle retired{next.header.semantic_owner,semantic_graph::kRootKind,
+            next.header.semantic_slot,next.header.semantic_generation};
+        const semantic_graph::ResidentHandle protected_root{bank.header.semantic_owner,semantic_graph::kRootKind,
+            bank.header.semantic_slot,bank.header.semantic_generation};
+        if(!publication_retire_root(descriptor,retired,protected_root,&state->execution_work))return 6;
     }
     next.header.abi=0;*staged=true;
     return 0;
@@ -5519,17 +6220,18 @@ __device__ uint64_t publication_append_provenance(const PublicationControl& cont
     }
     return 0;
 }
-__device__ uint64_t publication_append_final_intent(const PublicationControl& control,const PublicationBank& base,
-        PublicationBank& next) {
+__device__ uint64_t publication_append_prefix_intent(const PublicationControl& control,const PublicationBank& base,
+        PublicationBank& next,uint64_t begin,uint64_t end,const uint64_t* plan_digest=nullptr) {
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
     auto* entry_range=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,30));
     auto* payload_range=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,31));
     const auto* prefix=publication_find_range(ranges,next.header.range_count,1);
     const auto* lineage=publication_find_range(ranges,next.header.range_count,40);
-    if(!entry_range || !payload_range || !prefix || !lineage || next.header.terminal!=2 ||
-       next.header.prefix_extent!=next.header.terminal_position+1)return 1;
+    const uint64_t header_bytes=plan_digest ? 48 : 8;
+    if(!entry_range || !payload_range || !prefix || !lineage || begin>end || end>next.header.prefix_extent ||
+       end-begin>(UINT64_MAX-header_bytes)/8 || end>prefix->length_bytes/sizeof(SourceSlot))return 1;
     auto* queue=reinterpret_cast<IntentQueueHeader*>(publication_range_bytes(control,*entry_range));
-    const uint64_t payload_bytes=8+next.header.prefix_extent*8;
+    const uint64_t token_count=end-begin,payload_bytes=header_bytes+token_count*8;
     if(!queue || queue->count>=queue->capacity || payload_bytes>queue->payload_capacity_bytes-queue->payload_used_bytes)return 5;
     const uint64_t payload_offset=queue->payload_used_bytes;
     entry_range->length_bytes=sizeof(IntentQueueHeader)+(queue->count+1)*sizeof(IntentEntry);
@@ -5540,10 +6242,17 @@ __device__ uint64_t publication_append_final_intent(const PublicationControl& co
     if(!payload || !source)return 1;
     // Authorized effect descriptors have arbitrary byte lengths; the following
     // token payload is explicitly little-endian and need not be aligned.
-    for(uint32_t b=0;b<8;++b)payload[payload_offset+b]=uint8_t(next.header.prefix_extent>>(8*b));
-    for(uint64_t i=0;i<next.header.prefix_extent;++i) {
+    uint64_t count_offset=payload_offset;
+    if(plan_digest) {
+        for(uint32_t w=0;w<4;++w)for(uint32_t b=0;b<8;++b)
+            payload[payload_offset+8*w+b]=uint8_t(plan_digest[w]>>(8*b));
+        for(uint32_t b=0;b<8;++b)payload[payload_offset+32+b]=uint8_t(begin>>(8*b));
+        count_offset+=40;
+    }
+    for(uint32_t b=0;b<8;++b)payload[count_offset+b]=uint8_t(token_count>>(8*b));
+    for(uint64_t i=begin;i<end;++i) {
         if(source[i].kind!=1 || source[i].logical_position!=i || !source[i].committed || !source[i].recomputed)return 1;
-        for(uint32_t b=0;b<8;++b)payload[payload_offset+8*(i+1)+b]=uint8_t(source[i].token>>(8*b));
+        for(uint32_t b=0;b<8;++b)payload[payload_offset+header_bytes+8*(i-begin)+b]=uint8_t(source[i].token>>(8*b));
     }
     auto& entry=reinterpret_cast<IntentEntry*>(queue+1)[queue->count];entry=IntentEntry{};
     semantic_graph::copy_identity(entry.checkpoint_lineage,lineage->digest);
@@ -5566,6 +6275,20 @@ __device__ uint64_t publication_append_final_intent(const PublicationControl& co
     if(publication_range_digest(control,*entry_range,nullptr,entry_range->digest) ||
        publication_range_digest(control,*payload_range,nullptr,payload_range->digest))return 1;
     return 0;
+}
+__device__ uint64_t publication_append_final_intent(const PublicationControl& control,const PublicationBank& base,
+        PublicationBank& next) {
+    if(next.header.terminal!=2 || next.header.prefix_extent!=next.header.terminal_position+1)return 1;
+    return publication_append_prefix_intent(control,base,next,0,next.header.prefix_extent);
+}
+__device__ uint64_t publication_append_nonterminal_intent(const PublicationControl& control,const PublicationBank& base,
+        PublicationBank& next) {
+    const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
+    if(contract.nonterminal_intent_mode!=1 || next.header.terminal!=0 ||
+       base.header.prefix_extent>=contract.nonterminal_intent_prefix_end ||
+       next.header.prefix_extent<contract.nonterminal_intent_prefix_end)return 0;
+    return publication_append_prefix_intent(control,base,next,contract.nonterminal_intent_prefix_begin,
+        contract.nonterminal_intent_prefix_end,contract.nonterminal_intent_plan_digest);
 }
 __device__ void publication_snapshot(const Descriptor& descriptor,const semantic_graph::ResidentHandle& root,
         semantic_graph::Receipt* receipt,ExecutionWork* work=nullptr) {
@@ -5598,6 +6321,63 @@ __device__ void publication_refusal_snapshot(const Descriptor& descriptor,
         }
     }
 }
+__device__ bool task_ground_acquire(const Descriptor& descriptor,const PublicationBank* bank,
+        const semantic_task_ground::Task& task,uint64_t transition_kind,State* state) {
+    semantic_graph::NativeWorkTally work{};
+    if(bank) {
+        const auto& control=*reinterpret_cast<const PublicationControl*>(descriptor.publication.control);
+        const auto* ranges=reinterpret_cast<const PublicationRange*>(control.directories[bank->header.publication_word&1]);
+        const auto* original=publication_find_range(ranges,bank->header.range_count,semantic_task_ground::kPublicationRole,0,&work);
+        uint64_t digest[4];
+        if(!original || original->length_bytes!=descriptor.task_ground_bytes ||
+           publication_range_digest(control,*original,nullptr,digest,nullptr,&work) ||
+           !publication_identity_equal(digest,original->digest))return false;
+        const auto* bytes=publication_range_bytes(control,*original);
+        if(!bytes)return false;
+        publication_copy_bytes(reinterpret_cast<uint8_t*>(descriptor.task_ground),bytes,original->length_bytes,&work);
+    }
+    semantic_task_ground::Plane plane{};
+    if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,task,&plane))return false;
+    if(transition_kind==1) {
+        auto* words=reinterpret_cast<uint64_t*>(plane.query_rows);
+        for(uint64_t word=0;word<3*uint64_t(task.queries)*semantic_task_ground::kQueryWords;++word)
+            words[word]=semantic_graph::written_word(0,&work);
+    }
+    execution_work_merge_native(state->execution_work,work);
+    return !state->execution_work.overflow;
+}
+
+__device__ bool task_ground_accept_rules(const Descriptor& descriptor,const TaskProgramBank& bank,
+        const semantic_program::Rule* inserted,uint32_t inserted_count,State* state) {
+    if(!bank.editable)return inserted_count==0;
+    semantic_task_ground::Plane plane{};
+    if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,bank.task,&plane))return false;
+    semantic_graph::NativeWorkTally work{};
+    semantic_program::Rule additions[2]{};uint32_t count=0;
+    for(uint32_t proposed=0;proposed<inserted_count;++proposed) {
+        bool duplicate=false;
+        for(uint64_t prior=0;prior<uint64_t(bank.program.rule_count)+plane.header[6]+count;++prior) {
+            semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            const auto rule=prior<bank.program.rule_count ? semantic_program::bank_rule(bank.program,uint32_t(prior)) :
+                prior<bank.program.rule_count+plane.header[6] ? plane.selected_rules[prior-bank.program.rule_count] :
+                additions[prior-bank.program.rule_count-plane.header[6]];
+            const auto* a=reinterpret_cast<const uint32_t*>(&rule);
+            const auto* b=reinterpret_cast<const uint32_t*>(&inserted[proposed]);
+            bool equal=true;for(uint32_t field=0;field<10;++field)equal&=a[field]==b[field];
+            duplicate|=equal;
+        }
+        if(!duplicate)additions[count++]=inserted[proposed];
+    }
+    if(count>plane.header[7]-plane.header[6])return false;
+    for(uint32_t added=0;added<count;++added) {
+        publication_copy_bytes(reinterpret_cast<uint8_t*>(&plane.selected_rules[plane.header[6]+added]),
+            reinterpret_cast<const uint8_t*>(&additions[added]),sizeof(semantic_program::Rule),&work);
+    }
+    plane.header[6]=semantic_graph::written_word(plane.header[6]+count,&work);
+    execution_work_merge_native(state->execution_work,work);
+    return !state->execution_work.overflow;
+}
+
 __device__ uint64_t publication_publish(const Descriptor& descriptor,PublicationBank& base,uint64_t word,uint64_t end,
         const semantic_graph::ResidentHandle& base_root,State* state,const Receipt* receipts,bool no_draw=false,bool drain=false) {
     if(state->execution_work.overflow) { state->status=11;return 1; }
@@ -5633,10 +6413,20 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     if(drain)next.header.terminal=2;
     next.state=*state;next.state.next_proposal=next.header.proposal;
     for(uint32_t i=0;i<136;++i)next.receipts[i]=no_draw ? base.receipts[i] : receipts[i];
-    if(publication_apply_continuation(control,base,next,pending) ||
+    semantic_graph::NativeWorkTally preserved_work{};
+    const uint64_t preservation_status=publication_apply_continuation(control,base,next,pending,&preserved_work);
+    execution_work_merge_native(state->execution_work,preserved_work);
+    if(preservation_status ||
        publication_append_provenance(control,base,next,receipts,winner,descriptor.text))return 1;
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
     const auto* previous=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
+    auto* ground=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,semantic_task_ground::kPublicationRole));
+    if(!ground || ground->length_bytes!=descriptor.task_ground_bytes)return 1;
+    auto* ground_bytes=publication_range_bytes(control,*ground);if(!ground_bytes)return 1;
+    semantic_graph::NativeWorkTally ground_work{};
+    publication_copy_bytes(ground_bytes,reinterpret_cast<const uint8_t*>(descriptor.task_ground),ground->length_bytes,&ground_work);
+    execution_work_merge_native(state->execution_work,ground_work);
+    if(state->execution_work.overflow)return 1;
     auto* intent=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,30));
     const auto* old_intent=publication_find_range(previous,base.header.range_count,30);
     if(!intent || !old_intent)return 1;
@@ -5676,6 +6466,7 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
        publication_write_coverage(control,contract,next,drain ? nullptr : &pending) || publication_seal_ranges(control,next,&base) ||
        publication_logical_digest(control,next))return 1;
     if(drain && publication_append_final_intent(control,base,next))return 1;
+    if(!drain && publication_append_nonterminal_intent(control,base,next))return 1;
     if(publication_write_attempt(control,next,base,pending.transition_kind))return 1;
     auto* attempt=const_cast<PublicationRange*>(publication_find_range(ranges,next.header.range_count,33));
     if(!attempt || publication_range_digest(control,*attempt,nullptr,attempt->digest) ||
@@ -5698,9 +6489,14 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
 // They are copied from the actual current chain, never from an action roster.
 struct FeedbackSupportCollector {
     uint64_t* rows;
-    uint64_t capacity, count, refusal;
+    uint64_t capacity, count, refusal, begin=0, channels=3;
     __device__ bool operator()(uint64_t slot,const uint64_t* version,const uint64_t* support) {
-        if(count>=capacity || support[11]==UINT32_MAX) { refusal=1;return false; }
+        if(!(channels&support[5]))return true;
+        for(uint64_t index=begin;index<count;++index) {
+            const auto* prior=rows+12*index;
+            if(prior[2]==version[5] && prior[3]==support[1] && prior[4]==slot && prior[5]==version[1])return true;
+        }
+        if(count>=capacity) { refusal=1;return false; }
         if(support[10]==UINT32_MAX) { refusal=2;return false; }
         uint64_t* row=rows+12*count++;
         row[0]=support[10];row[1]=support[11];row[2]=version[5];row[3]=support[1];
@@ -5713,8 +6509,9 @@ struct FeedbackSupportCollector {
 struct PublicationFeedbackInputs {
     const PublicationBank* bank;
     const RawFeedbackRecord* records;
-    semantic_feedback::Statement statements[3];
-    uint64_t statement_capacity;
+    const PublicationControl* control;
+    const PublicationRange* ranges;
+    uint64_t statement_count,statement_capacity;
 };
 
 // Resolve every source through the actual acquired reader. The publication
@@ -5724,7 +6521,7 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
     const uint64_t lease_ptr=reinterpret_cast<uint64_t>(lease);
     if(!control_ptr || control_ptr%alignof(PublicationControl) || control_ptr>UINT64_MAX-sizeof(PublicationControl) ||
        !lease_ptr || lease_ptr%alignof(PublicationLease) || lease_ptr>UINT64_MAX-sizeof(PublicationLease) ||
-        slots<3 || slots>UINT64_MAX/sizeof(RawFeedbackRecord))return 1;
+        !slots || slots>UINT64_MAX/sizeof(RawFeedbackRecord))return 1;
     const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
     if(lease->bank>1 || !control.contract || control.contract%alignof(PublicationContract) ||
        control.contract>UINT64_MAX-sizeof(PublicationContract) ||
@@ -5749,14 +6546,18 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
        !publication_identity_equal(digest,records->digest))return 1;
     inputs->bank=bank;
     inputs->records=reinterpret_cast<const RawFeedbackRecord*>(bytes);
+    inputs->control=&control;inputs->ranges=ranges;
+    if(contract.role_count!=semantic_task_ground::kPublicationRole || !contract.role_counts)return 1;
+    const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
+    if(roles[15].role!=16 || !roles[15].count || roles[15].count>UINT32_MAX || roles[15].count>slots)return 1;
+    inputs->statement_count=roles[15].count;
     inputs->statement_capacity=0;
-    for(uint64_t index=0;index<3;++index) {
+    for(uint64_t index=0;index<inputs->statement_count;++index) {
         const auto* statement=publication_find_range(ranges,bank->header.range_count,16,index);
         if(!statement || !statement->length_bytes)return 1;
         const auto* data=publication_range_bytes(control,*statement);
         if(!data || publication_range_digest(control,*statement,nullptr,digest) ||
            !publication_identity_equal(digest,statement->digest))return 1;
-        inputs->statements[index]={data,statement->length_bytes};
         if(statement->length_bytes>inputs->statement_capacity)inputs->statement_capacity=statement->length_bytes;
     }
     return 0;
@@ -5774,26 +6575,76 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
     PublicationFeedbackInputs inputs{};
     if(publication_feedback_inputs(descriptor.publication.control,lease,slots,&inputs) || !descriptor.task)return 1;
     const auto* task=reinterpret_cast<const uint64_t*>(descriptor.task);
-    if(task[0]!=6 || task[1]!=descriptor.arena[1] ||
-       task[22]>=UINT32_MAX || task[23]>=UINT32_MAX || task[24]>=UINT32_MAX)return 1;
+    TaskProgramBank program{};
+    if(!task_program_bank(task,descriptor.task_words,&program) || task[1]!=descriptor.arena[1])return 1;
+    const auto& view=program.task;
     const auto& bank=*inputs.bank;
     semantic_graph::Layout layout{};
     if(!semantic_graph::build_layout(reinterpret_cast<uint64_t*>(descriptor.arena[0]),
         descriptor.arena[2],descriptor.arena[3],descriptor.arena[4],descriptor.arena[5],
-        descriptor.arena[6],&layout) || support_capacity!=layout.support_capacity)return 1;
+        descriptor.arena[6],&layout) || (slots && layout.support_capacity>UINT64_MAX/slots) ||
+        support_capacity!=slots*layout.support_capacity)return 1;
     const semantic_graph::ResidentHandle root{bank.header.semantic_owner,semantic_graph::kRootKind,
         bank.header.semantic_slot,bank.header.semantic_generation};
+    semantic_task_ground::Plane plane{};
+    semantic_program::DualSupport lineage{};
+    semantic_program::Fact* facts=nullptr;
+    semantic_program::Result closure{};
+    if(program.editable) {
+        const auto* ground=publication_find_range(inputs.ranges,bank.header.range_count,semantic_task_ground::kPublicationRole);
+        if(!ground || !semantic_task_ground::decode_plane(
+            reinterpret_cast<uint64_t>(publication_range_bytes(*inputs.control,*ground)),ground->length_bytes,view,&plane))return 1;
+        closure=task_program_closure(descriptor,program,plane,0,nullptr,0,&lineage,&facts);
+        if(closure.status!=semantic_program::Status::Ok)return 1;
+    }
     FeedbackSupportCollector collector{supports,support_capacity,0,0};
     for(uint64_t slot=0;slot<slots;++slot) {
         offsets[slot]=collector.count;
         const auto& saved=inputs.records[slot];
         if(saved.valid==0) { offsets[slot+1]=collector.count;continue; }
-        if(saved.valid!=1 || saved.statement_index>2 || saved.pro>1 || saved.contra>1)return 1;
+        if(saved.valid!=1 || saved.statement_index>=view.queries || saved.pro>1 || saved.contra>1)return 1;
+        collector.begin=collector.count;
         semantic_graph::DecodedStatement statement{};
-        statement.record=uint32_t(task[22+saved.statement_index]);
+        statement.record=uint32_t(view.query(uint32_t(saved.statement_index))[4]);
         for(uint32_t i=0;i<8;++i)
-            statement.identity_words[i]=uint32_t(task[6+4*saved.statement_index+i/2]>>(32*(i%2)));
+            statement.identity_words[i]=uint32_t(view.query(uint32_t(saved.statement_index))[i/2]>>(32*(i%2)));
         auto& query=queries[slot];
+        if(program.editable) {
+            const auto query_fact=semantic_program::bank_fact(program.program,saved.statement_index);
+            const uint32_t fact_index=semantic_program::find_fact(facts,closure.fact_count,query_fact);
+            const uint64_t truth=fact_index==closure.fact_count ? 0 : lineage.truth[fact_index];
+            if(truth!=(saved.pro|(saved.contra<<1)) || saved.query_receipt.words[1]!=0x5850524f47515545ULL ||
+               saved.query_receipt.words[2]!=truth || saved.query_receipt.words[4]!=saved.statement_index)return 1;
+            query=saved.query_receipt;
+            original_statements[slot]=statement.record;
+            for(uint32_t binding=0;binding<view.bindings && fact_index<closure.fact_count;++binding) {
+                uint64_t channels=0;
+                for(uint32_t channel=0;channel<2;++channel) {
+                    if(lineage.lineage[(uint64_t(fact_index)*2+channel)*lineage.words+binding/64] &
+                       (uint64_t(1)<<(binding%64)))channels|=uint64_t(1)<<channel;
+                }
+                if(!channels)continue;
+                if(!plane.observations[binding].present)return 1;
+                semantic_graph::DecodedStatement protected_statement{};
+                protected_statement.record=uint32_t(view.binding(binding)[1]);
+                for(uint32_t word=0;word<8;++word)
+                    protected_statement.identity_words[word]=uint32_t(view.observation(binding)[word/2]>>(32*(word%2)));
+                semantic_graph::Receipt actual{};
+                semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&actual,&protected_statement);
+                if(actual.words[0]!=semantic_graph::kOk || (actual.words[2]&channels)!=channels ||
+                   actual.words[39]!=bank.header.semantic_owner || actual.words[33]!=semantic_graph::kRootKind ||
+                   actual.words[34]!=bank.header.semantic_slot || actual.words[35]!=bank.header.semantic_generation ||
+                   !publication_identity_equal(actual.words+16,bank.header.semantic_digest))return 1;
+                for(uint32_t word=0;word<3;++word)if(actual.words[13+word]!=bank.header.semantic_extents[word])return 1;
+                collector.channels=channels;
+                semantic_graph::Receipt checked{};
+                if(!actual.words[12] || !semantic_graph::visit_support_chain(layout,actual.words[7],actual.words[11]+1,
+                    false,collector,&checked))return collector.refusal ? collector.refusal : 1;
+            }
+            offsets[slot+1]=collector.count;
+            continue;
+        }
+        collector.channels=3;
         semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&query,&statement);
         if(query.words[0]!=semantic_graph::kOk || query.words[2]!=(saved.pro|(saved.contra<<1)) ||
            query.words[39]!=bank.header.semantic_owner || query.words[33]!=semantic_graph::kRootKind ||
@@ -5848,21 +6699,35 @@ extern "C" __global__ void semantic_feedback_encode(uint64_t control_ptr,
     const uint64_t width = 9 * capacity + 4;
     __shared__ PublicationFeedbackInputs inputs;
     __shared__ uint64_t input_error;
+    __shared__ semantic_feedback::Statement statement;
+    __shared__ uint64_t statement_error;
     if(threadIdx.x==0) {
         input_error=publication_feedback_inputs(control_ptr,lease,slots,&inputs);
         if(!input_error && inputs.statement_capacity!=capacity)input_error=1;
     }
     __syncthreads();
     for (uint64_t slot = blockIdx.x; slot < slots; slot += gridDim.x) {
-        const uint64_t error = input_error ? (uint64_t(1)<<32)|input_error :
-            semantic_feedback::validate(inputs.records[slot], inputs.statements, capacity);
+        if(threadIdx.x==0) {
+            statement={};statement_error=0;
+            if(!input_error && inputs.records[slot].valid) {
+                const auto index=inputs.records[slot].statement_index;
+                const auto* range=index<inputs.statement_count ? publication_find_range(inputs.ranges,
+                    inputs.bank->header.range_count,16,index) : nullptr;
+                if(!range)statement_error=1;
+                else statement={publication_range_bytes(*inputs.control,*range),range->length_bytes};
+            }
+        }
+        __syncthreads();
+        const uint64_t error = input_error ? (uint64_t(1)<<32)|input_error : statement_error ? statement_error :
+            semantic_feedback::validate(inputs.records[slot], statement, inputs.statement_count, capacity);
         if (threadIdx.x == 0) {
             status[slot] = error;
             validity[slot] = error ? 0 : uint8_t(inputs.records[slot].valid);
         }
         for (uint64_t column = threadIdx.x; column < width; column += blockDim.x)
             features[slot * width + column] = error ? 0.0f :
-                semantic_feedback::coordinate(inputs.records[slot], inputs.statements, capacity, column);
+                semantic_feedback::coordinate(inputs.records[slot], statement, capacity, column);
+        __syncthreads();
     }
 }
 
@@ -6063,7 +6928,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                    !publication_identity_equal(pending.instance,lease.instance) || contract.abi!=1 ||
                    !publication_identity_equal(pending.topology_identity,contract.topology_identity) ||
                    !publication_identity_equal(pending.table_identity,contract.table_identity) ||
-                    !task || task[0]!=6 || task[1]!=descriptor.arena[1] ||
+                    !task || task[0]!=7 || task[1]!=descriptor.arena[1] ||
                    !publication_identity_equal(contract.task_identity,task+2)) {
                     semantic_content_integrity_trap();return;
                 }
@@ -6121,12 +6986,19 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 transition_kind=reinterpret_cast<const PendingContinuation*>(control.continuation)->transition_kind;
             }
         }
-        if(!failed && task && (task[0]!=6 || task[1]!=descriptor.arena[1] ||
-           task[18]>3 || task[19]>3 || task[20]>3 || task[52+task[21]*5]>1 ||
-           !task_priorities_valid(task))) {
+        if(!failed && task && (task[0]!=7 || task[1]!=descriptor.arena[1])) {
             failed=1;state->status=7;
         }
-        if(!failed && task)state->actor_eligible=task[52+task[21]*5];
+        if(!failed && task)state->actor_eligible=program_bank.task.actor_eligible;
+        if(!failed && task && !task_ground_acquire(descriptor,acquired_bank,program_bank.task,transition_kind,state)) {
+            failed=1;state->status=9;
+        }
+        if(!failed && program_bank.editable) {
+            semantic_task_ground::Plane plane{};
+            if(!semantic_task_ground::decode_plane(descriptor.task_ground,descriptor.task_ground_bytes,
+                    program_bank.task,&plane)) { failed=1;state->status=9; }
+            else program_bank.selected_rule_count=uint32_t(plane.header[6]);
+        }
         input_bank_admitted=!failed && transition_kind==1;
     }
     __syncthreads();
@@ -6478,7 +7350,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     semantic_graph::DecodedSupport event;
                     decode_action(books,choices,&statement,&event);
                     if(task && !state->task_evaluation.lane_refusal[lane] &&
-                       !task_allows(task,statement,event))state->task_evaluation.lane_refusal[lane]=1;
+                       !task_allows(program_bank.task,statement,event))state->task_evaluation.lane_refusal[lane]=1;
                     if(!task || !state->task_evaluation.lane_refusal[lane]) {
                         ++state->work[lane].edit_commands;
                         semantic_call(descriptor,semantic_graph::kResidentInsertSupportAdmission,nullptr,&candidate,output,&statement,&event,&state->execution_work);
@@ -6498,7 +7370,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 uint64_t admission=semantic_graph::kResidentSealAdmission;
                 if(task) {
                     if(state->task_evaluation.lane_refusal[lane]) {
-                        task_cost(state,lane+1,task);admission=semantic_graph::kResidentDiscardAdmission;
+                        task_cost(state,lane+1,program_bank.task);admission=semantic_graph::kResidentDiscardAdmission;
                     } else {
                         const auto query=program_bank.editable
                             ? task_program_queries(descriptor,task,program_bank,lane+1,
@@ -6508,11 +7380,11 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                                 ? TaskProgramQueryOutcome::Ok : TaskProgramQueryOutcome::Failure);
                         if(query==TaskProgramQueryOutcome::Failure) {
                             failed=1;state->status=9;
-                        } else if(query==TaskProgramQueryOutcome::FactCapacity ||
+                        } else if(query==TaskProgramQueryOutcome::Scope || query==TaskProgramQueryOutcome::FactCapacity ||
                                   query==TaskProgramQueryOutcome::FuelExhausted) {
                             state->task_evaluation.lane_refusal[lane]=
-                                query==TaskProgramQueryOutcome::FactCapacity ? 3 : 4;
-                            task_cost(state,lane+1,task);
+                                query==TaskProgramQueryOutcome::Scope ? 1 : query==TaskProgramQueryOutcome::FactCapacity ? 3 : 4;
+                            task_cost(state,lane+1,program_bank.task);
                             admission=semantic_graph::kResidentDiscardAdmission;
                         } else if(!state->task_evaluation.facts[lane+1].eligible) {
                             state->task_evaluation.lane_refusal[lane]=2;
@@ -6581,13 +7453,19 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                     }
                     text_candidate.header.abi=0;
                 }
-                if(task)select_task(state,task);
+                if(task && !select_task(descriptor,state,program_bank.task)) {failed=1;state->status=9;}
+                if(!failed && task && program_bank.editable && state->task_evaluation.winner) {
+                    const uint32_t lane=uint32_t(state->task_evaluation.winner-1);
+                    if(!task_ground_accept_rules(descriptor,program_bank,inserted_rules[lane],inserted_counts[lane],state)) {
+                        failed=1;state->status=9;
+                    }
+                }
                 state->importance_weight=weight;
-                if(acquired_bank) {
+                if(!failed && acquired_bank) {
                     auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
                     control.refusal=publication_publish(descriptor,*acquired_bank,acquired_word,structural_end,base,state,receipts);
                     if(control.refusal){failed=1;state->status=state->execution_work.overflow ? 11 : 10;}
-                } else state->next_proposal=state->proposal+1;
+                } else if(!failed)state->next_proposal=state->proposal+1;
             }
         }
         if(failed && !retire_pending_roots(descriptor,base,state))state->status=6;

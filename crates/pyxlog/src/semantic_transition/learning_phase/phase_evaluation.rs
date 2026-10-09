@@ -6,8 +6,9 @@ use super::super::model_evaluation::{
 };
 use super::*;
 use xlog_cuda::{
-    SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkResult,
-    SemanticColdNativeWork, SemanticModelEvaluation,
+    SemanticCancelledModelEvaluation, SemanticColdModelWork, SemanticColdModelWorkDisposition,
+    SemanticColdModelWorkResult, SemanticColdNativeWork, SemanticModelEvaluation,
+    SemanticPublishedStateObservation,
 };
 
 pub(super) struct EvaluationOwners {
@@ -94,6 +95,8 @@ struct ReadOnlyTerminalRefusal {
     serializer_entered: bool,
     serialized_model: Option<Py<PyAny>>,
     source_verified: bool,
+    source_native_observations: [Option<SemanticPublishedStateObservation>; 2],
+    source_native_verified: [bool; 2],
     history: Option<Arc<[u8]>>,
     payload: Option<Arc<[u8]>>,
 }
@@ -376,6 +379,8 @@ impl PySemanticLearningPhaseTransition {
                     serializer_entered: false,
                     serialized_model: None,
                     source_verified: false,
+                    source_native_observations: [None, None],
+                    source_native_verified: [false; 2],
                     history: None,
                     payload: None,
                 }),
@@ -396,6 +401,7 @@ impl PySemanticLearningPhaseTransition {
                 self.preparation_inputs.cold_model_work_capacity,
                 interval_ordinal,
                 self.records()?.confirmed_admission()?,
+                xlog_cuda::SemanticColdModelWorkPurpose::TerminalRefusal,
             )
             .map_err(xlog_err)?;
         self.phase_evaluations()?
@@ -563,6 +569,8 @@ impl PySemanticLearningPhaseTransition {
             serializer_entered: false,
             serialized_model: None,
             source_verified: false,
+            source_native_observations: [None, None],
+            source_native_verified: [false; 2],
             history: None,
             payload: None,
         });
@@ -1282,6 +1290,83 @@ impl PySemanticLearningPhaseTransition {
         Ok(())
     }
 
+    fn verify_terminal_source_native(
+        &self,
+        py: Python<'_>,
+        task: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        expected: &[u8],
+        occurrence: usize,
+    ) -> PyResult<()> {
+        let (verified, prepared) = {
+            let retained = self.phase_evaluations()?;
+            let refusal = retained
+                .last()
+                .expect("retained cancellation")
+                .refusal
+                .as_ref()
+                .expect("original cancellation");
+            (
+                refusal.source_native_verified[occurrence],
+                refusal.source_native_observations[occurrence].is_some(),
+            )
+        };
+        if verified {
+            return Ok(());
+        }
+        require_phase_native_scope(py, task, parent)?;
+        let session = task.session.borrow(py);
+        let mut owner = session.owner()?;
+        let lease = parent.lease()?;
+        if !prepared {
+            task.require_current(&owner)?;
+            let observation = owner
+                .prepare_published_state_observation(&lease, true)
+                .map_err(xlog_err)?;
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained cancellation")
+                .refusal
+                .as_mut()
+                .expect("original cancellation")
+                .source_native_observations[occurrence] = Some(observation);
+        }
+        // The phase lock is released before any native submission or join.
+        let mut observation = self
+            .phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .source_native_observations[occurrence]
+            .take()
+            .expect("original native observation");
+        let result = owner
+            .resolve_published_state_observation(&lease, &mut observation)
+            .map_err(xlog_err);
+        self.phase_evaluations()?
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation")
+            .source_native_observations[occurrence] = Some(observation);
+        if result? != expected {
+            return Err(invalid("retained learning-phase native state changed"));
+        }
+        let mut retained = self.phase_evaluations()?;
+        let refusal = retained
+            .last_mut()
+            .expect("retained cancellation")
+            .refusal
+            .as_mut()
+            .expect("original cancellation");
+        refusal.source_native_verified[occurrence] = true;
+        refusal.source_native_observations[occurrence] = None;
+        Ok(())
+    }
+
     fn verify_terminal_source(&self, py: Python<'_>) -> PyResult<()> {
         let source = self.source.borrow(py);
         source.require_creator()?;
@@ -1325,7 +1410,7 @@ impl PySemanticLearningPhaseTransition {
             ));
         }
         let parent = self.parent.borrow(py);
-        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        self.verify_terminal_source_native(py, &task, &parent, &manifest.native, 0)?;
         let (entered, result, region) = {
             let mut retained = self.phase_evaluations()?;
             let current = retained.last_mut().expect("retained cancellation");
@@ -1391,7 +1476,7 @@ impl PySemanticLearningPhaseTransition {
             )
             .map_err(xlog_err)?;
         require_model_bytes(model.bind(py), &manifest.model)?;
-        verify_phase_native(py, &task, &parent, &manifest.native, true)?;
+        self.verify_terminal_source_native(py, &task, &parent, &manifest.native, 1)?;
         task.state()?.snapshot = snapshot;
         self.phase_evaluations()?
             .last_mut()
@@ -1801,6 +1886,22 @@ impl PySemanticLearningPhaseTransition {
                 2,
             )
             .map_err(xlog_err)?;
+        let cleanup = current
+            .regions
+            .get(2)
+            .ok_or_else(|| invalid("cancelled evaluation lost its original cleanup region"))?
+            .borrow(py);
+        self.source
+            .borrow(py)
+            .owner()?
+            .cancel_cold_model_work_evaluation_cleanup(
+                cleanup
+                    .region
+                    .as_ref()
+                    .expect("original evaluation cleanup"),
+                cancelled,
+            )
+            .map_err(xlog_err)?;
         current.cold_stage = EvaluationColdStage::Cleanup;
         Self::clear_evaluation_cold_visibility(py, &session);
         Ok(())
@@ -1810,6 +1911,7 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
         original: &Py<PySemanticModelEvaluation>,
+        native: &SemanticModelEvaluation,
     ) -> PyResult<()> {
         let mut retained = self.phase_evaluations()?;
         let current = retained
@@ -1824,7 +1926,159 @@ impl PySemanticLearningPhaseTransition {
                 "phase evaluation cannot replace its original native invocation",
             ));
         }
+        let cleanup = current
+            .regions
+            .get(2)
+            .ok_or_else(|| invalid("phase evaluation lost its original cleanup region"))?
+            .borrow(py);
+        let source = self.source.borrow(py);
+        let parent = current.owners()?.parent.borrow(py);
+        let region = cleanup
+            .region
+            .as_ref()
+            .expect("original evaluation cleanup");
+        if parent.session.as_ptr() == self.source.as_ptr() {
+            source
+                .owner()?
+                .bind_cold_model_work_evaluation_cleanup(region, native, None)
+                .map_err(xlog_err)?;
+        } else {
+            let session = parent.session.borrow(py);
+            let owner = session.owner()?;
+            source
+                .owner()?
+                .bind_cold_model_work_evaluation_cleanup(region, native, Some(&owner))
+                .map_err(xlog_err)?;
+        }
         current.native_evaluation = Some(original.clone_ref(py));
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn admit_evaluation_capture(
+        &self,
+        py: Python<'_>,
+        original: &PySemanticModelEvaluation,
+        quantities: [u64; 3],
+        captured_native: u64,
+    ) -> PyResult<()> {
+        let (work, budget) = {
+            let retained = self.phase_evaluations()?;
+            let current = retained
+                .last()
+                .ok_or_else(|| invalid("evaluation capture lost its original signed operation"))?;
+            Self::require_evaluation_entry(py, current)?;
+            if !self.phase_evaluation_active.load(Ordering::Acquire)
+                || !current.ready
+                || !current.evaluation_admitted
+                || current
+                    .native_evaluation
+                    .as_ref()
+                    .is_none_or(|owner| !std::ptr::eq(&*owner.borrow(py), original))
+            {
+                return Err(invalid("evaluation capture admission changed its original native owner or signed operation"));
+            }
+            (
+                current.work.clone().ok_or_else(|| {
+                    invalid("evaluation capture lost its original full cold report")
+                })?,
+                current.budget,
+            )
+        };
+        self.records()?.require_preparation_admission()?;
+        // The entire immutable cold producer plan, not a caller's claimed
+        // remainder or just the already visited regions, shares this budget.
+        // The captured native producers share the same checked common sum.
+        // Later cold native producers and the physical certificate remain
+        // separate; this is not a whole-lifecycle native ceiling.
+        let cold = self
+            .source
+            .borrow(py)
+            .owner()?
+            .cold_model_work_plan_quantities(&work)
+            .map_err(xlog_err)?;
+        let cold_content = self
+            .source
+            .borrow(py)
+            .owner()?
+            .cold_model_work_content_ceiling(&work)
+            .map_err(xlog_err)?;
+        let cold_content = cold_content
+            .into_iter()
+            .try_fold(0u64, |sum, value| sum.checked_add(value))
+            .ok_or_else(|| invalid("evaluation's frozen cold content ceiling overflowed"))?;
+        let known_bound = quantities[0]
+            .checked_add(cold[0])
+            .and_then(|bound| bound.checked_add(cold_content))
+            .and_then(|bound| bound.checked_add(captured_native))
+            .ok_or_else(|| invalid("evaluation's original model work bounds overflowed"))?;
+        let calls = quantities[2]
+            .checked_add(cold[2])
+            .ok_or_else(|| invalid("evaluation's original model call bounds overflowed"))?;
+        if known_bound > budget[0] || calls > budget[2] {
+            self.phase_evaluations()?
+                .last_mut()
+                .expect("retained evaluation")
+                .budget_exceeded = true;
+            return Err(invalid("evaluation's frozen original producers exceed its signed operation budget before launch"));
+        }
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn evaluation_cold_content_owner(
+        &self,
+        py: Python<'_>,
+        work: &SemanticColdModelWork,
+    ) -> PyResult<Py<PySemanticModelEvaluation>> {
+        let retained = self.phase_evaluations()?;
+        let current = retained
+            .last()
+            .ok_or_else(|| invalid("cold content lost its original evaluation phase"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if !current
+            .work
+            .as_ref()
+            .is_some_and(|original| original.same_invocation(work))
+        {
+            return Err(invalid(
+                "cold content changed its original signed evaluation report",
+            ));
+        }
+        current
+            .native_evaluation
+            .as_ref()
+            .map(|original| original.clone_ref(py))
+            .ok_or_else(|| invalid("cold content precedes its original issued evaluation"))
+    }
+
+    pub(in crate::semantic_transition) fn admit_evaluation_cold_content(
+        &self,
+        py: Python<'_>,
+        work: &SemanticColdModelWork,
+    ) -> PyResult<()> {
+        self.evaluation_cold_content_owner(py, work)?;
+        let budget = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained original evaluation")
+            .budget;
+        let source = self.source.borrow(py);
+        let owner = source.owner()?;
+        let model = owner
+            .cold_model_work_plan_quantities(work)
+            .map_err(xlog_err)?;
+        let native = owner
+            .cold_model_work_content_ceiling(work)
+            .map_err(xlog_err)?;
+        let native = native
+            .into_iter()
+            .try_fold(0u64, |sum, value| sum.checked_add(value))
+            .ok_or_else(|| invalid("original evaluation content ceiling overflowed"))?;
+        let units = model[0]
+            .checked_add(native)
+            .ok_or_else(|| invalid("original evaluation cold producer ceiling overflowed"))?;
+        if units > budget[0] || model[2] > budget[2] {
+            return Err(invalid("original evaluation cold content and model plan exceed their signed budget before work"));
+        }
         Ok(())
     }
 
@@ -2633,6 +2887,11 @@ impl PySemanticLearningPhaseTransition {
                     inputs.cold_model_work_capacity,
                     ordinal,
                     admission,
+                    if branch == "source" {
+                        xlog_cuda::SemanticColdModelWorkPurpose::SourceEvaluation
+                    } else {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateEvaluation
+                    },
                 )
                 .map_err(xlog_err)?;
             self.phase_evaluations()?
@@ -2908,7 +3167,7 @@ impl PySemanticLearningPhaseTransition {
         &self,
         py: Python<'_>,
     ) -> PyResult<(SemanticColdModelWorkResult, u64)> {
-        let (work, closed, work_result, parent, custody, cached_peak) = {
+        let (work, closed, work_result, parent, custody, cached_peak, disposition) = {
             let retained = self.phase_evaluations()?;
             let current = retained.last().expect("retained evaluation");
             if !matches!(
@@ -2940,6 +3199,11 @@ impl PySemanticLearningPhaseTransition {
                     .map(|owners| owners.parent.clone_ref(py)),
                 current.custody.clone(),
                 current.backing_peak,
+                if current.refusal.is_some() && current.terminal_known() {
+                    SemanticColdModelWorkDisposition::KnownRefusal
+                } else {
+                    SemanticColdModelWorkDisposition::Complete
+                },
             )
         };
         let source = self.source.borrow(py);
@@ -2992,7 +3256,12 @@ impl PySemanticLearningPhaseTransition {
                 // chooses the original submit or read-only resolution.
                 let result = source
                     .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*self.parent.borrow(py).lease()?,
+                        &work,
+                        &streams,
+                        disposition,
+                    )
                     .map_err(xlog_err)?;
                 self.phase_evaluations()?
                     .last_mut()

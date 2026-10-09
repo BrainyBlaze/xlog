@@ -814,6 +814,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::IntermediateRestore,
                 )
                 .map_err(xlog_err)?;
             self.intermediate()?
@@ -924,6 +925,7 @@ impl PySemanticLearningPhaseTransition {
                     &snapshot,
                     self.model_owner(py, PhaseModelOwner::Restore)?.bind(py),
                     domain.bind(py),
+                    task.checkpoint.training_canary_owner.as_ref().map(|owner| owner.bind(py).as_any()),
                     None,
                     recipe.as_ref(),
                     self.preparation_inputs
@@ -1009,7 +1011,12 @@ impl PySemanticLearningPhaseTransition {
                     .source
                     .borrow(py)
                     .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*self.parent.borrow(py).lease()?,
+                        &work,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?;
                 self.intermediate()?
                     .as_mut()

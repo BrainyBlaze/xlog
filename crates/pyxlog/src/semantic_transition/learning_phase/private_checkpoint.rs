@@ -444,6 +444,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::PrivateCheckpoint,
                 )
                 .map_err(xlog_err)?;
             self.private_checkpoints()?
@@ -613,7 +614,12 @@ impl PySemanticLearningPhaseTransition {
                     checkpoint_consumer_streams(streams.bind(py), &mut (16 * 1024 * 1024))?;
                 let report = source
                     .owner()?
-                    .finish_cold_model_work(&*self.parent.borrow(py).lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*self.parent.borrow(py).lease()?,
+                        &work,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?;
                 self.private_checkpoints()?
                     .last_mut()
