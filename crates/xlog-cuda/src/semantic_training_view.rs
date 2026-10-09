@@ -2862,7 +2862,7 @@ fn validate_row(
     })
 }
 
-fn origin_record(origin: SemanticTrainingViewOrigin) -> SemanticTrainingViewOriginRecord {
+pub(crate) fn origin_record(origin: SemanticTrainingViewOrigin) -> SemanticTrainingViewOriginRecord {
     SemanticTrainingViewOriginRecord {
         present: 1,
         transition: match origin.transition {

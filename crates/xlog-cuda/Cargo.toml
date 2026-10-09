@@ -27,6 +27,7 @@ libloading.workspace = true
 arrow = { version = "60", default-features = false, features = ["ffi", "ipc"] }
 sha2 = "0.11"
 getrandom = "0.4"
+serde = "1"
 serde_json.workspace = true
 
 [build-dependencies]

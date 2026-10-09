@@ -921,6 +921,17 @@ impl SemanticTransitionSession {
                 &material,
                 &original_generations,
             )?;
+            if next.state.actor_eligible == 1 && self.actor_refresh.is_none() {
+                self.register_prepared_actor_refresh_origin(step,
+                    crate::semantic_training_view::origin_record(SemanticTrainingViewOrigin {
+                        transition: SemanticTransitionKind::Proposal,
+                        predecessor: identity(header),
+                        successor: identity(next.header),
+                        invocation: header.rng_binding()?,
+                        model_geometry_digest: header.model_geometry_digest,
+                        model_numerical_digest: header.model_numerical_digest,
+                    }), next.state.action_batch_root, publication_abi_bytes(&[next.state.action_batch]))?;
+            }
             Ok(Some(SemanticCompletedReplayMaterials {
                 predecessor: identity(header),
                 successor: identity(next.header),
