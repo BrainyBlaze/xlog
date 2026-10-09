@@ -16,11 +16,13 @@ struct Task {
     uint32_t queries, bindings;
     uint64_t coding, support_count, level_count, goal_count;
     const uint64_t *scoring, *goal_witness, *query_rows, *supports, *levels, *goals, *binding_rows;
+    const uint64_t* observation_rows;
     uint64_t actor_eligible;
     semantic_program::Bank program;
     bool editable;
     __device__ const uint64_t* query(uint32_t index) const { return query_rows + uint64_t(index)*7; }
     __device__ const uint64_t* binding(uint32_t index) const { return binding_rows + uint64_t(index)*kBindingWords; }
+    __device__ const uint64_t* observation(uint32_t index) const { return observation_rows + uint64_t(index)*7; }
     __device__ bool target(uint32_t query, uint64_t* truth) const {
         for(uint64_t index=0;index<goal_count;++index) {
             if(goals[index*3]==query) { *truth=goals[index*3+1];return true; }
@@ -28,11 +30,11 @@ struct Task {
         return false;
     }
     __device__ bool observation_fact(uint32_t binding_index,semantic_program::Fact* fact) const {
-        const uint64_t record=binding(binding_index)[1];
-        for(uint32_t index=0;index<queries;++index) {
-            if(query(index)[4]==record) { *fact=semantic_program::bank_fact(program,index);return true; }
-        }
-        return false;
+        if(binding_index>=bindings || !editable)return false;
+        const uint64_t* row=observation(binding_index);
+        if(!(row[0]|row[1]|row[2]|row[3]) || row[4]>=program.predicate_count ||
+           row[5]>UINT32_MAX || row[6]>UINT32_MAX)return false;
+        *fact={uint32_t(row[4]),uint32_t(row[5]),uint32_t(row[6])};return true;
     }
 };
 
@@ -54,7 +56,8 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
     };
     if(!take(task.queries,7,&task.query_rows) || !take(task.support_count,5,&task.supports) ||
        !take(task.level_count,1,&task.levels) || !take(task.goal_count,3,&task.goals) ||
-       !take(task.bindings,kBindingWords,&task.binding_rows) || words[12]!=count-offset)return false;
+       !take(task.bindings,kBindingWords,&task.binding_rows) ||
+       !take(task.bindings,7,&task.observation_rows) || words[12]!=count-offset)return false;
     task.editable=words[12]!=0;
     if(task.editable && (!semantic_program::decode_bank(words+offset,words[12],&task.program) ||
        task.program.query_count!=task.queries || task.program.rule_count>semantic_program::kRuleCapacity))return false;

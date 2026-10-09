@@ -86,6 +86,7 @@ struct SemanticTrainingObjectiveRecord {
     uint64_t evaluator_abi,identity[4],task_identity[4],row_count,capacity;
     uint64_t group_count,group_member_count,canary_count,protected_member_count;
     uint64_t evaluator_min_bits,evaluator_max_bits,coefficient_bits[9],cost_unit[4],cost_cap,truth_tokens[4];
+    uint64_t canary_source_offset,canary_source_words;
 };
 
 struct SemanticTrainingObjectiveGroupRecord {

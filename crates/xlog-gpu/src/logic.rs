@@ -1234,6 +1234,8 @@ pub fn compile_positive_binary_task(
         predicate_count: theory.predicates.len() as u32,
         initial_facts,
         initial_rules,
+        observation_facts: queries.iter().copied().enumerate()
+            .map(|(record, fact)| (record as u32, fact)).collect(),
         queries,
     })
 }

@@ -296,6 +296,12 @@ pub(crate) struct PySemanticTransitionColdTask {
     statement_records: Vec<u32>,
 }
 
+impl PySemanticTransitionColdTask {
+    pub(super) fn canary_source(&self, py: Python<'_>) -> PyResult<Arc<xlog_cuda::SemanticTrainingCanarySource>> {
+        self.session.borrow(py).owner()?.training_canary_source().map_err(xlog_err)
+    }
+}
+
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
@@ -533,6 +539,9 @@ impl PySemanticTransitionColdTask {
     /// restored Session is allocated. Immutable task content and statement
     /// ordinals remain readable; saved Session/controller aliases cannot run.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
+        if self.session.borrow(py).owner()?.training_canary_source_borrowed() {
+            return Err(invalid("logical canary source remains owned by dependent training sessions"));
+        }
         self.session.borrow(py).release_observed_cold()
     }
 
