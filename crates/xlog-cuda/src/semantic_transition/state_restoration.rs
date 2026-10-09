@@ -24,28 +24,6 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    pub(super) fn publication_preparation_read<T: DeviceRepr + Copy>(
-        &mut self,
-        preparation: &Arc<OriginalPublicationPreparation>,
-        source: DeviceMemoryView<T>,
-    ) -> Result<Vec<T>, SemanticTransitionError> {
-        let restoration = self
-            .state_material_restore
-            .as_ref()
-            .filter(|owner| {
-                preparation
-                    .restoration
-                    .as_ref()
-                    .is_some_and(|issuance| Arc::ptr_eq(issuance, &owner.issuance))
-            })
-            .cloned();
-        if !self.original_restoration_may_submit(restoration.as_ref(), Some(preparation)) {
-            return Err(SemanticTransitionError::Poisoned);
-        }
-        let mut original = self.stage_publication_read(source)?;
-        self.resolve_publication_read_with_poison(&mut original, &mut false)
-    }
-
     fn require_state_material_restore_entry(&self) -> Result<(), SemanticTransitionError> {
         #[cfg(feature = "semantic-policy")]
         if let Some(context) = self.actor_refresh_context_issuance() {
@@ -80,7 +58,7 @@ impl SemanticTransitionSession {
         })
     }
 
-    fn original_restoration_may_submit(
+    pub(super) fn original_restoration_may_submit(
         &self,
         restoration: Option<&Arc<OriginalStateMaterialRestore>>,
         preparation: Option<&Arc<OriginalPublicationPreparation>>,
@@ -955,7 +933,7 @@ struct PublicationPreparation {
     rng: SemanticRngBinding,
     retain_current_models: bool,
     fold: Option<learning_phase::LearningFoldPlan>,
-    fold_entered: bool,
+    fold_work: Option<learning_phase::OriginalLearningFold>,
     fold_completed: bool,
     memory: Vec<crate::device::RetainedDeviceMemoryCommand>,
     memory_next: usize,
@@ -1265,6 +1243,9 @@ impl SemanticTransitionSession {
             self.state.view(),
             true,
         )?);
+        let fold_work = fold
+            .map(|plan| self.stage_learning_fold(plan, Arc::clone(&storage)))
+            .transpose()?;
         Ok(Arc::new(OriginalPublicationPreparation {
             issuer: Arc::clone(&self.publication_issuer),
             restoration: restoration.map(|owner| Arc::clone(&owner.issuance)),
@@ -1277,7 +1258,7 @@ impl SemanticTransitionSession {
                 rng,
                 retain_current_models,
                 fold: fold.cloned(),
-                fold_entered: false,
+                fold_work,
                 fold_completed: false,
                 memory,
                 memory_next: 0,
@@ -1382,20 +1363,15 @@ impl SemanticTransitionSession {
                 && original.fold.is_some()
                 && !original.fold_completed
             {
-                if original.fold_entered {
-                    return Err(publication_input_error(
-                        "original learning fold completion remains unresolved",
-                    ));
-                }
-                if !self.original_restoration_may_submit(restoration, Some(&owner)) {
-                    return Err(SemanticTransitionError::Poisoned);
-                }
-                original.fold_entered = true;
                 self.apply_learning_fold(
-                    original.fold.as_ref().expect("original learning fold"),
+                    original.fold_work.as_mut().ok_or(
+                        SemanticTransitionError::ObservationMismatch,
+                    )?,
                     &owner,
+                    restoration,
                 )?;
                 original.fold_completed = true;
+                original.fold_work = None;
             }
             if original.write_next == original.writes.len() {
                 break;

@@ -935,17 +935,61 @@ fn packed_layout(
     Ok(layout)
 }
 
+/// The original cold fold's allocations and ordered, single-entry commands.
+/// Nothing in this owner is recreated after a device effect has entered.
+pub(super) struct OriginalLearningFold {
+    storage: Arc<PublicationStorage>,
+    scratch: Vec<TrackedCudaSlice<u8>>,
+    outputs: Vec<Option<TrackedCudaSlice<u8>>>,
+    status: TrackedCudaSlice<u64>,
+    status_write: state_restoration::OriginalDeviceWrite,
+    status_read: PublicationRead<u64>,
+    preserve: Vec<crate::device::RetainedDeviceMemoryCommand>,
+    preserve_next: usize,
+    kernels: Vec<LearningFoldKernel>,
+    kernel_next: usize,
+    execute: CudaFunction,
+    checked: bool,
+    assign: Vec<crate::device::RetainedDeviceMemoryCommand>,
+    assign_next: usize,
+    poisoned: bool,
+}
+
+struct LearningFoldKernel {
+    descriptor: FoldDeviceAssignment,
+    stage: u64,
+    command: OriginalNativeCommand,
+}
+
+fn resolve_fold_memory_command(
+    domain: &ResidentExecutionDomain,
+    command: &mut crate::device::RetainedDeviceMemoryCommand,
+    poisoned: &mut bool,
+    may_submit: bool,
+) -> Result<(), SemanticTransitionError> {
+    if !command.entered() {
+        if !may_submit {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let mut recorder = domain.new_strict_recorder();
+        recorder.write(command.destination());
+        if let Some(source) = command.source() {
+            recorder.read(source);
+        }
+        enqueue_recorded(domain, poisoned, recorder, |_| command.enqueue())?;
+    }
+    command.resolve().map_err(|error| {
+        *poisoned = true;
+        runtime_error("original learning fold copy completion", error)
+    })
+}
+
 impl SemanticTransitionSession {
-    pub(super) fn apply_learning_fold(
-        &mut self,
+    pub(super) fn stage_learning_fold(
+        &self,
         plan: &LearningFoldPlan,
-        preparation: &Arc<state_restoration::OriginalPublicationPreparation>,
-    ) -> Result<(), SemanticTransitionError> {
-        let storage = Arc::clone(
-            self.publication
-                .as_ref()
-                .ok_or(SemanticTransitionError::NotBound)?,
-        );
+        storage: Arc<PublicationStorage>,
+    ) -> Result<OriginalLearningFold, SemanticTransitionError> {
         // A cold fold has a genuine private writer, not a second persistent
         // model bank. Preserve all bytes (including alias padding) before the
         // unchanged compute/scatter/all-view-check law and sole assignment.
@@ -955,33 +999,6 @@ impl SemanticTransitionSession {
             .iter()
             .map(|&bytes| allocate_publication::<u8>(&self.provider, bytes as usize))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut recorder = self.domain.new_strict_recorder();
-        for (index, destination) in scratch.iter().enumerate() {
-            recorder.read(&storage.allocations[storage.model_slots[index][0]].slice()?);
-            recorder.write(destination);
-        }
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            for (index, destination) in scratch.iter().enumerate() {
-                if destination.is_empty() {
-                    continue;
-                }
-                // SAFETY: full source/scratch allocations are disjoint, retained
-                // and recorded; no descriptor names this cold fold's writer.
-                unsafe {
-                    sys::cuMemcpyDtoDAsync_v2(
-                        destination.device_ptr_value(),
-                        storage.allocations[storage.model_slots[index][0]]
-                            .entry()
-                            .pointer,
-                        destination.len(),
-                        enqueue.stream().cu_stream(),
-                    )
-                }
-                .result()
-                .map_err(|error| XlogError::Kernel(error.to_string()))?;
-            }
-            Ok::<(), XlogError>(())
-        })?;
         let pointer = |key: (u64, u64), bank: usize| {
             let (allocation, offset) = storage.model_memory.location(key.0, key.1)?;
             let base = if bank == 0 {
@@ -1083,98 +1100,189 @@ impl SemanticTransitionSession {
             descriptors.push(descriptor);
         }
         let status = allocate_publication::<u64>(&self.provider, 1)?;
-        upload_publication(&self.provider, &[0u64], &status)?;
+        let status_write = state_restoration::OriginalDeviceWrite::new(
+            &self.stream,
+            &[0u64],
+            status.view(),
+            false,
+        )?;
+        let status_read = self.stage_publication_read(status.view())?;
         let execute = self
             .provider
             .device()
             .inner()
             .get_func("xlog_semantic_transition", "semantic_learning_fold")
             .ok_or_else(|| runtime_error("kernel lookup", "learning absorption unavailable"))?;
-        let mut recorder = self.domain.new_strict_recorder();
-        storage.record(&mut recorder);
-        for allocation in &scratch {
-            recorder.read_write(allocation);
-        }
-        recorder.read_write(&status);
-        for output in outputs.iter().flatten() {
-            recorder.read_write(output);
-        }
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            // Every expectation is computed before scatter. Masters consume the
-            // already-rounded effective outputs, never an unrounded accumulator.
-            for stage in 0..4u64 {
-                for descriptor in &descriptors {
-                    if descriptor.count == 0
-                        || (stage == 0 && matches!(descriptor.mode, 0 | 2))
-                        || (stage == 1 && descriptor.mode != 2)
-                        || (stage == 2 && descriptor.mode == 0)
-                    {
-                        continue;
-                    }
-                    let blocks = descriptor.count.div_ceil(256).min(65535) as u32;
-                    // SAFETY: original, scratch, expectation and all factor
-                    // spans are derived from the complete retained native map;
-                    // their owners were recorded before this enqueue boundary.
-                    unsafe {
-                        execute.clone().launch_in(
-                            enqueue,
-                            LaunchConfig {
-                                grid_dim: (blocks, 1, 1),
-                                block_dim: (256, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (*descriptor, stage, status.device_ptr_value()),
-                        )
-                    }
-                    .map_err(|error| XlogError::Kernel(error.to_string()))?;
-                }
-            }
-            Ok::<(), XlogError>(())
-        })?;
-        wait_on_stream(
-            &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "cold adapter absorption and physical alias check",
-            CudaStream::synchronize,
-        )?;
-        if self.publication_preparation_read(preparation, status.view())?[0] != 0 {
-            return Err(publication_input_error("adapter absorption encountered nonfinite numerics or conflicting physical alias bytes"));
-        }
-        let mut recorder = self.domain.new_strict_recorder();
-        storage.record(&mut recorder);
-        for (index, allocation) in scratch.iter().enumerate() {
-            recorder.read(allocation);
-            recorder.write(&storage.allocations[storage.model_slots[index][0]].slice()?);
-        }
-        enqueue_recorded(&self.domain, &mut self.poisoned, recorder, |enqueue| {
-            for (index, slots) in storage.model_slots.iter().enumerate() {
-                let destination = &storage.allocations[slots[0]];
-                if destination.is_empty() {
+        let mut kernels = Vec::new();
+        // Freeze the same complete compute/scatter/all-view-check sequence.
+        // Masters consume already-rounded effective outputs, never an unrounded
+        // accumulator, and no assignment enters before every check completes.
+        for stage in 0..4u64 {
+            for descriptor in &descriptors {
+                if descriptor.count == 0
+                    || (stage == 0 && matches!(descriptor.mode, 0 | 2))
+                    || (stage == 1 && descriptor.mode != 2)
+                    || (stage == 2 && descriptor.mode == 0)
+                {
                     continue;
                 }
-                // SAFETY: the complete unsealed scratch allocation passed every
-                // original view before this first candidate-bank assignment.
-                unsafe {
-                    sys::cuMemcpyDtoDAsync_v2(
-                        destination.entry().pointer,
-                        scratch[index].device_ptr_value(),
-                        destination.len(),
-                        enqueue.stream().cu_stream(),
-                    )
-                }
-                .result()
-                .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                kernels.push(LearningFoldKernel {
+                    descriptor: *descriptor,
+                    stage,
+                    command: OriginalNativeCommand::new(&self.domain)?,
+                });
             }
-            Ok::<(), XlogError>(())
-        })?;
-        wait_on_stream(
+        }
+        let mut preserve = Vec::new();
+        let mut assign = Vec::new();
+        for (index, allocation) in scratch.iter().enumerate() {
+            if allocation.is_empty() {
+                continue;
+            }
+            let original = storage.allocations[storage.model_slots[index][0]]
+                .slice()?
+                .view();
+            preserve.push(
+                crate::device::RetainedDeviceMemoryCommand::copy(
+                    &self.stream,
+                    original.clone(),
+                    allocation.view(),
+                )
+                .map_err(|error| runtime_error("original fold preservation staging", error))?,
+            );
+            assign.push(
+                crate::device::RetainedDeviceMemoryCommand::copy(
+                    &self.stream,
+                    allocation.view(),
+                    original,
+                )
+                .map_err(|error| runtime_error("original fold assignment staging", error))?,
+            );
+        }
+        Ok(OriginalLearningFold {
+            storage,
+            scratch,
+            outputs,
+            status,
+            status_write,
+            status_read,
+            preserve,
+            preserve_next: 0,
+            kernels,
+            kernel_next: 0,
+            execute,
+            checked: false,
+            assign,
+            assign_next: 0,
+            poisoned: false,
+        })
+    }
+
+    pub(super) fn apply_learning_fold(
+        &mut self,
+        original: &mut OriginalLearningFold,
+        preparation: &Arc<state_restoration::OriginalPublicationPreparation>,
+        restoration: Option<&Arc<state_restoration::OriginalStateMaterialRestore>>,
+    ) -> Result<(), SemanticTransitionError> {
+        if self
+            .publication
+            .as_ref()
+            .is_none_or(|storage| !Arc::ptr_eq(storage, &original.storage))
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        // Preserve the original effect order: full-backing copies, status
+        // initialization, four kernel stages, status check, sole assignment.
+        while original.preserve_next < original.preserve.len() {
+            let may_submit = self.original_restoration_may_submit(restoration, Some(preparation));
+            resolve_fold_memory_command(
+                &self.domain,
+                &mut original.preserve[original.preserve_next],
+                &mut original.poisoned,
+                may_submit,
+            )?;
+            original.preserve_next += 1;
+        }
+        let may_submit = self.original_restoration_may_submit(restoration, Some(preparation));
+        original.status_write.resolve(
+            &self.domain,
             &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "cold absorbed candidate assignment",
-            CudaStream::synchronize,
-        )
+            &self.provider,
+            &mut original.poisoned,
+            may_submit,
+        )?;
+        while original.kernel_next < original.kernels.len() {
+            let kernel = &mut original.kernels[original.kernel_next];
+            if !kernel.command.resolve_entered(&mut original.poisoned)? {
+                if !self.original_restoration_may_submit(restoration, Some(preparation)) {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
+                let mut recorder = self.domain.new_strict_recorder();
+                original.storage.record(&mut recorder);
+                for allocation in &original.scratch {
+                    recorder.read_write(allocation);
+                }
+                recorder.read_write(&original.status);
+                for output in original.outputs.iter().flatten() {
+                    recorder.read_write(output);
+                }
+                let descriptor = kernel.descriptor;
+                let stage = kernel.stage;
+                let status = original.status.device_ptr_value();
+                let execute = original.execute.clone();
+                let blocks = descriptor.count.div_ceil(256).min(65535) as u32;
+                kernel.command.run(
+                    &self.domain,
+                    &mut original.poisoned,
+                    recorder,
+                    |enqueue, entered, submitted| {
+                        // SAFETY: the frozen descriptor, scratch, expectations
+                        // and factor spans have their original retained owners
+                        // in this exact command's strict recorder.
+                        *entered = true;
+                        unsafe {
+                            execute.launch_in(
+                                enqueue,
+                                LaunchConfig {
+                                    grid_dim: (blocks, 1, 1),
+                                    block_dim: (256, 1, 1),
+                                    shared_mem_bytes: 0,
+                                },
+                                (descriptor, stage, status),
+                            )
+                        }
+                        .map_err(|error| XlogError::Kernel(error.to_string()))?;
+                        *submitted = true;
+                        Ok(())
+                    },
+                )?;
+            }
+            original.kernel_next += 1;
+        }
+        if !original.checked {
+            let may_submit = self.original_restoration_may_submit(restoration, Some(preparation));
+            let status = self.resolve_acquisition_read(
+                &mut original.status_read,
+                may_submit,
+                &mut original.poisoned,
+            )?;
+            if status.as_slice() != [0] {
+                return Err(publication_input_error("adapter absorption encountered nonfinite numerics or conflicting physical alias bytes"));
+            }
+            original.checked = true;
+        }
+        while original.assign_next < original.assign.len() {
+            let may_submit = self.original_restoration_may_submit(restoration, Some(preparation));
+            resolve_fold_memory_command(
+                &self.domain,
+                &mut original.assign[original.assign_next],
+                &mut original.poisoned,
+                may_submit,
+            )?;
+            original.assign_next += 1;
+        }
+        original.poisoned = false;
+        Ok(())
     }
 }
 
