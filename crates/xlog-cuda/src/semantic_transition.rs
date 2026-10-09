@@ -31232,6 +31232,54 @@ impl SemanticTransitionSession {
         Ok(step)
     }
 
+    /// Inspect only the original consumer-completion owner of this reader.
+    pub fn published_consumer_completion_pending(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<bool, SemanticTransitionError> {
+        let step = self.checked_original_consumer_step(lease)?;
+        let Some(original) = &step.consumer_completion else { return Ok(false); };
+        if !self.original_completion_may_submit(lease.token, Some(original), None) {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let original = original.lock()
+            .map_err(|_| publication_input_error("original consumer owner poisoned"))?;
+        if original.identity != Some(lease.identity)
+            || original.purpose == OriginalConsumerPurpose::Cancellation
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(!original.completed && original.poisoned
+            && (original.cursor != 0 || original.edges.iter().any(|edge| edge.record_entered || edge.wait_entered)))
+    }
+
+    /// Inspect only this reader's retained original Release operation.
+    pub fn published_reader_release_pending(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<bool, SemanticTransitionError> {
+        self.checked_original_consumer_step(lease)?;
+        let Some(reader) = self.readers.get(&lease.token) else { return Ok(false); };
+        let Some(original) = &reader.retirement_owner else { return Ok(false); };
+        if !self.original_completion_may_submit(lease.token, None, Some(original)) {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let original = original.lock()
+            .map_err(|_| publication_input_error("original reader retirement owner poisoned"))?;
+        let consumers = original.consumers.lock()
+            .map_err(|_| publication_input_error("original reader consumer owner poisoned"))?;
+        if original.identity != lease.identity || consumers.identity != Some(lease.identity) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let read = original.read.lock()
+            .map_err(|_| publication_input_error("original reader retirement read owner poisoned"))?;
+        let entered = original.command.completion_entered || original.command.entered
+            || read.read.entered()
+            || consumers.cursor != 0
+            || consumers.edges.iter().any(|edge| edge.record_entered || edge.wait_entered);
+        Ok(reader.retirement_pending && entered && (original.poisoned || consumers.poisoned))
+    }
+
     fn checked_original_prepared_consumer_step(
         &self,
         step: &SemanticPreparedStep,
@@ -36311,28 +36359,7 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let original = Arc::clone(&self.policy_tapes[index].policy.text_binding);
         if self.policy_tapes[index].retirement.is_some() {
-            // Only this local retirement owner permits continuation. Historical
-            // Session/graph poison does not authorize a new guard or suffix.
-            if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
-                return Err(SemanticTransitionError::Poisoned);
-            }
-            if self.pending || self.pending_replay_delivery.is_some()
-                || self.pending_training_materialization.is_some()
-            {
-                return Err(SemanticTransitionError::OverlappingLaunch);
-            }
-            let step = self.steps.get(&lease.token).ok_or(SemanticTransitionError::NotBound)?;
-            if !Arc::ptr_eq(&lease.issuer, &self.publication_issuer)
-                || step.identity != Some(lease.identity)
-                || lease.active != self.readers.contains_key(&lease.token)
-                || !self.policy_tapes[index].retirement_parent.as_ref().is_some_and(|parent| parent.matches(lease))
-                || original._witness.reader_token != lease.token
-                || !Arc::ptr_eq(&original._witness.issuer, &self.publication_issuer)
-                || !Arc::ptr_eq(&original._witness._witness, &step.content_witnesses)
-                || original._witness.index >= step.content.len()
-            {
-                return Err(SemanticTransitionError::ObservationMismatch);
-            }
+            self.require_original_policy_retirement(lease, index)?;
         } else {
             self.ensure_quiescent()?;
             self.checked_content_witness(lease, &original._witness)?;
@@ -36345,6 +36372,67 @@ impl SemanticTransitionSession {
             });
         }
         self.finish_policy_tape(index, consumer_stream)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_original_policy_retirement(
+        &self,
+        lease: &SemanticPublishedLease,
+        index: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let step = self.checked_original_consumer_step(lease)?;
+        let tape = self.policy_tapes.get(index).ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let original = &tape.policy.text_binding;
+        if !tape.retirement_parent.as_ref().is_some_and(|parent| parent.matches(lease))
+            || original._witness.reader_token != lease.token
+            || !Arc::ptr_eq(&original._witness.issuer, &self.publication_issuer)
+            || !Arc::ptr_eq(&original._witness._witness, &step.content_witnesses)
+            || original._witness.index >= step.content.len()
+            || tape.retirement.as_ref().is_none_or(|retirement| !Arc::ptr_eq(&retirement.binding, original))
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        // Exclude only this exact retirement; no unrelated pending operation
+        // or independent Session/graph failure grants a new suffix.
+        if self.poisoned || self.graph.ensure_not_poisoned().is_err()
+            || self.pending || self.pending_replay_delivery.is_some()
+            || self.pending_training_materialization.is_some()
+            || self.prepared_segment.as_ref().is_some_and(|build| build.execution_poisoned)
+            || self.has_uninitialized_cold_model_work()
+            || self.has_pending_cold_model_work_completion(None)
+            || self.policy_tapes.iter().enumerate().any(|(other, tape)| other != index && tape.retirement.is_some())
+            || self.readers.values().any(|reader| reader.retirement_pending || reader.acquisition_pending)
+            || self.steps.values().any(|step| step.consumer_completion.is_some())
+        {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        Ok(())
+    }
+
+    /// Classify only uncertainty retained by this invocation's original
+    /// final-use operation. This performs no read, guard, or stream operation.
+    #[cfg(feature = "semantic-policy")]
+    pub fn policy_invocation_final_use_pending(
+        &self,
+        lease: &SemanticPublishedLease,
+        invocation: SemanticRngBinding,
+    ) -> Result<bool, SemanticTransitionError> {
+        self.checked_original_consumer_step(lease)?;
+        let Some(index) = self.policy_tapes.iter().position(|tape| tape.invocation == invocation) else {
+            return Ok(false);
+        };
+        let Some(retirement) = self.policy_tapes[index].retirement.as_ref() else {
+            return Ok(false);
+        };
+        self.require_original_policy_retirement(lease, index)?;
+        let edges_entered = retirement.inputs.iter().chain(&retirement.outputs)
+            .any(|edge| edge.record_entered || edge.wait_entered);
+        let content = &self.steps[&lease.token].content[retirement.binding._witness.index];
+        let content = content.original_cold.lock()
+            .map_err(|_| publication_input_error("original policy content owner poisoned"))?;
+        let content_entered = content.as_ref().is_some_and(|batch| batch.retirement
+            && batch.verify && batch.commands.iter().any(|command| command.completion_entered || command.entered));
+        Ok(retirement.poisoned && (edges_entered || content_entered))
     }
 
     #[cfg(feature = "semantic-policy")]
