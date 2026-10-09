@@ -9149,6 +9149,7 @@ enum PublishedReaderAcquisition {
 struct PublishedReader {
     device: TrackedCudaSlice<PublicationLease>,
     acquisition: PublishedReaderAcquisition,
+    initialization: Option<crate::device::RetainedDeviceWrite<PublicationLease>>,
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
     model_owners: Vec<Arc<ModelGenerationOwner>>,
@@ -25226,6 +25227,7 @@ impl SemanticTransitionSession {
             PublishedReader {
                 device,
                 acquisition: PublishedReaderAcquisition::Allocated,
+                initialization: None,
                 aliases: Arc::new(()),
                 consumer_streams: BTreeSet::new(),
                 model_owners: Vec::new(),
@@ -25239,21 +25241,48 @@ impl SemanticTransitionSession {
         token: u64,
     ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
         if self.readers[&token].acquisition == PublishedReaderAcquisition::Allocated {
-            // The retained reader precedes even initialization. After a failed
-            // upload, resolution joins the original stream before retrying this
-            // idempotent prefix; no Acquire has entered at this stage.
-            if let Err(error) = upload_publication(
-                &self.provider,
-                &[PublicationLease::default()],
-                &self.readers[&token].device,
-            ) {
+            if self.readers[&token].initialization.is_none() {
+                let initialization = crate::device::RetainedDeviceWrite::new(
+                    &self.stream,
+                    &[PublicationLease::default()],
+                    self.readers[&token].device.view(),
+                )
+                .map_err(|error| {
+                    runtime_error("publication lease initialization staging", error)
+                })?;
+                self.provider
+                    .admit_launch_metadata_htod(size_of::<PublicationLease>());
+                self.readers
+                    .get_mut(&token)
+                    .expect("installed acquisition reader")
+                    .initialization = Some(initialization);
+            }
+            let reader = self
+                .readers
+                .get_mut(&token)
+                .expect("installed acquisition reader");
+            let initialization = reader
+                .initialization
+                .as_mut()
+                .expect("original lease initialization");
+            // Both the original pinned source and destination precede DMA.
+            // Resolution joins an entered copy and never uploads it again.
+            let initialized = (|| {
+                if !initialization.entered() {
+                    initialization.enqueue(&self.stream).map_err(|error| {
+                        runtime_error("publication lease initialization upload", error)
+                    })?;
+                }
+                initialization.resolve().map_err(|error| {
+                    runtime_error("publication lease initialization completion", error)
+                })
+            })();
+            if let Err(error) = initialized {
                 self.poisoned = true;
                 return Err(error);
             }
-            self.readers
-                .get_mut(&token)
-                .expect("installed acquisition reader")
-                .acquisition = PublishedReaderAcquisition::Initialized;
+            reader.acquisition = PublishedReaderAcquisition::Initialized;
+            reader.initialization = None;
         }
         if self.readers[&token].acquisition == PublishedReaderAcquisition::Initialized {
             self.publication_command(2, Some(token))?;
