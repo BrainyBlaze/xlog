@@ -374,8 +374,9 @@ publication evidence. It rejects actor rows and checkpoint-only referents.
 The result receipt is HMAC-SHA256 under the bound receiver key over
 `b"xlog.replay.result.v2\0"` followed by seven 32-byte fields:
 stable intent, SHA256 of the complete delivery receipt, original action base
-logical identity, original action successor logical identity, nonzero execution
-identity, SHA256 of the canonical UTF-8 record line, and SHA256 of the original
+logical identity, original action successor logical identity, the original
+completed-action owner identity (`envelope.action_identity`), SHA256 of the
+canonical UTF-8 record line, and SHA256 of the original
 native evidence, then a little-endian 64-bit disposition (`1` for an eligible
 replay row, `2` for rejected measurement evidence). The final 32 bytes are the MAC.
 The disposition is derived from the original five ordered verification receipt

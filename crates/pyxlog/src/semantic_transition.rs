@@ -5168,6 +5168,12 @@ impl ReplayRow {
         if actions.next().is_some() {
             return Err(invalid("replay episode has more than one action owner"));
         }
+        let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
+        if replay_json_value(replay_json_field(&envelope, "action_identity")?)? != action.identity {
+            return Err(invalid(
+                "replay episode differs from its original action owner",
+            ));
+        }
         replay_digest_identity(&action.identity)
     }
 
@@ -18266,10 +18272,12 @@ impl PySemanticTransitionController {
                         Identity256::from_bytes(Sha256::digest(&row.evidence).into());
                     let training_row = row.training_view_row()?;
                     let disposition = row.acquired_result_disposition()?;
+                    let action_identity = row.action_identity()?;
                     parsed.push((
                         row.native_replay()?.material,
                         training_row,
                         bytes,
+                        action_identity,
                         record_digest,
                         evidence_digest,
                         disposition,
@@ -18448,6 +18456,7 @@ impl PySemanticTransitionController {
         let record_digest =
             Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
         let evidence_digest = Identity256::from_bytes(Sha256::digest(&row.evidence).into());
+        let action_identity = row.action_identity()?;
         let disposition = row.acquired_result_disposition()?;
         let training_row = row.training_view_row()?;
         let replay = row.native_replay()?;
@@ -18486,6 +18495,7 @@ impl PySemanticTransitionController {
             &replay.material,
             training_row,
             &canonical_row,
+            action_identity,
             record_digest,
             evidence_digest,
             disposition,

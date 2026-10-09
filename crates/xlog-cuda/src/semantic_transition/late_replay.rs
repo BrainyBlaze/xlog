@@ -65,6 +65,7 @@ fn verify_result_receipt(
     receipt: &[u8],
     intent: &IntentEntry,
     delivery_digest: Identity256,
+    action_identity: Identity256,
     record_digest: Identity256,
     evidence_digest: Identity256,
     disposition: u64,
@@ -87,11 +88,7 @@ fn verify_result_receipt(
         delivery_digest,
         intent.base_logical,
         intent.result_logical,
-        Identity256::from_bytes(
-            receipt[DOMAIN.len() + 4 * 32..DOMAIN.len() + 5 * 32]
-                .try_into()
-                .expect("checked result receipt extent"),
-        ),
+        action_identity,
         record_digest,
         evidence_digest,
     ]
@@ -355,6 +352,7 @@ impl SemanticTransitionSession {
             Vec<u8>,
             Identity256,
             Identity256,
+            Identity256,
             u64,
         )],
     ) -> Result<(), SemanticTransitionError> {
@@ -383,8 +381,10 @@ impl SemanticTransitionSession {
         let receipts =
             acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
         let mut eligible_count = 0;
-        for (archived, (replay, row, canonical, record_digest, evidence_digest, disposition)) in
-            rows.iter().zip(acquisitions)
+        for (
+            archived,
+            (replay, row, canonical, action_identity, record_digest, evidence_digest, disposition),
+        ) in rows.iter().zip(acquisitions)
         {
             let row_ordinal = arena
                 .original_count()
@@ -463,6 +463,7 @@ impl SemanticTransitionSession {
                     archived.result_receipt,
                     &original,
                     delivery_digest,
+                    *action_identity,
                     *record_digest,
                     *evidence_digest,
                     *disposition,
@@ -628,6 +629,7 @@ impl SemanticTransitionSession {
         replay: &SemanticReplayMaterial,
         row: SemanticTrainingViewRow,
         canonical_row: &[u8],
+        action_identity: Identity256,
         record_digest: Identity256,
         evidence_digest: Identity256,
         disposition: u64,
@@ -708,6 +710,7 @@ impl SemanticTransitionSession {
             result_receipt,
             &original,
             delivery_digest,
+            action_identity,
             record_digest,
             evidence_digest,
             disposition,

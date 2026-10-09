@@ -1517,10 +1517,15 @@ __device__ bool publication_resolve_range(const PublicationControl& control,cons
     if(!storage.generation || storage.generation!=range.generation ||
        range.offset_bytes>storage.bytes || range.length_bytes>storage.bytes-range.offset_bytes ||
        storage.pointer>UINT64_MAX-storage.bytes)return false;
-    // A genuine empty model tensor has an owned zero-byte storage entry. Null
-    // is its data pointer, not an invalid owner and not an alias-class identity.
-    if(!storage.bytes)return !storage.pointer && range.role>=18 && range.role<=20 &&
-        !range.offset_bytes && !range.length_bytes && !range.logical_begin && !range.logical_end;
+    // Genuine empty model tensors and an unreserved replay payload retain an
+    // owned zero-byte entry. Null is their data pointer, not a missing owner.
+    if(!storage.bytes) {
+        const bool empty_model=range.role>=18 && range.role<=20;
+        const bool empty_payload=range.role==57 && !range.index && control.contract &&
+            !reinterpret_cast<const PublicationContract*>(control.contract)->replay_payload_capacity_bytes;
+        return !storage.pointer && (empty_model || empty_payload) &&
+            !range.offset_bytes && !range.length_bytes && !range.logical_begin && !range.logical_end;
+    }
     if(!storage.pointer)return false;
     *bytes=reinterpret_cast<uint8_t*>(storage.pointer+range.offset_bytes);
     return true;
@@ -1739,7 +1744,7 @@ __device__ uint64_t publication_tensor_view(const PublicationControl& control,co
     uint8_t* bytes=nullptr;
     if(!publication_resolve_range(control,range,&bytes) ||
        publication_content_view(bytes,range.length_bytes,range,layout,view,content_bytes,work))return 1;
-    if(!layout)return bytes ? 0 : 1;
+    if(!layout)return bytes || (range.role==57 && !range.length_bytes) ? 0 : 1;
     const bool empty_model=range.role>=18 && range.role<=25 &&
         layout->logical_axis==UINT64_MAX && !*content_bytes;
     if(empty_model) {
@@ -2941,8 +2946,39 @@ __device__ void publication_copy_bytes(uint8_t* to,const uint8_t* from,uint64_t 
         semantic_graph::NativeWorkTally* work=nullptr) {
     for(uint64_t i=0;i<count;++i)to[i]=semantic_graph::written_byte(from[i],work);
 }
+__device__ uint64_t publication_preserve_range(const PublicationControl& control,
+        const PublicationRange* original,uint64_t range_count,
+        const PublicationRange& source,PublicationRange& destination,
+        semantic_graph::NativeWorkTally* work=nullptr) {
+    if(source.role!=destination.role || source.index!=destination.index ||
+       source.storage_slot>=control.storage_count || destination.storage_slot>=control.storage_count ||
+       source.storage_slot==destination.storage_slot || source.offset_bytes!=destination.offset_bytes)return 1;
+    const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+    const auto& from=storage[source.storage_slot];
+    const auto& to=storage[destination.storage_slot];
+    if(from.bytes!=to.bytes || source.offset_bytes>from.bytes ||
+       destination.generation!=to.generation || (from.bytes && from.pointer==to.pointer))return 1;
+    const auto* layout=publication_find_layout(control,original,range_count,source.role,source.index);
+    TensorLayoutTableView table{};
+    const bool tensor=(source.role>=4 && source.role<=13) ||
+        (source.role>=18 && source.role<=25) || (source.role>=51 && source.role<=54);
+    if(tensor && (!layout || !publication_tensor_table(control,original,range_count,&table)))return 1;
+    uint64_t digest[4];
+    if(publication_range_digest(control,source,layout,digest,tensor ? &table : nullptr,work) ||
+       !publication_identity_equal(digest,source.digest))return 1;
+    const uint64_t slot=destination.storage_slot,generation=destination.generation;
+    destination=source;destination.storage_slot=slot;destination.generation=generation;
+    uint8_t *source_bytes=nullptr,*destination_bytes=nullptr;
+    if(!publication_resolve_range(control,source,&source_bytes) ||
+       !publication_resolve_range(control,destination,&destination_bytes))return 1;
+    // Retain padding and unused capacity as well as the visible logical bytes;
+    // future native producers own the same frozen backing, not a short prefix.
+    publication_copy_bytes(destination_bytes,source_bytes,from.bytes-source.offset_bytes,work);
+    return 0;
+}
 __device__ uint64_t publication_apply_continuation(const PublicationControl& control,
-        const PublicationBank& base,PublicationBank& next,const PendingContinuation& pending) {
+        const PublicationBank& base,PublicationBank& next,const PendingContinuation& pending,
+        semantic_graph::NativeWorkTally* work=nullptr) {
     const auto* from=reinterpret_cast<const PublicationRange*>(pending.ranges);
     const auto* old=reinterpret_cast<const PublicationRange*>(control.directories[pending.base_word&1]);
     auto* to=reinterpret_cast<PublicationRange*>(control.directories[(pending.base_word&1)^1]);
@@ -2962,19 +2998,8 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
             publication_copy_bytes(reinterpret_cast<uint8_t*>(destination.pointer),
                 reinterpret_cast<const uint8_t*>(source.pointer),source.bytes);
         }
-        if(old[i].role==44) {
-            // Ordinary continuations preserve the model schema. The selected
-            // record stays read-leased; only this bank's private copy is sealed.
-            uint64_t digest[4];
-            if(to[i].storage_slot==old[i].storage_slot || publication_range_digest(control,old[i],nullptr,digest) ||
-               !publication_identity_equal(digest,old[i].digest))return 1;
-            to[i].length_bytes=old[i].length_bytes;
-            to[i].logical_begin=old[i].logical_begin;to[i].logical_end=old[i].logical_end;
-            auto* destination=publication_range_bytes(control,to[i]);
-            const auto* source=publication_range_bytes(control,old[i]);
-            if(!destination || !source)return 1;
-            publication_copy_bytes(destination,source,old[i].length_bytes);
-        }
+        if(old[i].role==32 || old[i].role==44 || old[i].role==56 || old[i].role==57)
+            if(publication_preserve_range(control,old,base.header.range_count,old[i],to[i],work))return 1;
         if(old[i].role>=18 && old[i].role<=25) {
             if(pending.transition_kind!=4) {
                 to[i]=old[i];
@@ -5523,7 +5548,21 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
            input.receipt_len>UINT64_MAX-sizeof(AcknowledgementEntry) ||
            cursor>storage[ack_template.storage_slot].bytes ||
            sizeof(AcknowledgementEntry)+input.receipt_len>storage[ack_template.storage_slot].bytes-cursor)break;
-        for(uint64_t i=0;i<base->header.range_count;++i)next_ranges[i]=old[i];
+        for(uint64_t i=0;i<base->header.range_count;++i) {
+            PublicationRange target=next_ranges[i];
+            const uint64_t role=old[i].role;
+            next_ranges[i]=old[i];
+            // Keep every unchanged owned mutable range in its original inactive
+            // backing. Aliasing the acquired directory would strand the next
+            // ordinary continuation or overwrite its still-read-leased source.
+            if(publication_mutable_role(role) && role!=1 && role!=2 && role!=31 &&
+               !(role>=18 && role<=25) && role!=32 && role!=33 &&
+               !(replay && (role==56 || role==57))) {
+                if(publication_preserve_range(control,old,base->header.range_count,old[i],target)) { exact=false;break; }
+                next_ranges[i]=target;
+            }
+        }
+        if(!exact)break;
         auto* next_ack=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,32));
         auto* next_attempt=const_cast<PublicationRange*>(publication_find_range(next_ranges,base->header.range_count,33));
         next_ack->storage_slot=ack_template.storage_slot;
@@ -5929,7 +5968,10 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     if(drain)next.header.terminal=2;
     next.state=*state;next.state.next_proposal=next.header.proposal;
     for(uint32_t i=0;i<136;++i)next.receipts[i]=no_draw ? base.receipts[i] : receipts[i];
-    if(publication_apply_continuation(control,base,next,pending) ||
+    semantic_graph::NativeWorkTally preserved_work{};
+    const uint64_t preservation_status=publication_apply_continuation(control,base,next,pending,&preserved_work);
+    execution_work_merge_native(state->execution_work,preserved_work);
+    if(preservation_status ||
        publication_append_provenance(control,base,next,receipts,winner,descriptor.text))return 1;
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
     const auto* previous=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
