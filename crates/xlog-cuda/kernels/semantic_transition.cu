@@ -5751,19 +5751,12 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
                             (uint64_t(decoded[identity][word*2+1])<<32)))exact=false;
                     }
                 }
-                bool original_statement=false;
-                for(uint32_t query=0;query<result_task.queries;++query) {
+                const auto* original=result_task.observation(ordinal);
+                for(uint32_t word=0;word<4;++word) {
                     semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
-                    const auto* original=result_task.query(query);
-                    if(original[4]!=statement.record)continue;
-                    original_statement=true;
-                    for(uint32_t word=0;word<4;++word) {
-                        semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
-                        if(original[word]!=(uint64_t(statement.identity_words[word*2])|
-                            (uint64_t(statement.identity_words[word*2+1])<<32)))exact=false;
-                    }
+                    if(original[word]!=(uint64_t(statement.identity_words[word*2])|
+                        (uint64_t(statement.identity_words[word*2+1])<<32)))exact=false;
                 }
-                if(!original_statement)exact=false;
             }
             if(!exact)break;
         }

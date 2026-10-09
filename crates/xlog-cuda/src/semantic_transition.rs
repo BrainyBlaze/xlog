@@ -19,6 +19,7 @@ pub(crate) use native_work_bound::OriginalNativeCommand;
 mod prepared_replay;
 mod replay_model_backing;
 mod task_ground;
+mod verification_receipts;
 pub use task_ground::{
     SemanticTaskGround, SemanticTaskMeasurementBinding, SemanticTaskReceiptFamily,
     SemanticTaskVerificationBinding,
