@@ -389,6 +389,20 @@ class SemanticCompletedSegmentPending(RuntimeError):
     Retain the original Runtime and resolve its result, never resubmit.
     """
 
+class SemanticPreparedSegmentPending(RuntimeError):
+    """Retain the original controller/task use and call resolve_segment.
+
+    The original attempt may still be pending. Never submit another graph,
+    replace its callback or treat this signal as completed execution.
+    """
+
+class SemanticPreparedSegmentCancelled(RuntimeError):
+    """Original native proof confirms no graph call; retire the construction.
+
+    This is not an executed or skipped result roster and does not refund its
+    original attempt, Program progression or nominal proposal expense.
+    """
+
 class SemanticPublishedParent:
     def resolve_model_context_preparation(self) -> bool:
         """Join only the original submitted context preparation; never submit a suffix."""
@@ -470,6 +484,19 @@ class SemanticTransitionController:
         tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
     ]]:
         """Deliver the same retained complete native roster with fresh rights; no execution."""
+        ...
+
+    def resolve_segment(
+        self, task_use: SemanticTransitionTaskUse,
+    ) -> tuple[SemanticPublishedParent, tuple[
+        tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
+    ]]:
+        """Join only the original attempt and retained handoff, never relaunch.
+
+        Uses its original authority-refresh callback. An unfinished original
+        attempt raises SemanticPreparedSegmentPending. A proved pre-graph
+        cancellation raises SemanticPreparedSegmentCancelled for retirement.
+        """
         ...
 
 # ---------------------------------------------------------------------------

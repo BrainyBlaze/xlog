@@ -37,6 +37,7 @@ pub(super) struct PrivateExecutionGroup {
     replay_model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
     non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
     non_submission_confirmed: bool,
+    non_submission_observer_entered: bool,
     selected_parent: Option<Py<PySemanticPublishedParent>>,
     native_retired: bool,
     retirement_work: Option<Py<PySemanticColdModelWork>>,
@@ -2191,8 +2192,8 @@ impl PySemanticLearningPhaseTransition {
         let (steps, ordinal, detached) = {
             let mut retained = self.private_group()?;
             let group = retained.as_mut().expect("original private group");
-            if group.non_submission.is_some()
-                || !proof.matches(&group.native_steps)
+            if !proof.matches(&group.native_steps)
+                || group.non_submission.as_ref().is_some_and(|original| !original.matches(&group.native_steps))
                 || group
                     .build_scope
                     .as_ref()
@@ -2205,7 +2206,12 @@ impl PySemanticLearningPhaseTransition {
                     "private cancellation changed its original unsubmitted construction",
                 ));
             }
-            group.non_submission = Some(proof.clone());
+            if group.non_submission_confirmed {
+                return Ok(());
+            }
+            if group.non_submission.is_none() {
+                group.non_submission = Some(proof.clone());
+            }
             (
                 group.native_steps.clone(),
                 group.ordinal,
@@ -2220,9 +2226,29 @@ impl PySemanticLearningPhaseTransition {
             .owner()?
             .prepared_stream(&steps[0])
             .map_err(xlog_err)?;
-        self.preparation_inputs
-            .resource_observer
-            .cancel_step_captures(py, ordinal, &steps, stream.cu_stream() as u64, &proof)?;
+        let entered = {
+            let mut retained = self.private_group()?;
+            let group = retained.as_mut().expect("original cancelled group");
+            std::mem::replace(&mut group.non_submission_observer_entered, true)
+        };
+        let observation = if entered {
+            self.preparation_inputs.resource_observer.resolve_step_cancellation(
+                py, ordinal, &steps, stream.cu_stream() as u64, &proof,
+            )
+        } else {
+            self.preparation_inputs.resource_observer.cancel_step_captures(
+                py, ordinal, &steps, stream.cu_stream() as u64, &proof,
+            )
+        };
+        if let Err(error) = observation {
+            return match self.preparation_inputs.resource_observer.step_cancellation_pending(
+                py, ordinal, &steps, stream.cu_stream() as u64, &proof,
+            ) {
+                Ok(true) => Err(super::super::prepared_segment_pending(py, error)),
+                Ok(false) => Err(error),
+                Err(authority) => super::super::finish_with_cleanup(py, Err(error), Err(authority)),
+            };
+        }
         self.private_group()?
             .as_mut()
             .expect("original cancelled group")
@@ -2661,6 +2687,7 @@ impl PySemanticLearningPhaseTransition {
                 replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
                 non_submission: None,
                 non_submission_confirmed: false,
+                non_submission_observer_entered: false,
                 selected_parent: None,
                 native_retired: false,
                 adoption_work: None,

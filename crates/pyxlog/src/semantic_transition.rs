@@ -257,6 +257,34 @@ fn completed_segment_pending(py: Python<'_>, original: PyErr) -> PyErr {
 }
 
 #[cfg(feature = "semantic-policy")]
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticPreparedSegmentPending,
+    PyRuntimeError,
+    "The original prepared segment retains an unfinished native attempt; resolve it without resubmission."
+);
+
+#[cfg(feature = "semantic-policy")]
+pyo3::create_exception!(
+    pyxlog._native,
+    SemanticPreparedSegmentCancelled,
+    PyRuntimeError,
+    "The original prepared segment was cancelled before any graph call; retire its retained construction."
+);
+
+#[cfg(feature = "semantic-policy")]
+fn prepared_segment_pending(py: Python<'_>, original: PyErr) -> PyErr {
+    if original.is_instance_of::<SemanticPreparedSegmentPending>(py) {
+        return original;
+    }
+    let pending = SemanticPreparedSegmentPending::new_err(
+        "retain the original controller and task use, then call resolve_segment; never relaunch or admit another operation",
+    );
+    pending.set_cause(py, Some(original));
+    pending
+}
+
+#[cfg(feature = "semantic-policy")]
 fn private_execution_owner(
     py: Python<'_>,
     session: &PySemanticTransitionSession,
@@ -2601,7 +2629,7 @@ impl PySemanticTransitionSession {
                 PySemanticPublishedParent {
                     session: session.clone_ref(py),
                     task_use: task_use.clone_ref(py),
-                    inner: Mutex::new(lease),
+                    inner: Arc::new(Mutex::new(lease)),
                     continuation_producers: Mutex::new(Vec::new()),
                 },
             )?
@@ -3753,6 +3781,8 @@ struct PreparedPythonSegment {
     #[cfg(feature = "semantic-policy")]
     completion: Option<PreparedSegmentCompletion>,
     #[cfg(feature = "semantic-policy")]
+    execution: Option<Arc<Mutex<PreparedSegmentExecution>>>,
+    #[cfg(feature = "semantic-policy")]
     cold_callbacks: Vec<Arc<Mutex<PreparedColdCallback>>>,
 }
 
@@ -3776,11 +3806,38 @@ struct PreparedSegmentCompletion {
     result: Py<PyTuple>,
 }
 
+#[cfg(feature = "semantic-policy")]
+struct PreparedSegmentExecution {
+    controller: Py<PySemanticTransitionController>,
+    scope: Arc<()>,
+    operation: String,
+    admission_snapshot: Vec<u8>,
+    refresh_snapshot: Py<PyAny>,
+    private: Option<Py<learning_phase::PySemanticLearningPhaseTransition>>,
+    private_parent: Option<Py<PySemanticPublishedParent>>,
+    checkpoint_phase: CheckpointTaskPhase,
+    native_attempt: bool,
+    native_steps: Vec<xlog_cuda::SemanticPreparedStep>,
+    original_failure: Option<PyErr>,
+    route: Option<xlog_cuda::SemanticPreparedSegmentContinuation>,
+    non_submission: Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>,
+    cancellation_handoff_complete: bool,
+    parent_finished: bool,
+    acquisition: Option<xlog_cuda::SemanticPublishedAcquisition>,
+    lease: Option<Arc<Mutex<SemanticPublishedLease>>>,
+    parent: Option<Py<PySemanticPublishedParent>>,
+    rows: Vec<Py<PyAny>>,
+    invocation_staging: Option<PySemanticPolicyInvocation>,
+    invocation: Option<Py<PyAny>>,
+}
+
 struct PreparedBuildGuard<'a> {
     session: &'a PySemanticTransitionSession,
     task_use: &'a PySemanticTransitionTaskUse,
     committed: bool,
     native_completion: Option<(Arc<()>, String)>,
+    #[cfg(feature = "semantic-policy")]
+    native_attempt: Option<(Arc<()>, String, Vec<xlog_cuda::SemanticPreparedStep>)>,
     native_non_submission: bool,
     cancelled_checkpoint: Option<(Arc<()>, CheckpointTaskPhase)>,
 }
@@ -3822,6 +3879,30 @@ impl Drop for PreparedRetirementGuard<'_> {
 impl Drop for PreparedBuildGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
+            #[cfg(feature = "semantic-policy")]
+            let pending = self.native_attempt.as_ref().is_some_and(|(scope, operation, steps)| {
+                let mut native = self.session.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(owner) = native.as_mut() else { return false; };
+                if owner.prepared_segment_continuation(steps).is_err() { return false; }
+                if let Ok(mut state) = self.task_use.state() {
+                    if matches!(&state.phase, TaskUsePhase::Segment(original) if original == operation)
+                        || matches!(&state.phase, TaskUsePhase::ExecutionPending { scope: original, operation: original_operation } if Arc::ptr_eq(original, scope) && original_operation == operation)
+                    {
+                        state.phase = TaskUsePhase::ExecutionPending {
+                            scope: Arc::clone(scope),
+                            operation: operation.clone(),
+                        };
+                        return true;
+                    }
+                }
+                false
+            });
+            #[cfg(not(feature = "semantic-policy"))]
+            let pending = false;
+            if pending {
+                self.session.recording.store(false, Ordering::Release);
+                return;
+            }
             if let Some((scope, operation)) = &self.native_completion {
                 // Native already reconciled every original step and reader.
                 // A missing Python handoff cannot undo that completion, grant
@@ -8311,6 +8392,10 @@ enum TaskUsePhase {
         scope: Arc<()>,
         operation: Option<String>,
     },
+    ExecutionPending {
+        scope: Arc<()>,
+        operation: String,
+    },
     CompletedPending {
         scope: Arc<()>,
         operation: String,
@@ -8320,6 +8405,10 @@ enum TaskUsePhase {
     CancelledPrivate {
         scope: Arc<()>,
         checkpoint: CheckpointTaskPhase,
+    },
+    CancelledPrepared {
+        scope: Arc<()>,
+        operation: String,
     },
     Segment(String),
     ArenaPreparing(Box<TaskUsePhase>),
@@ -9575,10 +9664,14 @@ impl PySemanticTransitionTaskUse {
     }
 
     fn require_identity(&self, owner: &SemanticTransitionSession) -> PyResult<()> {
-        self.issuance.require_current()?;
         if owner.is_poisoned() {
             return Err(invalid("native semantic session is poisoned"));
         }
+        self.require_original_identity(owner)
+    }
+
+    fn require_original_identity(&self, owner: &SemanticTransitionSession) -> PyResult<()> {
+        self.issuance.require_current()?;
         if owner.task_evaluation_epoch() != self.task_epoch
             || owner
                 .task_evaluation_identity()
@@ -10131,7 +10224,7 @@ impl Drop for ImportReadScope<'_> {
 pub(crate) struct PySemanticPublishedParent {
     session: Py<PySemanticTransitionSession>,
     task_use: Py<PySemanticTransitionTaskUse>,
-    inner: Mutex<SemanticPublishedLease>,
+    inner: Arc<Mutex<SemanticPublishedLease>>,
     // Policy invocations retain this actual parent through late backward. Keep
     // original autograd producers without a parent-to-witness ownership cycle.
     continuation_producers: Mutex<Vec<Py<PyAny>>>,
@@ -15038,6 +15131,28 @@ impl PySemanticPolicyInvocation {
 
 #[cfg(feature = "semantic-policy")]
 impl PySemanticPolicyInvocation {
+    fn clone_unpublished(&self, py: Python<'_>) -> PyResult<Self> {
+        if *self.final_use_started.lock()
+            .map_err(|_| invalid("original policy final-use owner is poisoned"))?
+        {
+            return Err(invalid("published policy invocation cannot be restaged"));
+        }
+        Ok(Self {
+            session: self.session.clone_ref(py),
+            _task_use: self._task_use.clone_ref(py),
+            _parent: match &self._parent {
+                ContentStepOwner::Published(parent) => ContentStepOwner::Published(parent.clone_ref(py)),
+                ContentStepOwner::Prepared(step) => ContentStepOwner::Prepared(step.clone_ref(py)),
+            },
+            _model_output: self._model_output.clone_ref(py),
+            _inputs: std::array::from_fn(|index| self._inputs[index].clone_ref(py)),
+            rng: self.rng,
+            outcome: self.outcome.clone(),
+            training: self.training,
+            final_use_started: Mutex::new(false),
+        })
+    }
+
     fn finish_recorded_training_use(
         &self,
         py: Python<'_>,
@@ -16852,6 +16967,7 @@ impl PySemanticTransitionController {
             task_use: &issued,
             committed: false,
             native_completion: None,
+            native_attempt: None,
             native_non_submission: false,
             cancelled_checkpoint: None,
         };
@@ -16960,6 +17076,8 @@ impl PySemanticTransitionController {
                 outcomes: None,
                 #[cfg(feature = "semantic-policy")]
                 completion: None,
+                #[cfg(feature = "semantic-policy")]
+                execution: None,
                 cold_callbacks: Vec::new(),
             });
         let check = || self.check_recording(py, &issued, &scope, &snapshot);
@@ -17309,17 +17427,19 @@ impl PySemanticTransitionController {
     #[cfg(feature = "semantic-policy")]
     #[pyo3(signature = (task_use, *, operation, snapshot, refresh_snapshot))]
     fn execute_segment(
-        &self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         operation: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         refresh_snapshot: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
-        let session = self.session.borrow(py);
+        let controlled = slf.borrow();
+        let this = &*controlled;
+        let session = this.session.borrow(py);
         session.require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_read_issued(&issued)?;
+        this.require_read_issued(&issued)?;
         if session.recording.load(Ordering::Acquire) || session.retiring.load(Ordering::Acquire) {
             return Err(invalid(
                 "segment submission cannot overlap a producer ownership scope",
@@ -17346,6 +17466,9 @@ impl PySemanticTransitionController {
             if stored.task_use.as_ptr() != task_use.as_ptr() {
                 return Err(invalid("built segment belongs to another task use"));
             }
+            if stored.execution.is_some() {
+                return Err(invalid("original segment already has its one execution attempt"));
+            }
             (
                 Arc::clone(&stored.scope),
                 stored
@@ -17370,10 +17493,43 @@ impl PySemanticTransitionController {
             task_use: &issued,
             committed: false,
             native_completion: None,
+            native_attempt: None,
             native_non_submission: false,
             cancelled_checkpoint: None,
         };
-        let submission = (|| {
+        let execution = Arc::new(Mutex::new(PreparedSegmentExecution {
+            controller: slf.clone().unbind(),
+            scope: Arc::clone(&scope),
+            operation: operation.clone(),
+            admission_snapshot: snapshot.canonical.clone(),
+            refresh_snapshot: refresh_snapshot.clone().unbind(),
+            private,
+            private_parent,
+            checkpoint_phase,
+            native_attempt: false,
+            native_steps: steps.iter().map(|step| step.borrow(py).inner.clone()).collect(),
+            original_failure: None,
+            route: None,
+            non_submission: None,
+            cancellation_handoff_complete: false,
+            parent_finished: false,
+            acquisition: None,
+            lease: None,
+            parent: None,
+            rows: Vec::new(),
+            invocation_staging: None,
+            invocation: None,
+        }));
+        session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .as_mut().ok_or_else(|| invalid("original built segment disappeared"))?
+            .execution = Some(Arc::clone(&execution));
+        let submission = (|| -> PyResult<()> {
+            let retained = execution.lock()
+                .map_err(|_| invalid("original execution mutex is poisoned"))?;
+            let private = retained.private.as_ref().map(|value| value.clone_ref(py));
+            let private_parent = retained.private_parent.as_ref().map(|value| value.clone_ref(py));
+            drop(retained);
             if let Some(private) = &private {
                 private
                     .borrow(py)
@@ -17393,186 +17549,123 @@ impl PySemanticTransitionController {
             issued.require_learning_operation(&owner, &operation)?;
             let mut state = issued.state()?;
             state.admit_built_segment(&scope, &issued.authority, operation.clone(), snapshot)?;
-            let expected = Self::execution_binding(&state, false)?;
-            owner
-                .launch_prepared_segment(state.snapshot.canonical.clone())
-                .map_err(xlog_err)?;
-            Ok(expected)
+            let native_steps = steps.iter().map(|step| step.borrow(py).inner.clone()).collect::<Vec<_>>();
+            guard.native_attempt = Some((Arc::clone(&scope), operation.clone(), native_steps.clone()));
+            execution.lock().map_err(|_| invalid("original execution mutex is poisoned"))?.native_attempt = true;
+            match owner.launch_prepared_segment(state.snapshot.canonical.clone()) {
+                Ok(()) => {
+                    execution.lock().map_err(|_| invalid("original execution mutex is poisoned"))?.route =
+                        Some(xlog_cuda::SemanticPreparedSegmentContinuation::GraphCallEntered);
+                    Ok(())
+                }
+                Err(error) => {
+                    if matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }) {
+                        if let Ok(route) = owner.prepared_segment_continuation(&native_steps) {
+                            let mut retained = execution.lock().map_err(|_| invalid("original execution mutex is poisoned"))?;
+                            retained.route = Some(route);
+                            let error = xlog_err(error);
+                            retained.original_failure = Some(error.clone_ref(py));
+                            state.phase = TaskUsePhase::ExecutionPending {
+                                scope: Arc::clone(&scope), operation: operation.clone(),
+                            };
+                            return Err(prepared_segment_pending(py, error));
+                        }
+                    }
+                    Err(xlog_err(error))
+                }
+            }
         })();
-        let expected = match submission {
-            Ok(expected) => expected,
+        match submission {
+            Ok(()) => {},
             Err(error) => {
-                if let Some(private) = &private {
+                if error.is_instance_of::<SemanticPreparedSegmentPending>(py) {
+                    guard.committed = true;
+                    return Err(error);
+                }
+                let retained = execution.lock().map_err(|_| invalid("original execution mutex is poisoned"))?;
+                if !retained.native_attempt {
+                    if let Some(private) = &retained.private {
                     let cancellation = guard.retain_private_cancellation(
                         py,
                         &private.borrow(py),
                         &scope,
                         &steps,
-                        &checkpoint_phase,
+                        &retained.checkpoint_phase,
                     );
                     return finish_with_cleanup(py, Err(error), cancellation);
+                    }
                 }
+                guard.native_attempt = None;
                 return Err(error);
             }
-        };
-        let shared = &*session;
-        let outcomes = py.detach(|| {
-            let mut owner = shared.witness_owner()?;
-            owner.complete_prepared_segment().map_err(xlog_err)
-        })?;
-        // Set this only after the native whole-roster reconciliation returned.
-        // It retains completion even if the following Python handoff fails;
-        // failed launch/readback and incomplete native outcomes never set it.
-        guard.native_completion = Some((Arc::clone(&scope), operation.clone()));
-        if let Some(parent) = &private_parent {
-            let admission = session
-                .segment_instruction
-                .lock()
-                .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
-                .clone();
-            if let Some(admission) = admission {
-                session
-                    .owner()?
-                    .admitted_segment_parent_identity(
-                        &admission.inner,
-                        &*parent.borrow(py).lease()?,
-                    )
-                    .map_err(xlog_err)?;
-            } else {
-                session
-                    .owner()?
-                    .finish_prepared_segment_parent(&mut *parent.borrow(py).lease()?)
-                    .map_err(xlog_err)?;
-            }
         }
+        let result = this.continue_original_segment(py, &session, &issued, &task_use, &execution, &mut guard);
+        if result.is_ok()
+            || result.as_ref().is_err_and(|error| error.is_instance_of::<SemanticPreparedSegmentPending>(py)
+                || error.is_instance_of::<SemanticPreparedSegmentCancelled>(py))
         {
-            let mut retained = session
-                .prepared_segment
-                .lock()
-                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
-            let retained = retained
-                .as_mut()
-                .ok_or_else(|| invalid("completed segment lost its original owner"))?;
-            if retained.outcomes.is_some() || outcomes.len() != steps.len() {
-                return Err(invalid("native completion changed the original step count"));
-            }
-            retained.outcomes = Some(outcomes.clone());
+            guard.committed = true;
+        } else {
+            guard.native_attempt = None;
+            guard.native_completion = None;
+            guard.native_non_submission = false;
         }
-        let check = || -> PyResult<()> {
-            self.require_read_issued(&issued)?;
-            let owner = session.owner()?;
-            issued.require_identity(&owner)?;
-            if !owner.prepared_segment_completion_known()
-                || Self::execution_binding(&*issued.state()?, false)? != expected
-            {
-                return Err(invalid(
-                    "completed segment authority changed during result handoff",
-                ));
-            }
-            Ok(())
-        };
-        check()?;
-        let lease = {
-            let mut owner = session.owner()?;
-            issued.require_identity(&owner)?;
-            let state = issued.state()?;
-            if Self::execution_binding(&state, false)? != expected {
-                return Err(invalid(
-                    "completion snapshot no longer belongs to this original operation",
-                ));
-            }
-            owner.acquire().map_err(xlog_err)?
-        };
-        let parent = Py::new(
-            py,
-            PySemanticPublishedParent {
-                session: self.session.clone_ref(py),
-                task_use: task_use.clone_ref(py),
-                inner: Mutex::new(lease),
-                continuation_producers: Mutex::new(Vec::new()),
-            },
-        )?;
-        let mut rows = Vec::with_capacity(steps.len());
-        for (step, completed) in steps.into_iter().zip(outcomes) {
-            let native_step = match &completed {
-                xlog_cuda::SemanticPreparedStepOutcome::Skipped { step, .. }
-                | xlog_cuda::SemanticPreparedStepOutcome::Completed { step, .. } => step,
-            };
-            if !step.borrow(py).inner.same_handle(native_step) {
-                return Err(invalid(
-                    "native completion changed its original ordered step",
-                ));
-            }
-            let (transition, status, refusal, invocation, bank) = match completed {
-                xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } => {
-                    (None, status, None, py.None(), None)
-                }
-                xlog_cuda::SemanticPreparedStepOutcome::Completed {
-                    invocation,
-                    bank,
-                    transition,
-                    outcome,
-                    ..
-                } => {
-                    let label = match transition {
-                        SemanticTransitionKind::Proposal => "proposal",
-                        SemanticTransitionKind::Recompute => "recompute",
-                        SemanticTransitionKind::Update => "update",
-                        SemanticTransitionKind::Drain => "drain",
-                    };
-                    let refusal = transition_refusal_report(py, &outcome)?;
-                    let invocation = if transition == SemanticTransitionKind::Proposal {
-                        Py::new(
-                            py,
-                            self.issue_prepared_policy_invocation(
-                                py,
-                                task_use.clone_ref(py),
-                                step.clone_ref(py),
-                                invocation,
-                                outcome,
-                                operation == "training",
-                            )?,
-                        )?
-                        .into_any()
-                    } else {
-                        py.None()
-                    };
-                    (Some(label), 0, refusal, invocation, Some(bank))
-                }
-            };
-            rows.push(
-                (step, transition, status, refusal, invocation, bank)
-                    .into_pyobject(py)?
-                    .unbind(),
-            );
-        }
-        let result = (parent, PyTuple::new(py, rows)?)
-            .into_pyobject(py)?
-            .unbind();
-        {
-            let mut retained = session
-                .prepared_segment
-                .lock()
-                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
-            let retained = retained
-                .as_mut()
-                .ok_or_else(|| invalid("completed segment lost its original owner"))?;
-            retained.completion = Some(PreparedSegmentCompletion {
-                operation: operation.clone(),
-                admission_snapshot: expected.1,
-                result,
-            });
-            issued.state()?.phase = TaskUsePhase::CompletedPending { scope, operation };
-        }
-        // The complete native/Python roster is now retained. An authority
-        // callback failure must quarantine this delivery, not abort the known
-        // completed graph or discard results needed by the original resolver.
-        guard.committed = true;
+        result?;
         drop(guard);
         drop(issued);
         drop(session);
-        self.resolve_completed_segment(py, task_use, refresh_snapshot)
+        this.resolve_completed_segment(py, task_use, refresh_snapshot)
             .map_err(|original| completed_segment_pending(py, original))
+    }
+
+    /// Join only the retained original attempt. No operation, authority
+    /// snapshot, producer callback or graph launch can be replaced here.
+    #[cfg(feature = "semantic-policy")]
+    fn resolve_segment(&self, py: Python<'_>, task_use: Py<PySemanticTransitionTaskUse>) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let issued = task_use.borrow(py);
+        self.require_read_issued(&issued)?;
+        if session.importing.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+            || session.recording.swap(true, Ordering::AcqRel)
+        {
+            return Err(invalid("original segment resolution requires its idle original Session"));
+        }
+        let _resolution = PreparedRetirementGuard(&session.recording);
+        let execution = {
+            let stored = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let stored = stored.as_ref().ok_or_else(|| invalid("no original segment attempt to resolve"))?;
+            if stored.task_use.as_ptr() != task_use.as_ptr() {
+                return Err(invalid("original segment attempt belongs to another task use"));
+            }
+            Arc::clone(stored.execution.as_ref().ok_or_else(|| invalid("segment has no original execution attempt"))?)
+        };
+        let mut guard = PreparedBuildGuard {
+            session: &session, task_use: &issued, committed: false,
+            native_completion: None, native_attempt: None,
+            native_non_submission: false, cancelled_checkpoint: None,
+        };
+        let result = self.continue_original_segment(py, &session, &issued, &task_use, &execution, &mut guard);
+        if result.is_ok()
+            || result.as_ref().is_err_and(|error| error.is_instance_of::<SemanticPreparedSegmentPending>(py)
+                || error.is_instance_of::<SemanticPreparedSegmentCancelled>(py))
+        {
+            guard.committed = true;
+        } else {
+            guard.native_attempt = None;
+            guard.native_completion = None;
+            guard.native_non_submission = false;
+        }
+        result?;
+        let callback = execution.lock().map_err(|_| invalid("original execution mutex is poisoned"))?
+            .refresh_snapshot.clone_ref(py);
+        drop(guard);
+        drop(_resolution);
+        drop(issued);
+        drop(session);
+        self.resolve_completed_segment(py, task_use, callback.bind(py))
     }
 
     /// Return only the SAME retained final parent and complete ordered rows.
@@ -17748,7 +17841,10 @@ impl PySemanticTransitionController {
         let session = self.session.borrow(py);
         session.require_creator()?;
         self.require_read_issued(&task_use.borrow(py))?;
-        task_use.borrow(py).state()?.require_public_use()?;
+        let cancellation = self.original_segment_cancellation(py, &session, &task_use)?;
+        if cancellation.is_none() {
+            task_use.borrow(py).state()?.require_public_use()?;
+        }
         if session.importing.load(Ordering::Acquire)
             || session.recording.load(Ordering::Acquire)
             || session.retiring.swap(true, Ordering::AcqRel)
@@ -17840,10 +17936,11 @@ impl PySemanticTransitionController {
                 // owner joins entered prefixes and submits unentered suffixes.
                 original.retirement_entered = true;
                 drop(original);
-                let inner = session
-                    .owner()?
-                    .prepare_admitted_retirement_cold_model_work(&instruction.inner)
-                    .map_err(xlog_err)?;
+                let inner = if let Some(proof) = &cancellation {
+                    session.owner()?.prepare_cancelled_admitted_retirement_cold_model_work(&instruction.inner, proof)
+                } else {
+                    session.owner()?.prepare_admitted_retirement_cold_model_work(&instruction.inner)
+                }.map_err(xlog_err)?;
                 let work = Py::new(
                     py,
                     learning_phase::cold_model_work::PySemanticColdModelWork {
@@ -17891,10 +17988,11 @@ impl PySemanticTransitionController {
         }
         if !graph_retired {
             while quiesced < steps.len() {
-                session
-                    .owner()?
-                    .quiesce_prepared_step(&steps[quiesced].borrow(py).inner, &streams)
-                    .map_err(xlog_err)?;
+                if let Some(proof) = &cancellation {
+                    session.owner()?.quiesce_cancelled_prepared_step(&steps[quiesced].borrow(py).inner, proof, &streams)
+                } else {
+                    session.owner()?.quiesce_prepared_step(&steps[quiesced].borrow(py).inner, &streams)
+                }.map_err(xlog_err)?;
                 quiesced += 1;
                 session
                     .prepared_segment
@@ -17904,15 +18002,17 @@ impl PySemanticTransitionController {
                     .ok_or_else(|| invalid("original segment disappeared during retirement"))?
                     .retirement_steps_quiesced = quiesced;
             }
-            let graph = session
-                .owner()?
-                .take_prepared_executable_for_retirement()
-                .map_err(xlog_err)?;
+            let graph = if let Some(proof) = &cancellation {
+                session.owner()?.take_cancelled_prepared_executable_for_retirement(proof)
+            } else {
+                session.owner()?.take_prepared_executable_for_retirement()
+            }.map_err(xlog_err)?;
             drop(graph);
-            session
-                .owner()?
-                .require_completed_prepared_graph_retirement()
-                .map_err(xlog_err)?;
+            if let Some(proof) = &cancellation {
+                session.owner()?.require_cancelled_prepared_graph_retirement(proof)
+            } else {
+                session.owner()?.require_completed_prepared_graph_retirement()
+            }.map_err(xlog_err)?;
             session
                 .prepared_segment
                 .lock()
@@ -17962,6 +18062,9 @@ impl PySemanticTransitionController {
                         "original task authority changed during producer retirement",
                     ));
                 }
+                if cancellation.is_some() && self.original_segment_cancellation(py, &session, &task_use)?.is_none() {
+                    return Err(invalid("cancelled producer retirement lost its original proof"));
+                }
                 Ok(())
             };
             let finish = recording_callback(check, || prepared.bind(py).getattr("finish_segment"))?;
@@ -17990,14 +18093,17 @@ impl PySemanticTransitionController {
                 child.release_session(py)?;
             }
             if let Some(work) = &retirement_work {
-                let report = session
-                    .owner()?
-                    .finish_admitted_retirement_cold_model_work(
+                let report = if let Some(proof) = &cancellation {
+                    session.owner()?.finish_cancelled_admitted_retirement_cold_model_work(
+                        &instruction.inner, proof, &work.borrow(py).inner, &streams,
+                    )
+                } else {
+                    session.owner()?.finish_admitted_retirement_cold_model_work(
                         &instruction.inner,
                         &work.borrow(py).inner,
                         &streams,
                     )
-                    .map_err(xlog_err)?;
+                }.map_err(xlog_err)?;
                 instruction.preparation()?.retirement_report = Some(report);
             }
             let total = session
@@ -18012,10 +18118,11 @@ impl PySemanticTransitionController {
         // The actual final-use report is complete before its target storage
         // token can be removed. Neither callbacks nor entered report work recur.
         for step in &steps {
-            session
-                .owner()?
-                .release_prepared_step(&step.borrow(py).inner, &streams)
-                .map_err(xlog_err)?;
+            if let Some(proof) = &cancellation {
+                session.owner()?.release_cancelled_prepared_step(&step.borrow(py).inner, proof, &streams)
+            } else {
+                session.owner()?.release_prepared_step(&step.borrow(py).inner, &streams)
+            }.map_err(xlog_err)?;
             // Preserve only unretired steps if another external alias delays a
             // later release. A retry never re-releases an already removed owner.
             let removed = {
@@ -18035,10 +18142,11 @@ impl PySemanticTransitionController {
             };
             drop(removed);
         }
-        let native_resources = session
-            .owner()?
-            .take_prepared_resources_for_retirement()
-            .map_err(xlog_err)?;
+        let native_resources = if let Some(proof) = &cancellation {
+            session.owner()?.take_cancelled_prepared_resources_for_retirement(proof)
+        } else {
+            session.owner()?.take_prepared_resources_for_retirement()
+        }.map_err(xlog_err)?;
         drop(native_resources);
         let retained = session
             .prepared_segment
@@ -18063,6 +18171,9 @@ impl PySemanticTransitionController {
                 .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
                 .take();
             drop(instruction);
+        }
+        if cancellation.is_some() {
+            task_use.borrow(py).state()?.phase = TaskUsePhase::Refused;
         }
         drain_export_owners();
         Ok(())
@@ -18986,7 +19097,7 @@ impl PySemanticTransitionController {
                 PySemanticPublishedParent {
                     session: controlled.session.clone_ref(py),
                     task_use: task_use.clone().unbind(),
-                    inner: Mutex::new(slot),
+                    inner: Arc::new(Mutex::new(slot)),
                     continuation_producers: Mutex::new(Vec::new()),
                 },
             )?
@@ -19508,7 +19619,7 @@ impl PySemanticTransitionController {
         Ok(PySemanticPublishedParent {
             session: self.session.clone_ref(py),
             task_use,
-            inner: Mutex::new(lease),
+            inner: Arc::new(Mutex::new(lease)),
             continuation_producers: Mutex::new(Vec::new()),
         })
     }
@@ -21110,6 +21221,316 @@ impl PySemanticTransitionController {
         })
     }
 
+    #[cfg(feature = "semantic-policy")]
+    fn original_segment_cancellation(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+    ) -> PyResult<Option<xlog_cuda::SemanticPreparedSegmentNonSubmission>> {
+        let (scope, execution, steps) = {
+            let retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let Some(retained) = retained.as_ref() else { return Ok(None); };
+            if retained.task_use.as_ptr() != task_use.as_ptr() {
+                return Err(invalid("cancelled retirement belongs to another task use"));
+            }
+            let Some(execution) = &retained.execution else { return Ok(None); };
+            (Arc::clone(&retained.scope), Arc::clone(execution),
+                retained.steps.iter().map(|step| step.borrow(py).inner.clone()).collect::<Vec<_>>())
+        };
+        let original = execution.lock()
+            .map_err(|_| invalid("original execution mutex is poisoned"))?;
+        if original.private.is_some() || original.non_submission.is_none() {
+            return Ok(None);
+        }
+        if !original.cancellation_handoff_complete
+            || !Arc::ptr_eq(&scope, &original.scope)
+            || !Arc::ptr_eq(&original.controller.borrow(py).identity, &self.identity)
+            || self.session.as_ptr() != task_use.borrow(py).session.as_ptr()
+        {
+            return Err(invalid("cancelled retirement lost its original attempt owner"));
+        }
+        let proof = original.non_submission.as_ref().expect("original cancellation proof");
+        if !proof.matches(&original.native_steps) {
+            return Err(invalid("cancelled retirement changed its original native roster"));
+        }
+        let mut after = 0;
+        for step in &steps {
+            let index = original.native_steps[after..].iter().position(|original| original.same_handle(step))
+                .ok_or_else(|| invalid("cancelled retirement changed its remaining ordered steps"))?;
+            after += index + 1;
+        }
+        let issued = task_use.borrow(py);
+        self.require_read_issued(&issued)?;
+        issued.require_original_identity(&session.owner()?)?;
+        let state = issued.state()?;
+        if !matches!(&state.phase, TaskUsePhase::CancelledPrepared { scope: retained, operation }
+            if Arc::ptr_eq(retained, &scope) && operation == &original.operation)
+            || state.snapshot.canonical != original.admission_snapshot
+        {
+            return Err(invalid("cancelled retirement changed its original task phase"));
+        }
+        Ok(Some(proof.clone()))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn continue_original_segment(
+        &self,
+        py: Python<'_>,
+        session: &PySemanticTransitionSession,
+        issued: &PySemanticTransitionTaskUse,
+        task_use: &Py<PySemanticTransitionTaskUse>,
+        execution: &Arc<Mutex<PreparedSegmentExecution>>,
+        guard: &mut PreparedBuildGuard<'_>,
+    ) -> PyResult<()> {
+        self.require_read_issued(issued)?;
+        let mut original = execution.lock()
+            .map_err(|_| invalid("original execution mutex is poisoned"))?;
+        if !Arc::ptr_eq(&original.controller.borrow(py).identity, &self.identity)
+            || self.session.as_ptr() != task_use.borrow(py).session.as_ptr()
+            || !original.native_attempt
+        {
+            return Err(invalid("segment resolution changed its original controller or attempt"));
+        }
+        let (steps, outcomes, complete) = {
+            let retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained.as_ref().ok_or_else(|| invalid("original segment owner disappeared"))?;
+            if retained.task_use.as_ptr() != task_use.as_ptr()
+                || !Arc::ptr_eq(&retained.scope, &original.scope)
+                || retained.execution.as_ref().is_none_or(|owner| !Arc::ptr_eq(owner, execution))
+            {
+                return Err(invalid("segment resolution changed its original ordered scope"));
+            }
+            (retained.steps.iter().map(|step| step.clone_ref(py)).collect::<Vec<_>>(),
+                retained.outcomes.clone(), retained.completion.is_some())
+        };
+        {
+            let owner = session.owner()?;
+            issued.require_original_identity(&owner)?;
+            let state = issued.state()?;
+            let phase_matches = match &state.phase {
+                TaskUsePhase::Segment(operation) => operation == &original.operation,
+                TaskUsePhase::ExecutionPending { scope, operation }
+                | TaskUsePhase::CompletedPending { scope, operation }
+                | TaskUsePhase::CancelledPrepared { scope, operation } =>
+                    Arc::ptr_eq(scope, &original.scope) && operation == &original.operation,
+                TaskUsePhase::CancelledPrivate { scope, checkpoint } =>
+                    Arc::ptr_eq(scope, &original.scope) && checkpoint == &original.checkpoint_phase,
+                _ => false,
+            };
+            if !phase_matches || (!complete && state.snapshot.canonical != original.admission_snapshot) {
+                return Err(invalid("segment resolution changed its original operation or authority snapshot"));
+            }
+        }
+        if complete {
+            return Ok(());
+        }
+        let native_steps = steps.iter().map(|step| step.borrow(py).inner.clone()).collect::<Vec<_>>();
+        guard.native_attempt = Some((Arc::clone(&original.scope), original.operation.clone(), native_steps.clone()));
+        if outcomes.is_none() {
+            let route = session.owner()?.prepared_segment_continuation(&native_steps).map_err(xlog_err)?;
+            if original.route.is_some_and(|expected| expected != route) {
+                return Err(invalid("original native segment changed its entered disposition"));
+            }
+            original.route = Some(route);
+            if route == xlog_cuda::SemanticPreparedSegmentContinuation::NeverGraphCalled {
+                if original.non_submission.is_none() {
+                    let cancellation = session.owner()?.cancel_prepared_segment_before_submission(&native_steps);
+                    match cancellation {
+                        Ok(proof) => original.non_submission = Some(proof),
+                        Err(error @ xlog_cuda::SemanticTransitionError::Runtime { .. }) => {
+                            session.owner()?.prepared_segment_continuation(&native_steps).map_err(xlog_err)?;
+                            issued.state()?.phase = TaskUsePhase::ExecutionPending {
+                                scope: Arc::clone(&original.scope), operation: original.operation.clone(),
+                            };
+                            return Err(prepared_segment_pending(py, xlog_err(error)));
+                        }
+                        Err(error) => return Err(xlog_err(error)),
+                    }
+                }
+                let proof = original.non_submission.as_ref().expect("original native cancellation");
+                if !proof.matches(&native_steps) {
+                    return Err(invalid("original cancellation changed its native roster"));
+                }
+                guard.native_non_submission = true;
+                if let Some(private) = &original.private {
+                    if !original.cancellation_handoff_complete {
+                        let private = private.clone_ref(py);
+                        let proof = proof.clone();
+                        match private.borrow(py).retain_private_non_submission(
+                            py, session, issued, &original.scope, proof,
+                        ) {
+                            Ok(()) => original.cancellation_handoff_complete = true,
+                            Err(error) => {
+                                if !error.is_instance_of::<SemanticPreparedSegmentPending>(py) {
+                                    return Err(error);
+                                }
+                                let error = if let Some(cause) = &original.original_failure {
+                                    finish_with_cleanup::<()>(py, Err(cause.clone_ref(py)), Err(error))
+                                        .expect_err("original cancellation is pending")
+                                } else { error };
+                                original.original_failure = Some(error.clone_ref(py));
+                                issued.state()?.phase = TaskUsePhase::ExecutionPending {
+                                    scope: Arc::clone(&original.scope), operation: original.operation.clone(),
+                                };
+                                return Err(prepared_segment_pending(py, error));
+                            }
+                        }
+                    }
+                    issued.state()?.phase = TaskUsePhase::CancelledPrivate {
+                        scope: Arc::clone(&original.scope), checkpoint: original.checkpoint_phase.clone(),
+                    };
+                } else {
+                    original.cancellation_handoff_complete = true;
+                    issued.state()?.phase = TaskUsePhase::CancelledPrepared {
+                        scope: Arc::clone(&original.scope), operation: original.operation.clone(),
+                    };
+                }
+                let cancelled = SemanticPreparedSegmentCancelled::new_err(
+                    "original segment was never graph-called; retain its controller and task use for cancelled construction retirement",
+                );
+                if let Some(error) = &original.original_failure {
+                    cancelled.set_cause(py, Some(error.clone_ref(py)));
+                }
+                return Err(cancelled);
+            }
+            let completion = py.detach(|| {
+                let mut owner = session.witness_owner()?;
+                Ok::<_, PyErr>(owner.complete_prepared_segment())
+            })?;
+            let outcomes = match completion {
+                Ok(outcomes) => outcomes,
+                Err(error @ xlog_cuda::SemanticTransitionError::Runtime { .. }) => {
+                    session.owner()?.prepared_segment_continuation(&native_steps).map_err(xlog_err)?;
+                    issued.state()?.phase = TaskUsePhase::ExecutionPending {
+                        scope: Arc::clone(&original.scope), operation: original.operation.clone(),
+                    };
+                    let error = xlog_err(error);
+                    original.original_failure = Some(error.clone_ref(py));
+                    return Err(prepared_segment_pending(py, error));
+                }
+                Err(error) => return Err(xlog_err(error)),
+            };
+            // Native completion is retained before private-parent cleanup or
+            // any fallible Python allocation. A lost suffix cannot reread or
+            // replay the original numerical graph.
+            let mut retained = session.prepared_segment.lock()
+                .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+            let retained = retained.as_mut().ok_or_else(|| invalid("completed segment lost its owner"))?;
+            if outcomes.len() != steps.len() || retained.outcomes.is_some() {
+                return Err(invalid("native completion changed its original ordered roster"));
+            }
+            retained.outcomes = Some(outcomes);
+        }
+        guard.native_completion = Some((Arc::clone(&original.scope), original.operation.clone()));
+        if !session.owner()?.prepared_segment_completion_known() {
+            return Err(invalid("original native segment has not been completely reconciled"));
+        }
+        issued.state()?.phase = TaskUsePhase::CompletedPending {
+            scope: Arc::clone(&original.scope), operation: original.operation.clone(),
+        };
+        if !original.parent_finished {
+            if let Some(parent) = &original.private_parent {
+                let admission = session.segment_instruction.lock()
+                    .map_err(|_| invalid("original instruction owner mutex is poisoned"))?.clone();
+                let result = if let Some(admission) = admission {
+                    session.owner()?.admitted_segment_parent_identity(&admission.inner, &*parent.borrow(py).lease()?).map(|_| ())
+                } else {
+                    session.owner()?.finish_prepared_segment_parent(&mut *parent.borrow(py).lease()?)
+                };
+                if let Err(error) = result {
+                    return Err(if matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }) {
+                        prepared_segment_pending(py, xlog_err(error))
+                    } else { xlog_err(error) });
+                }
+            }
+            original.parent_finished = true;
+        }
+        if original.lease.is_none() {
+            if original.acquisition.is_none() {
+                original.acquisition = Some(session.owner()?.begin_published_acquisition().map_err(xlog_err)?);
+            }
+            let result = session.owner()?.resolve_published_acquisition(original.acquisition.as_ref().expect("original acquisition"));
+            match result {
+                Ok(lease) => original.lease = Some(Arc::new(Mutex::new(lease))),
+                Err(error) => return Err(if matches!(error, xlog_cuda::SemanticTransitionError::Runtime { .. }) {
+                    prepared_segment_pending(py, xlog_err(error))
+                } else { xlog_err(error) }),
+            }
+        }
+        if original.parent.is_none() {
+            original.parent = Some(Py::new(py, PySemanticPublishedParent {
+                session: self.session.clone_ref(py), task_use: task_use.clone_ref(py),
+                inner: Arc::clone(original.lease.as_ref().expect("original acquired lease")),
+                continuation_producers: Mutex::new(Vec::new()),
+            }).map_err(|error| prepared_segment_pending(py, error))?);
+        }
+        let outcomes = session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+            .as_ref().and_then(|retained| retained.outcomes.clone())
+            .ok_or_else(|| invalid("completed segment lost its retained native outcomes"))?;
+        while original.rows.len() < steps.len() {
+            let index = original.rows.len();
+            let step = &steps[index];
+            let completed = &outcomes[index];
+            let native_step = match completed {
+                xlog_cuda::SemanticPreparedStepOutcome::Skipped { step, .. }
+                | xlog_cuda::SemanticPreparedStepOutcome::Completed { step, .. } => step,
+            };
+            if !step.borrow(py).inner.same_handle(native_step) {
+                return Err(invalid("native completion changed its original ordered step"));
+            }
+            let (transition, status, refusal, invocation, bank) = match completed {
+                xlog_cuda::SemanticPreparedStepOutcome::Skipped { status, .. } =>
+                    (None, *status, None, py.None(), None),
+                xlog_cuda::SemanticPreparedStepOutcome::Completed { invocation, bank, transition, outcome, .. } => {
+                    let label = match transition {
+                        SemanticTransitionKind::Proposal => "proposal",
+                        SemanticTransitionKind::Recompute => "recompute",
+                        SemanticTransitionKind::Update => "update",
+                        SemanticTransitionKind::Drain => "drain",
+                    };
+                    let refusal = transition_refusal_report(py, outcome)
+                        .map_err(|error| prepared_segment_pending(py, error))?;
+                    let invocation = if *transition == SemanticTransitionKind::Proposal {
+                        if original.invocation.is_none() {
+                            if original.invocation_staging.is_none() {
+                                original.invocation_staging = Some(self.issue_prepared_policy_invocation(
+                                    py, task_use.clone_ref(py), step.clone_ref(py), *invocation, outcome.clone(),
+                                    original.operation == "training", &original.scope, &original.admission_snapshot,
+                                )?);
+                            }
+                            let staged = original.invocation_staging.as_ref().expect("original unpublished invocation");
+                            let invocation = Py::new(py, staged.clone_unpublished(py)?)
+                                .map_err(|error| prepared_segment_pending(py, error))?.into_any();
+                            original.invocation = Some(invocation);
+                            original.invocation_staging = None;
+                        }
+                        original.invocation.as_ref().expect("original invocation").clone_ref(py)
+                    } else { py.None() };
+                    (Some(label), 0, refusal, invocation, Some(*bank))
+                }
+            };
+            let row = (step.clone_ref(py), transition, status, refusal, invocation, bank)
+                .into_pyobject(py).map_err(|error| prepared_segment_pending(py, error))?.unbind().into_any();
+            original.rows.push(row);
+            original.invocation = None;
+        }
+        let rows = PyTuple::new(py, original.rows.iter().map(|row| row.clone_ref(py)))
+            .map_err(|error| prepared_segment_pending(py, error))?;
+        let result = (original.parent.as_ref().expect("original Python parent").clone_ref(py), rows)
+            .into_pyobject(py).map_err(|error| prepared_segment_pending(py, error))?.unbind();
+        let mut retained = session.prepared_segment.lock()
+            .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+        let retained = retained.as_mut().ok_or_else(|| invalid("completed segment lost its owner"))?;
+        retained.completion = Some(PreparedSegmentCompletion {
+            operation: original.operation.clone(), admission_snapshot: original.admission_snapshot.clone(), result,
+        });
+        Ok(())
+    }
+
     fn require_issued(&self, task_use: &PySemanticTransitionTaskUse) -> PyResult<()> {
         self.require_read_issued(task_use)?;
         task_use.state()?.require_public_use()
@@ -21262,7 +21683,7 @@ impl PySemanticTransitionController {
             PySemanticPublishedParent {
                 session: self.session.clone_ref(py),
                 task_use: task_use.clone_ref(py),
-                inner: Mutex::new(lease),
+                inner: Arc::new(Mutex::new(lease)),
                 continuation_producers: Mutex::new(Vec::new()),
             },
         )?;
@@ -21953,22 +22374,29 @@ impl PySemanticTransitionController {
         rng: SemanticRngBinding,
         outcome: xlog_cuda::SemanticTransitionOutcome,
         training: bool,
+        scope: &Arc<()>,
+        admission_snapshot: &[u8],
     ) -> PyResult<PySemanticPolicyInvocation> {
         self.session.borrow(py).require_creator()?;
         let original = step.borrow(py);
         let issued = task_use.borrow(py);
         let session = self.session.borrow(py);
         let owner = session.owner()?;
-        self.require_issued(&issued)?;
+        self.require_read_issued(&issued)?;
         original.require_task(py, &issued)?;
-        issued.require_current(&owner)?;
+        issued.require_original_identity(&owner)?;
+        if !Arc::ptr_eq(&original.scope, scope) || !owner.prepared_segment_completion_known() {
+            return Err(invalid("policy result requires the same completely observed original scope"));
+        }
         let bank = owner
             .require_prepared_policy_invocation(&original.inner, rng)
             .map_err(xlog_err)?;
         let state = issued.state()?;
-        state.require_public_use()?;
-        let (operation, _) = state.prepared_content_binding(&original.scope)?;
-        if operation.as_deref() != Some(if training { "training" } else { "inference" }) {
+        let operation = if training { "training" } else { "inference" };
+        if !matches!(&state.phase, TaskUsePhase::CompletedPending { scope: retained, operation: admitted }
+            if Arc::ptr_eq(retained, scope) && admitted == operation)
+            || state.snapshot.canonical != admission_snapshot
+        {
             return Err(invalid(
                 "prepared policy result changed its admitted operation",
             ));
