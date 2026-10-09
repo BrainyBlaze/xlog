@@ -721,8 +721,25 @@ impl SemanticTransitionSession {
         &mut self,
         admission: &SemanticSegmentInstructionAdmission,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.prepare_admitted_retirement_cold_model_work_inner(admission, None)
+    }
+
+    pub fn prepare_cancelled_admitted_retirement_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.prepare_admitted_retirement_cold_model_work_inner(admission, Some(proof))
+    }
+
+    fn prepare_admitted_retirement_cold_model_work_inner(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         let original = self.instruction_admission(admission)?;
         if let Some(handle) = original.retirement_work.clone() {
+            self.require_admitted_retirement_disposition(admission, cancellation)?;
             self.continue_cold_model_work_initialization(&handle)?;
             return Ok(handle);
         }
@@ -733,14 +750,20 @@ impl SemanticTransitionSession {
         let build = self.prepared_segment.as_ref().ok_or_else(|| {
             publication_input_error("instruction retirement lost its original prepared owner")
         })?;
-        if !build.completed
-            || build
+        if build
                 .program_admission
                 .as_ref()
                 .is_none_or(|original| !original.same_handle(admission))
         {
             return Err(publication_input_error(
-                "cold retirement requires the same completed original segment",
+                "cold retirement requires the same original admitted segment",
+            ));
+        }
+        if let Some(proof) = cancellation {
+            build.require_non_submission(proof)?;
+        } else if !build.completed {
+            return Err(publication_input_error(
+                "ordinary cold retirement requires actual segment completion",
             ));
         }
         let token = *build.tokens.first().ok_or_else(|| {
@@ -751,6 +774,9 @@ impl SemanticTransitionSession {
             .admitted_segment_cold_capacity(admission)?
             .model_work_capacity;
         let ordinal = self.admitted_segment_first_program_ordinal(admission)?;
+        // Freeze the native disposition before installing or initializing the
+        // original report. An uncertain initialization cannot change its mode.
+        self.instruction_admission_mut(admission)?.retirement_cancellation = cancellation.cloned();
         self.install_cold_model_work(
             token,
             capacity,
@@ -791,11 +817,52 @@ impl SemanticTransitionSession {
         work: &SemanticColdModelWork,
         streams: &[u64],
     ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.finish_admitted_retirement_cold_model_work_inner(admission, None, work, streams)
+    }
+
+    pub fn finish_cancelled_admitted_retirement_cold_model_work(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        proof: &SemanticPreparedSegmentNonSubmission,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.finish_admitted_retirement_cold_model_work_inner(admission, Some(proof), work, streams)
+    }
+
+    fn require_admitted_retirement_disposition(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+    ) -> Result<SemanticColdModelWorkDisposition, SemanticTransitionError> {
+        let original = self.instruction_admission(admission)?;
+        match (&original.retirement_cancellation, cancellation) {
+            (None, None) => Ok(SemanticColdModelWorkDisposition::Complete),
+            (Some(stored), Some(proof)) if stored.matches(&proof.steps) => {
+                self.prepared_segment.as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?
+                    .require_non_submission(proof)?;
+                Ok(SemanticColdModelWorkDisposition::KnownRefusal)
+            }
+            _ => Err(publication_input_error(
+                "cold retirement changed its original native disposition or cancellation proof",
+            )),
+        }
+    }
+
+    fn finish_admitted_retirement_cold_model_work_inner(
+        &mut self,
+        admission: &SemanticSegmentInstructionAdmission,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        let disposition = self.require_admitted_retirement_disposition(admission, cancellation)?;
         let result = self.finish_cold_model_work_for_reader(
             ColdWorkReader::AdmittedRetirement(admission),
             work,
             streams,
-            SemanticColdModelWorkDisposition::Complete,
+            disposition,
         )?;
         self.instruction_admission_mut(admission)?.retirement_result = Some(result);
         Ok(result)
@@ -1297,8 +1364,14 @@ impl SemanticTransitionSession {
                         "instruction retirement lost its original prepared owner",
                     )
                 })?;
-                if !build.completed
-                    || build
+                if let Some(proof) = &original.retirement_cancellation {
+                    build.require_non_submission(proof)?;
+                } else if !build.completed {
+                    return Err(publication_input_error(
+                        "cold retirement requires actual original segment completion",
+                    ));
+                }
+                if build
                         .program_admission
                         .as_ref()
                         .is_none_or(|original| !original.same_handle(admission))

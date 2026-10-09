@@ -9437,8 +9437,9 @@ impl OriginalNativeCommand {
 
 struct PublishedReader {
     device: TrackedCudaSlice<PublicationLease>,
+    acquisition_owner: Arc<Mutex<OriginalPublishedAcquisition>>,
+    acquisition_pending: bool,
     acquisition: PublishedReaderAcquisition,
-    acquisition_submitted: bool,
     initialization: Option<crate::device::RetainedDeviceWrite<PublicationLease>>,
     observation: Option<Arc<Mutex<PublicationRead<PublicationLease>>>>,
     bank_observation: Option<Arc<Mutex<PublishedReaderBankObservation>>>,
@@ -9449,6 +9450,20 @@ struct PublishedReader {
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
     model_owners: Vec<Arc<ModelGenerationOwner>>,
+}
+
+/// Capability for one original Acquire. It is issued before any transfer or
+/// kernel call and cannot issue a second reader after its lease was delivered.
+pub struct SemanticPublishedAcquisition {
+    issuer: Arc<()>,
+    token: u64,
+    owner: Arc<Mutex<OriginalPublishedAcquisition>>,
+}
+
+struct OriginalPublishedAcquisition {
+    command: OriginalNativeCommand,
+    poisoned: bool,
+    delivered: bool,
 }
 
 struct PublishedReaderRetirement {
@@ -11013,6 +11028,14 @@ pub struct SemanticPreparedExecutable {
 #[derive(Clone)]
 pub struct SemanticPreparedSegmentNonSubmission {
     steps: Vec<SemanticPreparedStep>,
+}
+
+/// Routing of one closed original launch frame. Neither variant authenticates
+/// numerical completion or replaces the original cancellation/observation law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticPreparedSegmentContinuation {
+    NeverGraphCalled,
+    GraphCallEntered,
 }
 
 impl SemanticPreparedSegmentNonSubmission {
@@ -17026,6 +17049,39 @@ impl SemanticTransitionSession {
         self.prepared_segment
             .as_ref()
             .is_some_and(|build| build.completed)
+    }
+
+    pub fn prepared_segment_continuation(
+        &self,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<SemanticPreparedSegmentContinuation, SemanticTransitionError> {
+        if self.poisoned || self.graph.ensure_not_poisoned().is_err() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let build = self.prepared_segment.as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?;
+        if !build.submitted
+            || build.completed
+            || build.launch_attempt.as_ref()
+                .is_none_or(|attempt| !attempt.closed.load(Ordering::Acquire))
+            || steps.len() != build.tokens.len()
+            || steps.iter().zip(&build.tokens).any(|(step, token)| {
+                step.token != *token
+                    || build.check_retained(step, &self.publication_issuer).is_err()
+                    || self.steps.get(token).is_none_or(|owner| {
+                        owner.prepared.is_none() || owner.identity.is_some()
+                    })
+            })
+        {
+            return Err(publication_input_error(
+                "continuation requires its complete closed original prepared launch attempt",
+            ));
+        }
+        Ok(if build.graph_call_entered {
+            SemanticPreparedSegmentContinuation::GraphCallEntered
+        } else {
+            SemanticPreparedSegmentContinuation::NeverGraphCalled
+        })
     }
 
     /// Close this exact construction before any graph call. A failed submission
@@ -27627,7 +27683,6 @@ impl SemanticTransitionSession {
             if let Some(reader) = reader {
                 if operation == 2 && *entered {
                     reader.acquisition = PublishedReaderAcquisition::Entered;
-                    reader.acquisition_submitted = *submitted;
                 } else if operation == 3 {
                     reader.retirement_entered |= *entered;
                     reader.retirement_submitted |= *submitted;
@@ -27785,20 +27840,35 @@ impl SemanticTransitionSession {
             // reader. A failed publication can never return the old base as progress.
             self.observe(proposal)?.into_published()?;
         }
+        let original = self.begin_published_acquisition()?;
+        self.resolve_published_acquisition(&original)
+    }
+
+    /// Allocate the original reader and its completion custody before Acquire
+    /// can enter the driver. Keep this capability across an uncertain return.
+    pub fn begin_published_acquisition(
+        &mut self,
+    ) -> Result<SemanticPublishedAcquisition, SemanticTransitionError> {
         self.ensure_quiescent()?;
         let token = self
             .next_reader
             .checked_add(1)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        self.next_reader = token;
         let device = allocate_publication(&self.provider, 1)?;
+        let original = Arc::new(Mutex::new(OriginalPublishedAcquisition {
+            command: OriginalNativeCommand::new(&self.domain)?,
+            poisoned: false,
+            delivered: false,
+        }));
+        self.next_reader = token;
         self.steps.insert(token, StepContentStorage::new());
         self.readers.insert(
             token,
             PublishedReader {
                 device,
+                acquisition_owner: Arc::clone(&original),
+                acquisition_pending: true,
                 acquisition: PublishedReaderAcquisition::Allocated,
-                acquisition_submitted: false,
                 initialization: None,
                 observation: None,
                 bank_observation: None,
@@ -27811,15 +27881,63 @@ impl SemanticTransitionSession {
                 model_owners: Vec::new(),
             },
         );
-        self.continue_acquire_reader(token)
+        Ok(SemanticPublishedAcquisition {
+            issuer: Arc::clone(&self.publication_issuer),
+            token,
+            owner: original,
+        })
+    }
+
+    /// Join only this original Acquire, returning its unique actual lease once.
+    /// A driver entry, successful submission and native result remain distinct.
+    pub fn resolve_published_acquisition(
+        &mut self,
+        original: &SemanticPublishedAcquisition,
+    ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        if !Arc::ptr_eq(&original.issuer, &self.publication_issuer)
+            || self.readers.get(&original.token).is_none_or(|reader| {
+                !Arc::ptr_eq(&reader.acquisition_owner, &original.owner)
+            })
+        {
+            return Err(publication_input_error("Acquire changed its original native owner"));
+        }
+        self.continue_acquire_reader(original.token)
+    }
+
+    fn original_acquisition_may_submit(&self, token: u64) -> bool {
+        !self.has_unresolved_native_effect()
+            && !self.pending
+            && self.pending_replay_delivery.is_none()
+            && self.pending_training_materialization.is_none()
+            && !self.readers.iter().any(|(other, reader)| {
+                reader.retirement_pending || (*other != token && reader.acquisition_pending)
+            })
+            && !self.steps.values().any(|step| step.consumer_completion.is_some())
+            && {
+                #[cfg(feature = "semantic-policy")]
+                { !self.has_pending_cold_model_work_completion(None) }
+                #[cfg(not(feature = "semantic-policy"))]
+                { true }
+            }
     }
 
     fn continue_acquire_reader(
         &mut self,
         token: u64,
     ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
+        let original = Arc::clone(&self.readers.get(&token)
+            .ok_or(SemanticTransitionError::NotBound)?.acquisition_owner);
+        let may_submit = self.original_acquisition_may_submit(token);
+        let mut original = original.lock()
+            .map_err(|_| publication_input_error("original acquisition owner poisoned"))?;
+        if original.delivered {
+            return Err(publication_input_error("original Acquire lease was already delivered"));
+        }
         if self.readers[&token].acquisition == PublishedReaderAcquisition::Allocated {
             if self.readers[&token].initialization.is_none() {
+                if !may_submit {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
                 let initialization = crate::device::RetainedDeviceWrite::new(
                     &self.stream,
                     &[PublicationLease::default()],
@@ -27847,6 +27965,10 @@ impl SemanticTransitionSession {
             // Resolution joins an entered copy and never uploads it again.
             let initialized = (|| {
                 if !initialization.entered() {
+                    if !may_submit {
+                        return Err(SemanticTransitionError::Poisoned);
+                    }
+                    original.poisoned = true;
                     initialization.enqueue(&self.stream).map_err(|error| {
                         runtime_error("publication lease initialization upload", error)
                     })?;
@@ -27856,7 +27978,7 @@ impl SemanticTransitionSession {
                 })
             })();
             if let Err(error) = initialized {
-                self.poisoned = true;
+                original.poisoned = true;
                 return Err(error);
             }
             reader.acquisition = PublishedReaderAcquisition::Initialized;
@@ -27864,6 +27986,9 @@ impl SemanticTransitionSession {
         }
         if self.readers[&token].acquisition == PublishedReaderAcquisition::Initialized {
             if self.readers[&token].observation.is_none() {
+                if !may_submit {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
                 let observation =
                     self.stage_publication_read(self.readers[&token].device.view())?;
                 self.readers
@@ -27871,25 +27996,40 @@ impl SemanticTransitionSession {
                     .expect("installed acquisition reader")
                     .observation = Some(Arc::new(Mutex::new(observation)));
             }
-            self.publication_command(2, Some(token))?;
+            let OriginalPublishedAcquisition { command, poisoned, .. } = &mut *original;
+            if !command.resolve_entered(poisoned)? {
+                if !may_submit {
+                    return Err(SemanticTransitionError::Poisoned);
+                }
+                *poisoned = true;
+                self.publication_command_with_original(2, Some(token), Some(command), poisoned)?;
+            }
         }
-        wait_on_stream(
-            &self.stream,
-            &mut self.poisoned,
-            &mut self.stream_waits,
-            "original publication acquisition completion",
-            CudaStream::synchronize,
-        )?;
-        self.finish_acquired_reader(token)
+        // An entered original command is never launched again, including an
+        // error after driver entry. Its own completion precedes every read.
+        if !original.command.completed {
+            original.command.completion.wait().map_err(|error| {
+                original.poisoned = true;
+                runtime_error("original acquisition completion", error)
+            })?;
+        }
+        let lease = self.finish_acquired_reader(token, may_submit, &mut original.poisoned)?;
+        original.delivered = true;
+        original.poisoned = false;
+        self.readers.get_mut(&token).expect("delivered original reader")
+            .acquisition_pending = false;
+        Ok(lease)
     }
 
     fn finish_acquired_reader(
         &mut self,
         token: u64,
+        may_submit: bool,
+        poisoned: &mut bool,
     ) -> Result<SemanticPublishedLease, SemanticTransitionError> {
-        if !self.readers[&token].acquisition_submitted {
+        if self.readers[&token].acquisition != PublishedReaderAcquisition::Entered {
             return Err(publication_input_error(
-                "original Acquire has no known successful driver submission",
+                "original Acquire has no actual driver entry",
             ));
         }
         let storage = Arc::clone(
@@ -27903,9 +28043,9 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .ok_or(SemanticTransitionError::ObservationMismatch)?,
         );
-        let lease = self.resolve_publication_read(&mut observation.lock().map_err(|_| {
+        let lease = self.resolve_acquisition_read(&mut observation.lock().map_err(|_| {
             publication_input_error("publication acquisition read owner poisoned")
-        })?)?[0];
+        })?, may_submit, poisoned)?[0];
         if lease.status != 0 {
             self.readers.remove(&token);
             self.steps.remove(&token);
@@ -27938,6 +28078,9 @@ impl SemanticTransitionSession {
                 .expect("aligned fixed source ABI")
         };
         if self.readers[&token].bank_observation.is_none() {
+            if !may_submit {
+                return Err(SemanticTransitionError::Poisoned);
+            }
             let header_view = unsafe {
                 storage.banks[lease.bank as usize]
                     .view()
@@ -27967,10 +28110,10 @@ impl SemanticTransitionSession {
         let mut original = original
             .lock()
             .map_err(|_| publication_input_error("publication acquisition bank owner poisoned"))?;
-        let header = self.resolve_publication_read(&mut original.header)?[0];
-        let directory = self.resolve_publication_read(&mut original.directory)?;
+        let header = self.resolve_acquisition_read(&mut original.header, may_submit, poisoned)?[0];
+        let directory = self.resolve_acquisition_read(&mut original.directory, may_submit, poisoned)?;
         let source: [SemanticTextSlot; 32] = self
-            .resolve_publication_read(&mut original.source)?
+            .resolve_acquisition_read(&mut original.source, may_submit, poisoned)?
             .try_into()
             .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
         if header.abi != 1
@@ -28015,6 +28158,18 @@ impl SemanticTransitionSession {
             directory,
             active: true,
         })
+    }
+
+    fn resolve_acquisition_read<T: DeviceRepr + Copy>(
+        &mut self,
+        read: &mut PublicationRead<T>,
+        may_submit: bool,
+        poisoned: &mut bool,
+    ) -> Result<Vec<T>, SemanticTransitionError> {
+        if !may_submit && !read.read.entered() {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        self.resolve_publication_read_with_poison(read, poisoned)
     }
 
     fn checked_reader(
@@ -32214,7 +32369,7 @@ impl SemanticTransitionSession {
 
     fn is_poisoned_except_cold_report(&self, except_token: Option<u64>) -> bool {
         self.has_unresolved_native_effect()
-            || self.readers.values().any(|reader| reader.retirement_pending)
+            || self.readers.values().any(|reader| reader.retirement_pending || reader.acquisition_pending)
             || self.steps.values().any(|step| step.consumer_completion.is_some())
             || {
                 #[cfg(feature = "semantic-policy")]
@@ -32226,6 +32381,7 @@ impl SemanticTransitionSession {
 
     fn original_completion_base_may_submit(&self) -> bool {
         !self.has_unresolved_native_effect()
+            && !self.readers.values().any(|reader| reader.acquisition_pending)
             && !self.pending
             && self.pending_replay_delivery.is_none()
             && self.pending_training_materialization.is_none()
@@ -33204,18 +33360,7 @@ impl SemanticTransitionSession {
         let acquired = if let Some(token) = pending.handoff_reader {
             // Join the original prefix before continuing. Only its retained
             // unentered suffix may enqueue; an entered Acquire is observed only.
-            let result = wait_on_stream(
-                &self.stream,
-                &mut self.poisoned,
-                &mut self.stream_waits,
-                "original training successor acquisition",
-                CudaStream::synchronize,
-            )
-            .and_then(|()| self.continue_acquire_reader(token));
-            if result.is_ok() {
-                self.poisoned = false;
-            }
-            result
+            self.continue_acquire_reader(token)
         } else {
             let token = self
                 .next_reader
