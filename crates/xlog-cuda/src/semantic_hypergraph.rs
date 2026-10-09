@@ -249,8 +249,76 @@ pub(crate) struct SemanticRootInsertion {
     /// Derived predicate, four (record, argument) pairs, and qualifier owner.
     /// The complete typed values remain in this material's immutable admission.
     pub(crate) reconstruction: [u32; 10],
-    pub(crate) support: u32,
+    pub(crate) support: SemanticRootSupport,
     pub(crate) version: [u8; 32],
+}
+
+/// The exact origin of one root insertion. External references address the
+/// retained signed receipt bytes, never a new occurrence in immutable admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRootSupport {
+    Admitted(u32),
+    Authenticated {
+        binding_ordinal: u64,
+        observation: [u64; 18],
+    },
+}
+
+pub(crate) struct PreparedAuthenticatedSupports {
+    pub(crate) statements: Vec<SemanticResidentDecodedStatement>,
+    pub(crate) supports: Vec<SemanticResidentDecodedSupport>,
+    pub(crate) references: Vec<(Identity256, SemanticRootSupport)>,
+}
+
+impl SemanticRootSupport {
+    fn event(
+        self,
+        admission: &SemanticAdmission,
+        statement: Option<u32>,
+    ) -> Result<SemanticSupportEvent, SemanticHypergraphError> {
+        let Self::Authenticated { observation, .. } = self else {
+            let Self::Admitted(index) = self else {
+                unreachable!()
+            };
+            return admission.support_event(index);
+        };
+        admission.statement_key(statement.ok_or_else(|| {
+            admission_error("authenticated observation requires its original protected statement")
+        })?)?;
+        if observation[0] != 1
+            || !matches!(observation[1], 1 | 2)
+            || observation[2..]
+                .chunks_exact(4)
+                .any(|identity| identity == [0; 4])
+        {
+            return Err(admission_error(
+                "authenticated observation has invalid complete identities",
+            ));
+        }
+        let identity = |offset: usize| {
+            let mut bytes = [0; 32];
+            for (chunk, word) in bytes
+                .chunks_exact_mut(8)
+                .zip(&observation[offset..offset + 4])
+            {
+                chunk.copy_from_slice(&word.to_le_bytes());
+            }
+            Identity256::from_bytes(bytes)
+        };
+        Ok(SemanticSupportEvent {
+            owner: admission.base.owner,
+            record: u32::MAX,
+            polarity: if observation[1] == 1 {
+                SemanticPolarity::Pro
+            } else {
+                SemanticPolarity::Contra
+            },
+            provenance: identity(2),
+            source: identity(6),
+            context: identity(10),
+            scope: identity(14),
+        })
+    }
 }
 
 /// Bounded little-endian reader shared by native execution material payloads.
@@ -405,7 +473,22 @@ impl SemanticRootMaterial {
             for reference in insertion.reconstruction {
                 material_u32(&mut out, reference);
             }
-            material_u32(&mut out, insertion.support);
+            match insertion.support {
+                SemanticRootSupport::Admitted(index) => {
+                    out.push(0);
+                    material_u32(&mut out, index);
+                }
+                SemanticRootSupport::Authenticated {
+                    binding_ordinal,
+                    observation,
+                } => {
+                    out.push(1);
+                    material_u64(&mut out, binding_ordinal);
+                    for word in observation {
+                        material_u64(&mut out, word);
+                    }
+                }
+            }
             out.extend_from_slice(&insertion.version);
         }
         out.extend_from_slice(&self.digest);
@@ -424,7 +507,7 @@ impl SemanticRootMaterial {
         symbols: &[String],
     ) -> Result<Vec<u8>, SemanticHypergraphError> {
         let mut out = b"XLOGROOT".to_vec();
-        material_u32(&mut out, 2);
+        material_u32(&mut out, 3);
         material_count(&mut out, records.predicates.len())?;
         for predicate in &records.predicates {
             material_u32(&mut out, predicate.predicate.0);
@@ -493,7 +576,7 @@ impl SemanticRootMaterial {
         limits: SemanticAdmissionLimits,
     ) -> Result<Self, SemanticHypergraphError> {
         let mut reader = SemanticMaterialReader::new(bytes);
-        if reader.take(8)? != b"XLOGROOT" || reader.u32()? != 2 {
+        if reader.take(8)? != b"XLOGROOT" || reader.u32()? != 3 {
             return Err(admission_error(
                 "unsupported semantic root material encoding",
             ));
@@ -617,7 +700,7 @@ impl SemanticRootMaterial {
         for _ in 0..count {
             symbols.push(material_string(&mut reader, &mut text_budget)?);
         }
-        let count = reader.count(77)?;
+        let count = reader.count(78)?;
         let mut insertions = Vec::with_capacity(count);
         for _ in 0..count {
             let statement = match reader.u8()? {
@@ -634,10 +717,25 @@ impl SemanticRootMaterial {
                     "original material target has derived reconstruction references",
                 ));
             }
+            let support = match reader.u8()? {
+                0 => SemanticRootSupport::Admitted(reader.u32()?),
+                1 => {
+                    let binding_ordinal = reader.u64()?;
+                    let mut observation = [0; 18];
+                    for word in &mut observation {
+                        *word = reader.u64()?;
+                    }
+                    SemanticRootSupport::Authenticated {
+                        binding_ordinal,
+                        observation,
+                    }
+                }
+                _ => return Err(admission_error("invalid material support origin")),
+            };
             insertions.push(SemanticRootInsertion {
                 statement,
                 reconstruction,
-                support: reader.u32()?,
+                support,
                 version: reader.take(32)?.try_into().unwrap(),
             });
         }
@@ -897,7 +995,7 @@ impl SemanticRootMaterial {
         for insertion in &self.insertions {
             let key =
                 material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
-            let event = admission.support_event(insertion.support)?;
+            let event = insertion.support.event(admission, insertion.statement)?;
             let support = event.identity(key.identity).0;
             if !supports.insert((key.identity.0, support)) {
                 return Err(admission_error(
@@ -940,6 +1038,7 @@ fn material_from_arena(
     root: SemanticRootHandle,
     snapshot: SemanticRootSnapshot,
     admission: &SemanticAdmission,
+    authenticated: &[(Identity256, SemanticRootSupport)],
 ) -> Result<SemanticRootMaterial, SemanticHypergraphError> {
     let corrupt = || SemanticHypergraphError::CorruptLineage {
         detail: "root material contains invalid native reachability or generation".into(),
@@ -1037,7 +1136,20 @@ fn material_from_arena(
             let reconstruction =
                 std::array::from_fn(|word| (support[12 + word / 2] >> (32 * (word % 2))) as u32);
             let key = material_statement_key(admission, statement_index, &reconstruction)?;
-            let event = admission.support_event(support_index)?;
+            let source = if support_index == u32::MAX {
+                authenticated
+                    .iter()
+                    .find(|(identity, _)| identity.as_bytes() == &support_identity)
+                    .map(|(_, source)| *source)
+                    .ok_or_else(|| {
+                        admission_error(
+                            "reachable observation lost its original signed-material reference",
+                        )
+                    })?
+            } else {
+                SemanticRootSupport::Admitted(support_index)
+            };
+            let event = source.event(admission, statement_index)?;
             if key.identity.0 != statement_identity
                 || event.polarity.code() != support[5]
                 || event.identity(key.identity).0 != support_identity
@@ -1068,7 +1180,7 @@ fn material_from_arena(
                 SemanticRootInsertion {
                     statement: statement_index,
                     reconstruction,
-                    support: support_index,
+                    support: source,
                     version: digest,
                 },
             ));
@@ -2576,6 +2688,9 @@ pub struct SemanticHypergraph {
     current_fork: Option<CurrentFork>,
     empty_root: SemanticRootHandle,
     admission: Option<SemanticAdmission>,
+    // Cold metadata for genuinely authenticated external events. The immutable
+    // original admission and categorical support codebooks are never extended.
+    authenticated_supports: Vec<(Identity256, SemanticRootSupport)>,
     stats: SemanticHypergraphExecutionStats,
     device_controlled: bool,
     poisoned: bool,
@@ -2591,6 +2706,120 @@ pub struct SemanticHypergraph {
 }
 
 impl SemanticHypergraph {
+    /// Prepare only native-authenticated observations. This does not publish
+    /// facts or add anything to the original typed admission/codebooks.
+    pub(crate) fn prepare_authenticated_supports(
+        &mut self,
+        sources: &[(u32, SemanticRootSupport)],
+    ) -> Result<PreparedAuthenticatedSupports, SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        let admission = self
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("external support requires original typed admission"))?;
+        let words = |bytes: &[u8; 32]| {
+            std::array::from_fn(|index| {
+                u32::from_le_bytes(
+                    bytes[index * 4..index * 4 + 4]
+                        .try_into()
+                        .expect("identity word"),
+                )
+            })
+        };
+        let mut prepared = PreparedAuthenticatedSupports {
+            statements: Vec::with_capacity(sources.len()),
+            supports: Vec::with_capacity(sources.len()),
+            references: Vec::with_capacity(sources.len()),
+        };
+        for &(record, source) in sources {
+            if !matches!(source, SemanticRootSupport::Authenticated { .. }) {
+                return Err(admission_error(
+                    "external support cannot reinterpret an admitted occurrence",
+                ));
+            }
+            let statement = admission.statement_key(record)?;
+            let event = source.event(admission, Some(record))?;
+            let identity = Identity256::from_bytes(*event.identity(statement.identity).as_bytes());
+            if self
+                .authenticated_supports
+                .iter()
+                .chain(&prepared.references)
+                .any(|(previous, value)| *previous == identity && *value != source)
+            {
+                return Err(admission_error(
+                    "one authenticated support has conflicting original references",
+                ));
+            }
+            prepared.statements.push(SemanticResidentDecodedStatement {
+                identity_words: words(statement.identity.as_bytes()),
+                record,
+                reconstruction: [0; 10],
+            });
+            prepared.supports.push(SemanticResidentDecodedSupport {
+                polarity: event.polarity.code() as u32,
+                provenance_words: words(event.provenance.as_bytes()),
+                source_words: words(event.source.as_bytes()),
+                context_words: words(event.context.as_bytes()),
+                scope_words: words(event.scope.as_bytes()),
+                record: u32::MAX,
+            });
+            if !prepared
+                .references
+                .iter()
+                .any(|(previous, _)| *previous == identity)
+            {
+                prepared.references.push((identity, source));
+            }
+        }
+        let additional = prepared
+            .references
+            .iter()
+            .filter(|(identity, _)| {
+                !self
+                    .authenticated_supports
+                    .iter()
+                    .any(|(previous, _)| previous == identity)
+            })
+            .count();
+        if self
+            .authenticated_supports
+            .len()
+            .checked_add(additional)
+            .is_none_or(|count| count > self.capacities.supports as usize)
+        {
+            return Err(admission_error(
+                "external provenance exceeds original support capacity",
+            ));
+        }
+        self.authenticated_supports
+            .try_reserve(additional)
+            .map_err(|_| {
+                admission_error("cannot retain original authenticated support metadata")
+            })?;
+        Ok(prepared)
+    }
+
+    /// Original pre-reserved metadata becomes visible only after the same
+    /// native publication is known committed. No device operation is repeated.
+    pub(crate) fn finish_authenticated_supports(
+        &mut self,
+        references: &[(Identity256, SemanticRootSupport)],
+    ) {
+        for &(identity, source) in references {
+            if !self
+                .authenticated_supports
+                .iter()
+                .any(|(prior, _)| *prior == identity)
+            {
+                self.authenticated_supports.push((identity, source));
+            }
+        }
+    }
+
+    pub(crate) fn authenticated_supports(&self) -> &[(Identity256, SemanticRootSupport)] {
+        &self.authenticated_supports
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn begin_cold_work(
         &mut self,
@@ -2731,6 +2960,7 @@ impl SemanticHypergraph {
             self.admission
                 .as_ref()
                 .ok_or_else(|| admission_error("retained root requires typed admission"))?,
+            &self.authenticated_supports,
         )
     }
 
@@ -2747,7 +2977,7 @@ impl SemanticHypergraph {
         let (records, symbols) = normalized_material_admission(admission)?;
         let prefix = SemanticRootMaterial::encode_admission(&records, &symbols)?.len();
         (self.capacities.versions as usize)
-            .checked_mul(1 + 4 + 10 * 4 + 4 + 32)
+            .checked_mul(1 + 4 + 10 * 4 + 1 + 8 + 18 * 8 + 32)
             .and_then(|bytes| bytes.checked_add(prefix))
             .and_then(|bytes| bytes.checked_add(4 + 2 * 32 + 2 * 3 * 4))
             .ok_or_else(size_overflow)
@@ -2938,6 +3168,7 @@ impl CudaKernelProvider {
             current_fork: None,
             empty_root: SemanticRootHandle::new(owner, 0, 1),
             admission: None,
+            authenticated_supports: Vec::new(),
             stats: SemanticHypergraphExecutionStats::default(),
             device_controlled: false,
             poisoned: false,
@@ -3343,6 +3574,7 @@ impl SemanticHypergraph {
                 original.root,
                 snapshot,
                 self.admission.as_ref().expect("checked typed admission"),
+                &self.authenticated_supports,
             )
         })();
         let material = poison_after_reconciliation_error(&mut self.poisoned, result)?;
@@ -3377,6 +3609,24 @@ impl SemanticHypergraph {
             ));
         }
         material.validate_lineage(admission)?;
+        let sources = material
+            .insertions
+            .iter()
+            .filter_map(|insertion| {
+                matches!(insertion.support, SemanticRootSupport::Authenticated { .. })
+                    .then_some((insertion.statement, insertion.support))
+            })
+            .map(|(record, source)| {
+                Ok((
+                    record.ok_or_else(|| {
+                        admission_error("external support lost its original statement")
+                    })?,
+                    source,
+                ))
+            })
+            .collect::<Result<Vec<_>, SemanticHypergraphError>>()?;
+        let authenticated = self.prepare_authenticated_supports(&sources)?;
+        self.finish_authenticated_supports(&authenticated.references);
         let base_versions = material.admission_base_extents[2] as usize;
         let needed_roots = 1
             + u32::from(!material.insertions.is_empty())
@@ -3403,7 +3653,7 @@ impl SemanticHypergraph {
                         insertion.statement,
                         &insertion.reconstruction,
                     )?;
-                    let event = admission.support_event(insertion.support)?;
+                    let event = insertion.support.event(admission, insertion.statement)?;
                     match self.insert_support_reconstructed(
                         fork,
                         &key,

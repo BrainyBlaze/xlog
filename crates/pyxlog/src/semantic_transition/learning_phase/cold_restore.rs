@@ -654,6 +654,7 @@ fn require_private_expense(
         || source_seed.training_domain != private_seed.training_domain
         || source_seed.replay_capacity != private_seed.replay_capacity
         || source_seed.training_objective != private_seed.training_objective
+        || source_seed.original_training_roster()? != private_seed.original_training_roster()?
         || source_seed.checkpoint_source_limits()? != private_seed.checkpoint_source_limits()?
         || source_seed.proposal_expense()?.capacity != expense.capacity
         || source_seed.proposal_expense()?.spent > expense.spent
@@ -1325,6 +1326,7 @@ impl VerifiedClosure {
         if source_seed.training_domain != final_seed.training_domain
             || source_seed.replay_capacity != final_seed.replay_capacity
             || source_seed.training_objective != final_seed.training_objective
+            || source_seed.original_training_roster()? != final_seed.original_training_roster()?
             || source_seed.checkpoint_source_limits()? != final_seed.checkpoint_source_limits()?
             || source_seed.proposal_expense()?.capacity != final_seed.proposal_expense()?.capacity
             || source_seed.proposal_expense()?.spent > final_seed.proposal_expense()?.spent
