@@ -856,7 +856,7 @@ struct PolicyAdjointNumericalDescriptor {
 struct PolicyBackward {
     uint64_t cotangents,parameters,text,baselines,recurrent,scores,status,parameter_cells,text_cells;
     uint64_t selection,objective,objective_groups,objective_group_members,roster_rows,origin_candidate;
-    uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term;
+    uint64_t origin_lease,origin_bank,mode,member_ordinal,critic_term,target_header;
     PolicyAdjointNumericalDescriptor numerical;
 };
 struct Descriptor {
@@ -4758,6 +4758,15 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor) {
                     : (b.mode==2 && group_member));
                 apply_edit=owned && matching_edit_rows==1;
                 apply_selected=apply_actor || apply_edit;
+                if(apply_selected && !*status) {
+                    const auto* target=reinterpret_cast<const PublicationHeader*>(b.target_header);
+                    const auto& origin=b.mode==1 ? selection.origin : roster[b.member_ordinal].origin;
+                    if(!publication_pointer_span(b.target_header,sizeof(PublicationHeader),alignof(PublicationHeader)) ||
+                       target->abi!=1 || origin.present!=1 ||
+                       !publication_identity_equal(origin.model_geometry_digest,target->model_geometry_digest) ||
+                       !publication_identity_equal(origin.model_numerical_digest,target->model_numerical_digest))
+                        *status=1;
+                }
                 if((apply_actor || apply_edit) && (!state || state->status))*status=1;
                 if((b.mode==2 || b.mode==3) && (!owned || !state || state->status))*status=1;
                 if((b.mode==2 || b.mode==3) && !*status) {

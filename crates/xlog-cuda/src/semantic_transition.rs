@@ -13440,6 +13440,7 @@ struct PolicyBackward {
     mode: u64,
     member_ordinal: u64,
     critic_term: u64,
+    target_header: u64,
     numerical: PolicyAdjointNumericalDescriptor,
 }
 
@@ -14333,8 +14334,8 @@ const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 160);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
-const _: () = assert!(size_of::<PolicyBackward>() == 256);
-const _: () = assert!(size_of::<Descriptor>() == 1368);
+const _: () = assert!(size_of::<PolicyBackward>() == 264);
+const _: () = assert!(size_of::<Descriptor>() == 1376);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -30828,6 +30829,18 @@ impl SemanticTransitionSession {
             descriptor,
             recorder,
         } = self.prepare_policy_vjp_recording(
+            &self.domain,
+            Some(
+                &self.steps[&update_step.token]
+                    .inputs
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "policy backward requires the original Update publication basis",
+                        )
+                    })?
+                    .header,
+            ),
             policy,
             policy.buffers.adjoints.as_ref().ok_or_else(|| {
                 publication_input_error("original policy adjoint banks have already been consumed")
@@ -31157,6 +31170,18 @@ impl SemanticTransitionSession {
             descriptor,
             recorder,
         } = self.prepare_policy_vjp_recording(
+            &self.domain,
+            Some(
+                &self.steps[&update_step.token]
+                    .inputs
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "policy backward requires the original Update publication basis",
+                        )
+                    })?
+                    .header,
+            ),
             policy,
             &owner,
             support,
@@ -31594,15 +31619,25 @@ impl SemanticTransitionSession {
         dlpack_consumer_stream(consumer_stream)?;
         self.check_prepared_content_stream(update_step, consumer_stream)?;
         source.ensure_quiescent()?;
+        let target_task = self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let source_task = source
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
         if bank > 1
             || Arc::ptr_eq(&self.publication_issuer, &source.publication_issuer)
             || self.provider.device().ordinal() != source.provider.device().ordinal()
-            || self.task_content() != source.task_content()
-            || self.task_content().is_none()
-            || self.task_scoring_law_identity()? != source.task_scoring_law_identity()?
+            || target_task.0.spec.scoring != source_task.0.spec.scoring
+            || target_task.0.objective_law != source_task.0.objective_law
+            || target_task.0.spec.training_domain.is_none()
+            || target_task.0.spec.training_domain != source_task.0.spec.training_domain
+            || (!edit_only && !source_task.0.spec.actor_eligible)
         {
             return Err(publication_input_error(
-                "imported group member requires a distinct original Session on the same bound task and device",
+                "imported group member requires its original task on the same device with the frozen common scoring, objective and training domain",
             ));
         }
         let build = self.prepared_segment.as_ref().ok_or_else(|| {
@@ -31674,11 +31709,35 @@ impl SemanticTransitionSession {
         let state = tape.origin_state.as_ref().ok_or_else(|| {
             publication_input_error("imported group member has no original published state")
         })?;
+        let origin = member_row.origin.as_ref().ok_or_else(|| {
+            publication_input_error("imported group member has no original execution lineage")
+        })?;
+        if origin.invocation != invocation
+            || origin.transition != SemanticTransitionKind::Proposal
+            || origin.model_geometry_digest != source_lease.header.model_geometry_digest
+            || origin.model_numerical_digest != source_lease.header.model_numerical_digest
+        {
+            return Err(publication_input_error(
+                "imported group member differs from its original invocation or exact model realization",
+            ));
+        }
         let owner = Arc::clone(&tape.policy.buffers.temporal_adjoints);
         let PolicyVjpRecording {
             descriptor,
             recorder,
-        } = self.prepare_policy_vjp_recording(
+        } = source.prepare_policy_vjp_recording(
+            &self.domain,
+            Some(
+                &self.steps[&update_step.token]
+                    .inputs
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "policy backward requires the original Update publication basis",
+                        )
+                    })?
+                    .header,
+            ),
             &tape.policy,
             &owner,
             &tape.support,
@@ -31938,6 +31997,8 @@ impl SemanticTransitionSession {
     )]
     fn prepare_policy_vjp_recording(
         &self,
+        recording_domain: &ResidentExecutionDomain,
+        target_header: Option<&TrackedCudaSlice<PublicationHeader>>,
         policy: &PolicyStorage,
         adjoints: &PolicyAdjointBuffers,
         support: &TrackedCudaSlice<u8>,
@@ -31947,6 +32008,11 @@ impl SemanticTransitionSession {
         codebooks: &DeviceMemoryView<u64>,
         input: PolicyVjpInput<'_>,
     ) -> Result<PolicyVjpRecording, SemanticTransitionError> {
+        if matches!(input, PolicyVjpInput::External(_)) != target_header.is_none() {
+            return Err(publication_input_error(
+                "policy backward must retain exactly its original Update publication basis",
+            ));
+        }
         if let PolicyVjpInput::External(score_cotangents) = input {
             if score_cotangents.len() != COMPONENT_COUNT {
                 return Err(SemanticTransitionError::InvalidInput {
@@ -32101,9 +32167,13 @@ impl SemanticTransitionSession {
             mode,
             member_ordinal,
             critic_term,
+            target_header: target_header.map_or(0, |header| header.device_ptr_value()),
         };
         self.validate_ranges_with(&io)?;
-        let mut recorder = self.domain.new_strict_recorder();
+        let mut recorder = recording_domain.new_strict_recorder();
+        if let Some(header) = target_header {
+            recorder.read(header);
+        }
         recorder.read(support);
         recorder.read(receipts);
         recorder.read(codebooks);
@@ -32218,6 +32288,8 @@ impl SemanticTransitionSession {
             descriptor,
             recorder,
         } = self.prepare_policy_vjp_recording(
+            &self.domain,
+            None,
             policy,
             policy.buffers.adjoints.as_ref().ok_or_else(|| {
                 publication_input_error("original policy adjoint banks have already been consumed")
