@@ -850,11 +850,11 @@ impl SemanticRootMaterial {
     pub(crate) fn task_observation_roots(
         &self,
         admission: &SemanticAdmission,
-        query_records: [u32; 3],
+        query_records: &[u32],
     ) -> Result<crate::semantic_transition::SemanticTaskObservationRoots, SemanticHypergraphError>
     {
         self.validate_lineage(admission)?;
-        let queries = query_records.map(|record| admission.statement_key(record));
+        let queries = query_records.iter().map(|&record| admission.statement_key(record));
         let mut contributors = Vec::new();
         for (ordinal, query) in queries.into_iter().enumerate() {
             let query = query?;
@@ -872,7 +872,7 @@ impl SemanticRootMaterial {
         Ok(crate::semantic_transition::SemanticTaskObservationRoots {
             root_digest: crate::semantic_transition::Identity256::from_bytes(self.digest),
             root_extents: self.extents,
-            query_records,
+            query_records: query_records.to_vec(),
             contributors,
         })
     }

@@ -226,8 +226,8 @@ pub struct SemanticTrainingCanary {
     /// Model-logit positions whose next-token predictions must equal the
     /// canonical truth token for each native task result, in query order. Only
     /// the symbolic-utility and goal-chain canaries use these coordinates;
-    /// every other kind uses `[u64::MAX; 3]`.
-    pub obligation_positions: [u64; 3],
+    /// every other kind uses an empty roster.
+    pub obligation_positions: Vec<u64>,
     /// Explicit frozen members whose individual retention is uncompensated.
     /// Only the retained-behavior canary carries this set. Aggregate retention
     /// labels remain the metric denominator and do not imply protection.
@@ -304,7 +304,8 @@ pub struct SemanticTrainingCanaryRecord {
     pub upper_bound_bits: u64,
     pub memory_limit: u64,
     pub work_limit: u64,
-    pub obligation_positions: [u64; 3],
+    pub obligation_member_offset: u64,
+    pub obligation_member_count: u64,
     pub protected_member_offset: u64,
     pub protected_member_count: u64,
     pub row_identity: [u64; 4],
@@ -1515,7 +1516,7 @@ impl SemanticTrainingViewArena {
         training_domain: &SemanticTrainingDomain,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
-        expected_truth: [SemanticTruth; 3],
+        initial_truth: &[SemanticTruth],
         replay_binding: Option<SemanticReplayAppendBinding>,
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         validate_execution_domain(provider, domain)
@@ -1657,7 +1658,7 @@ impl SemanticTrainingViewArena {
                 capacity,
                 task_identity,
                 task_content,
-                expected_truth,
+                initial_truth,
                 record_limit,
             )?;
         #[cfg(not(feature = "semantic-policy"))]
@@ -1668,7 +1669,7 @@ impl SemanticTrainingViewArena {
             capacity,
             task_identity,
             task_content,
-            expected_truth,
+            initial_truth,
             record_limit,
         )?;
         #[cfg(feature = "semantic-policy")]
@@ -1933,7 +1934,7 @@ fn validate_objective(
     capacity: usize,
     task_identity: Identity256,
     task_content: SemanticTaskContentIdentity,
-    expected_truth: [SemanticTruth; 3],
+    initial_truth: &[SemanticTruth],
     record_limit: u64,
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
@@ -2073,6 +2074,8 @@ fn validate_objective(
         let positions_valid = if obligation_kind {
             row.is_some_and(|row| {
                 row.basis == SemanticTrainingViewBasis::CorpusSymbolicAnchor as u64
+                    && !initial_truth.is_empty()
+                    && canary.obligation_positions.len() == initial_truth.len()
                     && canary
                         .obligation_positions
                         .windows(2)
@@ -2081,7 +2084,7 @@ fn validate_objective(
                         .obligation_positions
                         .iter()
                         .all(|position| *position < row.window)
-                    && canary.obligation_positions.iter().zip(expected_truth).all(
+                    && canary.obligation_positions.iter().zip(initial_truth).all(
                         |(position, truth)| {
                             position
                                 .checked_add(1)
@@ -2111,14 +2114,14 @@ fn validate_objective(
                                 .map(|bytes| {
                                     u64::from_le_bytes(
                                         bytes.try_into().expect("bounded truth token"),
-                                    ) == objective.truth_tokens[truth as usize]
+                                    ) == objective.truth_tokens[*truth as usize]
                                 })
                                 .unwrap_or(false)
                         },
                     )
             })
         } else {
-            canary.obligation_positions == [u64::MAX; 3]
+            canary.obligation_positions.is_empty()
         };
         let protected_valid = if canary.kind == SemanticTrainingCanaryKind::RetainedBehavior {
             canary
@@ -2155,6 +2158,8 @@ fn validate_objective(
         seen_canaries[index] = true;
         let row = row.expect("checked canary row");
         let identity = canary_identity(&objective, canary, row, task_identity);
+        let obligation_member_offset = protected_members.len();
+        protected_members.extend_from_slice(&canary.obligation_positions);
         let protected_member_offset = protected_members.len();
         protected_members.extend_from_slice(&canary.protected_positions);
         canaries.push(SemanticTrainingCanaryRecord {
@@ -2165,7 +2170,10 @@ fn validate_objective(
             upper_bound_bits: canary.upper_bound.to_bits(),
             memory_limit: canary.memory_limit,
             work_limit: canary.work_limit,
-            obligation_positions: canary.obligation_positions,
+            obligation_member_offset: u64::try_from(obligation_member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            obligation_member_count: u64::try_from(canary.obligation_positions.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             protected_member_offset: u64::try_from(protected_member_offset)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             protected_member_count: u64::try_from(canary.protected_positions.len())
@@ -2285,7 +2293,8 @@ fn canary_identity(
     hasher.update(canary.upper_bound.to_bits().to_le_bytes());
     hasher.update(canary.memory_limit.to_le_bytes());
     hasher.update(canary.work_limit.to_le_bytes());
-    for position in canary.obligation_positions {
+    hasher.update((canary.obligation_positions.len() as u64).to_le_bytes());
+    for position in &canary.obligation_positions {
         hasher.update(position.to_le_bytes());
     }
     hasher.update(
