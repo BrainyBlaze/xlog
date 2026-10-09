@@ -1861,16 +1861,21 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(dst.len())
             .ok_or_else(|| XlogError::Kernel("dtoh size overflow".to_string()))?;
-        self.check_deterministic_d2h("dtoh_sync_copy_into_tracked", bytes as u64)?;
-        self.transfer_tracker.record_dtoh(bytes as u64);
-        record_resident_transfer(self.provider_identity, |stats| {
-            stats.tracked_dtoh_calls += 1;
-            stats.tracked_dtoh_bytes += bytes as u64;
-        });
+        self.admit_tracked_dtoh(bytes as u64)?;
         self.device
             .inner()
             .dtoh_sync_copy_into(src, dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy from device: {}", e)))
+    }
+
+    pub(crate) fn admit_tracked_dtoh(&self, bytes: u64) -> Result<()> {
+        self.check_deterministic_d2h("dtoh_sync_copy_into_tracked", bytes)?;
+        self.transfer_tracker.record_dtoh(bytes);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_dtoh_calls += 1;
+            stats.tracked_dtoh_bytes += bytes;
+        });
+        Ok(())
     }
 
     /// Hard cap (in bytes) for [`Self::dtoh_small_metadata_untracked`].
@@ -1934,11 +1939,7 @@ impl CudaKernelProvider {
             ))
         })?;
         let mut buf: Vec<T> = vec![T::default(); count];
-        self.untracked_metadata_dtoh_count
-            .fetch_add(1, Ordering::Relaxed);
-        record_resident_transfer(self.provider_identity, |stats| {
-            stats.untracked_metadata_dtoh_calls += 1;
-        });
+        self.admit_small_metadata_dtoh(bytes)?;
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -1946,6 +1947,20 @@ impl CudaKernelProvider {
                 XlogError::Kernel(format!("dtoh_small_metadata_untracked: copy failed: {}", e))
             })?;
         Ok(buf)
+    }
+
+    pub(crate) fn admit_small_metadata_dtoh(&self, bytes: usize) -> Result<()> {
+        if bytes > Self::DTOH_SMALL_METADATA_MAX_BYTES {
+            return Err(XlogError::Kernel(
+                "metadata read exceeds its fixed byte cap".into(),
+            ));
+        }
+        self.untracked_metadata_dtoh_count
+            .fetch_add(1, Ordering::Relaxed);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.untracked_metadata_dtoh_calls += 1;
+        });
+        Ok(())
     }
 
     /// Read a single scalar from device to host WITHOUT updating the
@@ -1995,11 +2010,7 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
-        self.transfer_tracker.record_htod(bytes as u64);
-        record_resident_transfer(self.provider_identity, |stats| {
-            stats.tracked_htod_calls += 1;
-            stats.tracked_htod_bytes += bytes as u64;
-        });
+        self.admit_tracked_htod(bytes);
         self.device
             .inner()
             .htod_sync_copy_into(src, dst)
@@ -2039,14 +2050,26 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("launch metadata htod size overflow".to_string()))?;
-        self.transfer_tracker
-            .record_htod_launch_metadata(bytes as u64);
+        self.admit_launch_metadata_htod(bytes);
         self.device
             .inner()
             .htod_sync_copy_into(src, dst)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to copy launch metadata to device: {}", e))
             })
+    }
+
+    pub(crate) fn admit_launch_metadata_htod(&self, bytes: usize) {
+        self.transfer_tracker
+            .record_htod_launch_metadata(bytes as u64);
+    }
+
+    pub(crate) fn admit_tracked_htod(&self, bytes: usize) {
+        self.transfer_tracker.record_htod(bytes as u64);
+        record_resident_transfer(self.provider_identity, |stats| {
+            stats.tracked_htod_calls += 1;
+            stats.tracked_htod_bytes += bytes as u64;
+        });
     }
 
     /// Initialize device metadata within its admitted write. Capture stores

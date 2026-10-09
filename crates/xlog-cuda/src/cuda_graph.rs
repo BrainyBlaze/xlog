@@ -1089,7 +1089,7 @@ fn conditional_driver_call(
 
 /// Native destruction acknowledgement shared across builder and executable.
 /// Dropping a Rust owner or queuing retirement never sets this acknowledgement.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CudaGraphRetirement(Arc<AtomicBool>);
 
 impl CudaGraphRetirement {
@@ -1182,9 +1182,44 @@ pub struct ConditionalCudaGraphBody {
     handle: sys::CUgraphConditionalHandle,
     context: sys::CUcontext,
     modules: CaptureOwners,
+    retirement: CudaGraphRetirement,
 }
 
 impl ConditionalCudaGraphBody {
+    /// Append an ordered sequence inside this original conditional body.
+    /// Nested admissions and their numerical bodies remain in the same parent
+    /// graph and share its retained modules and retirement; this cannot create
+    /// or launch a separately executable graph.
+    pub fn with_sequence<F>(
+        &self,
+        stream: &CudaStream,
+        populate: F,
+    ) -> std::result::Result<(), CudaConditionalGraphUnavailable>
+    where
+        F: FnOnce(&mut ConditionalCudaGraphBodySequence) -> std::result::Result<(), CudaConditionalGraphUnavailable>,
+    {
+        let context = stream_context(stream).map_err(CudaConditionalGraphUnavailable::body_population)?;
+        if context != self.context { return Err(CudaConditionalGraphUnavailable::ContextMismatch); }
+        // Resolve every fallible prerequisite before wrapping a borrowed raw
+        // graph in the canonical owner's storage representation.
+        let api = ConditionalGraphDriverApi::load()?;
+        let frontier = graph_leaf_nodes(self.graph)?;
+        let mut sequence = ConditionalCudaGraphBodySequence {
+            builder: ConditionalCudaGraphSequenceBuilder {
+                graph: UninstantiatedCudaGraph {
+                    raw: self.graph,
+                    context: stream.context().clone(),
+                    modules: self.modules.clone(),
+                    retirement: self.retirement.clone(),
+                },
+                raw_context: self.context,
+                api,
+                frontier,
+            },
+        };
+        populate(&mut sequence)
+    }
+
     pub fn graph(&self) -> sys::CUgraph {
         self.graph
     }
@@ -1271,6 +1306,37 @@ impl ConditionalCudaGraphBody {
             }
             Ok(())
         })
+    }
+}
+
+/// A lexical borrowed sequence in an original CUDA-owned conditional body.
+/// Only the original parent can instantiate, launch or retire this graph.
+pub struct ConditionalCudaGraphBodySequence {
+    builder: ConditionalCudaGraphSequenceBuilder,
+}
+
+impl ConditionalCudaGraphBodySequence {
+    pub fn capture_segment_on_stream<F, E>(&mut self, stream: &CudaStream, record: F)
+        -> std::result::Result<(), CudaConditionalGraphUnavailable>
+    where F: FnOnce() -> std::result::Result<(), E>, E: fmt::Display {
+        self.builder.capture_segment_on_stream(stream, record)
+    }
+
+    pub fn add_conditional_if<P, F, E>(&mut self, stream: &CudaStream, preflight: P, body: F)
+        -> std::result::Result<u64, CudaConditionalGraphUnavailable>
+    where P: FnOnce(u64) -> std::result::Result<(), E>, E: fmt::Display,
+        F: FnOnce(&ConditionalCudaGraphBody) -> std::result::Result<(), CudaConditionalGraphUnavailable> {
+        self.builder.add_conditional_if(stream, preflight, body)
+    }
+
+    pub(crate) fn retirement(&self) -> CudaGraphRetirement { self.builder.retirement() }
+}
+
+impl Drop for ConditionalCudaGraphBodySequence {
+    fn drop(&mut self) {
+        // The original parent owns the body. Even callback failure or unwind
+        // must not destroy it or claim that parent retirement has completed.
+        self.builder.graph.raw = ptr::null_mut();
     }
 }
 
@@ -1515,6 +1581,7 @@ impl ConditionalCudaGraphSequenceBuilder {
             handle,
             context: self.raw_context,
             modules: self.graph.modules.clone(),
+            retirement: self.graph.retirement.clone(),
         })?;
         self.frontier.clear();
         self.frontier.push(conditional_node);
@@ -2181,6 +2248,7 @@ impl CapturedCudaGraph {
             handle,
             context: raw_context,
             modules: graph.modules.clone(),
+            retirement: graph.retirement.clone(),
         })?;
 
         let mut instantiated = Self::instantiate_graph(graph)?;

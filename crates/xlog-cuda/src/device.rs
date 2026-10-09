@@ -92,6 +92,7 @@ pub(crate) struct PinnedHostBuffer {
     context: Arc<CudarcContext>,
     event: Option<CudaEvent>,
     completion: HostTransferCompletion,
+    retirement_proven: bool,
 }
 
 impl PinnedHostBuffer {
@@ -110,6 +111,7 @@ impl PinnedHostBuffer {
             context,
             event: Some(event),
             completion: HostTransferCompletion::Complete,
+            retirement_proven: false,
         })
     }
 
@@ -173,6 +175,9 @@ impl PinnedHostBuffer {
     }
 
     pub(crate) fn wait(&mut self) -> std::result::Result<(), DriverError> {
+        if self.retirement_proven {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
         let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
         self.completion.wait(
             || {
@@ -186,6 +191,39 @@ impl PinnedHostBuffer {
             // context fence could invalidate an uncatalogued external capture.
             || Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN)),
         )
+    }
+
+    fn prove_retirement(
+        &mut self,
+        stream: &CudaStream,
+        original_stream_id: u64,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if stream.context().cu_ctx() != self.context.cu_ctx()
+            || crate::cuda_graph::stream_execution_id(stream)? != original_stream_id
+        {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        self.context.bind_to_thread()?;
+        match self.completion {
+            HostTransferCompletion::Complete => {}
+            HostTransferCompletion::EventRecorded => {
+                if self
+                    .event
+                    .as_ref()
+                    .expect("pinned owner event present")
+                    .synchronize()
+                    .is_err()
+                {
+                    stream.synchronize()?;
+                }
+            }
+            HostTransferCompletion::Unfenced => stream.synchronize()?,
+        }
+        // This proof permits only freeing the original allocation. It does not
+        // authenticate successful DMA or make any staged value readable.
+        self.retirement_proven = true;
+        Ok(())
     }
 
     fn write<T: DeviceRepr>(&mut self, source: &[T]) -> std::result::Result<(), DriverError> {
@@ -253,6 +291,426 @@ impl PinnedHostBuffer {
     }
 }
 
+/// One original device zero or copy, retaining both admitted byte spans and
+/// its completion fence across an uncertain driver submission.
+pub(crate) struct RetainedDeviceMemoryCommand {
+    source: Option<DeviceMemoryView<u8>>,
+    destination: DeviceMemoryView<u8>,
+    stream: Arc<CudaStream>,
+    stream_id: u64,
+    completion: ExecutionCompletion,
+    completion_entered: bool,
+    entered: bool,
+    submitted: bool,
+    completed: bool,
+}
+
+impl RetainedDeviceMemoryCommand {
+    pub(crate) fn zero(
+        stream: &Arc<CudaStream>,
+        destination: DeviceMemoryView<u8>,
+    ) -> std::result::Result<Self, DriverError> {
+        Self::new(stream, None, destination)
+    }
+
+    pub(crate) fn copy(
+        stream: &Arc<CudaStream>,
+        source: DeviceMemoryView<u8>,
+        destination: DeviceMemoryView<u8>,
+    ) -> std::result::Result<Self, DriverError> {
+        if source.len() != destination.len() {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        Self::new(stream, Some(source), destination)
+    }
+
+    fn new(
+        stream: &Arc<CudaStream>,
+        source: Option<DeviceMemoryView<u8>>,
+        destination: DeviceMemoryView<u8>,
+    ) -> std::result::Result<Self, DriverError> {
+        Ok(Self {
+            completed: destination.len() == 0,
+            source,
+            destination,
+            stream: Arc::clone(stream),
+            stream_id: crate::cuda_graph::stream_execution_id(stream)?,
+            completion: ExecutionCompletion::new(stream.context())?,
+            completion_entered: false,
+            entered: false,
+            submitted: false,
+        })
+    }
+
+    pub(crate) fn entered(&self) -> bool {
+        self.entered
+    }
+
+    pub(crate) fn destination(&self) -> &DeviceMemoryView<u8> {
+        &self.destination
+    }
+
+    pub(crate) fn source(&self) -> Option<&DeviceMemoryView<u8>> {
+        self.source.as_ref()
+    }
+
+    pub(crate) fn enqueue(&mut self) -> ResourceResult<()> {
+        if self.completed {
+            return Ok(());
+        }
+        if self.entered || crate::cuda_graph::stream_execution_id(&self.stream)? != self.stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE).into());
+        }
+        if self.completion_entered {
+            self.completion.wait()?;
+            self.completion = ExecutionCompletion::new(self.stream.context())?;
+            self.completion_entered = false;
+        }
+        let mut accesses = vec![self.destination.access(Access::Write)?];
+        if let Some(source) = &self.source {
+            accesses.push(source.access(Access::Read)?);
+        }
+        let destination = &self.destination;
+        let bytes = destination.len();
+        let source = &self.source;
+        let entered = &mut self.entered;
+        let submitted = &mut self.submitted;
+        let completion = &mut self.completion;
+        let completion_entered = &mut self.completion_entered;
+        let stream = &self.stream;
+        with_memory_access(Arc::clone(stream), accesses, |proof| {
+            let mut destination = proof.write(destination)?;
+            let (destination_ptr, _destination_guard) = destination.device_ptr_mut(stream);
+            let source = source.as_ref().map(|source| proof.read(source)).transpose()?;
+            let source = source.as_ref().map(|source| source.device_ptr(stream));
+            // A failed event/manifest prefix is distinct from memory-command
+            // entry. Only a positively unentered memory suffix may be rearmed.
+            *completion_entered = true;
+            completion.submit(stream, None, || {
+                // SAFETY: original typed views and their access proof retain
+                // both exact byte extents through this one driver command.
+                unsafe {
+                    *entered = true;
+                    match source.as_ref() {
+                        Some((source_ptr, _guard)) => sys::cuMemcpyDtoDAsync_v2(
+                            destination_ptr, *source_ptr, bytes, stream.cu_stream(),
+                        ).result()?,
+                        None => sys::cuMemsetD8Async(
+                            destination_ptr, 0, bytes, stream.cu_stream(),
+                        ).result()?,
+                    }
+                    *submitted = true;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn resolve(&mut self) -> std::result::Result<(), DriverError> {
+        if self.completed {
+            return Ok(());
+        }
+        if self.entered {
+            self.completion.wait()?;
+        }
+        if !self.submitted {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN));
+        }
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for RetainedDeviceMemoryCommand {
+    fn drop(&mut self) {
+        if !self.entered || self.completed {
+            return;
+        }
+        let retained = (
+            self.source.clone(),
+            self.destination.clone(),
+            Arc::clone(&self.stream),
+            std::mem::take(&mut self.completion),
+        );
+        crate::cuda_graph::retire_resources_after_completion(
+            retained,
+            |(_, _, stream, completion)| {
+                stream.context().bind_to_thread().and_then(|()| completion.wait())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+            |(_, _, stream, _), error| stream.context().record_err::<()>(Err(error)),
+        );
+    }
+}
+
+/// Original initialized host staging and its admitted device destination.
+/// Resolution waits for the retained copy; it never repeats an entered DMA.
+pub(crate) struct RetainedDeviceWrite<T: DeviceRepr> {
+    destination: DeviceMemoryView<T>,
+    buffer: Option<PinnedHostBuffer>,
+    entered: bool,
+    submitted: bool,
+    completed: bool,
+    original_stream_id: u64,
+    retired: bool,
+}
+
+impl<T: DeviceRepr> RetainedDeviceWrite<T> {
+    pub(crate) fn submitted(&self) -> bool {
+        self.submitted
+    }
+
+    pub(crate) fn new(
+        stream: &CudaStream,
+        source: &[T],
+        destination: DeviceMemoryView<T>,
+    ) -> std::result::Result<Self, DriverError> {
+        if source.len() != destination.len() {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(source.len())
+            .ok_or(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?;
+        let original_stream_id = crate::cuda_graph::stream_execution_id(stream)?;
+        let mut buffer = PinnedHostBuffer::new(stream, bytes)?;
+        buffer.write(source)?;
+        Ok(Self {
+            destination,
+            buffer: Some(buffer),
+            entered: false,
+            submitted: false,
+            completed: false,
+            original_stream_id,
+            retired: false,
+        })
+    }
+
+    pub(crate) fn entered(&self) -> bool {
+        self.entered
+    }
+
+    pub(crate) fn enqueue(&mut self, stream: &Arc<CudaStream>) -> ResourceResult<()> {
+        if self.entered
+            || self.retired
+            || crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id
+        {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE).into());
+        }
+        let destination = &self.destination;
+        let entered = &mut self.entered;
+        let submitted = &mut self.submitted;
+        let buffer = self.buffer.as_mut().expect("original write staging");
+        let bytes = buffer.bytes;
+        with_memory_access(
+            Arc::clone(stream),
+            vec![destination.access(Access::Write)?],
+            |proof| {
+                let mut destination = proof.write(destination)?;
+                let (ptr, _guard) = destination.device_ptr_mut(stream);
+                // SAFETY: the destination is admitted and both original
+                // allocations remain owned through uncertain completion.
+                unsafe {
+                    buffer.enqueue(stream, |host| {
+                        *entered = true;
+                        sys::cuMemcpyHtoDAsync_v2(ptr, host.cast(), bytes, stream.cu_stream())
+                            .result()?;
+                        *submitted = true;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn resolve(&mut self) -> std::result::Result<(), DriverError> {
+        if self.retired {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        if self.completed {
+            return Ok(());
+        }
+        if !self.submitted {
+            if self.entered {
+                self.buffer
+                    .as_mut()
+                    .expect("original write staging")
+                    .wait()?;
+            }
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN));
+        }
+        self.buffer
+            .as_mut()
+            .expect("original write staging")
+            .wait()?;
+        self.completed = true;
+        self.buffer = None;
+        Ok(())
+    }
+
+    /// Join only the original DMA's resource lifetime, without accepting its
+    /// result or changing whether the original submission was confirmed.
+    pub(crate) fn retire_without_result(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        if self.retired {
+            return Ok(());
+        }
+        if let Some(buffer) = self.buffer.as_mut() {
+            buffer.prove_retirement(stream, self.original_stream_id)?;
+        }
+        self.retired = true;
+        self.buffer = None;
+        Ok(())
+    }
+}
+
+/// An original device-to-host copy whose allocation and event survive a late
+/// submission or join error. Resolving this owner never enqueues another copy.
+pub(crate) struct RetainedDeviceRead<T: DeviceRepr + Copy> {
+    source: DeviceMemoryView<T>,
+    buffer: Option<PinnedHostBuffer>,
+    entered: bool,
+    submitted: bool,
+    retired: bool,
+    original_stream_id: u64,
+    values: Option<Vec<T>>,
+}
+
+impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
+    pub(crate) fn new(
+        stream: &CudaStream,
+        source: DeviceMemoryView<T>,
+    ) -> std::result::Result<Self, DriverError> {
+        let bytes = source
+            .len()
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?;
+        Ok(Self {
+            source,
+            buffer: Some(PinnedHostBuffer::new(stream, bytes)?),
+            entered: false,
+            submitted: false,
+            retired: false,
+            original_stream_id: crate::cuda_graph::stream_execution_id(stream)?,
+            values: None,
+        })
+    }
+
+    pub(crate) fn source(&self) -> &DeviceMemoryView<T> {
+        &self.source
+    }
+
+    pub(crate) fn completed(&self) -> bool {
+        self.values.is_some() || self.retired
+    }
+
+    pub(crate) fn entered(&self) -> bool {
+        self.entered
+    }
+
+    /// The caller must record this exact retained source in its execution domain.
+    pub(crate) fn enqueue(&mut self, stream: &CudaStream) -> std::result::Result<(), DriverError> {
+        if self.entered || self.retired
+            || crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id
+        {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        let source = &self.source;
+        let entered = &mut self.entered;
+        let submitted = &mut self.submitted;
+        let buffer = self.buffer.as_mut().expect("original read staging");
+        let bytes = buffer.bytes;
+        // SAFETY: this owner retains the complete source and pinned destination.
+        // Successful DMA is recorded separately from any later fence error.
+        unsafe {
+            buffer.enqueue(stream, |destination| {
+                // Pin/context/capture preflight has succeeded. Only this actual
+                // driver boundary makes completion uncertain.
+                *entered = true;
+                sys::cuMemcpyDtoHAsync_v2(
+                    destination.cast(),
+                    *source.device_ptr(),
+                    bytes,
+                    stream.cu_stream(),
+                )
+                .result()?;
+                *submitted = true;
+                Ok(())
+            })
+        }
+    }
+
+    pub(crate) fn resolve(&mut self) -> std::result::Result<Vec<T>, DriverError> {
+        if self.retired {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        if let Some(values) = &self.values {
+            return Ok(values.clone());
+        }
+        if !self.submitted {
+            if self.entered {
+                self.buffer
+                    .as_mut()
+                    .expect("original read staging")
+                    .wait()?;
+            }
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN));
+        }
+        // SAFETY: only a successful complete DMA submission can reach this
+        // read; read_vec joins that submission's retained original event.
+        let values = unsafe {
+            self.buffer
+                .as_mut()
+                .expect("original read staging")
+                .read_vec::<T>(self.source.len())
+        }?;
+        self.values = Some(values.clone());
+        self.buffer = None;
+        Ok(values)
+    }
+
+    /// The enclosing material owner has retained the authenticated result, so
+    /// this completed component no longer needs a duplicate host allocation.
+    pub(crate) fn retire_completed_values(&mut self) {
+        assert!(
+            self.values.is_some(),
+            "original read must complete before retirement"
+        );
+        self.values = None;
+        self.retired = true;
+    }
+
+    /// Retire only this original copy's allocations, without accepting or
+    /// constructing a host result and without changing submission history.
+    pub(crate) fn retire_without_result(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(stream)?;
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        if self.retired {
+            return Ok(());
+        }
+        if let Some(buffer) = self.buffer.as_mut() {
+            buffer.prove_retirement(stream, self.original_stream_id)?;
+        }
+        self.retired = true;
+        self.buffer = None;
+        self.values = None;
+        Ok(())
+    }
+}
+
 impl Drop for PinnedHostBuffer {
     fn drop(&mut self) {
         let resources = (
@@ -260,18 +718,22 @@ impl Drop for PinnedHostBuffer {
             Arc::clone(&self.context),
             self.event.take().expect("pinned owner event present"),
             self.completion,
+            self.retirement_proven,
         );
         crate::cuda_graph::retire_resources_after_completion(
             resources,
-            |(_, context, event, completion)| {
+            |(_, context, event, completion, retirement_proven)| {
                 context.bind_to_thread()?;
+                if *retirement_proven {
+                    return Ok(());
+                }
                 let mut completion = *completion;
                 completion.wait(
                     || event.synchronize(),
                     || Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN)),
                 )
             },
-            |(ptr, _, _, _)| {
+            |(ptr, _, _, _, _)| {
                 // SAFETY: the entire copy batch is complete. The canonical
                 // retirement helper never resubmits an unknown free outcome.
                 unsafe { sys::cuMemFreeHost(*ptr as *mut c_void).result() }
@@ -814,6 +1276,27 @@ impl CudaFunction {
         params: &mut [*mut c_void],
         cooperative: bool,
     ) -> std::result::Result<(), DriverError> {
+        let mut entered = false;
+        let mut submitted = false;
+        self.launch_raw_in_original(
+            enqueue,
+            cfg,
+            params,
+            cooperative,
+            &mut entered,
+            &mut submitted,
+        )
+    }
+
+    pub(crate) unsafe fn launch_raw_in_original(
+        &self,
+        enqueue: &crate::launch::CudaEnqueue<'_>,
+        cfg: LaunchConfig,
+        params: &mut [*mut c_void],
+        cooperative: bool,
+        entered: &mut bool,
+        submitted: &mut bool,
+    ) -> std::result::Result<(), DriverError> {
         let stream = enqueue.stream();
         if stream.context().cu_ctx() != self.context.cu_ctx() {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
@@ -827,7 +1310,8 @@ impl CudaFunction {
                 Some(binding),
                 Some(enqueue.completion()),
                 || {
-                    if cooperative {
+                    *entered = true;
+                    let result = if cooperative {
                         result::launch_cooperative_kernel(
                             self.cu_function(),
                             cfg.grid_dim,
@@ -845,7 +1329,9 @@ impl CudaFunction {
                             stream.cu_stream(),
                             params,
                         )
-                    }
+                    };
+                    *submitted = result.is_ok();
+                    result
                 },
             )
         })
@@ -1316,39 +1802,15 @@ impl CudaDeviceInner {
                 "host-to-device copy destination is shorter than its source".into(),
             )
         })?;
-        let bytes = src
-            .len()
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or_else(|| {
-                crate::device_runtime::ResourceError::StreamMisuse(
-                    "host copy byte size overflow".into(),
-                )
-            })?;
-        let mut staging = PinnedHostBuffer::new(&self.stream, bytes)?;
-        {
+        let mut original = {
             // SAFETY: HostSlice supplies its recorded producer dependencies.
             // Complete those waits before reading even a pinned host slice.
             let (source, _guard) = unsafe { src.stream_synced_slice(&self.stream) };
             self.stream.synchronize()?;
-            staging.write(source)?;
-        }
-        with_memory_access(
-            Arc::clone(&self.stream),
-            vec![dst.access(Access::Write)?],
-            |proof| {
-                let mut destination = proof.write(&dst)?;
-                let (ptr, _guard) = destination.device_ptr_mut(&self.stream);
-                // SAFETY: the complete destination is admitted; only owned
-                // staging storage participates in DMA, including on error.
-                unsafe {
-                    staging.enqueue(&self.stream, |host| {
-                        sys::cuMemcpyHtoDAsync_v2(ptr, host.cast(), bytes, self.stream.cu_stream())
-                            .result()
-                    })?;
-                }
-                Ok(staging.wait()?)
-            },
-        )
+            RetainedDeviceWrite::new(&self.stream, source, dst)?
+        };
+        original.enqueue(&self.stream)?;
+        Ok(original.resolve()?)
     }
 
     pub fn dtoh_sync_copy_into<T: DeviceRepr, Src: DeviceRead<T>, Dst: HostSlice<T> + ?Sized>(

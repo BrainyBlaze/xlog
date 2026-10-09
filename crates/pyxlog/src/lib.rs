@@ -1249,6 +1249,16 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicRelationSession>()?;
     m.add_class::<semantic_transition::PySemanticTransitionSession>()?;
     m.add_class::<semantic_transition::PySemanticTransitionController>()?;
+    m.add(
+        "SemanticReplayDeliveryPending",
+        m.py()
+            .get_type::<semantic_transition::SemanticReplayDeliveryPending>(),
+    )?;
+    m.add(
+        "SemanticTrainingArenaPending",
+        m.py()
+            .get_type::<semantic_transition::SemanticTrainingArenaPending>(),
+    )?;
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionColdTask>()?;
     m.add_class::<semantic_transition::cold_task::PySemanticTransitionFreshParent>()?;
     m.add_class::<semantic_transition::PySemanticTransitionTaskUse>()?;
@@ -1263,11 +1273,27 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<semantic_transition::PySemanticPreparedStep>()?;
     #[cfg(feature = "semantic-policy")]
     {
+        m.add_class::<semantic_transition::learning_phase::PySemanticPrivateExecutionContinuation>()?;
+        m.add_class::<semantic_transition::actor_refresh::PySemanticPreparedActorRefresh>()?;
+        m.add_class::<semantic_transition::PySemanticSegmentInstructionAdmission>()?;
         m.add_class::<semantic_transition::learning_phase::cold_model_work::PySemanticColdModelWork>()?;
+        m.add_class::<semantic_transition::learning_phase::cold_model_work::PySemanticColdModelWorkOperation>()?;
         m.add(
             "SemanticCompletedSegmentPending",
             m.py()
                 .get_type::<semantic_transition::SemanticCompletedSegmentPending>(),
+        )?;
+        m.add(
+            "SemanticPreparedSegmentPending",
+            m.py().get_type::<semantic_transition::SemanticPreparedSegmentPending>(),
+        )?;
+        m.add(
+            "SemanticPreparedSegmentCancelled",
+            m.py().get_type::<semantic_transition::SemanticPreparedSegmentCancelled>(),
+        )?;
+        m.add(
+            "SemanticRetainedFinalUsePending",
+            m.py().get_type::<semantic_transition::SemanticRetainedFinalUsePending>(),
         )?;
         m.add(
             "SemanticModelEvaluationPending",

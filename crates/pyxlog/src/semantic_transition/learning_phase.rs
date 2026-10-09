@@ -36,7 +36,9 @@ mod private_execution;
 #[cfg(feature = "semantic-policy")]
 use private_execution::PrivateExecutionGroup;
 #[cfg(feature = "semantic-policy")]
-pub(crate) use private_execution::{PrivateReplayChildCustody, PySemanticPrivateReplayChild};
+pub(crate) use private_execution::{
+    PrivateReplayChildCustody, PySemanticPrivateExecutionContinuation, PySemanticPrivateReplayChild,
+};
 #[cfg(feature = "semantic-policy")]
 mod private_checkpoint;
 #[cfg(feature = "semantic-policy")]
@@ -584,12 +586,7 @@ fn verify_phase_native(
     let session = task.session.borrow(py);
     let mut owner = session.owner()?;
     task.require_current(&owner)?;
-    parent.require_task(py, task)?;
-    if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
-        return Err(invalid(
-            "learning-phase owner escaped its retained preparation",
-        ));
-    }
+    require_phase_native_scope(py, task, parent)?;
     let lease = parent.lease()?;
     let actual = if recompute {
         owner.current_recompute_state_material(&lease)
@@ -599,6 +596,20 @@ fn verify_phase_native(
     .map_err(xlog_err)?;
     if actual != expected {
         return Err(invalid("retained learning-phase native state changed"));
+    }
+    Ok(())
+}
+
+fn require_phase_native_scope(
+    py: Python<'_>,
+    task: &PySemanticTransitionTaskUse,
+    parent: &PySemanticPublishedParent,
+) -> PyResult<()> {
+    parent.require_task(py, task)?;
+    if !matches!(task.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
+        return Err(invalid(
+            "learning-phase owner escaped its retained preparation",
+        ));
     }
     Ok(())
 }
@@ -616,7 +627,7 @@ fn verify_phase_checkpoint(
     task.require_current(&owner)?;
     let phase = checkpoint_task_phase(&*task.state()?)?;
     let binding = TaskCheckpointBinding::from_owner(&owner)?;
-    if task.checkpoint.encode(saved_snapshot, &phase, &binding)? != manifest.task {
+    if task.checkpoint.encode(&owner, saved_snapshot, &phase, &binding)? != manifest.task {
         return Err(invalid(
             "phase checkpoint differs from its original live task capsule",
         ));
@@ -1072,7 +1083,12 @@ impl PySemanticLearningPhaseTransition {
                 // submission. Native dispatches from the original report's
                 // actual state without re-entering the model callback.
                 owner
-                    .finish_cold_model_work(&lease, &work.inner, &streams)
+                    .finish_cold_model_work(
+                        &lease,
+                        &work.inner,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?
             };
             // Retain the actual components before refusal. Other source S

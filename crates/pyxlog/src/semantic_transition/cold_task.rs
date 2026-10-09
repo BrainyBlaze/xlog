@@ -19,11 +19,15 @@ use super::{
 };
 
 const MAX_POSITION: u64 = 262_144;
-const STATEMENT_RECORDS: (u32, u32, u32) = (0, 1, 2);
 
 pub(super) struct EditableTaskSource {
     pub program: Arc<xlog_cuda::SemanticProgramAdmission>,
-    pub observer_source: String,
+    pub observer_source: Option<String>,
+    pub initial_source: String,
+    pub initial_theory: String,
+    pub input_facts: String,
+    pub statements: Vec<(String, u8)>,
+    pub query_records: Vec<u32>,
 }
 
 /// Recover executable source only from the canonical typed cold admission.
@@ -32,11 +36,13 @@ pub(super) struct EditableTaskSource {
 pub(super) fn editable_source_from_admission(
     admission: &SemanticAdmissionRecords,
 ) -> PyResult<Option<EditableTaskSource>> {
-    if admission.predicates.len() != 2
+    if admission.predicates.len() != 3
         || admission.predicates[0].predicate != RelId(1)
         || admission.predicates[0].role != SemanticRecordRole::Statement
         || admission.predicates[1].predicate != RelId(2)
         || admission.predicates[1].role != SemanticRecordRole::Qualifier
+        || admission.predicates[2].predicate != RelId(3)
+        || admission.predicates[2].role != SemanticRecordRole::Qualifier
         || admission.predicates[0].schema.sort_labels()
             != [
                 "task-statement-ordinal",
@@ -44,8 +50,10 @@ pub(super) fn editable_source_from_admission(
                 "truth4-admissibility-mask",
             ]
         || admission.predicates[1].schema.sort_labels() != ["task-input-kind", "task-input-text"]
+        || admission.predicates[2].schema.sort_labels() != ["task-query-ordinal", "task-statement-record"]
         || admission.predicates[0].schema.key_columns != [0]
         || admission.predicates[1].schema.key_columns != [0]
+        || admission.predicates[2].schema.key_columns != [0]
         || !admission.predicates[0]
             .schema
             .columns
@@ -62,10 +70,21 @@ pub(super) fn editable_source_from_admission(
             .iter()
             .map(|(name, scalar)| (name.as_str(), *scalar))
             .eq([("kind", ScalarType::U32), ("content", ScalarType::Symbol)])
+        || !admission.predicates[2].schema.columns.iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([("ordinal", ScalarType::U32), ("statement_record", ScalarType::U32)])
     {
         return Ok(None);
     }
-    if admission.records.len() != 6 || !admission.supports.is_empty() {
+    let statement_count = admission.records.iter().take_while(|record| record.predicate == RelId(1)).count();
+    let source_count = admission.records[statement_count..].iter()
+        .take_while(|record| record.predicate == RelId(2)).count();
+    let selector_begin = statement_count.checked_add(source_count)
+        .ok_or_else(|| invalid("editable task record geometry overflow"))?;
+    let query_count = admission.records.len().saturating_sub(selector_begin);
+    if statement_count == 0 || statement_count > u32::MAX as usize - 3
+        || !(2..=3).contains(&source_count) || query_count == 0
+        || admission.records.len() > u32::MAX as usize || !admission.supports.is_empty() {
         return Err(invalid(
             "editable task admission has incomplete source records",
         ));
@@ -77,8 +96,10 @@ pub(super) fn editable_source_from_admission(
         xlog_core::symbol::resolve_checked(*id)
             .ok_or_else(|| invalid("editable task source symbol is unavailable"))
     };
-    let mut statements = Vec::with_capacity(3);
-    for (index, record) in admission.records[..3].iter().enumerate() {
+    let qualifiers = (statement_count..selector_begin).map(|index| index as u32).collect::<Vec<_>>();
+    let mut statements = Vec::with_capacity(statement_count);
+    let mut masks = Vec::with_capacity(statement_count);
+    for (index, record) in admission.records[..statement_count].iter().enumerate() {
         let [SemanticArgument::U32(ordinal), content, SemanticArgument::U32(mask)] =
             record.arguments.as_slice()
         else {
@@ -88,7 +109,7 @@ pub(super) fn editable_source_from_admission(
         };
         if record.predicate != RelId(1)
             || *ordinal != index as u32
-            || record.qualifiers != [3, 4, 5]
+            || record.qualifiers != qualifiers
             || !(1..=15).contains(mask)
         {
             return Err(invalid(
@@ -96,9 +117,10 @@ pub(super) fn editable_source_from_admission(
             ));
         }
         statements.push(symbol(content)?);
+        masks.push(*mask as u8);
     }
-    let mut sources = Vec::with_capacity(3);
-    for (index, record) in admission.records[3..].iter().enumerate() {
+    let mut sources = Vec::with_capacity(source_count);
+    for (index, record) in admission.records[statement_count..selector_begin].iter().enumerate() {
         let [SemanticArgument::U32(kind), content] = record.arguments.as_slice() else {
             return Err(invalid("editable task input has invalid typed arguments"));
         };
@@ -109,19 +131,37 @@ pub(super) fn editable_source_from_admission(
         }
         sources.push(symbol(content)?);
     }
+    let mut query_records = Vec::with_capacity(query_count);
+    for (index, record) in admission.records[selector_begin..].iter().enumerate() {
+        let [SemanticArgument::U32(ordinal), SemanticArgument::U32(statement)] = record.arguments.as_slice()
+        else { return Err(invalid("editable task query selector has invalid typed arguments")); };
+        if record.predicate != RelId(3) || *ordinal != index as u32
+            || *statement as usize >= statement_count || !record.qualifiers.is_empty() {
+            return Err(invalid("editable task query selection differs from its admission"));
+        }
+        query_records.push(*statement);
+    }
+    let statement_texts = statements.iter().map(String::as_str).collect::<Vec<_>>();
     let program = xlog_gpu::logic::compile_positive_binary_task(
         &sources[0],
         &sources[1],
-        [&statements[0], &statements[1], &statements[2]],
+        &statement_texts,
+        &query_records,
     )
     .map_err(xlog_err)?;
     Ok(Some(EditableTaskSource {
         program: Arc::new(program),
-        observer_source: sources[2].clone(),
+        observer_source: sources.get(2).cloned(),
+        initial_source: xlog_gpu::logic::positive_binary_task_source(&sources[0], &sources[1],
+            &query_records.iter().map(|record| statement_texts[*record as usize]).collect::<Vec<_>>()),
+        initial_theory: sources[0].clone(),
+        input_facts: sources[1].clone(),
+        statements: statements.into_iter().zip(masks).collect(),
+        query_records,
     }))
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct FreshRecord {
     role: u64,
     bytes: Vec<u8>,
@@ -138,6 +178,7 @@ struct FreshRecord {
     module = "pyxlog._native",
     frozen
 )]
+#[derive(PartialEq, Eq)]
 pub(crate) struct PySemanticTransitionFreshParent {
     owner_thread: ThreadId,
     provenance_capacity_records: u64,
@@ -284,14 +325,33 @@ pub(crate) struct PySemanticTransitionColdTask {
     parent: Py<PySemanticTransitionFreshParent>,
     content: (
         xlog_cuda::SemanticTaskContentIdentity,
-        [xlog_cuda::SemanticTruth; 3],
+        Vec<xlog_cuda::SemanticTruth>,
     ),
+    task_ground: super::ColdValue,
+    statement_records: Vec<u32>,
+}
+
+impl PySemanticTransitionColdTask {
+    pub(super) fn canary_source(&self, py: Python<'_>) -> PyResult<Arc<xlog_cuda::SemanticTrainingCanarySource>> {
+        self.session.borrow(py).owner()?.training_canary_source().map_err(xlog_err)
+    }
+
+    pub(super) fn canary_allocation_domain(&self, py: Python<'_>) -> PyResult<super::CheckpointAllocationDomain> {
+        self.canary_source(py)?;
+        let (provider, domain) = self.session.borrow(py).owner()?.checkpoint_allocation_domain().map_err(xlog_err)?;
+        Ok(super::CheckpointAllocationDomain {
+            provider,
+            domain,
+            #[cfg(feature = "semantic-policy")]
+            cold_work: None,
+        })
+    }
 }
 
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, private_replay_child=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -302,6 +362,9 @@ impl PySemanticTransitionColdTask {
         input_facts: &Bound<'_, PyAny>,
         observer_program: &Bound<'_, PyAny>,
         statements: &Bound<'_, PyAny>,
+        query_records: &Bound<'_, PyAny>,
+        task_ground: &Bound<'_, PyAny>,
+        training_canary_source: &Bound<'_, PyAny>,
         capacities: (u32, u32, u32, u32),
         admission_limits: (u32, u32, u32, usize),
         device_ordinal: usize,
@@ -323,7 +386,20 @@ impl PySemanticTransitionColdTask {
         fuel: u64,
         rng: (u64, u8, u32),
         private_replay_child: Option<&Bound<'_, PyAny>>,
+        prepared_actor_refresh: Option<&Bound<'_, PyAny>>,
+        actor_refresh_bank: Option<usize>,
     ) -> PyResult<Self> {
+        if private_replay_child.is_some() && prepared_actor_refresh.is_some()
+            || prepared_actor_refresh.is_some() != actor_refresh_bank.is_some()
+            || actor_refresh_bank.is_some_and(|bank| bank > 1)
+        {
+            return Err(invalid("actor construction requires one typed owner and original bank, not a historical replay child"));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let actor_custody = prepared_actor_refresh.map(|owner| {
+            owner.extract::<PyRef<'_, super::actor_refresh::PySemanticPreparedActorRefresh>>()
+                .map(|owner| Arc::clone(&owner.inner))
+        }).transpose()?;
         #[cfg(feature = "semantic-policy")]
         let replay_custody = private_replay_child
             .map(|child| {
@@ -337,19 +413,51 @@ impl PySemanticTransitionColdTask {
             .as_ref()
             .map(|child| child.allocation(py))
             .transpose()?;
+        #[cfg(feature = "semantic-policy")]
+        let allocation = match &actor_custody {
+            Some(owner) => Some(owner.allocation(py, actor_refresh_bank.expect("checked actor bank"))?),
+            None => allocation,
+        };
         #[cfg(not(feature = "semantic-policy"))]
         let allocation = {
-            if private_replay_child.is_some() {
+            if private_replay_child.is_some() || prepared_actor_refresh.is_some() {
                 return Err(invalid(
                     "private replay construction requires semantic-policy",
                 ));
             }
             None
         };
+        let (canary_source, canary_owner, _) = super::read_training_canary_source(py, Some(training_canary_source))?;
+        let source_allocation = canary_owner.as_ref()
+            .map(|source| source.borrow(py).canary_allocation_domain(py)).transpose()?;
+        let allocation = match (allocation, source_allocation) {
+            (Some(replay), Some(source)) => {
+                if !Arc::ptr_eq(replay.provider.memory(), source.provider.memory())
+                    || replay.domain.stream_id() != source.domain.stream_id() {
+                    return Err(invalid("dependent task must retain its original canary allocation owner and stream"));
+                }
+                Some(replay)
+            }
+            (Some(allocation), None) | (None, Some(allocation)) => Some(allocation),
+            (None, None) => None,
+        };
         let initial_theory = exact_text(initial_theory, "initial_theory")?;
         let input_facts = exact_text(input_facts, "input_facts")?;
-        let observer_program = exact_text(observer_program, "observer_program")?;
+        let task_ground = super::read_task_ground(task_ground, &mut (16 * 1024 * 1024))?;
+        let native_ground = super::task_ground_value(&task_ground)?;
+        let observer_program = match &native_ground {
+            xlog_cuda::SemanticTaskGround::Logical => Some(exact_text(observer_program, "observer_program")?),
+            xlog_cuda::SemanticTaskGround::Coding(_) if observer_program.is_none() => None,
+            xlog_cuda::SemanticTaskGround::Coding(_) => return Err(invalid("coding task has no independent observer reference")),
+        };
         let statements = exact_statements(statements)?;
+        let statement_records = exact_unsigned_tuple(query_records, "query_records")?.into_iter()
+            .map(|record| u32::try_from(record).map_err(|_| invalid("query record exceeds its native index domain")))
+            .collect::<PyResult<Vec<_>>>()?;
+        if statement_records.is_empty() || statement_records.len() > u32::MAX as usize
+            || statement_records.iter().any(|record| *record as usize >= statements.len()) {
+            return Err(invalid("query_records requires a finite nonempty selection of original Statements"));
+        }
         let terminal_tokens = exact_unsigned_tuple(terminal_tokens, "terminal_tokens")?;
         let intent_effect = exact_bytes(intent_effect, "intent_effect")?;
         validate_parent_geometry(
@@ -368,30 +476,31 @@ impl PySemanticTransitionColdTask {
             generations.0,
             rng,
         )?;
-        let statement_records = [
-            STATEMENT_RECORDS.0,
-            STATEMENT_RECORDS.1,
-            STATEMENT_RECORDS.2,
-        ];
+        let statement_texts = statement_records.iter().map(|record| statements[*record as usize].0.as_str()).collect::<Vec<_>>();
+        let initial_source = xlog_gpu::logic::positive_binary_task_source(&initial_theory, &input_facts, &statement_texts);
         let mut program = xlog_gpu::logic::SemanticLogicTaskProgram::compile(
-            observer_program.clone(),
-            statement_records.map(|record| record as usize),
+            observer_program.clone().unwrap_or(initial_source),
+            if observer_program.is_some() { statement_records.iter().map(|record| *record as usize).collect() }
+            else { (0..statement_records.len()).collect() },
         )
         .map_err(xlog_err)?;
 
         let task_digest = task_digest(
             &initial_theory,
             &input_facts,
-            &observer_program,
+            observer_program.as_deref(),
             &statements,
+            &statement_records,
+            &task_ground,
         );
         let admission = task_admission(
             &initial_theory,
             &input_facts,
-            &observer_program,
+            observer_program.as_deref(),
             &statements,
+            &statement_records,
         )?;
-        let role_counts = initial_role_counts();
+        let role_counts = initial_role_counts(statement_records.len());
         let records = fresh_records(
             task_digest,
             capacities,
@@ -432,39 +541,76 @@ impl PySemanticTransitionColdTask {
                 records,
             },
         )?;
-        let native_session = PySemanticTransitionSession::from_admission(
-            admission,
-            capacities,
-            admission_limits,
-            device_ordinal,
-            memory_bytes,
-            Arc::new(Mutex::new(ProposalExpense {
-                capacity: None,
-                spent: 0,
-            })),
-            Arc::new(Mutex::new(CheckpointSources::default())),
-            allocation,
-        );
-        let native_session = native_session.map_err(|error| {
-            #[cfg(feature = "semantic-policy")]
-            if let Some(child) = &replay_custody {
-                child.fail();
+        let import_owners = || {
+            (
+                Arc::new(Mutex::new(ProposalExpense::default())),
+                Arc::new(Mutex::new(CheckpointSources::default())),
+            )
+        };
+        #[cfg(feature = "semantic-policy")]
+        let (proposal_expense, checkpoint_sources) = replay_custody
+            .as_ref()
+            .map(|child| child.shared_import_owners(py))
+            .transpose()?
+            .unwrap_or_else(import_owners);
+        #[cfg(feature = "semantic-policy")]
+        let (proposal_expense, checkpoint_sources) = match &actor_custody {
+            Some(owner) => owner.shared_import_owners(py)?,
+            None => (proposal_expense, checkpoint_sources),
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let (proposal_expense, checkpoint_sources) = import_owners();
+        let canary = canary_source.zip(canary_owner);
+        #[cfg(feature = "semantic-policy")]
+        let actor_session = actor_custody.as_ref().map(|owner| owner.construct_session(
+            py, actor_refresh_bank.expect("checked actor bank"), admission.clone(), &parent,
+            &task_ground, capacities, admission_limits, device_ordinal, memory_bytes,
+            Arc::clone(&proposal_expense), Arc::clone(&checkpoint_sources), canary.clone(),
+        )).transpose()?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let actor_session: Option<(Py<PySemanticTransitionSession>, Py<PySemanticTransitionFreshParent>)> = None;
+        let (session, parent) = match actor_session {
+            Some(original) => original,
+            None => {
+                let native_session = PySemanticTransitionSession::from_admission(
+                    admission, capacities, admission_limits, device_ordinal, memory_bytes,
+                    proposal_expense, checkpoint_sources, allocation, canary,
+                ).map_err(|error| {
+                    #[cfg(feature = "semantic-policy")]
+                    if let Some(child) = &replay_custody { child.fail(); }
+                    error
+                })?;
+                (Py::new(py, native_session)?, parent)
             }
-            error
-        })?;
-        let session = Py::new(py, native_session)?;
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_session(py, &session)?;
         }
+        #[cfg(feature = "semantic-policy")]
+        let cached_content = actor_custody.as_ref().map(|owner| owner.constructed_content(
+            actor_refresh_bank.expect("checked actor bank"),
+        )).transpose()?.flatten();
+        #[cfg(not(feature = "semantic-policy"))]
+        let cached_content = None;
+        let content = match cached_content {
+            Some(content) => content,
+            None => {
         let content = (|| {
             let native_session = session.borrow(py);
             if let Some(editable) = native_session.editable_program.as_ref() {
                 program = program.with_editable_program(Arc::clone(editable));
             }
+            #[cfg(feature = "semantic-policy")]
+            if let Some(owner) = &actor_custody {
+                return owner.observe_constructed_content(
+                    py, actor_refresh_bank.expect("checked actor bank"),
+                    Arc::new(program), &statement_records, &native_ground,
+                );
+            }
             let result = native_session
                 .owner()?
-                .observe_cold_task_content(statement_records, &[], &program)
+                .observe_cold_task_content(&statement_records, &[], &program, &native_ground)
                 .map_err(xlog_err);
             result
         })()
@@ -475,23 +621,38 @@ impl PySemanticTransitionColdTask {
             }
             error
         })?;
+                content
+            }
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.observed()?;
         }
-        let controller = Py::new(
-            py,
-            PySemanticTransitionController::new(py, session.clone_ref(py))?,
-        )?;
+        #[cfg(feature = "semantic-policy")]
+        let cached_controller = actor_custody.as_ref().map(|owner| owner.constructed_controller(
+            py, actor_refresh_bank.expect("checked actor bank"),
+        )).transpose()?.flatten();
+        #[cfg(not(feature = "semantic-policy"))]
+        let cached_controller = None;
+        let controller = match cached_controller {
+            Some(controller) => controller,
+            None => Py::new(py, PySemanticTransitionController::new(py, session.clone_ref(py))?)?,
+        };
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_controller(&controller.borrow(py).identity)?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(child) = &actor_custody {
+            child.retain_controller(py, actor_refresh_bank.expect("checked actor bank"), &controller)?;
         }
         Ok(Self {
             session,
             controller,
             parent,
             content,
+            task_ground,
+            statement_records,
         })
     }
 
@@ -517,6 +678,9 @@ impl PySemanticTransitionColdTask {
     /// restored Session is allocated. Immutable task content and statement
     /// ordinals remain readable; saved Session/controller aliases cannot run.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
+        if self.session.borrow(py).owner()?.training_canary_source_borrowed() {
+            return Err(invalid("logical canary source remains owned by dependent training sessions"));
+        }
         self.session.borrow(py).release_observed_cold()
     }
 
@@ -525,13 +689,19 @@ impl PySemanticTransitionColdTask {
     #[getter]
     fn task_content(&self, py: Python<'_>) -> PyResult<super::TaskContentRead> {
         self.session.borrow(py).require_creator()?;
-        Ok(super::task_content_read(py, self.content))
+        super::task_content_read(py, self.content.clone())
     }
 
     #[getter]
-    fn statement_records(&self, py: Python<'_>) -> PyResult<(u32, u32, u32)> {
+    fn statement_records(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
-        Ok(STATEMENT_RECORDS)
+        Ok(PyTuple::new(py, self.statement_records.iter().copied())?.unbind())
+    }
+
+    #[getter]
+    fn task_ground(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.session.borrow(py).require_creator()?;
+        self.task_ground.python_value(py)
     }
 }
 
@@ -567,14 +737,14 @@ fn exact_unsigned_tuple(value: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<u6
         .collect()
 }
 
-fn exact_statements(value: &Bound<'_, PyAny>) -> PyResult<[(String, u8); 3]> {
+fn exact_statements(value: &Bound<'_, PyAny>) -> PyResult<Vec<(String, u8)>> {
     if !value.is_exact_instance_of::<PyTuple>() {
         return Err(invalid("statements requires an exact builtin tuple"));
     }
     let value = value.cast::<PyTuple>()?;
-    if value.len() != 3 {
+    if value.is_empty() || value.len() > u32::MAX as usize - 3 {
         return Err(invalid(
-            "cold semantic task requires exactly three ordered statements",
+            "cold semantic task requires a finite nonempty ordered statement roster",
         ));
     }
     value
@@ -603,9 +773,7 @@ fn exact_statements(value: &Bound<'_, PyAny>) -> PyResult<[(String, u8); 3]> {
             }
             Ok((text, mask))
         })
-        .collect::<PyResult<Vec<_>>>()?
-        .try_into()
-        .map_err(|_| invalid("cold semantic task requires exactly three ordered statements"))
+        .collect()
 }
 
 #[expect(
@@ -693,8 +861,9 @@ fn schema(columns: Vec<(&str, ScalarType, &str)>, key_columns: Vec<usize>) -> Py
 fn task_admission(
     initial_theory: &str,
     input_facts: &str,
-    observer_program: &str,
-    statements: &[(String, u8); 3],
+    observer_program: Option<&str>,
+    statements: &[(String, u8)],
+    query_records: &[u32],
 ) -> PyResult<SemanticAdmissionRecords> {
     let statement_schema = schema(
         vec![
@@ -711,6 +880,20 @@ fn task_admission(
         ],
         vec![0],
     )?;
+    let query_schema = schema(
+        vec![
+            ("ordinal", ScalarType::U32, "task-query-ordinal"),
+            ("statement_record", ScalarType::U32, "task-statement-record"),
+        ],
+        vec![0],
+    )?;
+    let mut sources = vec![initial_theory, input_facts];
+    sources.extend(observer_program);
+    if statements.len().checked_add(sources.len()).and_then(|count| count.checked_add(query_records.len()))
+        .is_none_or(|count| count > u32::MAX as usize) {
+        return Err(invalid("task admission record geometry exceeds its original index domain"));
+    }
+    let qualifiers = (statements.len()..statements.len()+sources.len()).map(|index| index as u32).collect::<Vec<_>>();
     let mut records = statements
         .iter()
         .enumerate()
@@ -721,11 +904,11 @@ fn task_admission(
                 SemanticArgument::Symbol(xlog_core::symbol::intern(statement)),
                 SemanticArgument::U32(u32::from(*mask)),
             ],
-            qualifiers: vec![3, 4, 5],
+            qualifiers: qualifiers.clone(),
         })
         .collect::<Vec<_>>();
     records.extend(
-        [initial_theory, input_facts, observer_program]
+        sources
             .into_iter()
             .enumerate()
             .map(|(kind, content)| SemanticTypedRecord {
@@ -737,6 +920,11 @@ fn task_admission(
                 qualifiers: Vec::new(),
             }),
     );
+    records.extend(query_records.iter().enumerate().map(|(ordinal, statement)| SemanticTypedRecord {
+        predicate: RelId(3),
+        arguments: vec![SemanticArgument::U32(ordinal as u32), SemanticArgument::U32(*statement)],
+        qualifiers: Vec::new(),
+    }));
     Ok(SemanticAdmissionRecords {
         predicates: vec![
             SemanticPredicateRecord {
@@ -748,6 +936,11 @@ fn task_admission(
                 predicate: RelId(2),
                 role: SemanticRecordRole::Qualifier,
                 schema: input_schema,
+            },
+            SemanticPredicateRecord {
+                predicate: RelId(3),
+                role: SemanticRecordRole::Qualifier,
+                schema: query_schema,
             },
         ],
         records,
@@ -763,17 +956,25 @@ fn append_sized(bytes: &mut Vec<u8>, value: &[u8]) {
 fn task_digest(
     initial_theory: &str,
     input_facts: &str,
-    observer_program: &str,
-    statements: &[(String, u8); 3],
+    observer_program: Option<&str>,
+    statements: &[(String, u8)],
+    query_records: &[u32],
+    task_ground: &super::ColdValue,
 ) -> [u8; 32] {
-    let mut bytes = b"xlog.semantic.cold-task.v1\0".to_vec();
-    for value in [initial_theory, input_facts, observer_program] {
+    let mut bytes = b"xlog.semantic.cold-task.v2\0".to_vec();
+    for value in [initial_theory, input_facts] {
         append_sized(&mut bytes, value.as_bytes());
     }
+    bytes.push(u8::from(observer_program.is_some()));
+    if let Some(observer) = observer_program { append_sized(&mut bytes, observer.as_bytes()); }
+    append_sized(&mut bytes, &super::checkpoint_cold_value_bytes(task_ground));
+    bytes.extend((statements.len() as u64).to_le_bytes());
     for (statement, mask) in statements {
         append_sized(&mut bytes, statement.as_bytes());
         bytes.push(*mask);
     }
+    bytes.extend((query_records.len() as u64).to_le_bytes());
+    for record in query_records { bytes.extend(record.to_le_bytes()); }
     Sha256::digest(bytes).into()
 }
 
@@ -869,9 +1070,9 @@ fn fresh_records(
     ]
 }
 
-fn initial_role_counts() -> [u64; 55] {
+fn initial_role_counts(query_count: usize) -> [u64; 55] {
     let mut counts = [1u64; 55];
-    counts[15] = 3;
+    counts[15] = query_count as u64;
     for role in [
         4u64, 5, 6, 7, 8, 9, 10, 11, 12, 13, 18, 19, 20, 21, 22, 23, 24, 25, 29, 43, 44, 45, 46,
         51, 52, 53, 54,

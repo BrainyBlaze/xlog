@@ -49,6 +49,26 @@ impl ModelWorkKind {
             _ => return None,
         })
     }
+
+    fn geometry_units(self, dimensions: &[u64]) -> Result<u64, &'static str> {
+        if dimensions.len() > 8 {
+            return Err("model work geometry exceeds eight dimensions");
+        }
+        if self == Self::ModelInvocation {
+            return if dimensions.is_empty() {
+                Ok(0)
+            } else {
+                Err("model invocation requires empty geometry")
+            };
+        }
+        if dimensions.contains(&0) {
+            return Ok(0);
+        }
+        dimensions
+            .iter()
+            .try_fold(1u64, |units, &extent| units.checked_mul(extent))
+            .ok_or("model work geometry exceeds the exact u64 counter")
+    }
 }
 
 /// Immutable kernel input. Unused dimensions are zero, while a scalar has rank
@@ -181,17 +201,208 @@ impl ModelWorkEvent {
             {
                 return Err("model invocation requires its original scalar native device slot");
             }
-            // A call is its own resource quantity, not another work tariff.
-            return Ok(0);
         }
-        let dimensions = &self.dimensions[..self.rank as usize];
-        if dimensions.contains(&0) {
-            return Ok(0);
+        kind.geometry_units(&self.dimensions[..self.rank as usize])
+    }
+}
+
+struct ModelWorkGeometry {
+    kind: ModelWorkKind,
+    rank: usize,
+    dimensions: [u64; 8],
+}
+
+impl ModelWorkGeometry {
+    fn new(kind: ModelWorkKind, dimensions: &[u64]) -> Result<(Self, u64), &'static str> {
+        if kind == ModelWorkKind::SavedCopyBytes {
+            return Err("saved copies require their original native witness producer");
         }
-        dimensions
+        let units = kind.geometry_units(dimensions)?;
+        let mut geometry = Self {
+            kind,
+            rank: dimensions.len(),
+            dimensions: [0; 8],
+        };
+        geometry.dimensions[..geometry.rank].copy_from_slice(dimensions);
+        Ok((geometry, units))
+    }
+}
+
+/// Immutable ordered geometry for the original report, admitted before recording.
+/// Actual indices exclude spans skipped by native proof of never-entered regions.
+pub(crate) struct ModelWorkPlan {
+    events: Vec<ModelWorkGeometry>,
+    region_ends: Vec<usize>,
+    recorded_indices: Vec<usize>,
+    bound: u64,
+    calls: u64,
+    next: usize,
+}
+
+impl ModelWorkPlan {
+    pub(crate) fn new(
+        capacity: usize,
+        operations: &[(ModelWorkKind, Vec<u64>)],
+        region_ends: &[usize],
+        region_count: usize,
+    ) -> Result<Self, &'static str> {
+        if operations.len() > capacity || u64::try_from(operations.len()).is_err() {
+            return Err("model operation plan exceeds its original event capacity");
+        }
+        if region_ends.len() != region_count
+            || region_ends.windows(2).any(|ends| ends[0] > ends[1])
+            || region_ends
+                .last()
+                .is_some_and(|end| *end != operations.len())
+        {
+            return Err("cold operation boundaries changed the original region roster or extent");
+        }
+        let mut events = Vec::new();
+        events
+            .try_reserve_exact(operations.len())
+            .map_err(|_| "model operation plan reservation failed")?;
+        let mut recorded_indices = Vec::new();
+        recorded_indices
+            .try_reserve_exact(operations.len())
+            .map_err(|_| "model operation trace reservation failed")?;
+        let mut bound = 0u64;
+        let mut calls = 0u64;
+        for (kind, dimensions) in operations {
+            let (event, units) = ModelWorkGeometry::new(*kind, dimensions)?;
+            bound = bound
+                .checked_add(units)
+                .ok_or("model operation plan exceeds the exact u64 work bound")?;
+            if *kind == ModelWorkKind::ModelInvocation {
+                calls = calls
+                    .checked_add(1)
+                    .ok_or("model operation plan exceeds the exact u64 call bound")?;
+            }
+            events.push(event);
+        }
+        Ok(Self {
+            events,
+            region_ends: region_ends.to_vec(),
+            recorded_indices,
+            bound,
+            calls,
+            next: 0,
+        })
+    }
+
+    pub(crate) fn quantities(&self) -> [u64; 3] {
+        [self.bound, self.events.len() as u64, self.calls]
+    }
+
+    pub(crate) fn require_next(
+        &self,
+        kind: ModelWorkKind,
+        dimensions: &[u64],
+        region: Option<usize>,
+    ) -> Result<(), &'static str> {
+        self.require_next_at(0, kind, dimensions, region)
+    }
+
+    pub(crate) fn require_next_at(
+        &self,
+        offset: usize,
+        kind: ModelWorkKind,
+        dimensions: &[u64],
+        region: Option<usize>,
+    ) -> Result<(), &'static str> {
+        let index = self
+            .next
+            .checked_add(offset)
+            .ok_or("model operation group exceeds its original plan extent")?;
+        if let Some(region) = region {
+            let (start, end) = self.region(region)?;
+            if index < start || index >= end {
+                return Err("cold model registration crossed its original region span");
+            }
+        }
+        if !self.events.get(index).is_some_and(|event| {
+            event.kind == kind && &event.dimensions[..event.rank] == dimensions
+        }) {
+            return Err("model registration changed its admitted operation order or geometry");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn consume(&mut self) {
+        self.recorded_indices.push(self.next);
+        self.next += 1;
+    }
+
+    fn region(&self, index: usize) -> Result<(usize, usize), &'static str> {
+        let end = *self
+            .region_ends
+            .get(index)
+            .ok_or("cold recording lost its original region boundary")?;
+        let start = if index == 0 {
+            0
+        } else {
+            self.region_ends[index - 1]
+        };
+        Ok((start, end))
+    }
+
+    pub(crate) fn require_region_start(&self, index: usize) -> Result<(), &'static str> {
+        if self.next != self.region(index)?.0 {
+            return Err("cold region did not begin at its original operation boundary");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_region_end(&self, index: usize) -> Result<(), &'static str> {
+        if self.next != self.region(index)?.1 {
+            return Err("successful cold region did not consume its complete admitted span");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn skip_unentered_region(&mut self, index: usize) -> Result<(), &'static str> {
+        self.require_region_start(index)?;
+        self.next = self.region(index)?.1;
+        Ok(())
+    }
+
+    pub(crate) fn require_evaluation_result_copy_region(
+        &self,
+        index: usize,
+    ) -> Result<(), &'static str> {
+        self.require_region_start(index)?;
+        let (start, end) = self.region(index)?;
+        if self.events[start..end]
             .iter()
-            .try_fold(1u64, |units, &extent| units.checked_mul(extent))
-            .ok_or("model work geometry exceeds the exact u64 counter")
+            .any(|event| event.kind != ModelWorkKind::CopyBytes)
+        {
+            return Err("cancelled evaluation can skip only its unentered result-copy region");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn complete(&self) -> bool {
+        self.next == self.events.len()
+    }
+
+    pub(crate) fn require_recorded_trace(
+        &self,
+        recorded: &[ModelWorkEvent],
+    ) -> Result<(), &'static str> {
+        if recorded.len() != self.recorded_indices.len()
+            || !recorded
+                .iter()
+                .zip(&self.recorded_indices)
+                .all(|(actual, index)| {
+                    self.events.get(*index).is_some_and(|planned| {
+                        actual.kind == planned.kind as u64
+                            && actual.rank as usize == planned.rank
+                            && actual.dimensions == planned.dimensions
+                    })
+                })
+        {
+            return Err("cold model report changed its authenticated admitted operation trace");
+        }
+        Ok(())
     }
 }
 
@@ -206,7 +417,74 @@ pub(crate) struct ModelWorkRecording {
     frozen: bool,
 }
 
+/// Immutable quantities issued only by an original frozen native recording.
+/// Combining certificates adds existing work; it never prices another plan.
+#[derive(Clone, Copy, Debug)]
+#[cfg(any(test, feature = "semantic-policy"))]
+pub(crate) struct FrozenModelWorkRecording {
+    bound: u64,
+    minimum: u64,
+    event_count: u64,
+    model_call_count: u64,
+}
+
+#[cfg(any(test, feature = "semantic-policy"))]
+impl FrozenModelWorkRecording {
+    pub(crate) fn bound(self) -> u64 {
+        self.bound
+    }
+
+    pub(crate) fn event_count(self) -> u64 {
+        self.event_count
+    }
+
+    pub(crate) fn model_call_count(self) -> u64 {
+        self.model_call_count
+    }
+
+    pub(crate) fn checked_sum(certificates: impl IntoIterator<Item = Self>) -> Option<Self> {
+        certificates.into_iter().try_fold(
+            Self {
+                bound: 0,
+                minimum: 0,
+                event_count: 0,
+                model_call_count: 0,
+            },
+            |sum, next| {
+                Some(Self {
+                    bound: sum.bound.checked_add(next.bound)?,
+                    minimum: sum.minimum.checked_add(next.minimum)?,
+                    event_count: sum.event_count.checked_add(next.event_count)?,
+                    model_call_count: sum.model_call_count.checked_add(next.model_call_count)?,
+                })
+            },
+        )
+    }
+}
+
 impl ModelWorkRecording {
+    #[cfg(any(test, feature = "semantic-policy"))]
+    pub(crate) fn frozen_certificate(&self) -> Result<FrozenModelWorkRecording, &'static str> {
+        if !self.frozen {
+            return Err("model work certificate requires its original frozen recording");
+        }
+        Ok(FrozenModelWorkRecording {
+            bound: self.bound,
+            minimum: self.minimum,
+            event_count: u64::try_from(self.events.len())
+                .map_err(|_| "model event count overflow")?,
+            model_call_count: self
+                .events
+                .iter()
+                .try_fold(0u64, |count, event| {
+                    count.checked_add(u64::from(
+                        event.kind == ModelWorkKind::ModelInvocation as u64,
+                    ))
+                })
+                .ok_or("model invocation count overflow")?,
+        })
+    }
+
     pub(crate) fn new(capacity: usize) -> Result<Self, &'static str> {
         if capacity == 0 {
             return Err("model work requires a positive cold event capacity");
@@ -321,7 +599,21 @@ impl ExecutionWork {
         recording: &ModelWorkRecording,
         refused_overflow: bool,
     ) -> bool {
-        recording.frozen_bound() == Some(self.model_bound)
+        recording.frozen_certificate().is_ok_and(|certificate| {
+            self.validate_model_certificates([certificate], refused_overflow)
+        })
+    }
+
+    #[cfg(any(test, feature = "semantic-policy"))]
+    pub(crate) fn validate_model_certificates(
+        &self,
+        certificates: impl IntoIterator<Item = FrozenModelWorkRecording>,
+        refused_overflow: bool,
+    ) -> bool {
+        let Some(recording) = FrozenModelWorkRecording::checked_sum(certificates) else {
+            return false;
+        };
+        recording.bound == self.model_bound
             && self.model_once.checked_add(self.native_attempt) == Some(self.raw)
             && self
                 .native_events
@@ -335,10 +627,10 @@ impl ExecutionWork {
                 .is_some_and(|sum| sum <= self.native_attempt)
             && self.active_candidate == 0
             && if refused_overflow {
-                self.overflow == 1 && self.model_events <= recording.events().len() as u64
+                self.overflow == 1 && self.model_events <= recording.event_count
             } else {
                 self.overflow == 0
-                    && self.model_events == recording.events().len() as u64
+                    && self.model_events == recording.event_count
                     && (recording.minimum..=self.model_bound).contains(&self.model_once)
             }
     }

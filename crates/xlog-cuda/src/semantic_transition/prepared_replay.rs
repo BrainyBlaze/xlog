@@ -189,13 +189,19 @@ impl PreparedReplayCustody {
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "stage the original replay allocations and initialization writes in one admitted roster"
+    )]
     pub(super) fn allocate(
         provider: &CudaKernelProvider,
+        stream: &CudaStream,
         storage: &PublicationStorage,
         inputs: &Arc<PreparedStepInputs>,
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
         learning_phases: &[SemanticLearningPhaseRecord],
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
     ) -> Result<Self, SemanticTransitionError> {
         let copy = provider
             .device()
@@ -208,12 +214,13 @@ impl PreparedReplayCustody {
         #[cfg(not(feature = "semantic-policy"))]
         let _ = learning_phases;
         let parent = ReplaySnapshot::allocate(
-            provider,
+            stream,
             storage,
             replay_plan(storage, true, &inputs.model_slots)?,
             storage.bank_templates[0].len(),
             arena_words,
             reservation,
+            writes,
         )?;
         let mut input_views = BTreeMap::new();
         let mut values = inputs.binding_values[0].clone();
@@ -259,19 +266,22 @@ impl PreparedReplayCustody {
         let input_bindings = reservation
             .alloc(values.len())
             .map_err(|error| runtime_error("retained input guard reservation", error))?;
-        upload_publication(provider, &values, &input_bindings)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &values, input_bindings.view(), false,
+        )?);
         Ok(Self {
             parent,
             input_bindings,
             input_views,
             original_inputs: Arc::clone(inputs),
             successor: ReplaySnapshot::allocate(
-                provider,
+                stream,
                 storage,
                 replay_plan(storage, false, &inputs.model_slots)?,
                 storage.bank_templates[0].len(),
                 0,
                 reservation,
+                writes,
             )?,
             copy,
             #[cfg(feature = "semantic-policy")]
@@ -376,7 +386,7 @@ impl PreparedReplayCustody {
             4 + graph_bytes,
             4 + size_of::<PublicationBank>(),
             4 + size_of::<PublicationContract>(),
-            4 + 55 * 8,
+            4 + PUBLICATION_ROLE_COUNT * 8,
             4 + storage.terminals.len() * 8,
             4 + storage.layouts.len() * (4 + size_of::<SemanticTensorLayout>()),
             geometry.len(),
@@ -707,8 +717,38 @@ impl SemanticTransitionSession {
             })
     }
 
-    /// Canonical cold replay tuple for this original, known completed Proposal.
-    /// Later publication-bank reuse cannot change these private native snapshots.
+    /// Original task ground from the same retained predecessor replay custody.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn prepared_parent_task_ground(
+        &mut self,
+        step: &SemanticPreparedStep,
+        header: &PublicationHeader,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        let original = self.checked_prepared_step(step, false)?;
+        let prepared = original.prepared.as_ref().expect("checked original owner");
+        if !prepared.observed || !self.prepared_segment.as_ref()
+            .is_some_and(|segment| segment.completed)
+        {
+            return Err(publication_input_error("retained task ground requires known completed execution"));
+        }
+        let parent = &prepared.replay_custody.as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?.parent;
+        let slot = parent.plan.iter().position(|row|
+            (row.role, row.index) == (SemanticStateRole::TaskGround as u64, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let bytes = parent.backings[slot].slice()?.view();
+        let bank = parent.bank.view();
+        let actual = parent.actual.view();
+        let actual = self.publication_read(actual)?;
+        if actual[2] != 1 || actual[1] != header.publication_word
+            || self.publication_read(bank)?[0].header != *header
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.publication_read(bytes)
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub fn prepared_completed_replay_materials(
         &mut self,
@@ -891,6 +931,17 @@ impl SemanticTransitionSession {
                 &material,
                 &original_generations,
             )?;
+            if next.state.actor_eligible == 1 && self.actor_refresh.is_none() {
+                self.register_prepared_actor_refresh_origin(step,
+                    crate::semantic_training_view::origin_record(SemanticTrainingViewOrigin {
+                        transition: SemanticTransitionKind::Proposal,
+                        predecessor: identity(header),
+                        successor: identity(next.header),
+                        invocation: header.rng_binding()?,
+                        model_geometry_digest: header.model_geometry_digest,
+                        model_numerical_digest: header.model_numerical_digest,
+                    }), next.state.action_batch_root, publication_abi_bytes(&[next.state.action_batch]))?;
+            }
             Ok(Some(SemanticCompletedReplayMaterials {
                 predecessor: identity(header),
                 successor: identity(next.header),
@@ -974,12 +1025,13 @@ impl SemanticTransitionSession {
 
 impl ReplaySnapshot {
     fn allocate(
-        provider: &CudaKernelProvider,
+        stream: &CudaStream,
         storage: &PublicationStorage,
         mut plan: Vec<ReplayCopyRow>,
         count: usize,
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
+        writes: &mut Vec<state_restoration::OriginalDeviceWrite>,
     ) -> Result<Self, SemanticTransitionError> {
         let mut backings = Vec::with_capacity(plan.len());
         let mut model_owners = Vec::new();
@@ -1011,7 +1063,9 @@ impl ReplaySnapshot {
         let rows = reservation
             .alloc(plan.len())
             .map_err(|error| runtime_error("replay roster reservation", error))?;
-        upload_publication(provider, &plan, &rows)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &plan, rows.view(), false,
+        )?);
         let bank = reservation
             .alloc(1)
             .map_err(|error| runtime_error("replay bank reservation", error))?;
@@ -1030,7 +1084,9 @@ impl ReplaySnapshot {
         let actual = reservation
             .alloc(3)
             .map_err(|error| runtime_error("replay work reservation", error))?;
-        upload_publication(provider, &[0u64; 3], &actual)?;
+        writes.push(state_restoration::OriginalDeviceWrite::new(
+            stream, &[0u64; 3], actual.view(), false,
+        )?);
         Ok(Self {
             rows,
             plan,

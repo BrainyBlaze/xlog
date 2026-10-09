@@ -66,7 +66,7 @@ class _UpdateCanaryMeasurement(TypedDict):
     memory_limit: int
     work_used: int
     work_limit: int
-    obligation_positions: tuple[int, int, int]
+    obligation_positions: tuple[int, ...]
     protected_member_offset: int
     protected_member_count: int
     protected_positions: tuple[int, ...]
@@ -139,11 +139,36 @@ class SemanticCompletedExecutionObservation:
     @property
     def model_calls(self) -> int: ...
 
+class SemanticPrivateExecutionContinuation:
+    """Native-issued custody of one original private execution resolver.
+
+    Issued by bind_private_execution_continuation before segment effects.
+    Only the retained native phase may invoke the original resolver.
+    """
+
+class SemanticPreparedActorRefresh:
+    """Native-issued CURRENT actor member with two original embedded children.
+
+    Create it only through the original Update's prepare_actor_refresh method.
+    Both bank producers borrow the sole outer memory_scope and never submit a
+    graph independently. Retain this owner through native final-use retirement.
+    """
+    def source_task(self, *, refresh_snapshot: Any) -> tuple[Any, ...]: ...
+    def prepare_bank(self, bank: int, task_use: SemanticTransitionTaskUse, producer: Any) -> Any: ...
+    def group_update_vjp(self, update_step: SemanticPreparedStep, bank: int, *, consumer_stream: int) -> tuple[Any, ...]: ...
+
 class SemanticPreparedStep:
+    def prepare_actor_refresh(self, member_ordinal: int, *, refresh_snapshot: Any) -> SemanticPreparedActorRefresh: ...
     """Session-issued original step; construction is not public."""
 
     @property
     def requested_transition(self) -> Literal["proposal", "recompute", "update"]: ...
+
+    def prepare_cold_model_work(
+        self, prepare_callback: Callable[[], Any], *, consumer_streams: Sequence[int]
+    ) -> Any:
+        """Prepare once under this original Update's native cold-work owner."""
+        ...
 
     @property
     def execution_measurements(self) -> SemanticCompletedExecutionObservation:
@@ -172,6 +197,90 @@ class SemanticPreparedStep:
     def completed_action_projection(
         self, *, consumer_streams: Sequence[int]
     ) -> SemanticCompletedActionProjection: ...
+
+_SemanticTensorLayout = tuple[
+    int, int, int, int, int, int, tuple[int, ...], tuple[int, ...]
+]
+_SemanticTensorInput = tuple[_SemanticTensorLayout, int, int, Any, Optional[Any]]
+
+class SemanticSegmentInstructionAdmission:
+    """Native-issued original instruction custody; construction is not public."""
+
+    def prepare(self, prepare_callback: Callable[[], Any]) -> Any: ...
+    def parent_identity(self) -> _PublishedIdentity: ...
+    def resolve_parent_handoff(self) -> None: ...
+    @property
+    def preparation_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+    @property
+    def retirement_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+    @property
+    def budgets(self) -> tuple[tuple[int, int, int], ...]: ...
+
+class SemanticPrivateReplayChild:
+    """One original selected replay child retained by its instruction owner."""
+
+    def source_task(
+        self, *, refresh_snapshot: Callable[[], Any]
+    ) -> tuple[bytes, tuple[Any, ...], tuple[Any, ...]]: ...
+
+class SemanticColdModelWork:
+    """Original native cold registrar, available only in its admitted callback."""
+
+    @property
+    def plan_admitted(self) -> bool: ...
+    @property
+    def region_count(self) -> int: ...
+    @property
+    def consumer_stream(self) -> int: ...
+    def evaluation_source_geometry(
+        self,
+    ) -> list[tuple[list[int], list[int], tuple[int, int]]]:
+        """Read seventeen original port layouts without selection or device export."""
+        ...
+    def admit_plan(
+        self,
+        operations: tuple[tuple[int, tuple[int, ...]], ...],
+        *,
+        region_ends: tuple[int, ...] = (),
+        evaluation_content: Optional[tuple[
+            tuple[_SemanticTensorInput, ...], tuple[_SemanticTensorInput, ...]
+        ]] = None,
+    ) -> tuple[int, int, int]:
+        """Admit once before any original buffer/view export or numerical producer.
+
+        Evaluation content is the actual output-three and objective-eight roster,
+        using the existing five-field tensor inputs, not caller native prices.
+        """
+        ...
+    def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
+    def begin(self) -> None: ...
+    def end(self) -> None: ...
+    def fail(self) -> None: ...
+    def prepare_operation(
+        self, kind: int, dimensions: tuple[int, ...], *, device_produced: bool = False,
+    ) -> SemanticColdModelWorkOperation:
+        """Hold the exact next original event before its effect, without charging it."""
+        ...
+    def prepare_operations(
+        self, operations: tuple[tuple[int, tuple[int, ...], bool], ...],
+    ) -> tuple[SemanticColdModelWorkOperation, ...]: ...
+    def record_model_invocation(self) -> None: ...
+    def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
+    def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
+
+class SemanticColdModelWorkOperation:
+    """Native-issued single-use effect admission, retained by its original recorder."""
+
+    @property
+    def slot(self) -> int: ...
+    def enter(self) -> int: ...
+    def complete(self) -> int: ...
+    def unknown(self) -> None: ...
+    def cancel_before_entry(self) -> None: ...
 
 class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""
@@ -210,7 +319,14 @@ class SemanticModelEvaluation:
     def consumer_stream(self) -> int: ...
     def training_view(self, *, consumer_stream: int) -> tuple[Any, ...]: ...
     def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
-    def begin(self) -> None: ...
+    def capture(
+        self, enqueue: Callable[[], Any], *, memory_scope: Any,
+        output_witness: Any, consumer_streams: Sequence[int],
+    ) -> tuple[int, int, int]:
+        """Retain the original capture and its work/event/call bounds without launching."""
+        ...
+    def launch(self) -> None: ...
+    def resolve_launch(self) -> None: ...
     def record_model_invocation(self) -> None: ...
     def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
     def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
@@ -226,8 +342,47 @@ class SemanticModelEvaluation:
         ...
     def cancel(self, *, consumer_streams: Sequence[int]) -> None: ...
 
+class SemanticTransitionColdTask:
+    """Original admitted statement roster and its explicit ordered query selection."""
+
+    def __init__(
+        self, *, initial_theory: str, input_facts: str,
+        observer_program: Optional[str], statements: tuple[tuple[str, int], ...],
+        query_records: tuple[int, ...], task_ground: tuple[str, tuple[Any, ...]],
+        training_canary_source: Optional[SemanticTransitionColdTask],
+        capacities: tuple[int, int, int, int],
+        admission_limits: tuple[int, int, int, int], device_ordinal: int,
+        memory_bytes: int, provenance_capacity_records: int, prefix_capacity: int,
+        feedback_capacity: int, pad_token: int, terminal_tokens: tuple[int, ...],
+        final_intent_payload_bytes: int, intent_effect: bytes,
+        intent_entry_capacity: int, intent_payload_capacity_bytes: int,
+        acknowledgement_payload_capacity_bytes: int,
+        authority_decisions_capacity_bytes: int, generations: tuple[int, int, int, int],
+        training_cursor: int, training_rng: tuple[int, int, int, int], fuel: int,
+        rng: tuple[int, int, int], private_replay_child: Any = None,
+    ) -> None: ...
+
+    @property
+    def task_content(self) -> tuple[bytes, bytes, bytes, tuple[int, ...]]: ...
+    @property
+    def statement_records(self) -> tuple[int, ...]:
+        """Original selected record indices, preserving order and repeated selections."""
+        ...
+    @property
+    def task_ground(self) -> tuple[str, tuple[Any, ...]]: ...
+    def close(self) -> None: ...
+
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
+
+    @property
+    def original_program(self) -> Optional[bytes]:
+        """Exact immutable first-import Program bytes, never a regenerated schedule."""
+        ...
+
+    def task_ground(self) -> tuple[str, tuple[Any, ...]]:
+        """Original tagged ground and full ordered verification bindings."""
+        ...
 
     def task_actor_eligible(self) -> bool:
         """Original native ex-ante actor decision, including after restore.
@@ -253,13 +408,54 @@ class SemanticCompletedSegmentPending(RuntimeError):
     Retain the original Runtime and resolve its result, never resubmit.
     """
 
+class SemanticPreparedSegmentPending(RuntimeError):
+    """Retain the original controller/task use and call resolve_segment.
+
+    The original attempt may still be pending. Never submit another graph,
+    replace its callback or treat this signal as completed execution.
+    """
+
+class SemanticPreparedSegmentCancelled(RuntimeError):
+    """Original native proof confirms no graph call; retire the construction.
+
+    This is not an executed or skipped result roster and does not refund its
+    original attempt, Program progression or nominal proposal expense.
+    """
+
+class SemanticRetainedFinalUsePending(RuntimeError):
+    """Retain the original target retirement and members until final use joins.
+
+    Retry only the original native final-use owner. Do not repeat cleanup,
+    historical import, or numerical work after this exception.
+    """
+
+class SemanticPublishedParent:
+    def resolve_model_context_preparation(self) -> bool:
+        """Join only the original submitted context preparation; never submit a suffix."""
+        ...
+
+class SemanticTransitionSession:
+    @staticmethod
+    def restore_checkpoint(
+        checkpoint: bytes, *, device_ordinal: int, snapshot: Any,
+        restore_model: Any, training_domain: Any, training_canary_source: Any,
+        original_program: Optional[bytes] = None, referent: Any = None,
+        resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
+        max_total_checkpoint_bytes: Any = None, refresh_snapshot: Any = None,
+        learning_phase_issuer: Any = None, learning_phase_records: Any = None,
+        learning_phase_record_limits: Any = None, learning_phase_fence: Any = None,
+        learning_phase_checkpoint_issuer: Any = None,
+    ) -> Any: ...
+
 class SemanticTransitionController:
     def import_task(
         self, *, task_ref: Any, task_scope: Any, statement_records: Any,
         allowed_support_records: Any, task_program_source: Any,
         task_query_ordinals: Any, task_scoring: Any, task_priority_levels: Any,
-        admissible_truth_masks: Any, actor_eligible: Any, live_authorities: Any,
+        admissible_truth_masks: Any, actor_eligible: Any, task_ground: Any,
+        live_authorities: Any,
         replay_rows: Any, training_objective: Any, training_domain: Any,
+        training_canary_source: Any, replay_capacity: Any,
         max_material_bytes: Any, max_total_material_bytes: Any,
         max_evidence_bytes: Any, dependencies: Any, feedback_roots: Any,
         publication_grants: Any, inference_grants: Any, training_grants: Any,
@@ -267,9 +463,34 @@ class SemanticTransitionController:
         replay_selection: Any, replay_operation: Any, restore_invocation: Any,
         pack_policy: Any, finish_invocation: Any, refresh_snapshot: Any,
         proposal_capacity: int,
+        original_program: Optional[bytes] = None,
+        actor_refresh_initial_kit: Optional[tuple[bytes, tuple[Any, ...]]] = None,
         resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
         max_total_checkpoint_bytes: Any = None, retain_policy: bool = False,
     ) -> Union[SemanticTransitionTaskUse, tuple[SemanticTransitionTaskUse, Any]]: ...
+
+    def admit_segment_instruction(
+        self, task_use: SemanticTransitionTaskUse, *, parent: SemanticPublishedParent,
+        instruction_bytes: bytes, first_program_ordinal: int,
+    ) -> SemanticSegmentInstructionAdmission: ...
+
+    def prepare_private_replay_child(
+        self, task_use: SemanticTransitionTaskUse, *,
+        instruction_admission: SemanticSegmentInstructionAdmission,
+        step_index: int, replay_ordinal: int,
+    ) -> SemanticPrivateReplayChild: ...
+
+    def build_segment(
+        self, task_use: SemanticTransitionTaskUse, *, transitions: Any,
+        producer: Any, tensor_content_capacity: int, model_work_capacity: int,
+        segment_capacity_bytes: int, other_external_cuda_bytes: int,
+        instruction_admission: Optional[SemanticSegmentInstructionAdmission],
+        consumer_streams: Sequence[int],
+    ) -> None: ...
+
+    def close(self, parent: SemanticPublishedParent) -> None:
+        """Confirm terminal native release after the original parent and steps retire."""
+        ...
 
     def prepare_model_evaluation(
         self, task_use: Any, parent: Any, *, model_work_capacity: int,
@@ -289,6 +510,19 @@ class SemanticTransitionController:
         tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
     ]]:
         """Deliver the same retained complete native roster with fresh rights; no execution."""
+        ...
+
+    def resolve_segment(
+        self, task_use: SemanticTransitionTaskUse,
+    ) -> tuple[SemanticPublishedParent, tuple[
+        tuple[SemanticPreparedStep, Optional[str], int, Optional[dict[str, Any]], Any, Optional[int]], ...
+    ]]:
+        """Join only the original attempt and retained handoff, never relaunch.
+
+        Uses its original authority-refresh callback. An unfinished original
+        attempt raises SemanticPreparedSegmentPending. A proved pre-graph
+        cancellation raises SemanticPreparedSegmentCancelled for retirement.
+        """
         ...
 
 # ---------------------------------------------------------------------------

@@ -449,6 +449,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::PrivateRestore,
                 )
                 .map_err(xlog_err)?;
             self.trajectory_start()?
@@ -482,7 +483,8 @@ impl PySemanticLearningPhaseTransition {
                 self.trajectory_start()?.as_mut().expect("retained original trajectory").restore_entered = true;
                 let result = PySemanticTransitionSession::restore_checkpoint_impl(
                     py, checkpoint.as_any(), self.source.borrow(py).device_ordinal, &snapshot,
-                    self.model_owner(py, PhaseModelOwner::Restore)?.bind(py), domain.bind(py), None, None,
+                    self.model_owner(py, PhaseModelOwner::Restore)?.bind(py), domain.bind(py),
+                    task.checkpoint.training_canary_owner.as_ref().map(|owner| owner.bind(py).as_any()), None, None,
                     self.preparation_inputs.resolve_checkpoint.as_ref().map(|callback| callback.bind(py)),
                     checkpoint_limit.as_ref().map(|value| value.bind(py)),
                     total_limit.as_ref().map(|value| value.bind(py)), Some(self.refresh_snapshot.bind(py)),
@@ -599,7 +601,12 @@ impl PySemanticLearningPhaseTransition {
                 // A callback attempt flag cannot prove report submission.
                 let report = source
                     .owner()?
-                    .finish_cold_model_work(&*parent.lease()?, &work, &streams)
+                    .finish_cold_model_work(
+                        &*parent.lease()?,
+                        &work,
+                        &streams,
+                        xlog_cuda::SemanticColdModelWorkDisposition::Complete,
+                    )
                     .map_err(xlog_err)?;
                 self.trajectory_start()?
                     .as_mut()
