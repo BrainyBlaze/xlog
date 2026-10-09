@@ -263,6 +263,17 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let mut model_ceiling =
             native_work_bound::content_digest_ceiling(contract.length_bytes, 21, false)?;
+        let model_snapshot = native_work_bound::model_snapshot_native_work_ceiling(
+            lease
+                .directory
+                .iter()
+                .filter(|range| matches!(range.role, 18..=20))
+                .count()
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            usize::try_from(contract.length_bytes)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        )?;
         for range in lease
             .directory
             .iter()
@@ -330,6 +341,7 @@ impl SemanticTransitionSession {
                 objective,
                 model_ceiling,
                 preparation_ceiling,
+                model_snapshot,
             )?,
         })
     }

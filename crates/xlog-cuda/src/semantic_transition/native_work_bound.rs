@@ -9,6 +9,7 @@ pub(crate) struct OriginalNativeCommand {
     entered: bool,
     submitted: bool,
     completed: bool,
+    dma_recorded: bool,
 }
 
 impl OriginalNativeCommand {
@@ -20,6 +21,7 @@ impl OriginalNativeCommand {
             entered: false,
             submitted: false,
             completed: false,
+            dma_recorded: false,
         })
     }
 
@@ -100,6 +102,31 @@ impl OriginalNativeCommand {
         self.completed = true;
         Ok(())
     }
+
+    pub(super) fn run_dma(
+        &mut self,
+        domain: &ResidentExecutionDomain,
+        poisoned: &mut bool,
+        recorder: LaunchRecorder,
+        allowance: Option<&Arc<Mutex<ColdNativeAllowance>>>,
+        bytes: usize,
+        operation: impl FnOnce(&CudaEnqueue<'_>, &mut bool, &mut bool) -> Result<(), XlogError>,
+    ) -> Result<(), SemanticTransitionError> {
+        let result = self.run(domain, poisoned, recorder, operation);
+        // A successful driver submission remains expenditure when the original
+        // commit or completion fence subsequently fails. A preflight refusal
+        // has submitted=false and cannot manufacture a reached copy.
+        if self.submitted && !self.dma_recorded {
+            if let Some(allowance) = allowance {
+                allowance
+                    .lock()
+                    .map_err(|_| publication_input_error("original cold allowance is poisoned"))?
+                    .record_submitted_dma(bytes)?;
+            }
+            self.dma_recorded = true;
+        }
+        result
+    }
 }
 
 pub(super) struct OriginalContentBatch {
@@ -134,6 +161,8 @@ impl OriginalContentBatch {
 pub(crate) struct ColdNativeAllowance {
     purpose: SemanticColdModelWorkPurpose,
     content: Option<FrozenColdEvaluationContent>,
+    submitted_dma: [u64; 9],
+    submitted_dma_ceiling: [u64; 9],
 }
 
 pub(super) struct FrozenColdEvaluationContent {
@@ -145,6 +174,7 @@ pub(super) struct FrozenColdEvaluationContent {
     model_ceiling: [u64; 9],
     ceiling: [u64; 9],
     remaining: [[u8; 2]; 4],
+    model_snapshot: Option<[u64; 9]>,
 }
 
 impl ColdNativeAllowance {
@@ -152,6 +182,8 @@ impl ColdNativeAllowance {
         Self {
             purpose,
             content: None,
+            submitted_dma: [0; 9],
+            submitted_dma_ceiling: [0; 9],
         }
     }
 
@@ -265,6 +297,89 @@ impl ColdNativeAllowance {
         content.preparation_available = false;
         Ok(())
     }
+
+    pub(super) fn claim_model_snapshot(
+        &mut self,
+        rows: usize,
+        contract_bytes: usize,
+    ) -> Result<bool, SemanticTransitionError> {
+        if !self.is_evaluation() {
+            return Ok(false);
+        }
+        let content = self.content.as_mut().ok_or_else(|| {
+            publication_input_error("model snapshot precedes its original cold admission")
+        })?;
+        let expected = content.model_snapshot.ok_or_else(|| {
+            publication_input_error("model snapshot exceeded its original finite occurrence")
+        })?;
+        if expected != model_snapshot_native_work_ceiling(rows, contract_bytes)? {
+            return Err(publication_input_error(
+                "model snapshot changed its originally admitted native geometry",
+            ));
+        }
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, expected)?;
+        content.model_snapshot = None;
+        Ok(true)
+    }
+
+    fn record_submitted_dma(&mut self, bytes: usize) -> Result<(), SemanticTransitionError> {
+        let mut reached = self.submitted_dma;
+        add_native_work_ceiling(
+            &mut reached,
+            [
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                u64::try_from(bytes).map_err(|_| native_work_ceiling_overflow())?,
+            ],
+        )?;
+        if reached
+            .iter()
+            .zip(self.submitted_dma_ceiling)
+            .any(|(actual, upper)| *actual > upper)
+        {
+            return Err(publication_input_error(
+                "submitted native DMA exceeded its original finite entitlement",
+            ));
+        }
+        self.submitted_dma = reached;
+        Ok(())
+    }
+
+    /// Merge only after the original operation's joins. DMA occurrences have
+    /// no CUDA tally writer, so this same native owner supplies their reached
+    /// subtotal exactly once to the cached final report, never to GPU counters.
+    pub(super) fn merge_submitted_dma(
+        &self,
+        result: &mut SemanticColdModelWorkResult,
+    ) -> Result<(), SemanticTransitionError> {
+        if native_work_ceiling_units(result.native_events)? != result.native_work
+            || self
+                .submitted_dma
+                .iter()
+                .zip(self.submitted_dma_ceiling)
+                .any(|(actual, upper)| *actual > upper)
+        {
+            return Err(publication_input_error(
+                "original native DMA report differs from its retained entitlement",
+            ));
+        }
+        let mut events = result.native_events;
+        add_native_work_ceiling(&mut events, self.submitted_dma)?;
+        let units = native_work_ceiling_units(events)?;
+        result
+            .model_work
+            .checked_add(units)
+            .ok_or_else(native_work_ceiling_overflow)?;
+        result.native_events = events;
+        result.native_work = units;
+        Ok(())
+    }
 }
 
 impl FrozenColdEvaluationContent {
@@ -275,6 +390,7 @@ impl FrozenColdEvaluationContent {
         objective: Vec<PreparedSemanticTensor>,
         model_ceiling: [u64; 9],
         preparation_ceiling: [u64; 9],
+        model_snapshot: [u64; 9],
     ) -> Result<Self, SemanticTransitionError> {
         let original = cohort.content_tensors();
         if original.len() != 17 || output.len() != 3 || objective.len() != 8 {
@@ -339,6 +455,7 @@ impl FrozenColdEvaluationContent {
         // although their execution tally is owned by numerical capture.
         let remaining = [[0, 4], [2, 5], [1, 1], [1, 2]];
         let mut ceiling = preparation_ceiling;
+        add_native_work_ceiling(&mut ceiling, model_snapshot)?;
         let sources = [&output, &objective];
         for (kind, tensors) in sources.into_iter().enumerate() {
             for verify in [false, true] {
@@ -378,6 +495,7 @@ impl FrozenColdEvaluationContent {
             model_ceiling,
             ceiling,
             remaining,
+            model_snapshot: Some(model_snapshot),
         })
     }
 }
@@ -389,6 +507,31 @@ pub(super) struct OriginalModelSnapshot {
     pub(super) contract_span: std::ops::Range<usize>,
     pub(super) cursor: usize,
     pub(super) commands: Vec<OriginalNativeCommand>,
+    pub(super) allowance: Option<std::sync::Weak<Mutex<ColdNativeAllowance>>>,
+}
+
+pub(super) fn model_snapshot_native_work_ceiling(
+    rows: usize,
+    contract_bytes: usize,
+) -> Result<[u64; 9], SemanticTransitionError> {
+    let commands = rows
+        .checked_add(1)
+        .ok_or_else(native_work_ceiling_overflow)?;
+    let bytes = rows
+        .checked_mul(size_of::<PublicationRange>())
+        .and_then(|bytes| bytes.checked_add(contract_bytes))
+        .ok_or_else(native_work_ceiling_overflow)?;
+    Ok([
+        u64::try_from(commands).map_err(|_| native_work_ceiling_overflow())?,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        u64::try_from(bytes).map_err(|_| native_work_ceiling_overflow())?,
+    ])
 }
 
 /// Add producer ceilings in the native tally's fixed event order.
