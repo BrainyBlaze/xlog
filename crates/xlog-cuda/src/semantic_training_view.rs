@@ -265,12 +265,42 @@ pub struct SemanticTrainingCanary {
     /// Model-logit positions whose next-token predictions must equal the
     /// canonical truth token for each native task result, in query order. Only
     /// the symbolic-utility and goal-chain canaries use these coordinates;
-    /// every other kind uses `[u64::MAX; 3]`.
-    pub obligation_positions: [u64; 3],
+    /// every other kind uses an empty roster.
+    pub obligation_positions: Vec<u64>,
     /// Explicit frozen members whose individual retention is uncompensated.
     /// Only the retained-behavior canary carries this set. Aggregate retention
     /// labels remain the metric denominator and do not imply protection.
     pub protected_positions: Vec<u64>,
+}
+
+/// Native-observed immutable Logical source for the original symbolic canaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTrainingCanarySource {
+    pub(crate) content: SemanticTaskContentIdentity,
+    pub(crate) statements: Vec<(Identity256, SemanticTruth)>,
+}
+
+impl SemanticTrainingCanarySource {
+    pub(crate) fn observed(
+        content: SemanticTaskContentIdentity,
+        statements: Vec<(Identity256, SemanticTruth)>,
+    ) -> Self {
+        Self { content, statements }
+    }
+
+    /// Immutable metadata from the original native Logical observation.
+    pub fn projection_words(&self) -> Vec<u64> {
+        let mut words = Vec::with_capacity(13 + self.statements.len() * 5);
+        words.extend(identity_words(self.content.query));
+        words.extend(identity_words(self.content.theory_program));
+        words.extend(identity_words(self.content.result));
+        words.push(self.statements.len() as u64);
+        for (statement, truth) in &self.statements {
+            words.extend(identity_words(*statement));
+            words.push(*truth as u64);
+        }
+        words
+    }
 }
 
 /// Complete frozen objective carried by the canonical replay-roster owner.
@@ -316,6 +346,8 @@ pub struct SemanticTrainingObjectiveRecord {
     pub cost_unit: [u64; 4],
     pub cost_cap: u64,
     pub truth_tokens: [u64; 4],
+    pub canary_source_offset: u64,
+    pub canary_source_words: u64,
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -343,7 +375,8 @@ pub struct SemanticTrainingCanaryRecord {
     pub upper_bound_bits: u64,
     pub memory_limit: u64,
     pub work_limit: u64,
-    pub obligation_positions: [u64; 3],
+    pub obligation_member_offset: u64,
+    pub obligation_member_count: u64,
     pub protected_member_offset: u64,
     pub protected_member_count: u64,
     pub row_identity: [u64; 4],
@@ -1393,7 +1426,7 @@ impl SemanticTrainingViewArena {
         objective: SemanticTrainingObjective,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
-        expected_truth: [SemanticTruth; 3],
+        canary_source: &SemanticTrainingCanarySource,
     ) -> Result<PreparedOriginalTrainingRoster, SemanticTransitionError> {
         if self.materialized || rows.is_empty() {
             return Err(input_error(
@@ -1406,7 +1439,7 @@ impl SemanticTrainingViewArena {
             &self.training_domain,
             task_identity,
             task_content,
-            expected_truth,
+            canary_source,
             &self.replay_capacity,
         )
     }
@@ -1771,7 +1804,7 @@ impl SemanticTrainingViewArena {
         training_domain: &SemanticTrainingDomain,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
-        expected_truth: [SemanticTruth; 3],
+        canary_source: &SemanticTrainingCanarySource,
         replay_binding: &Option<SemanticReplayAppendBinding>,
     ) -> Result<PreparedOriginalTrainingRoster, SemanticTransitionError> {
         if let Some(binding) = replay_binding {
@@ -1907,7 +1940,7 @@ impl SemanticTrainingViewArena {
                     capacity,
                     task_identity,
                     task_content,
-                    expected_truth,
+                    canary_source,
                     record_limit,
                 )?,
                 None => (
@@ -2033,7 +2066,11 @@ impl SemanticTrainingViewArena {
             .row_capacity
             .checked_mul(8)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        if group_members.len() > member_capacity || protected_members.len() > capacity {
+        let protected_capacity = canary_source.statements.len().checked_mul(7)
+            .and_then(|words| words.checked_add(13))
+            .and_then(|words| words.checked_add(capacity))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        if group_members.len() > member_capacity || protected_members.len() > protected_capacity {
             return Err(input_error(
                 "original objective exceeds its cold finite metadata capacity",
             ));
@@ -2041,7 +2078,7 @@ impl SemanticTrainingViewArena {
         group_members.resize(member_capacity, 0);
         groups.resize(8, SemanticTrainingObjectiveGroupRecord::default());
         canaries.resize(5, SemanticTrainingCanaryRecord::default());
-        protected_members.resize(capacity, 0);
+        protected_members.resize(protected_capacity, 0);
         descriptors.resize(
             replay_capacity.row_capacity,
             TrainingViewRowDescriptor::default(),
@@ -2081,7 +2118,7 @@ impl SemanticTrainingViewArena {
         training_domain: &SemanticTrainingDomain,
         task_identity: Identity256,
         task_content: SemanticTaskContentIdentity,
-        expected_truth: [SemanticTruth; 3],
+        canary_source: &SemanticTrainingCanarySource,
         replay_binding: Option<SemanticReplayAppendBinding>,
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         validate_execution_domain(provider, domain)
@@ -2092,7 +2129,7 @@ impl SemanticTrainingViewArena {
             training_domain,
             task_identity,
             task_content,
-            expected_truth,
+            canary_source,
             &replay_binding,
         )?;
         let select = provider
@@ -2304,8 +2341,8 @@ fn validate_objective(
     raw: &[u8],
     capacity: usize,
     task_identity: Identity256,
-    task_content: SemanticTaskContentIdentity,
-    expected_truth: [SemanticTruth; 3],
+    _task_content: SemanticTaskContentIdentity,
+    canary_source: &SemanticTrainingCanarySource,
     record_limit: u64,
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
@@ -2335,9 +2372,9 @@ fn validate_objective(
             "training objective has invalid evaluator, coefficient or cost bounds",
         ));
     }
-    let expected_query = identity_words(task_content.query);
-    let expected_theory_program = identity_words(task_content.theory_program);
-    let expected_result = identity_words(task_content.result);
+    let expected_query = identity_words(canary_source.content.query);
+    let expected_theory_program = identity_words(canary_source.content.theory_program);
+    let expected_result = identity_words(canary_source.content.result);
     for row in rows {
         let symbolic = row.basis == SemanticTrainingViewBasis::CorpusSymbolicAnchor as u64;
         let bound = row.task_query_identity == expected_query
@@ -2432,7 +2469,7 @@ fn validate_objective(
     }
     let mut seen_canaries = [false; 5];
     let mut canaries = Vec::with_capacity(objective.canaries.len());
-    let mut protected_members = Vec::new();
+    let mut protected_members = canary_source.projection_words();
     for canary in &objective.canaries {
         let index = canary.kind as usize - 1;
         let row = usize::try_from(canary.row_ordinal)
@@ -2445,6 +2482,8 @@ fn validate_objective(
         let positions_valid = if obligation_kind {
             row.is_some_and(|row| {
                 row.basis == SemanticTrainingViewBasis::CorpusSymbolicAnchor as u64
+                    && !canary_source.statements.is_empty()
+                    && canary.obligation_positions.len() == canary_source.statements.len()
                     && canary
                         .obligation_positions
                         .windows(2)
@@ -2453,8 +2492,8 @@ fn validate_objective(
                         .obligation_positions
                         .iter()
                         .all(|position| *position < row.window)
-                    && canary.obligation_positions.iter().zip(expected_truth).all(
-                        |(position, truth)| {
+                    && canary.obligation_positions.iter().zip(&canary_source.statements).all(
+                        |(position, (_, truth))| {
                             position
                                 .checked_add(1)
                                 .filter(|target| {
@@ -2483,14 +2522,14 @@ fn validate_objective(
                                 .map(|bytes| {
                                     u64::from_le_bytes(
                                         bytes.try_into().expect("bounded truth token"),
-                                    ) == objective.truth_tokens[truth as usize]
+                                    ) == objective.truth_tokens[*truth as usize]
                                 })
                                 .unwrap_or(false)
                         },
                     )
             })
         } else {
-            canary.obligation_positions == [u64::MAX; 3]
+            canary.obligation_positions.is_empty()
         };
         let protected_valid = if canary.kind == SemanticTrainingCanaryKind::RetainedBehavior {
             canary
@@ -2527,6 +2566,8 @@ fn validate_objective(
         seen_canaries[index] = true;
         let row = row.expect("checked canary row");
         let identity = canary_identity(&objective, canary, row, task_identity);
+        let obligation_member_offset = protected_members.len();
+        protected_members.extend_from_slice(&canary.obligation_positions);
         let protected_member_offset = protected_members.len();
         protected_members.extend_from_slice(&canary.protected_positions);
         canaries.push(SemanticTrainingCanaryRecord {
@@ -2537,7 +2578,10 @@ fn validate_objective(
             upper_bound_bits: canary.upper_bound.to_bits(),
             memory_limit: canary.memory_limit,
             work_limit: canary.work_limit,
-            obligation_positions: canary.obligation_positions,
+            obligation_member_offset: u64::try_from(obligation_member_offset)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            obligation_member_count: u64::try_from(canary.obligation_positions.len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             protected_member_offset: u64::try_from(protected_member_offset)
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
             protected_member_count: u64::try_from(canary.protected_positions.len())
@@ -2551,7 +2595,7 @@ fn validate_objective(
     if seen_canaries.iter().any(|seen| !seen) {
         return Err(input_error("training objective is incomplete"));
     }
-    let identity = objective_identity(&objective, rows, task_identity, &canaries);
+    let identity = objective_identity(&objective, rows, task_identity, &canaries, canary_source);
     Ok((
         SemanticTrainingObjectiveRecord {
             evaluator_abi: SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
@@ -2577,6 +2621,9 @@ fn validate_objective(
             cost_unit: identity_words(objective.cost_unit),
             cost_cap: objective.cost_cap,
             truth_tokens: objective.truth_tokens,
+            canary_source_offset: 0,
+            canary_source_words: u64::try_from(canary_source.projection_words().len())
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         },
         groups,
         group_members,
@@ -2590,11 +2637,15 @@ fn objective_identity(
     rows: &[TrainingViewRowDescriptor],
     task_identity: Identity256,
     canaries: &[SemanticTrainingCanaryRecord],
+    canary_source: &SemanticTrainingCanarySource,
 ) -> Identity256 {
     let mut hasher = Sha256::new();
     hasher.update(b"xlog.semantic.training-objective.v3\0");
     hasher.update(SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI.to_le_bytes());
     hasher.update(task_identity.as_bytes());
+    for word in canary_source.projection_words() {
+        hasher.update(word.to_le_bytes());
+    }
     hasher.update(objective.evaluator_min.to_bits().to_le_bytes());
     hasher.update(objective.evaluator_max.to_bits().to_le_bytes());
     for coefficient in objective.coefficients {
@@ -2657,7 +2708,8 @@ fn canary_identity(
     hasher.update(canary.upper_bound.to_bits().to_le_bytes());
     hasher.update(canary.memory_limit.to_le_bytes());
     hasher.update(canary.work_limit.to_le_bytes());
-    for position in canary.obligation_positions {
+    hasher.update((canary.obligation_positions.len() as u64).to_le_bytes());
+    for position in &canary.obligation_positions {
         hasher.update(position.to_le_bytes());
     }
     hasher.update(

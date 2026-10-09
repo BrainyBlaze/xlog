@@ -5,7 +5,7 @@ use crate::DeviceRepr;
 /// Native transition storage admits at most this many input facts per task.
 pub(crate) const RESIDENT_PROGRAM_FACT_CAPACITY: usize = 4096;
 /// The two sampled edits reserve two entries in this resident rule bank.
-const RESIDENT_PROGRAM_RULE_CAPACITY: usize = 256;
+pub(crate) const RESIDENT_PROGRAM_RULE_CAPACITY: usize = 256;
 
 /// One typed binary tuple. Predicate indices come from the admitted declaration order.
 #[repr(C)]
@@ -42,12 +42,17 @@ pub struct SemanticProgramAdmission {
     pub predicate_count: u32,
     pub initial_facts: Vec<SemanticProgramFact>,
     pub initial_rules: Vec<SemanticProgramRule>,
-    pub queries: [SemanticProgramFact; 3],
+    pub queries: Vec<SemanticProgramFact>,
+    /// Original admitted statement-record indices and their compiled tuples.
+    /// This roster is independent of the selected query axis.
+    pub observation_facts: Vec<(u32, SemanticProgramFact)>,
 }
 
 impl SemanticProgramAdmission {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if self.predicate_count == 0
+            || self.queries.is_empty()
+            || self.queries.len() > u32::MAX as usize
             || self.initial_facts.len() > u32::MAX as usize
             || self.initial_rules.len() > u32::MAX as usize
             || self
@@ -55,6 +60,10 @@ impl SemanticProgramAdmission {
                 .iter()
                 .chain(&self.initial_facts)
                 .any(|fact| fact.predicate >= self.predicate_count)
+            || self.observation_facts.iter().any(|(_, fact)| fact.predicate >= self.predicate_count)
+            || self.observation_facts.iter().enumerate().any(|(index, (record, _))| {
+                self.observation_facts[..index].iter().any(|(before, _)| before == record)
+            })
         {
             return Err("binary program has an invalid predicate or fact count");
         }
@@ -99,12 +108,12 @@ impl SemanticProgramAdmission {
 
     /// Canonical device-bank words, independent of host struct padding.
     pub(crate) fn words(&self) -> Vec<u64> {
-        let mut words =
-            Vec::with_capacity(12 + self.initial_facts.len() * 3 + self.initial_rules.len() * 10);
+        let mut words = Vec::new();
         words.extend([
             u64::from(self.predicate_count),
             self.initial_facts.len() as u64,
             self.initial_rules.len() as u64,
+            self.queries.len() as u64,
         ]);
         for fact in self.queries.iter().chain(&self.initial_facts) {
             words.extend([

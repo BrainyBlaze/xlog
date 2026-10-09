@@ -276,24 +276,24 @@ fn private_execution_owner(
 type PredicateInput = (u32, String, Vec<(String, u8, String)>, Vec<usize>);
 type RecordInput = (u32, Vec<(u8, Py<PyAny>)>, Vec<u32>);
 type SupportInput = (u32, String, u32, u32, u32, u32);
-type TaskContentRead = (Py<PyBytes>, Py<PyBytes>, Py<PyBytes>, (u8, u8, u8));
+type TaskContentRead = (Py<PyBytes>, Py<PyBytes>, Py<PyBytes>, Py<PyTuple>);
 
 fn task_content_read(
     py: Python<'_>,
-    (identity, truth): (SemanticTaskContentIdentity, [SemanticTruth; 3]),
-) -> TaskContentRead {
-    let [first, second, third] = truth.map(|truth| match truth {
+    (identity, truth): (SemanticTaskContentIdentity, Vec<SemanticTruth>),
+) -> PyResult<TaskContentRead> {
+    let truths = truth.into_iter().map(|truth| match truth {
         SemanticTruth::Neither => 0,
         SemanticTruth::True => 1,
         SemanticTruth::False => 2,
         SemanticTruth::Both => 3,
     });
-    (
+    Ok((
         PyBytes::new(py, identity.query.as_bytes()).unbind(),
         PyBytes::new(py, identity.theory_program.as_bytes()).unbind(),
         PyBytes::new(py, identity.result.as_bytes()).unbind(),
-        (first, second, third),
-    )
+        PyTuple::new(py, truths)?.unbind(),
+    ))
 }
 
 /// Own one admitted native semantic session and its acquired policy codebooks.
@@ -331,6 +331,7 @@ pub(crate) struct PySemanticTransitionSession {
     inner: Mutex<Option<SemanticTransitionSession>>,
     editable_program: Option<Arc<SemanticProgramAdmission>>,
     editable_observer_source: Option<String>,
+    editable_initial_source: Option<String>,
     importing: Arc<AtomicBool>,
     recording: AtomicBool,
     retiring: AtomicBool,
@@ -593,7 +594,8 @@ impl PySemanticTransitionSession {
             editable_program: editable_source
                 .as_ref()
                 .map(|source| Arc::clone(&source.program)),
-            editable_observer_source: editable_source.map(|source| source.observer_source),
+            editable_initial_source: editable_source.as_ref().map(|source| source.initial_source.clone()),
+            editable_observer_source: editable_source.and_then(|source| source.observer_source),
             importing: Arc::new(AtomicBool::new(false)),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
@@ -1883,7 +1885,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -1895,6 +1897,7 @@ impl PySemanticTransitionSession {
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: &Bound<'_, PyAny>,
         referent: Option<&Bound<'_, PyAny>>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
         max_checkpoint_bytes: Option<&Bound<'_, PyAny>>,
@@ -1970,6 +1973,7 @@ impl PySemanticTransitionSession {
             snapshot,
             restore_model,
             training_domain,
+            Some(training_canary_source),
             referent,
             None,
             resolve_checkpoint,
@@ -2098,6 +2102,7 @@ impl PySemanticTransitionSession {
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: Option<&Bound<'_, PyAny>>,
         referent: Option<&Bound<'_, PyAny>>,
         learning_transition: Option<&xlog_cuda::SemanticLearningPhaseTransition>,
         resolve_checkpoint: Option<&Bound<'_, PyAny>>,
@@ -2147,6 +2152,12 @@ impl PySemanticTransitionSession {
         let config = SemanticCheckpointSessionConfig::decode(&manifest.session)?;
         let (mut seed, saved_snapshot, phase, saved_binding) =
             TaskCheckpointSeed::decode(&manifest.task)?;
+        let (canary_source, canary_owner, canary_projection) =
+            read_training_canary_source(py, training_canary_source)?;
+        if canary_projection != seed.training_canary_source {
+            return Err(invalid("checkpoint symbolic canary source differs from its original native observation"));
+        }
+        seed.training_canary_owner = canary_owner;
         if let Some(shared) = shared_proposal_expense {
             let saved = seed.proposal_expense()?;
             let current = *shared
@@ -2210,20 +2221,21 @@ impl PySemanticTransitionSession {
                 .evaluation
                 .get(2)
                 .ok_or_else(|| invalid("checkpoint task evaluation is incomplete"))?
-                .text()?
-                != source.observer_source
+                != &source.observer_source.as_ref().map_or(ColdValue::None, |source| ColdValue::Text(source.clone()))
             {
                 return Err(invalid(
                     "checkpoint observer source differs from its admission",
                 ));
             }
         }
-        let editable_program = editable_source.map(|source| source.program);
+        let initial_program_source = editable_source.as_ref().map(|source| source.initial_source.as_str());
+        let editable_program = editable_source.as_ref().map(|source| Arc::clone(&source.program));
         let spec = task_evaluation_spec(
             &seed.evaluation,
             authority.priority_levels.clone(),
             editable_program.clone(),
             &seed.training_domain,
+            initial_program_source,
         )?;
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
@@ -2353,13 +2365,15 @@ impl PySemanticTransitionSession {
                     selected_material.as_ref().map(|binding| &binding.material),
                 )
                 .map_err(xlog_err)?;
-            authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+            authority.bind_native_reads(&observations, &spec.allowed_support_records, &spec.task_ground)?;
             let goal_witness = authority.goal_witness(&observations);
             owner.bind_task_evaluation(spec).map_err(xlog_err)?;
             owner
                 .bind_task_goal_witness(goal_witness)
                 .map_err(xlog_err)?;
             if training_objective.is_some() || replay_capacity.is_some() {
+                owner.bind_training_canary_source(canary_source.clone().ok_or_else(|| invalid(
+                    "restored training reservation requires its original Logical canary source"))?).map_err(xlog_err)?;
                 owner
                     .bind_training_view_arena(training_views, training_objective, replay_capacity)
                     .map_err(xlog_err)?;
@@ -2837,7 +2851,7 @@ fn update_measurements_report(
         check.set_item("measurement_bits", measured.measurement_bits)?;
         check.set_item(
             "obligation_positions",
-            PyTuple::new(py, frozen.obligation_positions)?,
+            PyTuple::new(py, &measured.obligation_positions)?,
         )?;
         check.set_item(
             "protected_positions",
@@ -5147,14 +5161,10 @@ fn read_training_objective(value: &ColdValue) -> PyResult<Option<SemanticTrainin
                 memory_limit: fields[4].unsigned()?,
                 work_limit: fields[5].unsigned()?,
                 obligation_positions: if fields[6] == ColdValue::None {
-                    [u64::MAX; 3]
+                    Vec::new()
                 } else {
-                    let positions = fields[6].fields(3)?;
-                    [
-                        positions[0].unsigned()?,
-                        positions[1].unsigned()?,
-                        positions[2].unsigned()?,
-                    ]
+                    fields[6].sequence()?.iter().map(ColdValue::unsigned)
+                        .collect::<PyResult<Vec<_>>>()?
                 },
                 protected_positions: if fields[7] == ColdValue::None {
                     Vec::new()
@@ -6350,6 +6360,7 @@ fn read_task_evaluation_spec(
     scoring: &Bound<'_, PyAny>,
     truth_masks: &Bound<'_, PyAny>,
     actor_eligible: &Bound<'_, PyAny>,
+    task_ground: &Bound<'_, PyAny>,
     budget: &mut usize,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
     let values = read_task_evaluation_values(
@@ -6360,11 +6371,12 @@ fn read_task_evaluation_spec(
         scoring,
         truth_masks,
         actor_eligible,
+        task_ground,
         budget,
     )?;
     // Observation coverage precedes task authority; priorities do not affect
     // its queried root set and are bound by import_task instead.
-    task_evaluation_spec(&values, Vec::new(), None, &ColdValue::None)
+    task_evaluation_spec(&values, Vec::new(), None, &ColdValue::None, None)
 }
 
 #[expect(
@@ -6379,9 +6391,10 @@ fn read_task_evaluation_values(
     scoring: &Bound<'_, PyAny>,
     truth_masks: &Bound<'_, PyAny>,
     actor_eligible: &Bound<'_, PyAny>,
+    task_ground: &Bound<'_, PyAny>,
     budget: &mut usize,
 ) -> PyResult<Vec<ColdValue>> {
-    [
+    let mut values = [
         statements,
         supports,
         source,
@@ -6392,7 +6405,108 @@ fn read_task_evaluation_values(
     ]
     .into_iter()
     .map(|value| ColdValue::read(value, budget, 0))
-    .collect()
+    .collect::<PyResult<Vec<_>>>()?;
+    values.push(read_task_ground(task_ground, budget)?);
+    Ok(values)
+}
+
+fn read_task_ground(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResult<ColdValue> {
+    fn tuple<'py>(value: &Bound<'py, PyAny>, length: Option<usize>, remaining: usize)
+        -> PyResult<Vec<Bound<'py, PyAny>>> {
+        if !value.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("task ground requires exact builtin tuples"));
+        }
+        let fields = value.cast::<PyTuple>()?.iter().collect::<Vec<_>>();
+        if length.is_some_and(|length| fields.len() != length) || fields.len() > remaining {
+            return Err(invalid("task ground has an invalid original tuple extent"));
+        }
+        Ok(fields)
+    }
+    let fields = tuple(value, Some(2), *budget)?;
+    let tag = ColdValue::read(&fields[0], budget, 0)?;
+    let bindings = tuple(&fields[1], None, *budget)?;
+    if bindings.len() > u32::MAX as usize {
+        return Err(invalid("task verification roster exceeds u32"));
+    }
+    let identity = |value: &Bound<'_, PyAny>, budget: &mut usize| -> PyResult<ColdValue> {
+        let native = identity_bytes(value)?;
+        *budget = budget.checked_sub(33).ok_or_else(|| invalid("task ground exceeds its metadata budget"))?;
+        Ok(ColdValue::Bytes(Arc::from(native.as_bytes().as_slice())))
+    };
+    let mut rows = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let fields = tuple(&binding, Some(8), *budget)?;
+        let mut row = vec![
+            ColdValue::read(&fields[0], budget, 0)?,
+            ColdValue::read(&fields[1], budget, 0)?,
+        ];
+        for field in &fields[2..6] {
+            row.push(identity(field, budget)?);
+        }
+        row.push(ColdValue::read(&fields[6], budget, 0)?);
+        row.push(if fields[7].is_none() {
+            ColdValue::read(&fields[7], budget, 0)?
+        } else {
+            ColdValue::Sequence(tuple(&fields[7], Some(4), *budget)?.iter()
+                .map(|field| identity(field, budget)).collect::<PyResult<_>>()?)
+        });
+        rows.push(ColdValue::Sequence(row));
+    }
+    let result = ColdValue::Sequence(vec![tag, ColdValue::Sequence(rows)]);
+    task_ground_value(&result)?;
+    Ok(result)
+}
+
+fn task_ground_value(value: &ColdValue) -> PyResult<xlog_cuda::SemanticTaskGround> {
+    use xlog_cuda::{SemanticTaskGround, SemanticTaskMeasurementBinding,
+        SemanticTaskReceiptFamily, SemanticTaskVerificationBinding};
+    let fields = value.fields(2)?;
+    let bindings = fields[1].sequence()?;
+    match fields[0].text()? {
+        "logical" if bindings.is_empty() => Ok(SemanticTaskGround::Logical),
+        "coding" if !bindings.is_empty() && bindings.len() <= u32::MAX as usize => {
+            let identity = |value: &ColdValue| -> PyResult<Identity256> {
+                let ColdValue::Bytes(bytes) = value else {
+                    return Err(invalid("task verification identity requires original 32-byte bytes"));
+                };
+                Ok(Identity256::from_bytes(bytes.as_ref().try_into()
+                    .map_err(|_| invalid("task verification identity must contain exactly 32 bytes"))?))
+            };
+            let index = |value: &ColdValue| u32::try_from(value.unsigned()?)
+                .map_err(|_| invalid("task verification index exceeds u32"));
+            let bindings = bindings.iter().map(|binding| {
+                let row = binding.fields(8)?;
+                let receipt_family = match row[6].text()? {
+                    "build" => SemanticTaskReceiptFamily::Build,
+                    "test" => SemanticTaskReceiptFamily::Test,
+                    "proof" => SemanticTaskReceiptFamily::Proof,
+                    "measurement" => SemanticTaskReceiptFamily::Measurement,
+                    "environment" => SemanticTaskReceiptFamily::Environment,
+                    _ => return Err(invalid("unknown task verification receipt family")),
+                };
+                let measurement = if row[7] == ColdValue::None { None } else {
+                    let measurement = row[7].fields(4)?;
+                    Some(SemanticTaskMeasurementBinding {
+                        metric_identity: identity(&measurement[0])?,
+                        comparator_identity: identity(&measurement[1])?,
+                        tolerance_identity: identity(&measurement[2])?,
+                        environment_identity: identity(&measurement[3])?,
+                    })
+                };
+                if matches!(receipt_family, SemanticTaskReceiptFamily::Measurement) != measurement.is_some() {
+                    return Err(invalid("task measurement binding differs from its original family"));
+                }
+                Ok(SemanticTaskVerificationBinding {
+                    query: index(&row[0])?, observation_record: index(&row[1])?,
+                    obligation_identity: identity(&row[2])?, requirement_identity: identity(&row[3])?,
+                    verifier_plan_identity: identity(&row[4])?, acceptance_condition_identity: identity(&row[5])?,
+                    receipt_family, measurement,
+                })
+            }).collect::<PyResult<Vec<_>>>()?;
+            Ok(SemanticTaskGround::Coding(bindings))
+        }
+        _ => Err(invalid("task ground must be logical with no bindings or coding with its original roster")),
+    }
 }
 
 fn task_evaluation_spec(
@@ -6400,39 +6514,49 @@ fn task_evaluation_spec(
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
     editable_program: Option<Arc<SemanticProgramAdmission>>,
     training_domain: &ColdValue,
+    initial_program_source: Option<&str>,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
-    if values.len() != 7 {
+    if values.len() != 8 {
         return Err(invalid("incorrect task evaluation input count"));
     }
     let statements = &values[0];
-    let statements = statements.fields(3)?;
+    let statements = statements.sequence()?;
+    if statements.is_empty() || statements.len() > u32::MAX as usize {
+        return Err(invalid("task query roster must be finite and nonempty"));
+    }
     let record_index = |value: &ColdValue| {
         u32::try_from(value.unsigned()?)
             .map_err(|_| invalid("native admitted record index exceeds u32"))
     };
-    let statement_records = [
-        record_index(&statements[0])?,
-        record_index(&statements[1])?,
-        record_index(&statements[2])?,
-    ];
+    let statement_records = statements.iter().map(record_index).collect::<PyResult<Vec<_>>>()?;
     let allowed_support_records = values[1]
         .sequence()?
         .iter()
         .map(record_index)
         .collect::<PyResult<Vec<_>>>()?;
-    let source = values[2].text()?.to_owned();
+    let task_ground = task_ground_value(&values[7])?;
+    let source = match (&task_ground, &values[2]) {
+        (xlog_cuda::SemanticTaskGround::Logical, source) => source.text()?.to_owned(),
+        (xlog_cuda::SemanticTaskGround::Coding(_), ColdValue::None) => initial_program_source
+            .ok_or_else(|| invalid("coding task requires its original admitted initial program"))?
+            .to_owned(),
+        (xlog_cuda::SemanticTaskGround::Coding(_), _) => {
+            return Err(invalid("coding task has no independent observer reference"));
+        }
+    };
     let queries = &values[3];
-    let queries = queries.fields(3)?;
+    let queries = queries.sequence()?;
     let query_ordinal = |value: &ColdValue| {
         usize::try_from(value.unsigned()?)
             .map_err(|_| invalid("native task query ordinal exceeds host address space"))
     };
-    let query_ordinals = [
-        query_ordinal(&queries[0])?,
-        query_ordinal(&queries[1])?,
-        query_ordinal(&queries[2])?,
-    ];
-    if editable_program.is_some() && (statement_records != [0, 1, 2] || query_ordinals != [0, 1, 2])
+    let query_ordinals = queries.iter().map(query_ordinal).collect::<PyResult<Vec<_>>>()?;
+    if query_ordinals.len() != statement_records.len() {
+        return Err(invalid("task queries differ from the original statement roster"));
+    }
+    if editable_program.is_some()
+        && (statement_records.iter().enumerate().any(|(index, record)| *record as usize != index)
+            || query_ordinals.iter().enumerate().any(|(index, ordinal)| *ordinal != index))
     {
         return Err(invalid(
             "editable task requires the original statement and observer query order",
@@ -6453,11 +6577,14 @@ fn task_evaluation_spec(
         spent_weight: weight(&scoring[5])?,
     };
     let masks = &values[5];
-    let masks = masks.fields(3)?;
+    let masks = masks.sequence()?;
+    if masks.len() != statement_records.len() {
+        return Err(invalid("task truth masks differ from the original query roster"));
+    }
     let mask = |value: &ColdValue| {
         u8::try_from(value.unsigned()?).map_err(|_| invalid("native task truth mask exceeds u8"))
     };
-    let admissible_truth_masks = [mask(&masks[0])?, mask(&masks[1])?, mask(&masks[2])?];
+    let admissible_truth_masks = masks.iter().map(mask).collect::<PyResult<Vec<_>>>()?;
     let actor_eligible = values[6].boolean()?;
     let mut program = xlog_gpu::logic::SemanticLogicTaskProgram::compile(source, query_ordinals)
         .map_err(xlog_err)?;
@@ -6467,6 +6594,7 @@ fn task_evaluation_spec(
     let program = Arc::new(program);
     Ok(xlog_cuda::SemanticTaskEvaluationSpec {
         statement_records,
+        task_ground,
         allowed_support_records,
         program,
         scoring,
@@ -6488,8 +6616,8 @@ fn task_priority_levels(value: &ColdValue) -> PyResult<Vec<xlog_cuda::SemanticTa
                 .map(|goal| {
                     let fields = goal.fields(3)?;
                     Ok(xlog_cuda::SemanticTaskPriorityGoal {
-                        query: u8::try_from(fields[0].unsigned()?)
-                            .map_err(|_| invalid("task priority query exceeds u8"))?,
+                        query: u32::try_from(fields[0].unsigned()?)
+                            .map_err(|_| invalid("task priority query exceeds u32"))?,
                         target_truth: u8::try_from(fields[1].unsigned()?)
                             .map_err(|_| invalid("task priority truth exceeds u8"))?,
                         weight: u32::try_from(fields[2].unsigned()?)
@@ -6564,6 +6692,9 @@ struct TaskAuthority {
     sources_allow_learning: bool,
     source_partitions: Vec<(Option<String>, String)>,
     corpus_sources: BTreeSet<String>,
+    // Structural obligations only. Native archived-material authentication
+    // under the current receiver must discharge these before execution.
+    external_reads: Vec<(u64, xlog_cuda::SemanticTaskVerificationBinding, [u64; 18])>,
 }
 
 fn parse_live_authorities(value: &ColdValue, scope: &[String]) -> PyResult<Vec<LiveAuthority>> {
@@ -6620,13 +6751,13 @@ impl TaskAuthority {
             } else {
                 let record = fields[6].fields(2)?;
                 let kind = record[0].text()?;
-                if !matches!(kind, "statement" | "support" | "observer") {
+                if !matches!(kind, "statement" | "support" | "observer" | "program") {
                     return Err(invalid("invalid native task read-root kind"));
                 }
                 let index = u32::try_from(record[1].unsigned()?)
                     .map_err(|_| invalid("native record index exceeds u32"))?;
-                if kind == "observer" && index != 0 {
-                    return Err(invalid("only the bound native observer zero exists"));
+                if matches!(kind, "observer" | "program") && index != 0 {
+                    return Err(invalid("only the original bound native program zero exists"));
                 }
                 Some((kind.to_owned(), index))
             };
@@ -6665,6 +6796,7 @@ impl TaskAuthority {
             sources_allow_learning: true,
             source_partitions: Vec::new(),
             corpus_sources: BTreeSet::new(),
+            external_reads: Vec::new(),
         };
         result.validate_lineage()?;
         Ok(result)
@@ -7137,17 +7269,22 @@ impl TaskAuthority {
     }
 
     fn bind_native_reads(
-        &self,
+        &mut self,
         observations: &xlog_cuda::SemanticTaskObservationRoots,
         supports: &[u32],
+        ground: &xlog_cuda::SemanticTaskGround,
     ) -> PyResult<()> {
         let mut expected = observations
             .query_records
             .iter()
             .map(|&index| ("statement".to_owned(), index))
             .chain(supports.iter().map(|&index| ("support".to_owned(), index)))
-            .chain(std::iter::once(("observer".to_owned(), 0)))
+            .chain(std::iter::once((match ground {
+                xlog_cuda::SemanticTaskGround::Logical => "observer",
+                xlog_cuda::SemanticTaskGround::Coding(_) => "program",
+            }.to_owned(), 0)))
             .collect::<BTreeSet<_>>();
+        let mut external_reads = Vec::new();
         for &(query, statement, support) in &observations.contributors {
             if query >= observations.query_records.len() as u32 {
                 return Err(invalid(
@@ -7157,7 +7294,25 @@ impl TaskAuthority {
             let statement = statement.ok_or_else(|| invalid(
                 "native feedback contributor has a derived target without an original admitted statement"))?;
             expected.insert(("statement".to_owned(), statement));
-            expected.insert(("support".to_owned(), support));
+            match support {
+                xlog_cuda::SemanticRootSupport::Admitted(record) => {
+                    expected.insert(("support".to_owned(), record));
+                }
+                xlog_cuda::SemanticRootSupport::Authenticated { binding_ordinal, observation } => {
+                    let binding = usize::try_from(binding_ordinal).ok()
+                        .and_then(|ordinal| ground.bindings().get(ordinal))
+                        .ok_or_else(|| invalid("external contributor names an absent original verification binding"))?;
+                    if binding.observation_record != statement
+                        || observation[0] != 1
+                        || !matches!(observation[1], 1 | 2)
+                        || observation[2..].chunks_exact(4)
+                            .any(|identity| identity.iter().all(|word| *word == 0))
+                    {
+                        return Err(invalid("external contributor differs from its original protected statement or signed-material reference"));
+                    }
+                    external_reads.push((binding_ordinal, binding.clone(), observation));
+                }
+            }
         }
         let actual = self
             .dependencies
@@ -7166,8 +7321,9 @@ impl TaskAuthority {
             .collect::<Vec<_>>();
         let distinct = actual.iter().cloned().collect::<BTreeSet<_>>();
         if actual.len() != distinct.len() || distinct != expected {
-            return Err(invalid("dependency closure must bind each actual native observer, statement and support read root exactly once"));
+            return Err(invalid("dependency closure must bind the original task-type-specific program, statements and admitted support reads exactly once"));
         }
+        self.external_reads = external_reads;
         Ok(())
     }
 
@@ -7515,12 +7671,30 @@ impl ProposalExpense {
     }
 }
 
+type TrainingCanarySourceRead = (
+    Option<Arc<xlog_cuda::SemanticTrainingCanarySource>>,
+    Option<Arc<Py<cold_task::PySemanticTransitionColdTask>>>,
+    ColdValue,
+);
+
+fn read_training_canary_source(py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<TrainingCanarySourceRead> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok((None, None, ColdValue::None));
+    };
+    let owner = value.extract::<Py<cold_task::PySemanticTransitionColdTask>>()?;
+    let source = owner.borrow(py).canary_source(py)?;
+    let bytes = source.projection_words().into_iter().flat_map(u64::to_le_bytes).collect::<Vec<_>>();
+    Ok((Some(source), Some(Arc::new(owner)), ColdValue::Bytes(Arc::from(bytes))))
+}
+
 #[derive(Clone)]
 struct TaskCheckpointSeed {
     authority: Vec<ColdValue>,
     evaluation: Vec<ColdValue>,
     training_objective: ColdValue,
     training_domain: ColdValue,
+    training_canary_source: ColdValue,
+    training_canary_owner: Option<Arc<Py<cold_task::PySemanticTransitionColdTask>>>,
     replay_capacity: ColdValue,
     original_training_roster: Arc<Mutex<OriginalTrainingRoster>>,
     initial_sources: ColdValue,
@@ -7685,6 +7859,7 @@ impl TaskCheckpointSeed {
             checkpoint_sources,
             self.replay_capacity.clone(),
             self.original_training_roster()?,
+            self.training_canary_source.clone(),
         ])))
     }
 
@@ -7697,7 +7872,7 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes, bytes.len())?;
-        let fields = value.fields(16)?;
+        let fields = value.fields(17)?;
         read_replay_capacity(&fields[14])?;
         let roster = fields[15].fields(2)?;
         roster[0].sequence()?;
@@ -7736,6 +7911,8 @@ impl TaskCheckpointSeed {
                 evaluation: fields[1].sequence()?.to_vec(),
                 training_objective: fields[2].clone(),
                 training_domain: fields[10].clone(),
+                training_canary_source: fields[16].clone(),
+                training_canary_owner: None,
                 replay_capacity: fields[14].clone(),
                 original_training_roster: Arc::new(Mutex::new(OriginalTrainingRoster::new(
                     roster[0].clone(),
@@ -9198,13 +9375,13 @@ fn completed_truth_kind(code: u64) -> &'static str {
 }
 
 #[cfg(feature = "semantic-policy")]
-fn completed_truth_codes(truth: [xlog_cuda::SemanticTruth; 3]) -> [u64; 3] {
-    truth.map(|value| value as u64)
+fn completed_truth_codes(truth: &[xlog_cuda::SemanticTruth]) -> Vec<u64> {
+    truth.iter().map(|value| *value as u64).collect()
 }
 
 #[cfg(feature = "semantic-policy")]
-fn completed_truth_kinds(truth: [xlog_cuda::SemanticTruth; 3]) -> [&'static str; 3] {
-    completed_truth_codes(truth).map(completed_truth_kind)
+fn completed_truth_kinds(truth: &[xlog_cuda::SemanticTruth]) -> Vec<&'static str> {
+    completed_truth_codes(truth).into_iter().map(completed_truth_kind).collect()
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -9591,24 +9768,36 @@ impl PySemanticCompletedTaskFacts {
         self.slot
     }
     #[getter]
-    fn truth_codes(&self) -> [u64; 3] {
-        self.inner.truth
+    fn truth_codes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, &self.inner.truth).map(Bound::unbind)
     }
     #[getter]
-    fn truth_kinds(&self) -> [&'static str; 3] {
-        self.inner.truth.map(completed_truth_kind)
+    fn truth_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, self.inner.truth.iter().copied().map(completed_truth_kind)).map(Bound::unbind)
     }
     #[getter]
-    fn correct(&self) -> [u64; 3] {
-        self.inner.correct
+    fn correct(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        self.inner.correct.as_ref().map(|values| PyTuple::new(py, values).map(Bound::unbind)).transpose()
     }
     #[getter]
-    fn correct_count(&self) -> u64 {
+    fn attained(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, &self.inner.attained).map(Bound::unbind)
+    }
+    #[getter]
+    fn correct_count(&self) -> Option<u64> {
+        self.inner.correct.as_ref().map(|values| values.iter().sum())
+    }
+    #[getter]
+    fn solves_expected_truths(&self) -> Option<bool> {
+        self.inner.correct.as_ref().map(|_| self.inner.p == 1)
+    }
+    #[getter]
+    fn attained_count(&self) -> u64 {
         self.inner.g
     }
     #[getter]
-    fn solves_expected_truths(&self) -> bool {
-        self.inner.p == 1
+    fn all_goals_attained(&self) -> Option<bool> {
+        self.inner.correct.is_none().then_some(self.inner.p == 1)
     }
     #[getter]
     fn measured_work(&self) -> u64 {
@@ -9644,32 +9833,32 @@ impl PySemanticCompletedLaneOutcome {
     }
     #[getter]
     fn kind(&self) -> &'static str {
-        match self.inner {
+        match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(_) => "EXECUTED",
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => "REFUSED",
         }
     }
     #[getter]
-    fn truth_codes(&self) -> Option<[u64; 3]> {
-        match self.inner {
+    fn truth_codes(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
-                Some(completed_truth_codes(truth))
+                PyTuple::new(py, completed_truth_codes(truth)).map(|value| Some(value.unbind()))
             }
-            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => None,
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => Ok(None),
         }
     }
     #[getter]
-    fn truth_kinds(&self) -> Option<[&'static str; 3]> {
-        match self.inner {
+    fn truth_kinds(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
-                Some(completed_truth_kinds(truth))
+                PyTuple::new(py, completed_truth_kinds(truth)).map(|value| Some(value.unbind()))
             }
-            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => None,
+            xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => Ok(None),
         }
     }
     #[getter]
     fn refusal_kind(&self) -> Option<&'static str> {
-        match self.inner {
+        match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(_) => None,
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(refusal) => {
                 Some(refusal.canonical_kind())
@@ -9746,7 +9935,11 @@ impl PySemanticCompletedTaskGround {
         PyBytes::new(py, self.inner.content.theory_program.as_bytes()).unbind()
     }
     #[getter]
-    fn expected_result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
+    fn expected_result_identity(&self, py: Python<'_>) -> Option<Py<PyBytes>> {
+        self.inner.expected_truth.as_ref().map(|_| PyBytes::new(py, self.inner.content.result.as_bytes()).unbind())
+    }
+    #[getter]
+    fn initial_result_identity(&self, py: Python<'_>) -> Py<PyBytes> {
         PyBytes::new(py, self.inner.content.result.as_bytes()).unbind()
     }
     #[getter]
@@ -9754,20 +9947,20 @@ impl PySemanticCompletedTaskGround {
         completed_publication_identity(py, self.inner.base)
     }
     #[getter]
-    fn expected_truth_codes(&self) -> [u64; 3] {
-        completed_truth_codes(self.inner.expected_truth)
+    fn expected_truth_codes(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        self.inner.expected_truth.as_ref().map(|truth| PyTuple::new(py, completed_truth_codes(truth)).map(Bound::unbind)).transpose()
     }
     #[getter]
-    fn expected_truth_kinds(&self) -> [&'static str; 3] {
-        completed_truth_kinds(self.inner.expected_truth)
+    fn expected_truth_kinds(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        self.inner.expected_truth.as_ref().map(|truth| PyTuple::new(py, completed_truth_kinds(truth)).map(Bound::unbind)).transpose()
     }
     #[getter]
-    fn base_truth_codes(&self) -> [u64; 3] {
-        completed_truth_codes(self.inner.base_truth)
+    fn base_truth_codes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, completed_truth_codes(&self.inner.base_truth)).map(Bound::unbind)
     }
     #[getter]
-    fn base_truth_kinds(&self) -> [&'static str; 3] {
-        completed_truth_kinds(self.inner.base_truth)
+    fn base_truth_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, completed_truth_kinds(&self.inner.base_truth)).map(Bound::unbind)
     }
     #[getter]
     fn semantic_goal_root(&self, py: Python<'_>) -> Py<PyBytes> {
@@ -9798,7 +9991,7 @@ impl PySemanticCompletedTaskGround {
         let facts = self
             .inner
             .facts
-            .into_iter()
+            .iter().cloned()
             .enumerate()
             .map(|(slot, inner)| Py::new(py, PySemanticCompletedTaskFacts { slot, inner }))
             .collect::<PyResult<Vec<_>>>()?;
@@ -9809,7 +10002,7 @@ impl PySemanticCompletedTaskGround {
         let outcomes = self
             .inner
             .lane_outcomes
-            .into_iter()
+            .iter().cloned()
             .enumerate()
             .map(|(lane, inner)| {
                 Py::new(
@@ -13249,7 +13442,8 @@ impl PySemanticPolicyInvocation {
                 py,
                 task.facts
                     .iter()
-                    .map(|fact| (fact.truth[0], fact.truth[1], fact.truth[2])),
+                    .map(|fact| PyTuple::new(py, &fact.truth))
+                    .collect::<PyResult<Vec<_>>>()?,
             )?,
         )?;
         result.set_item(
@@ -13258,8 +13452,16 @@ impl PySemanticPolicyInvocation {
                 py,
                 task.facts
                     .iter()
-                    .map(|fact| (fact.correct[0], fact.correct[1], fact.correct[2])),
+                    .map(|fact| fact.correct.as_ref()
+                        .map(|values| PyTuple::new(py, values)).transpose())
+                    .collect::<PyResult<Vec<_>>>()?,
             )?,
+        )?;
+        result.set_item(
+            "attained",
+            PyTuple::new(py, task.facts.iter()
+                .map(|fact| PyTuple::new(py, &fact.attained))
+                .collect::<PyResult<Vec<_>>>()?)?,
         )?;
         let program_rules = observation
             .lanes
@@ -13292,15 +13494,15 @@ impl PySemanticPolicyInvocation {
             PyTuple::new(
                 py,
                 task.facts.iter().map(|fact| {
-                    (
-                        (fact.correct[0], fact.correct[1]),
+                    Ok((
+                        fact.correct.as_ref().map(|values| PyTuple::new(py, values)).transpose()?,
                         fact.g,
                         fact.p,
                         fact.c,
                         fact.v,
                         fact.eligible,
-                    )
-                }),
+                    ))
+                }).collect::<PyResult<Vec<_>>>()?,
             )?,
         )?;
         Ok(result.unbind())
@@ -14297,7 +14499,7 @@ impl PySemanticPublishedParent {
     /// The result is (parent_identity, task_epoch, nodes, feedback_roots).
     /// Each node preserves the imported closed-schema order:
     /// (identity, kind, data_parents, control_parents, live_envelopes, target,
-    /// native_record). A native_record is ("statement" | "support" | "observer",
+    /// native_record). A native_record is ("statement" | "support" | "observer" | "program",
     /// index); target is an optional (replay_batch_row, logical_position).
     ///
     /// These are the actual dependencies retained after import validation,
@@ -14806,7 +15008,22 @@ impl PySemanticTransitionTaskUse {
         let (identity, truth) = owner
             .task_content()
             .ok_or_else(|| invalid("native task content binding is absent"))?;
-        Ok(task_content_read(py, (identity, truth)))
+        task_content_read(py, (identity, truth))
+    }
+
+    /// The same original task-ground carrier admitted before any action.
+    /// Fresh restoration retains its ordered bindings without issuing evidence.
+    fn task_ground(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let owner = session.owner()?;
+        self.require_current(&owner)?;
+        let original = self.checkpoint.evaluation.get(7)
+            .ok_or_else(|| invalid("task ground is absent from original cold custody"))?;
+        if owner.task_ground() != Some(&task_ground_value(original)?) {
+            return Err(invalid("task ground differs from original native admission"));
+        }
+        original.python_value(py)
     }
 
     /// Project the native law frozen at cold task binding, before any Proposal.
@@ -16390,7 +16607,7 @@ impl PySemanticTransitionController {
     /// neither, true, false and both to four distinct vocabulary ids. Each canary
     /// is ``(kind, row_ordinal, lower_f64_bits, upper_f64_bits, memory_limit,
     /// work_limit, obligation_positions_or_None, protected_positions_or_None)``.
-    /// For symbolic-utility and goal-chain, the three obligation positions are
+    /// For symbolic-utility and goal-chain, all native query positions are
     /// model-logit positions in native query order: the token immediately after
     /// each position in the symbolic training view must equal the objective's
     /// canonical token for that task result's four-valued truth. They are not
@@ -16522,7 +16739,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -16545,6 +16762,7 @@ impl PySemanticTransitionController {
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
         training_domain: &Bound<'_, PyAny>,
+        training_canary_source: &Bound<'_, PyAny>,
         replay_capacity: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
         max_total_material_bytes: &Bound<'_, PyAny>,
@@ -16634,6 +16852,8 @@ impl PySemanticTransitionController {
             .collect::<PyResult<Vec<_>>>()?;
         let training_objective_value = ColdValue::read(training_objective, &mut budget, 0)?;
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
+        let (canary_source, canary_owner, canary_projection) =
+            read_training_canary_source(py, Some(training_canary_source))?;
         let replay_capacity_value = replay_capacity_value(replay_capacity, &mut budget)?;
         let replay_capacity = read_replay_capacity(&replay_capacity_value)?;
         let training_objective = read_training_objective(&training_objective_value)?;
@@ -16662,12 +16882,15 @@ impl PySemanticTransitionController {
             if evaluation[2].text()? != source {
                 return Err(invalid("task observer source differs from its admission"));
             }
+        } else if session.editable_program.is_some() && evaluation[2] != ColdValue::None {
+            return Err(invalid("coding task has no independent observer reference"));
         }
         let spec = task_evaluation_spec(
             &evaluation,
             authority.priority_levels.clone(),
             session.editable_program.clone(),
             &training_domain_value,
+            session.editable_initial_source.as_deref(),
         )?;
         let checkpoint_referents = resolve_replay_checkpoint_referents(
             py,
@@ -16698,7 +16921,7 @@ impl PySemanticTransitionController {
                 selected_material.as_ref().map(|binding| &binding.material),
             )
             .map_err(xlog_err)?;
-        authority.bind_native_reads(&observations, &spec.allowed_support_records)?;
+        authority.bind_native_reads(&observations, &spec.allowed_support_records, &spec.task_ground)?;
         let goal_witness = authority.goal_witness(&observations);
         let operation = ColdValue::read(replay_operation, &mut budget, 0)?;
         let (phase, transition) = if let Some(material) = &selected_material {
@@ -16767,6 +16990,8 @@ impl PySemanticTransitionController {
                 )?;
             }
             if training_objective.is_some() || replay_capacity.is_some() {
+                owner.bind_training_canary_source(canary_source.ok_or_else(|| invalid(
+                    "training reservation requires its original Logical canary source"))?).map_err(xlog_err)?;
                 owner
                     .bind_training_view_arena(training_views, training_objective, replay_capacity)
                     .map_err(xlog_err)?;
@@ -16819,6 +17044,8 @@ impl PySemanticTransitionController {
                     evaluation,
                     training_objective: training_objective_value,
                     training_domain: training_domain_value,
+                    training_canary_source: canary_projection,
+                    training_canary_owner: canary_owner,
                     replay_capacity: replay_capacity_value,
                     initial_sources,
                     source_mapping,

@@ -1091,7 +1091,7 @@ pub struct LogicProgram {
     epistemic_provenance: Option<EpistemicProvenance>,
 }
 
-/// A self-contained XLOG program whose three selected zero-arity queries define
+/// A self-contained XLOG program whose selected zero-arity queries define
 /// a semantic task's positive support. Compilation preserves the authored
 /// source; observation executes the canonical GPU evaluator before deriving any
 /// result. Presence is `True` and absence is `Neither`, never negative support.
@@ -1101,7 +1101,7 @@ pub struct LogicProgram {
 /// this adapter.
 pub struct SemanticLogicTaskProgram {
     source: String,
-    query_ordinals: [usize; 3],
+    query_ordinals: Vec<usize>,
     program: LogicProgram,
     editable: Option<Arc<xlog_cuda::SemanticProgramAdmission>>,
 }
@@ -1117,17 +1117,22 @@ impl std::fmt::Debug for SemanticLogicTaskProgram {
 }
 
 impl SemanticLogicTaskProgram {
-    /// Compile a complete source program and select three zero-arity query results.
+    /// Compile a complete source program and select its original query roster.
     /// This performs no GPU execution; the native semantic owner calls `observe`
     /// during cold binding, including when restoring a retained task.
-    pub fn compile(source: String, query_ordinals: [usize; 3]) -> Result<Self> {
+    pub fn compile(source: String, query_ordinals: Vec<usize>) -> Result<Self> {
+        if query_ordinals.is_empty() || query_ordinals.len() > u32::MAX as usize {
+            return Err(XlogError::Compilation(
+                "semantic task requires a finite nonempty query roster".into(),
+            ));
+        }
         let program = LogicProgram::compile(&source)?;
         if !program.source_program.imports.is_empty() {
             return Err(XlogError::Compilation(
                 "semantic task source must contain its complete program without imports".into(),
             ));
         }
-        for ordinal in query_ordinals {
+        for &ordinal in &query_ordinals {
             let query = program.source_program.queries.get(ordinal).ok_or_else(|| {
                 XlogError::Compilation(format!("semantic task query ordinal {ordinal} is absent"))
             })?;
@@ -1162,9 +1167,15 @@ impl SemanticLogicTaskProgram {
 pub fn compile_positive_binary_task(
     initial_theory: &str,
     input_facts: &str,
-    statements: [&str; 3],
+    statements: &[&str],
 ) -> Result<xlog_cuda::SemanticProgramAdmission> {
     use xlog_cuda::{SemanticProgramAdmission, SemanticProgramFact};
+
+    if statements.is_empty() || statements.len() > u32::MAX as usize {
+        return Err(XlogError::Compilation(
+            "editable semantic task requires a finite nonempty query roster".into(),
+        ));
+    }
 
     let theory = xlog_logic::parse_program(initial_theory)?;
     let facts = xlog_logic::parse_program(input_facts)?;
@@ -1179,21 +1190,7 @@ pub fn compile_positive_binary_task(
     }
     // The production compiler remains the authority for XLOG syntax and type
     // semantics. The resident lowering below only handles its admitted subset.
-    let mut executable_source = String::with_capacity(
-        initial_theory.len()
-            + input_facts.len()
-            + statements.iter().map(|s| s.len() + 5).sum::<usize>()
-            + 5,
-    );
-    executable_source.push_str(initial_theory);
-    executable_source.push('\n');
-    executable_source.push_str(input_facts);
-    executable_source.push('\n');
-    for statement in statements {
-        executable_source.push_str("?- ");
-        executable_source.push_str(statement);
-        executable_source.push_str(".\n");
-    }
+    let executable_source = positive_binary_task_source(initial_theory, input_facts, statements);
     LogicProgram::compile(&executable_source)?;
 
     let mut predicate_indices = BTreeMap::new();
@@ -1228,21 +1225,39 @@ pub fn compile_positive_binary_task(
         }
     }
     let parsed_queries = xlog_logic::parse_program(&executable_source)?;
-    let queries: [SemanticProgramFact; 3] = parsed_queries
+    let queries: Vec<SemanticProgramFact> = parsed_queries
         .queries
         .iter()
         .map(|query| lower_binary_fact(&query.atom, &predicate_indices))
-        .collect::<Result<Vec<_>>>()?
-        .try_into()
-        .map_err(|_| {
-            XlogError::Compilation("editable semantic task requires three ground queries".into())
-        })?;
+        .collect::<Result<Vec<_>>>()?;
     Ok(SemanticProgramAdmission {
         predicate_count: theory.predicates.len() as u32,
         initial_facts,
         initial_rules,
+        observation_facts: queries.iter().copied().enumerate()
+            .map(|(record, fact)| (record as u32, fact)).collect(),
         queries,
     })
+}
+
+/// The original admitted initial theory and facts with their ordered ground
+/// queries. Both cold execution and resident lowering use this exact source.
+pub fn positive_binary_task_source(
+    initial_theory: &str,
+    input_facts: &str,
+    statements: &[&str],
+) -> String {
+    let mut source = String::new();
+    source.push_str(initial_theory);
+    source.push('\n');
+    source.push_str(input_facts);
+    source.push('\n');
+    for statement in statements {
+        source.push_str("?- ");
+        source.push_str(statement);
+        source.push_str(".\n");
+    }
+    source
 }
 
 fn positive_binary_source_only(program: &Program) -> bool {
@@ -1486,8 +1501,8 @@ impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
         })?;
         let mut input_bytes = b"xlog.semantic-task.query-selection.v1\0".to_vec();
         let mut result_bytes = b"xlog.semantic-task.four-valued-results.v1\0".to_vec();
-        let mut expected_truth = [xlog_cuda::SemanticTruth::Neither; 3];
-        for (slot, ordinal) in self.query_ordinals.into_iter().enumerate() {
+        let mut actual_truths = Vec::with_capacity(self.query_ordinals.len());
+        for &ordinal in &self.query_ordinals {
             let query = result.queries.get(ordinal).ok_or_else(|| {
                 execution_error(XlogError::Execution(format!(
                     "semantic task query ordinal {ordinal} was not returned"
@@ -1510,18 +1525,19 @@ impl xlog_cuda::SemanticTaskProgram for SemanticLogicTaskProgram {
                 ))));
             }
             input_bytes.extend_from_slice(&(ordinal as u64).to_le_bytes());
-            expected_truth[slot] = if rows == 1 {
+            let truth = if rows == 1 {
                 xlog_cuda::SemanticTruth::True
             } else {
                 xlog_cuda::SemanticTruth::Neither
             };
-            result_bytes.extend_from_slice(&(expected_truth[slot] as u64).to_le_bytes());
+            result_bytes.extend_from_slice(&(truth as u64).to_le_bytes());
+            actual_truths.push(truth);
         }
         Ok(xlog_cuda::SemanticTaskObservation {
             program_source: self.source.as_bytes().to_vec(),
             input_bytes,
             result_bytes,
-            expected_truth,
+            actual_truths,
         })
     }
 }

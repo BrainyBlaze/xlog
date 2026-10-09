@@ -376,7 +376,7 @@ impl PreparedReplayCustody {
             4 + graph_bytes,
             4 + size_of::<PublicationBank>(),
             4 + size_of::<PublicationContract>(),
-            4 + 55 * 8,
+            4 + PUBLICATION_ROLE_COUNT * 8,
             4 + storage.terminals.len() * 8,
             4 + storage.layouts.len() * (4 + size_of::<SemanticTensorLayout>()),
             geometry.len(),
@@ -707,8 +707,38 @@ impl SemanticTransitionSession {
             })
     }
 
-    /// Canonical cold replay tuple for this original, known completed Proposal.
-    /// Later publication-bank reuse cannot change these private native snapshots.
+    /// Original task ground from the same retained predecessor replay custody.
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn prepared_parent_task_ground(
+        &mut self,
+        step: &SemanticPreparedStep,
+        header: &PublicationHeader,
+    ) -> Result<Vec<u8>, SemanticTransitionError> {
+        let original = self.checked_prepared_step(step, false)?;
+        let prepared = original.prepared.as_ref().expect("checked original owner");
+        if !prepared.observed || !self.prepared_segment.as_ref()
+            .is_some_and(|segment| segment.completed)
+        {
+            return Err(publication_input_error("retained task ground requires known completed execution"));
+        }
+        let parent = &prepared.replay_custody.as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?.parent;
+        let slot = parent.plan.iter().position(|row|
+            (row.role, row.index) == (SemanticStateRole::TaskGround as u64, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let bytes = parent.backings[slot].slice()?.view();
+        let bank = parent.bank.view();
+        let actual = parent.actual.view();
+        let actual = self.publication_read(actual)?;
+        if actual[2] != 1 || actual[1] != header.publication_word
+            || self.publication_read(bank)?[0].header != *header
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.publication_read(bytes)
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub fn prepared_completed_replay_materials(
         &mut self,
