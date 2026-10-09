@@ -15390,6 +15390,7 @@ impl PySemanticPublishedParent {
         self.release_native_ownership(py, consumer_streams, false)
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn resolve_model_context_preparation(&self, py: Python<'_>) -> PyResult<bool> {
         let session = self.session.borrow(py);
         session.require_creator()?;
