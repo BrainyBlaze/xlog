@@ -15,13 +15,13 @@ mod model_evaluation;
 #[cfg(feature = "semantic-policy")]
 mod native_work_bound;
 #[cfg(feature = "semantic-policy")]
-pub(crate) use native_work_bound::OriginalNativeCommand;
+pub(crate) use native_work_bound::{ColdNativeAllowance, OriginalNativeCommand};
 mod prepared_replay;
 mod replay_model_backing;
 #[cfg(feature = "semantic-policy")]
 pub use cold_model_work::{
-    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkRegion,
-    SemanticColdModelWorkResult, SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkPurpose,
+    SemanticColdModelWorkRegion, SemanticColdModelWorkResult, SemanticColdNativeWork,
 };
 pub use learning_phase::{
     SemanticLearningCopyReset, SemanticLearningPhase, SemanticLearningPhaseRecord,
@@ -29,8 +29,9 @@ pub use learning_phase::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use model_evaluation::{
-    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
-    SemanticModelEvaluation, SemanticModelEvaluationResult,
+    SemanticCancelledModelEvaluation, SemanticColdEvaluationContent,
+    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticModelEvaluationResult,
 };
 #[cfg(feature = "semantic-policy")]
 pub use prepared_replay::SemanticCompletedReplayMaterials;
@@ -12127,7 +12128,18 @@ impl TensorContentBuffers {
         execute: &CudaFunction,
         verify: bool,
     ) -> Result<(), SemanticTransitionError> {
-        self.enqueue_with_custody(domain, poisoned, execute, verify, None, false, None, false)
+        self.enqueue_with_custody(
+            domain,
+            poisoned,
+            execute,
+            verify,
+            None,
+            false,
+            None,
+            false,
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
     }
 
     #[expect(
@@ -12144,6 +12156,9 @@ impl TensorContentBuffers {
         completed: bool,
         cold_work: Option<&DeviceMemoryView<u64>>,
         capture: bool,
+        #[cfg(feature = "semantic-policy")] allowance: Option<
+            &Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
+        >,
     ) -> Result<(), SemanticTransitionError> {
         #[cfg(not(feature = "semantic-policy"))]
         let _ = capture;
@@ -12178,6 +12193,45 @@ impl TensorContentBuffers {
         } else if original_cold.is_some() {
             return Err(publication_input_error(
                 "unknown original cold content lost its retained work allocation",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if cold_work.is_some() && allowance.is_none() {
+            return Err(publication_input_error(
+                "cold content lost its original native allowance owner",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(allowance) = allowance {
+            let claimed = original_cold
+                .as_ref()
+                .and_then(|original| original.allowance.as_ref());
+            if let Some(original) = claimed {
+                if original
+                    .upgrade()
+                    .is_none_or(|original| !Arc::ptr_eq(&original, allowance))
+                {
+                    return Err(publication_input_error(
+                        "original content changed its admitted native allowance",
+                    ));
+                }
+            } else {
+                allowance
+                    .lock()
+                    .map_err(|_| {
+                        publication_input_error("original cold native allowance is poisoned")
+                    })?
+                    .claim_content(self, verify)?;
+                if let Some(original) = original_cold.as_mut() {
+                    original.allowance = Some(Arc::downgrade(allowance));
+                }
+            }
+        } else if original_cold
+            .as_ref()
+            .is_some_and(|original| original.allowance.is_some())
+        {
+            return Err(publication_input_error(
+                "original content lost its admitted native allowance",
             ));
         }
         #[cfg(feature = "semantic-policy")]
@@ -26959,6 +27013,8 @@ impl SemanticTransitionSession {
             return self.record_evaluation_content_witness(witness, consumer_stream, verify);
         }
         let cold_work = self.cold_native_work(witness.reader_token)?;
+        #[cfg(feature = "semantic-policy")]
+        let allowance = self.cold_native_allowance(witness.reader_token)?;
         let execute = self
             .provider
             .device()
@@ -27010,6 +27066,8 @@ impl SemanticTransitionSession {
                 retained,
                 cold_work.as_ref(),
                 false,
+                #[cfg(feature = "semantic-policy")]
+                allowance.as_ref(),
             )?;
             self.order_content_consumers(consumer_stream)?;
             #[cfg(feature = "semantic-policy")]

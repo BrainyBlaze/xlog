@@ -229,6 +229,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::ControlRetirement,
                 )
                 .map_err(xlog_err)?;
             self.control_retirement()?

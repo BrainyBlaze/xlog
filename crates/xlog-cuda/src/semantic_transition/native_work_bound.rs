@@ -106,6 +106,9 @@ pub(super) struct OriginalContentBatch {
     pub(super) verify: bool,
     pub(super) cursor: usize,
     pub(super) commands: Vec<OriginalNativeCommand>,
+    // The original report and child graph retain the strong owner. Keeping
+    // only its issued identity here avoids a cohort -> batch -> cohort cycle.
+    pub(super) allowance: Option<std::sync::Weak<Mutex<ColdNativeAllowance>>>,
 }
 
 impl OriginalContentBatch {
@@ -121,6 +124,233 @@ impl OriginalContentBatch {
             verify,
             cursor: 0,
             commands,
+            allowance: None,
+        })
+    }
+}
+
+/// Original finite content occurrences. Other canonical native producers have
+/// separate schedules; this subtotal must never stand in for their ceiling.
+pub(crate) struct ColdNativeAllowance {
+    purpose: SemanticColdModelWorkPurpose,
+    content: Option<FrozenColdEvaluationContent>,
+}
+
+pub(super) struct FrozenColdEvaluationContent {
+    pub(super) cohort: Arc<SemanticEvaluationCohort>,
+    pub(super) output: Vec<PreparedSemanticTensor>,
+    pub(super) objective: Vec<PreparedSemanticTensor>,
+    model_ceiling: [u64; 9],
+    ceiling: [u64; 9],
+    remaining: [[u8; 2]; 4],
+}
+
+impl ColdNativeAllowance {
+    pub(super) fn new(purpose: SemanticColdModelWorkPurpose) -> Self {
+        Self {
+            purpose,
+            content: None,
+        }
+    }
+
+    pub(super) fn is_evaluation(&self) -> bool {
+        matches!(
+            self.purpose,
+            SemanticColdModelWorkPurpose::SourceEvaluation
+                | SemanticColdModelWorkPurpose::PrivateEvaluation
+        )
+    }
+
+    pub(super) fn freeze_content(
+        &mut self,
+        content: FrozenColdEvaluationContent,
+    ) -> Result<(), SemanticTransitionError> {
+        if !self.is_evaluation() || self.content.is_some() {
+            return Err(publication_input_error(
+                "evaluation content belongs to its sole original cold admission",
+            ));
+        }
+        self.content = Some(content);
+        Ok(())
+    }
+
+    pub(super) fn content_ceiling(&self) -> Result<[u64; 9], SemanticTransitionError> {
+        match &self.content {
+            Some(content) => Ok(content.ceiling),
+            None if !self.is_evaluation() => Ok([0; 9]),
+            None => Err(publication_input_error(
+                "evaluation content must be frozen before its original native producers",
+            )),
+        }
+    }
+
+    pub(super) fn claim_content(
+        &mut self,
+        tensors: &TensorContentBuffers,
+        verify: bool,
+    ) -> Result<(), SemanticTransitionError> {
+        if !self.is_evaluation() {
+            return Ok(());
+        }
+        let content = self.content.as_mut().ok_or_else(|| {
+            publication_input_error(
+                "evaluation content must be admitted before its first native producer",
+            )
+        })?;
+        let same = |expected: &[PreparedSemanticTensor], native: bool| {
+            expected.len() == tensors.tensors.len()
+                && expected
+                    .iter()
+                    .zip(&tensors.tensors)
+                    .all(|(expected, actual)| {
+                        if native {
+                            tensor_content_identity(expected) == tensor_content_identity(actual)
+                        } else {
+                            same_tensor_content_owner(expected, actual)
+                        }
+                    })
+        };
+        let kind = if matches!(tensors.seals, TensorContentSeals::Model(_)) {
+            let actual = tensors.native_work_ceiling(verify)?;
+            if !verify
+                || actual
+                    .iter()
+                    .zip(content.model_ceiling)
+                    .any(|(actual, upper)| *actual > upper)
+            {
+                return Err(publication_input_error(
+                    "model content changed its original native geometry ceiling",
+                ));
+            }
+            0
+        } else if same(content.cohort.content_tensors(), true) {
+            1
+        } else if same(&content.output, false) {
+            2
+        } else if same(&content.objective, false) {
+            3
+        } else {
+            return Err(publication_input_error(
+                "native content is outside its original evaluation roster",
+            ));
+        };
+        let remaining = &mut content.remaining[kind][usize::from(verify)];
+        *remaining = remaining.checked_sub(1).ok_or_else(|| {
+            publication_input_error(
+                "native content exceeded its original finite evaluation occurrences",
+            )
+        })?;
+        Ok(())
+    }
+}
+
+impl FrozenColdEvaluationContent {
+    pub(super) fn new(
+        cohort: Arc<SemanticEvaluationCohort>,
+        output: Vec<PreparedSemanticTensor>,
+        objective: Vec<PreparedSemanticTensor>,
+        model_ceiling: [u64; 9],
+    ) -> Result<Self, SemanticTransitionError> {
+        let original = cohort.content_tensors();
+        if original.len() != 17 || output.len() != 3 || objective.len() != 8 {
+            return Err(publication_input_error(
+                "evaluation content requires its original seventeen, three and eight ports",
+            ));
+        }
+        let check =
+            |tensor: &PreparedSemanticTensor, index: u64, scalar: u64, dimensions: &[u64]| {
+                let layout = tensor.layout;
+                layout.role == 0
+                    && layout.index == index
+                    && layout.scalar_type == scalar
+                    && layout.rank as usize == dimensions.len()
+                    && layout.logical_axis == u64::MAX
+                    && tensor.logical_begin == 0
+                    && tensor.logical_end == 0
+                    && &layout.dimensions[..dimensions.len()] == dimensions
+            };
+        if !check(&output[0], 0, 6, &[6])
+            || !check(&output[1], 1, 8, &[1])
+            || !check(&output[2], 2, 1, &[25])
+            || output[0].data != output[2].data
+            || output[1].data
+                != output[2]
+                    .data
+                    .checked_add(24)
+                    .ok_or_else(native_work_ceiling_overflow)?
+        {
+            return Err(publication_input_error(
+                "evaluation output changed its original shared twenty-five-byte projection",
+            ));
+        }
+        for (index, tensor) in objective[..5].iter().enumerate() {
+            let source = original[index].layout;
+            if !check(
+                tensor,
+                index as u64,
+                3,
+                &source.dimensions[..source.rank as usize],
+            ) {
+                return Err(publication_input_error(
+                    "objective source copies changed their original selected geometry",
+                ));
+            }
+        }
+        let groups = original[3].layout.dimensions[0];
+        let rows = original[6].layout.dimensions[0];
+        if !check(&objective[5], 5, 6, &[groups, 2])
+            || !check(&objective[6], 6, 8, &[groups, rows])
+            || !check(&objective[7], 7, 8, &[1])
+            || objective[7].data != output[1].data
+        {
+            return Err(publication_input_error(
+                "objective result changed its original selected geometry or output owner",
+            ));
+        }
+        // Actual original producer roster: four model verifications; a fresh
+        // cohort seal and external source capture; three cohort guards and two
+        // external source verifies; output capture/finish verify; objective
+        // capture and two verifies. Captured occurrences remain finite here,
+        // although their execution tally is owned by numerical capture.
+        let remaining = [[0, 4], [2, 5], [1, 1], [1, 2]];
+        let mut ceiling = [0; 9];
+        let sources = [&output, &objective];
+        for (kind, tensors) in sources.into_iter().enumerate() {
+            for verify in [false, true] {
+                let mut occurrence = [0; 9];
+                for tensor in tensors {
+                    add_native_work_ceiling(
+                        &mut occurrence,
+                        tensor_layout_native_work_ceiling(
+                            &tensor.layout,
+                            tensor.logical_begin,
+                            tensor.logical_end,
+                            tensor.source.as_ref().map_or(0, DeviceMemoryView::len),
+                            verify,
+                        )?,
+                    )?;
+                }
+                for _ in 0..remaining[kind + 2][usize::from(verify)] {
+                    add_native_work_ceiling(&mut ceiling, occurrence)?;
+                }
+            }
+        }
+        for _ in 0..4 {
+            add_native_work_ceiling(&mut ceiling, model_ceiling)?;
+        }
+        for verify in [false, true] {
+            let occurrence = cohort.content_native_work_ceiling(verify)?;
+            for _ in 0..remaining[1][usize::from(verify)] {
+                add_native_work_ceiling(&mut ceiling, occurrence)?;
+            }
+        }
+        Ok(Self {
+            cohort,
+            output,
+            objective,
+            model_ceiling,
+            ceiling,
+            remaining,
         })
     }
 }
@@ -185,7 +415,7 @@ pub(super) fn tensor_layout_native_work_ceiling(
     content_digest_ceiling(logical_bytes, 25 + layout.rank, !verify)
 }
 
-fn content_digest_ceiling(
+pub(super) fn content_digest_ceiling(
     content_bytes: u64,
     prefix_words: u64,
     seal: bool,

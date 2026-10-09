@@ -401,6 +401,7 @@ impl PySemanticLearningPhaseTransition {
                 self.preparation_inputs.cold_model_work_capacity,
                 interval_ordinal,
                 self.records()?.confirmed_admission()?,
+                xlog_cuda::SemanticColdModelWorkPurpose::TerminalRefusal,
             )
             .map_err(xlog_err)?;
         self.phase_evaluations()?
@@ -1995,8 +1996,19 @@ impl PySemanticLearningPhaseTransition {
             .owner()?
             .cold_model_work_plan_quantities(&work)
             .map_err(xlog_err)?;
+        let cold_content = self
+            .source
+            .borrow(py)
+            .owner()?
+            .cold_model_work_content_ceiling(&work)
+            .map_err(xlog_err)?;
+        let cold_content = cold_content
+            .into_iter()
+            .try_fold(0u64, |sum, value| sum.checked_add(value))
+            .ok_or_else(|| invalid("evaluation's frozen cold content ceiling overflowed"))?;
         let known_bound = quantities[0]
             .checked_add(cold[0])
+            .and_then(|bound| bound.checked_add(cold_content))
             .and_then(|bound| bound.checked_add(captured_native))
             .ok_or_else(|| invalid("evaluation's original model work bounds overflowed"))?;
         let calls = quantities[2]
@@ -2008,6 +2020,64 @@ impl PySemanticLearningPhaseTransition {
                 .expect("retained evaluation")
                 .budget_exceeded = true;
             return Err(invalid("evaluation's frozen original producers exceed its signed operation budget before launch"));
+        }
+        Ok(())
+    }
+
+    pub(in crate::semantic_transition) fn evaluation_cold_content_owner(
+        &self,
+        py: Python<'_>,
+        work: &SemanticColdModelWork,
+    ) -> PyResult<Py<PySemanticModelEvaluation>> {
+        let retained = self.phase_evaluations()?;
+        let current = retained
+            .last()
+            .ok_or_else(|| invalid("cold content lost its original evaluation phase"))?;
+        Self::require_evaluation_entry(py, current)?;
+        if !current
+            .work
+            .as_ref()
+            .is_some_and(|original| original.same_invocation(work))
+        {
+            return Err(invalid(
+                "cold content changed its original signed evaluation report",
+            ));
+        }
+        current
+            .native_evaluation
+            .as_ref()
+            .map(|original| original.clone_ref(py))
+            .ok_or_else(|| invalid("cold content precedes its original issued evaluation"))
+    }
+
+    pub(in crate::semantic_transition) fn admit_evaluation_cold_content(
+        &self,
+        py: Python<'_>,
+        work: &SemanticColdModelWork,
+    ) -> PyResult<()> {
+        self.evaluation_cold_content_owner(py, work)?;
+        let budget = self
+            .phase_evaluations()?
+            .last()
+            .expect("retained original evaluation")
+            .budget;
+        let source = self.source.borrow(py);
+        let owner = source.owner()?;
+        let model = owner
+            .cold_model_work_plan_quantities(work)
+            .map_err(xlog_err)?;
+        let native = owner
+            .cold_model_work_content_ceiling(work)
+            .map_err(xlog_err)?;
+        let native = native
+            .into_iter()
+            .try_fold(0u64, |sum, value| sum.checked_add(value))
+            .ok_or_else(|| invalid("original evaluation content ceiling overflowed"))?;
+        let units = model[0]
+            .checked_add(native)
+            .ok_or_else(|| invalid("original evaluation cold producer ceiling overflowed"))?;
+        if units > budget[0] || model[2] > budget[2] {
+            return Err(invalid("original evaluation cold content and model plan exceed their signed budget before work"));
         }
         Ok(())
     }
@@ -2817,6 +2887,11 @@ impl PySemanticLearningPhaseTransition {
                     inputs.cold_model_work_capacity,
                     ordinal,
                     admission,
+                    if branch == "source" {
+                        xlog_cuda::SemanticColdModelWorkPurpose::SourceEvaluation
+                    } else {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateEvaluation
+                    },
                 )
                 .map_err(xlog_err)?;
             self.phase_evaluations()?

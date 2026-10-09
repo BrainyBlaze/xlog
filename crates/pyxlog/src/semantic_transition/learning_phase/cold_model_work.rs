@@ -125,16 +125,33 @@ impl PySemanticColdModelWork {
     /// Retain the complete physical operation recipe before original recording.
     /// Native returns (work bound, event count, call upper), not a Python estimate.
     #[pyo3(
-        signature = (operations, *, region_ends = Vec::new()),
-        text_signature = "($self, operations, *, region_ends=())"
+        signature = (operations, *, region_ends = Vec::new(), evaluation_content = None),
+        text_signature = "($self, operations, *, region_ends=(), evaluation_content=None)"
     )]
     fn admit_plan(
         &self,
         py: Python<'_>,
         operations: &Bound<'_, PyAny>,
         #[pyo3(from_py_with = cold_region_ends)] region_ends: Vec<usize>,
+        evaluation_content: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(u64, u64, u64)> {
         self.check(py)?;
+        // Invoke original tensor producers before taking either native Session
+        // mutex. The actual evaluation owner guards every producer callback.
+        let (phase, content) = if let Some(value) = evaluation_content {
+            let parent = self.parent.borrow(py);
+            let session = parent.session.borrow(py);
+            let phase = private_execution_owner(py, &session)?.ok_or_else(|| {
+                invalid("evaluation content requires its actual original phase owner")
+            })?;
+            let evaluation = phase
+                .borrow(py)
+                .evaluation_cold_content_owner(py, &self.inner)?;
+            let content = evaluation.borrow(py).prepare_cold_content(py, value)?;
+            (Some(phase), Some(content))
+        } else {
+            (None, None)
+        };
         let reader = self.reader.borrow(py);
         let session = reader.session.borrow(py);
         let mut owner = session.owner()?;
@@ -169,9 +186,9 @@ impl PySemanticColdModelWork {
                 recipe.push((kind, values[..rank].to_vec()));
             }
             let quantities = if let Some(region) = &self.region {
-                owner.admit_cold_model_work_region_plan(region, &recipe, &region_ends)
+                owner.admit_cold_model_work_region_plan(region, &recipe, &region_ends, content)
             } else {
-                owner.admit_cold_model_work_plan(&self.inner, &recipe, &region_ends)
+                owner.admit_cold_model_work_plan(&self.inner, &recipe, &region_ends, content)
             }
             .map_err(xlog_err)?;
             Ok((quantities[0], quantities[1], quantities[2]))
@@ -179,7 +196,18 @@ impl PySemanticColdModelWork {
         if result.is_err() {
             owner.fail_cold_model_work(&self.inner);
         }
-        result
+        drop(owner);
+        let quantities = result?;
+        if let Some(phase) = phase {
+            if let Err(error) = phase
+                .borrow(py)
+                .admit_evaluation_cold_content(py, &self.inner)
+            {
+                session.owner()?.fail_cold_model_work(&self.inner);
+                return Err(error);
+            }
+        }
+        Ok(quantities)
     }
 
     #[getter]

@@ -1480,6 +1480,23 @@ impl PySemanticLearningPhaseTransition {
                 self.preparation_inputs.cold_model_work_capacity,
                 ordinal,
                 self.records()?.confirmed_admission()?,
+                match role {
+                    PrivateColdRole::Prefix => {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivatePrefix
+                    }
+                    PrivateColdRole::ModelPreparation => {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateModelPreparation
+                    }
+                    PrivateColdRole::SuccessorPreparation => {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateSuccessorPreparation
+                    }
+                    PrivateColdRole::Retirement => {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateRetirement
+                    }
+                    PrivateColdRole::Adoption => {
+                        xlog_cuda::SemanticColdModelWorkPurpose::PrivateAdoption
+                    }
+                },
             )
             .map_err(xlog_err)?;
         let custody = self
@@ -2244,6 +2261,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::PrivateExecution,
                 )
                 .map_err(xlog_err)?;
             let custody = self

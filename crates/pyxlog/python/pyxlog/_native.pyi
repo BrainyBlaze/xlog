@@ -173,6 +173,48 @@ class SemanticPreparedStep:
         self, *, consumer_streams: Sequence[int]
     ) -> SemanticCompletedActionProjection: ...
 
+_SemanticTensorLayout = tuple[
+    int, int, int, int, int, int, tuple[int, ...], tuple[int, ...]
+]
+_SemanticTensorInput = tuple[_SemanticTensorLayout, int, int, Any, Optional[Any]]
+
+class SemanticColdModelWork:
+    """Original native cold registrar, available only in its admitted callback."""
+
+    @property
+    def plan_admitted(self) -> bool: ...
+    @property
+    def region_count(self) -> int: ...
+    @property
+    def consumer_stream(self) -> int: ...
+    def evaluation_source_geometry(
+        self,
+    ) -> list[tuple[list[int], list[int], tuple[int, int]]]:
+        """Read seventeen original port layouts without selection or device export."""
+        ...
+    def admit_plan(
+        self,
+        operations: tuple[tuple[int, tuple[int, ...]], ...],
+        *,
+        region_ends: tuple[int, ...] = (),
+        evaluation_content: Optional[tuple[
+            tuple[_SemanticTensorInput, ...], tuple[_SemanticTensorInput, ...]
+        ]] = None,
+    ) -> tuple[int, int, int]:
+        """Admit once before any original buffer/view export or numerical producer.
+
+        Evaluation content is the actual output-three and objective-eight roster,
+        using the existing five-field tensor inputs, not caller native prices.
+        """
+        ...
+    def model_work_buffer(self, *, consumer_stream: int) -> Any: ...
+    def begin(self) -> None: ...
+    def end(self) -> None: ...
+    def fail(self) -> None: ...
+    def record_model_invocation(self) -> None: ...
+    def record_model_work(self, kind: int, dimensions: tuple[int, ...]) -> None: ...
+    def record_model_device_work(self, kind: int, upper_dimensions: tuple[int, ...]) -> int: ...
+
 class SemanticEvaluationCohort:
     """Native-issued sealed original selection; no public constructor."""
 

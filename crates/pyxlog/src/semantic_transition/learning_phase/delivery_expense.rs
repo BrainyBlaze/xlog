@@ -1055,6 +1055,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::Delivery,
                 )
                 .map_err(xlog_err)?;
             self.delivery_expense()?

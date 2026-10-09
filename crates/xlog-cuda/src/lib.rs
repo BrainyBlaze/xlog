@@ -108,13 +108,14 @@ pub use semantic_transition::{
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
-    SemanticCancelledModelEvaluation, SemanticCompletedModelEvaluation, SemanticEvaluationCohort,
-    SemanticModelEvaluation, SemanticModelEvaluationResult,
+    SemanticCancelledModelEvaluation, SemanticColdEvaluationContent,
+    SemanticCompletedModelEvaluation, SemanticEvaluationCohort, SemanticModelEvaluation,
+    SemanticModelEvaluationResult,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{
-    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkRegion,
-    SemanticColdModelWorkResult, SemanticColdNativeWork,
+    SemanticColdModelWork, SemanticColdModelWorkDisposition, SemanticColdModelWorkPurpose,
+    SemanticColdModelWorkRegion, SemanticColdModelWorkResult, SemanticColdNativeWork,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{

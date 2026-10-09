@@ -57,6 +57,26 @@ pub struct SemanticEvaluationCohort {
     provider: Arc<CudaKernelProvider>,
 }
 
+impl SemanticEvaluationCohort {
+    pub(super) fn content_tensors(&self) -> &[PreparedSemanticTensor] {
+        &self.content.tensors
+    }
+
+    pub(super) fn content_native_work_ceiling(
+        &self,
+        verify: bool,
+    ) -> Result<[u64; 9], SemanticTransitionError> {
+        self.content.native_work_ceiling(verify)
+    }
+}
+
+/// Metadata-only carrier from the actual original evaluation Session to its
+/// enclosing cold report, including retained real numerical allocation owners.
+pub struct SemanticColdEvaluationContent {
+    pub(super) allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
+    pub(super) content: native_work_bound::FrozenColdEvaluationContent,
+}
+
 /// Session-issued invocation handle, not an Update or a publication capability.
 #[derive(Clone)]
 pub struct SemanticModelEvaluation {
@@ -167,6 +187,8 @@ pub(super) struct EvaluationPreparation {
     sealed: bool,
     handle: Option<SemanticModelEvaluation>,
     guarded: bool,
+    started: bool,
+    complete: bool,
     reset: OriginalNativeCommand,
 }
 
@@ -176,7 +198,7 @@ pub(super) struct EvaluationStorage {
     cohort: Arc<SemanticEvaluationCohort>,
     work: PreparedModelWork,
     report: TrackedCudaSlice<u64>,
-    source_material: Identity256,
+    source_material: Option<Identity256>,
     cold_work: Option<DeviceMemoryView<u64>>,
     stream: u64,
     submitted: bool,
@@ -198,6 +220,94 @@ pub(super) struct EvaluationStorage {
 }
 
 impl SemanticTransitionSession {
+    pub fn prepare_cold_evaluation_content(
+        &self,
+        lease: &SemanticPublishedLease,
+        inputs: [Vec<SemanticTensorInput>; 2],
+    ) -> Result<SemanticColdEvaluationContent, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let evaluation = self.steps[&lease.token]
+            .evaluation
+            .as_ref()
+            .ok_or_else(|| {
+                publication_input_error(
+                    "cold evaluation content requires its original issued evaluation",
+                )
+            })?;
+        if evaluation.execution != EvaluationExecution::Prepared || evaluation.submitted {
+            return Err(publication_input_error(
+                "cold evaluation content must precede original numerical submission",
+            ));
+        }
+        let allowance = self.cold_native_allowance(lease.token)?.ok_or_else(|| {
+            publication_input_error("evaluation content lost its original cold allowance")
+        })?;
+        let work = self.cold_native_work(lease.token)?.ok_or_else(|| {
+            publication_input_error("evaluation content lost its original cold tally")
+        })?;
+        if evaluation.cold_work.as_ref().is_none_or(|original| {
+            original.device_ptr() != work.device_ptr() || original.len() != work.len()
+        }) {
+            return Err(publication_input_error(
+                "evaluation content changed its original report allocation",
+            ));
+        }
+        let storage = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let contract = lease
+            .directory
+            .iter()
+            .find(|range| range.role == SemanticStateRole::ModelContract as u64 && range.index == 0)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut model_ceiling =
+            native_work_bound::content_digest_ceiling(contract.length_bytes, 21, false)?;
+        for range in lease
+            .directory
+            .iter()
+            .filter(|range| matches!(range.role, 18..=20))
+        {
+            let mut layout = *storage
+                .layouts
+                .get(&(range.role, range.index))
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if layout.logical_axis != u64::MAX {
+                let axis = usize::try_from(layout.logical_axis)
+                    .ok()
+                    .filter(|axis| *axis < layout.rank as usize)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                layout.dimensions[axis] = range
+                    .logical_end
+                    .checked_sub(range.logical_begin)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            }
+            native_work_bound::add_native_work_ceiling(
+                &mut model_ceiling,
+                native_work_bound::tensor_layout_native_work_ceiling(
+                    &layout,
+                    range.logical_begin,
+                    range.logical_end,
+                    usize::try_from(range.length_bytes)
+                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                    true,
+                )?,
+            )?;
+        }
+        let [output, objective] = inputs;
+        let output = prepare_semantic_tensors(&self.provider, output)?;
+        let objective = prepare_semantic_tensors(&self.provider, objective)?;
+        Ok(SemanticColdEvaluationContent {
+            allowance,
+            content: native_work_bound::FrozenColdEvaluationContent::new(
+                Arc::clone(&evaluation.cohort),
+                output,
+                objective,
+                model_ceiling,
+            )?,
+        })
+    }
+
     /// Original immutable port metadata, without selecting, exporting, or
     /// reading device extents. Numerical owners can reserve their empty outputs
     /// before the original cold operation plan is admitted.
@@ -300,6 +410,8 @@ impl SemanticTransitionSession {
                 sealed: borrowed,
                 handle: None,
                 guarded: false,
+                started: false,
+                complete: false,
                 reset,
             })));
         }
@@ -314,7 +426,10 @@ impl SemanticTransitionSession {
         let mut original = owner
             .lock()
             .map_err(|_| publication_input_error("evaluation preparation owner is poisoned"))?;
-        self.resume_model_evaluation_preparation(lease, &mut original)
+        // Issue the original numerical owners without entering selection,
+        // exports, seals or reset. The cold plan must retain output geometry
+        // and admit its complete producers before the first consumer below.
+        self.resume_model_evaluation_preparation(lease, &mut original, false)
     }
 
     /// Identity-only evidence for resuming the original preparation. It does
@@ -341,7 +456,16 @@ impl SemanticTransitionSession {
         &mut self,
         lease: &SemanticPublishedLease,
         original: &mut EvaluationPreparation,
+        submit: bool,
     ) -> Result<SemanticModelEvaluation, SemanticTransitionError> {
+        if original.complete {
+            let handle = original
+                .handle
+                .as_ref()
+                .expect("completed original evaluation");
+            self.original_evaluation(handle)?;
+            return Ok(handle.clone());
+        }
         let event_capacity = original.event_capacity;
         let arena = self
             .training_views
@@ -355,25 +479,19 @@ impl SemanticTransitionSession {
             .0
             .content_identity();
         let device = self.provider.device().ordinal();
-        if original.source_material.is_none() {
-            if original.source_observation.is_none() {
-                original.source_observation =
-                    Some(self.prepare_published_state_observation(lease, false)?);
+        if submit {
+            if let Some(allowance) = self.cold_native_allowance(lease.token)? {
+                allowance
+                    .lock()
+                    .map_err(|_| {
+                        publication_input_error("original cold native allowance is poisoned")
+                    })?
+                    .content_ceiling()?;
             }
-            let source_bytes = self.resolve_published_state_observation(
-                lease,
-                original
-                    .source_observation
-                    .as_mut()
-                    .expect("retained source observation"),
-            )?;
-            PublicationMaterial::decode(&source_bytes)?.require_current_model_caches()?;
-            original.source_material = Some(Identity256::from_bytes(
-                Sha256::digest(&source_bytes).into(),
-            ));
+            original.started = true;
         }
-        let source_material = original.source_material.expect("resolved original source");
         let cold_work = self.cold_native_work(lease.token)?;
+        let allowance = self.cold_native_allowance(lease.token)?;
         if original.cohort.is_none() {
             let (arena, selected_view) = self.training_view_selection_basis(lease)?;
             let commands = [
@@ -439,7 +557,31 @@ impl SemanticTransitionSession {
             }));
         }
         let cohort = Arc::clone(original.cohort.as_ref().expect("retained original cohort"));
-        if !original.selected {
+        if submit && original.source_material.is_none() {
+            if original.source_observation.is_none() {
+                original.source_observation =
+                    Some(self.prepare_published_state_observation(lease, false)?);
+            }
+            let source_bytes = self.resolve_published_state_observation(
+                lease,
+                original
+                    .source_observation
+                    .as_mut()
+                    .expect("retained source observation"),
+            )?;
+            PublicationMaterial::decode(&source_bytes)?.require_current_model_caches()?;
+            original.source_material = Some(Identity256::from_bytes(
+                Sha256::digest(&source_bytes).into(),
+            ));
+            self.steps
+                .get_mut(&lease.token)
+                .expect("retained original reader")
+                .evaluation
+                .as_mut()
+                .expect("retained original evaluation")
+                .source_material = original.source_material;
+        }
+        if submit && !original.selected {
             let (selected_view, commands) = original
                 .selection
                 .as_mut()
@@ -454,7 +596,7 @@ impl SemanticTransitionSession {
             )?;
             original.selected = true;
         }
-        if !original.sealed {
+        if submit && !original.sealed {
             let seal = self
                 .provider
                 .device()
@@ -475,6 +617,7 @@ impl SemanticTransitionSession {
                 false,
                 cold_work.as_ref(),
                 false,
+                allowance.as_ref(),
             )?;
             cohort.content.complete_original_cold_content()?;
             original.sealed = true;
@@ -509,7 +652,7 @@ impl SemanticTransitionSession {
                 cohort,
                 work,
                 report,
-                source_material,
+                source_material: None,
                 cold_work,
                 stream: self.stream.cu_stream() as u64,
                 submitted: false,
@@ -536,6 +679,9 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("retained original evaluation");
         self.original_evaluation(handle)?;
+        if !submit {
+            return Ok(handle.clone());
+        }
         if !original.guarded {
             self.enqueue_evaluation_cohort(Arc::clone(&handle.cohort), handle.token)?;
             original.guarded = true;
@@ -552,7 +698,50 @@ impl SemanticTransitionSession {
             event_capacity,
             &mut original.reset,
         )?;
+        original.complete = true;
         Ok(handle.clone())
+    }
+
+    pub fn model_evaluation_preparation_is_original(
+        &self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<bool, SemanticTransitionError> {
+        self.checked_original_evaluation_reader(lease, handle)?;
+        Ok(self.steps[&lease.token].evaluation_preparation.is_some())
+    }
+
+    pub fn model_evaluation_preparation_pending(&self, handle: &SemanticModelEvaluation) -> bool {
+        self.original_evaluation(handle).is_ok()
+            && self
+                .steps
+                .get(&handle.token)
+                .and_then(|step| step.evaluation_preparation.as_ref())
+                .is_some_and(|owner| {
+                    owner
+                        .lock()
+                        .map_or(true, |original| original.started && !original.complete)
+                })
+    }
+
+    fn resume_original_evaluation_preparation(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        handle: &SemanticModelEvaluation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_original_evaluation_reader(lease, handle)?;
+        let Some(owner) = self.steps[&lease.token].evaluation_preparation.as_ref() else {
+            return Ok(());
+        };
+        let owner = Arc::clone(owner);
+        let mut original = owner
+            .lock()
+            .map_err(|_| publication_input_error("evaluation preparation owner is poisoned"))?;
+        let resumed = self.resume_model_evaluation_preparation(lease, &mut original, true)?;
+        if !Arc::ptr_eq(&resumed.invocation, &handle.invocation) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(())
     }
 
     pub(super) fn require_evaluation_cold_work_origin(
@@ -650,6 +839,7 @@ impl SemanticTransitionSession {
         token: u64,
     ) -> Result<(), SemanticTransitionError> {
         let cold_work = self.cold_native_work(token)?;
+        let allowance = self.cold_native_allowance(token)?;
         let seal = self
             .provider
             .device()
@@ -668,6 +858,7 @@ impl SemanticTransitionSession {
             false,
             cold_work.as_ref(),
             false,
+            allowance.as_ref(),
         )?;
         cohort.content.complete_original_cold_content()
     }
@@ -686,14 +877,26 @@ impl SemanticTransitionSession {
         port: SemanticTrainingViewPort,
         stream: u64,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.resume_original_evaluation_preparation(lease, handle)?;
         self.checked_evaluation_parent(lease, handle)?;
-        if self.evaluation(handle)?.execution != EvaluationExecution::Prepared {
+        if self.original_evaluation(handle)?.execution != EvaluationExecution::Prepared {
             return Err(publication_input_error(
                 "evaluation training ports export only before the original capture",
             ));
         }
-        let (view, shape, strides, dtype) = self.evaluation(handle)?.cohort.selected.port(port)?;
-        self.export_step_view(lease, view, shape, strides, dtype, stream)
+        let (view, shape, strides, dtype) = self
+            .original_evaluation(handle)?
+            .cohort
+            .selected
+            .port(port)?;
+        dlpack_consumer_stream(stream)?;
+        let guard = Arc::clone(&self.require_original_cold_content_reader(lease)?.aliases);
+        self.steps
+            .get_mut(&lease.token)
+            .expect("original evaluation reader")
+            .consumer_streams
+            .insert(stream);
+        self.export_owned_view(view, shape, strides, dtype, guard, stream, None)
     }
 
     fn checked_evaluation_parent(
@@ -701,8 +904,16 @@ impl SemanticTransitionSession {
         lease: &SemanticPublishedLease,
         handle: &SemanticModelEvaluation,
     ) -> Result<(), SemanticTransitionError> {
-        self.checked_reader(lease)?;
-        let evaluation = self.evaluation(handle)?;
+        let evaluation = if self
+            .steps
+            .get(&lease.token)
+            .is_some_and(|step| step.evaluation_preparation.is_some())
+        {
+            self.checked_original_evaluation_reader(lease, handle)?
+        } else {
+            self.checked_reader(lease)?;
+            self.evaluation(handle)?
+        };
         if lease.token != handle.token || evaluation.submitted || evaluation.result.is_some() {
             return Err(publication_input_error(
                 "evaluation is submitted, closed or belongs to another acquired parent",
@@ -717,8 +928,9 @@ impl SemanticTransitionSession {
         handle: &SemanticModelEvaluation,
         stream: u64,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
+        self.resume_original_evaluation_preparation(lease, handle)?;
         self.checked_evaluation_parent(lease, handle)?;
-        let evaluation = self.evaluation(handle)?;
+        let evaluation = self.original_evaluation(handle)?;
         if stream != evaluation.stream
             || evaluation.execution != EvaluationExecution::Prepared
             || evaluation.submitted
@@ -732,7 +944,7 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         let capacity = (evaluation.work.actual.len() / 3) as i64;
         let scratch = Arc::clone(&evaluation.work_aliases);
-        let reader = Arc::clone(&self.checked_step(lease)?.aliases);
+        let reader = Arc::clone(&self.require_original_cold_content_reader(lease)?.aliases);
         self.export_owned_view(
             view,
             vec![capacity, 3],
@@ -751,6 +963,7 @@ impl SemanticTransitionSession {
         witness: &SemanticTensorContentWitness,
         streams: &[u64],
     ) -> Result<SemanticModelEvaluationCapture, SemanticTransitionError> {
+        self.resume_original_evaluation_preparation(lease, handle)?;
         self.checked_evaluation_parent(lease, handle)?;
         self.checked_content_witness(lease, witness)?;
         let streams = self
@@ -860,6 +1073,7 @@ impl SemanticTransitionSession {
             )
             .ok_or_else(|| runtime_error("kernel lookup", "tensor content witness unavailable"))?;
         let cold_work = self.cold_native_work(witness.reader_token)?;
+        let allowance = self.cold_native_allowance(witness.reader_token)?;
         self.steps[&witness.reader_token].content[witness.index].enqueue_with_custody(
             &self.domain,
             &mut self.poisoned,
@@ -869,6 +1083,7 @@ impl SemanticTransitionSession {
             false,
             cold_work.as_ref(),
             true,
+            allowance.as_ref(),
         )
     }
 
@@ -1537,7 +1752,9 @@ impl SemanticTransitionSession {
                 .evaluation
                 .as_mut()
                 .expect("retained evaluation");
-            if evaluation.resolved_source_material != Some(evaluation.source_material) {
+            if evaluation.source_material.is_none()
+                || evaluation.resolved_source_material != evaluation.source_material
+            {
                 self.poisoned = true;
                 return Err(publication_input_error(
                     "read-only evaluation changed the full original publication",
@@ -1600,6 +1817,41 @@ impl SemanticTransitionSession {
             .step_consumer_streams(lease.token, streams)?
             .into_iter()
             .collect::<Vec<_>>();
+        let metadata_only = self.steps[&handle.token]
+            .evaluation_preparation
+            .as_ref()
+            .map(|owner| {
+                owner.lock().map(|original| !original.started).map_err(|_| {
+                    publication_input_error("original evaluation preparation is poisoned")
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if metadata_only {
+            // This original invocation has issued allocations only. There is
+            // no selected content or model graph to verify, and no numerical
+            // result is synthesized. Join allocation/consumer lifetime before
+            // releasing this exact original non-submission owner.
+            self.complete_step_consumers(lease, &streams)?;
+            let step = self
+                .steps
+                .get_mut(&handle.token)
+                .expect("original evaluation reader");
+            step.evaluation = None;
+            step.evaluation_preparation = None;
+            return Ok(SemanticCancelledModelEvaluation {
+                issuer: Arc::clone(&handle.issuer),
+                invocation: Arc::clone(&handle.invocation),
+                parent,
+                work: 0,
+                calls: 0,
+            });
+        }
+        if self.model_evaluation_preparation_pending(handle) {
+            return Err(publication_input_error(
+                "original evaluation preparation must resolve before cancellation",
+            ));
+        }
         let evaluation = self.evaluation(handle)?;
         if evaluation.submitted
             || matches!(
@@ -1622,7 +1874,7 @@ impl SemanticTransitionSession {
         self.guard_evaluation_cohort(handle)?;
         let material =
             Identity256::from_bytes(Sha256::digest(self.published_state_material(lease)?).into());
-        if material != self.evaluation(handle)?.source_material {
+        if Some(material) != self.evaluation(handle)?.source_material {
             self.poisoned = true;
             return Err(publication_input_error(
                 "cancelled evaluation changed the original publication",

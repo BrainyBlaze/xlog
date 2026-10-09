@@ -1,6 +1,13 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "semantic-policy")]
+use std::sync::Mutex;
+
+#[cfg(feature = "semantic-policy")]
+type ColdWorkAllowance = Arc<Mutex<crate::semantic_transition::ColdNativeAllowance>>;
+#[cfg(not(feature = "semantic-policy"))]
+type ColdWorkAllowance = ();
 
 use sha2::{Digest, Sha256};
 use xlog_core::{symbol, RelId, ScalarType, Schema, XlogError};
@@ -2700,6 +2707,7 @@ pub struct SemanticHypergraph {
     // A child graph borrows the original operation's tally, not a new report.
     // Its guard prevents that original report from closing before child joins.
     cold_work_custody: Option<Arc<()>>,
+    cold_work_allowance: Option<ColdWorkAllowance>,
     root_export: Option<Arc<()>>,
     // Retire device state before releasing its allocation and driver owner.
     provider: Arc<CudaKernelProvider>,
@@ -2824,6 +2832,7 @@ impl SemanticHypergraph {
     pub(crate) fn begin_cold_work(
         &mut self,
         work: DeviceMemoryView<u64>,
+        allowance: Arc<Mutex<crate::semantic_transition::ColdNativeAllowance>>,
     ) -> Result<(), SemanticHypergraphError> {
         self.ensure_not_poisoned()?;
         if self.cold_work.is_some() || work.len() != 11 {
@@ -2832,6 +2841,7 @@ impl SemanticHypergraph {
             ));
         }
         self.cold_work = Some(work);
+        self.cold_work_allowance = Some(allowance);
         Ok(())
     }
 
@@ -2850,6 +2860,7 @@ impl SemanticHypergraph {
         }
         self.cold_work = None;
         self.cold_work_custody = None;
+        self.cold_work_allowance = None;
         Ok(())
     }
 
@@ -2858,8 +2869,9 @@ impl SemanticHypergraph {
         &mut self,
         work: DeviceMemoryView<u64>,
         custody: Arc<()>,
+        allowance: Arc<Mutex<crate::semantic_transition::ColdNativeAllowance>>,
     ) -> Result<(), SemanticHypergraphError> {
-        self.begin_cold_work(work)?;
+        self.begin_cold_work(work, allowance)?;
         self.cold_work_custody = Some(custody);
         Ok(())
     }
@@ -2869,6 +2881,13 @@ impl SemanticHypergraph {
         self.cold_work_custody
             .as_ref()
             .and_then(|_| self.cold_work.clone())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn cold_work_allowance(
+        &self,
+    ) -> Option<Arc<Mutex<crate::semantic_transition::ColdNativeAllowance>>> {
+        self.cold_work_allowance.as_ref().map(Arc::clone)
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -3076,7 +3095,7 @@ impl CudaKernelProvider {
         self: &Arc<Self>,
         domain: &ResidentExecutionDomain,
         capacities: SemanticHypergraphCapacities,
-        cold_work: Option<(DeviceMemoryView<u64>, Arc<()>)>,
+        cold_work: Option<(DeviceMemoryView<u64>, Arc<()>, ColdWorkAllowance)>,
     ) -> Result<SemanticHypergraph, SemanticHypergraphError> {
         validate_execution_domain(self, domain)
             .map_err(|error| runtime_error("domain validation", error))?;
@@ -3145,9 +3164,9 @@ impl CudaKernelProvider {
                 kind: SemanticHandleKind::Root,
                 slot: 0,
             })?;
-        let (cold_work, cold_work_custody) = match cold_work {
-            Some((work, custody)) => (Some(work), Some(custody)),
-            None => (None, None),
+        let (cold_work, cold_work_custody, cold_work_allowance) = match cold_work {
+            Some((work, custody, allowance)) => (Some(work), Some(custody), Some(allowance)),
+            None => (None, None, None),
         };
         let mut graph = SemanticHypergraph {
             provider: Arc::clone(self),
@@ -3174,6 +3193,7 @@ impl CudaKernelProvider {
             poisoned: false,
             cold_work,
             cold_work_custody,
+            cold_work_allowance,
             root_export: None,
         };
         let command = graph.command_for(OP_INITIALIZE);

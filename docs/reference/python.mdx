@@ -1499,7 +1499,7 @@ Inside the original source serializer, before preparation returns,
 `task_use.active_cold_model_work()` or
 `controller.active_cold_model_work()` returns the same native-issued
 `SemanticColdModelWork`. Before exporting scratch or beginning the first region,
-call `admit_plan(operations, region_ends=...)` with the complete original report's immutable tuple
+call `admit_plan(operations, region_ends=..., evaluation_content=None)` with the complete original report's immutable tuple
 of `(kind, dimensions_tuple)` pairs. The serializer and comparison producer must
 execute that same physical recipe; it is not a separate cost estimator. Native
 returns `(work_bound, operation_count, model_calls)` using the existing geometry
@@ -1512,6 +1512,18 @@ operation counts, one for every original region, including empty regions. The
 counts are nondecreasing and the final count equals the complete operation count.
 A report without regions uses the default empty tuple. Region boundaries belong
 to the same admitted plan; entering or closing a region cannot replace them.
+
+For a source or private evaluation, supply `evaluation_content=(output, objective)`
+in that same sole admission. The immutable rosters contain the actual three output
+and eight objective tensor inputs. Each uses the existing five-field form
+`(layout, logical_begin, logical_end, producer, native_allocation_or_None)`.
+Read `evaluation_source_geometry()` to obtain the original seventeen port layouts
+without selecting or exporting device contents. Allocate the empty output and
+objective backing before admission; leave their fills and all numerical work in
+the original admitted preparation region. Native retains the actual allocation
+owners and derives finite content-producer allowances from their geometry. These
+allowances are not a whole cold lifecycle ceiling: publication, graph, save,
+restore and retirement producers still require their own complete native bounds.
 
 Obtain its `consumer_stream` and `model_work_buffer(consumer_stream=...)`, an
 original CUDA UInt64 `[capacity, 3]` buffer, before calling `begin()`.
@@ -4144,7 +4156,19 @@ model_work_capacity=..., cohort=None)` for an already admitted training operatio
 and its genuine acquired parent. It does not construct an Update, run backward,
 draw randomness, update an optimizer, or publish a successor.
 
-The returned `SemanticModelEvaluation` owns one recording. Export its
+Preparation issues one retained `SemanticModelEvaluation` and its empty recording
+owners without entering source observation, selection, content seals or recording
+reset. Admit the original cold report, including its actual output/objective
+content, before exporting the first model-work buffer or training-view port or
+starting capture. That first consumer resumes the same native preparation owner;
+later exports reuse the completed preparation and cannot reset or submit it again.
+If the original preparation entered native work but has not completed, retain all
+owners and resume the same buffer/view request after `SemanticModelEvaluationPending`.
+Do not repeat tensor producer callbacks, replace the evaluation or cancel its
+unresolved entered prefix. This original-owner continuation does not clear Session
+quarantine or grant new numerical submissions after a fatal CUDA failure.
+
+The returned evaluation owns one recording. Export its
 `training_view(consumer_stream=...)` and `model_work_buffer(consumer_stream=...)`
 while the invocation is still prepared. Bind the output tensors and their native
 content witness before capture. Then call

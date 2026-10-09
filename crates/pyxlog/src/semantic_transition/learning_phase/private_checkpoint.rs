@@ -444,6 +444,7 @@ impl PySemanticLearningPhaseTransition {
                     self.preparation_inputs.cold_model_work_capacity,
                     ordinal,
                     self.records()?.confirmed_admission()?,
+                    xlog_cuda::SemanticColdModelWorkPurpose::PrivateCheckpoint,
                 )
                 .map_err(xlog_err)?;
             self.private_checkpoints()?

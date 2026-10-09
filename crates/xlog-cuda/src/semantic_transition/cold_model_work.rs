@@ -13,6 +13,27 @@ pub struct SemanticColdModelWork {
     admission: Arc<[u8]>,
 }
 
+/// The actual enclosing native phase selects its producer roster. Neither an
+/// external model callback nor the caller's region geometry selects this law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticColdModelWorkPurpose {
+    ControlRetirement,
+    Delivery,
+    IntermediateRestore,
+    TerminalRefusal,
+    SourceEvaluation,
+    PrivateEvaluation,
+    PrivateCheckpoint,
+    PrivatePrefix,
+    PrivateModelPreparation,
+    PrivateSuccessorPreparation,
+    PrivateRetirement,
+    PrivateAdoption,
+    PrivateExecution,
+    PrivateRestore,
+    PreparedActorRefresh,
+}
+
 /// A single registration region inside the original cold report. Regions
 /// append to the same event roster and device slots; they never reset or reopen
 /// the enclosing report and grant no numerical evaluation authority.
@@ -23,6 +44,12 @@ pub struct SemanticColdModelWorkRegion {
 }
 
 impl SemanticColdModelWork {
+    pub fn same_invocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.issuer, &other.issuer)
+            && Arc::ptr_eq(&self.invocation, &other.invocation)
+            && self.token == other.token
+    }
+
     /// Checked bytes for this exact native work-buffer ABI, not measured usage.
     pub fn allocation_bytes(capacity: usize) -> Result<usize, SemanticTransitionError> {
         if capacity == 0 {
@@ -47,6 +74,7 @@ pub struct SemanticColdNativeWork {
     domain: ResidentExecutionDomain,
     work: DeviceMemoryView<u64>,
     custody: Arc<()>,
+    allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
 }
 
 impl SemanticColdNativeWork {
@@ -54,13 +82,20 @@ impl SemanticColdNativeWork {
         self,
         provider: &Arc<CudaKernelProvider>,
         domain: &ResidentExecutionDomain,
-    ) -> Result<(DeviceMemoryView<u64>, Arc<()>), SemanticTransitionError> {
+    ) -> Result<
+        (
+            DeviceMemoryView<u64>,
+            Arc<()>,
+            Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
+        ),
+        SemanticTransitionError,
+    > {
         if !Arc::ptr_eq(provider, &self.provider) || domain.stream_id() != self.domain.stream_id() {
             return Err(publication_input_error(
                 "cold child construction changed its original allocation owner or stream",
             ));
         }
-        Ok((self.work, self.custody))
+        Ok((self.work, self.custody, self.allowance))
     }
 }
 
@@ -107,6 +142,7 @@ pub(super) struct ColdModelWorkStorage {
     aliases: Arc<()>,
     operation_ordinal: u64,
     admission: Arc<[u8]>,
+    allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
     work: PreparedModelWork,
     native_work: TrackedCudaSlice<u64>,
     report: TrackedCudaSlice<u64>,
@@ -134,6 +170,31 @@ impl ColdModelWorkStorage {
 }
 
 impl SemanticTransitionSession {
+    pub(super) fn cold_native_allowance(
+        &self,
+        token: u64,
+    ) -> Result<Option<Arc<Mutex<native_work_bound::ColdNativeAllowance>>>, SemanticTransitionError>
+    {
+        let step = self.steps.get(&token).ok_or_else(|| {
+            publication_input_error("cold content lost its original acquired reader")
+        })?;
+        let allowance = self.graph.cold_work_allowance();
+        if let Some(storage) = &step.cold_model_work {
+            if matches!(
+                storage.state,
+                RecordingState::Waiting | RecordingState::Recording | RecordingState::Closed
+            ) && allowance
+                .as_ref()
+                .is_none_or(|actual| !Arc::ptr_eq(actual, &storage.allowance))
+            {
+                return Err(publication_input_error(
+                    "cold content changed its original tally allowance owner",
+                ));
+            }
+        }
+        Ok(allowance)
+    }
+
     pub(super) fn cold_native_work(
         &self,
         token: u64,
@@ -193,6 +254,7 @@ impl SemanticTransitionSession {
             domain: self.domain.clone(),
             work: storage.native_work.view(),
             custody: Arc::clone(&storage.aliases),
+            allowance: Arc::clone(&storage.allowance),
         })
     }
 
@@ -221,9 +283,9 @@ impl SemanticTransitionSession {
         work: SemanticColdNativeWork,
     ) -> Result<(), SemanticTransitionError> {
         self.checked_reader(lease)?;
-        let (view, custody) = work.graph_custody(&self.provider, &self.domain)?;
+        let (view, custody, allowance) = work.graph_custody(&self.provider, &self.domain)?;
         self.graph
-            .begin_borrowed_cold_work(view, custody)
+            .begin_borrowed_cold_work(view, custody, allowance)
             .map_err(SemanticTransitionError::Semantic)
     }
 
@@ -385,6 +447,7 @@ impl SemanticTransitionSession {
         capacity: usize,
         operation_ordinal: u64,
         admission: Arc<[u8]>,
+        purpose: SemanticColdModelWorkPurpose,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
         self.ensure_quiescent()?;
         self.require_completed_cold_model_work()?;
@@ -445,6 +508,9 @@ impl SemanticTransitionSession {
             aliases: Arc::new(()),
             operation_ordinal,
             admission,
+            allowance: Arc::new(Mutex::new(native_work_bound::ColdNativeAllowance::new(
+                purpose,
+            ))),
             work,
             native_work,
             report,
@@ -475,7 +541,7 @@ impl SemanticTransitionSession {
             .htod_launch_metadata_sync_copy_into(&[0u64; 11], &mut storage.native_work)
             .map_err(|error| runtime_error("cold semantic work initialization", error))?;
         self.graph
-            .begin_cold_work(storage.native_work.view())
+            .begin_cold_work(storage.native_work.view(), Arc::clone(&storage.allowance))
             .map_err(SemanticTransitionError::Semantic)?;
         Ok(handle)
     }
@@ -536,8 +602,15 @@ impl SemanticTransitionSession {
         handle: &SemanticColdModelWork,
         operations: &[(ModelWorkKind, Vec<u64>)],
         region_ends: &[usize],
+        evaluation_content: Option<SemanticColdEvaluationContent>,
     ) -> Result<[u64; 3], SemanticTransitionError> {
-        self.admit_cold_model_work_plan_in_region(handle, None, operations, region_ends)
+        self.admit_cold_model_work_plan_in_region(
+            handle,
+            None,
+            operations,
+            region_ends,
+            evaluation_content,
+        )
     }
 
     pub fn admit_cold_model_work_region_plan(
@@ -545,12 +618,14 @@ impl SemanticTransitionSession {
         region: &SemanticColdModelWorkRegion,
         operations: &[(ModelWorkKind, Vec<u64>)],
         region_ends: &[usize],
+        evaluation_content: Option<SemanticColdEvaluationContent>,
     ) -> Result<[u64; 3], SemanticTransitionError> {
         self.admit_cold_model_work_plan_in_region(
             &region.work,
             Some(region),
             operations,
             region_ends,
+            evaluation_content,
         )
     }
 
@@ -560,6 +635,7 @@ impl SemanticTransitionSession {
         region: Option<&SemanticColdModelWorkRegion>,
         operations: &[(ModelWorkKind, Vec<u64>)],
         region_ends: &[usize],
+        evaluation_content: Option<SemanticColdEvaluationContent>,
     ) -> Result<[u64; 3], SemanticTransitionError> {
         let result = (|| {
             if let Some(region) = region {
@@ -594,6 +670,22 @@ impl SemanticTransitionSession {
                 }
             }
             let quantities = plan.quantities();
+            let allowance = Arc::clone(&storage.allowance);
+            let mut allowance_guard = allowance.lock().map_err(|_| {
+                publication_input_error("original cold native allowance is poisoned")
+            })?;
+            if allowance_guard.is_evaluation() != evaluation_content.is_some() {
+                return Err(publication_input_error("the native evaluation purpose requires its original output and objective content"));
+            }
+            if let Some(content) = evaluation_content {
+                if !Arc::ptr_eq(&allowance, &content.allowance) {
+                    return Err(publication_input_error(
+                        "evaluation content belongs to another original cold report",
+                    ));
+                }
+                allowance_guard.freeze_content(content.content)?;
+            }
+            drop(allowance_guard);
             self.steps
                 .get_mut(&handle.token)
                 .expect("checked reader")
@@ -616,6 +708,18 @@ impl SemanticTransitionSession {
         handle: &SemanticColdModelWork,
     ) -> Result<[u64; 3], SemanticTransitionError> {
         Ok(self.cold_model_work(handle)?.plan()?.quantities())
+    }
+
+    /// Original finite content subtotal only, not the whole native lifecycle.
+    pub fn cold_model_work_content_ceiling(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<[u64; 9], SemanticTransitionError> {
+        self.cold_model_work(handle)?
+            .allowance
+            .lock()
+            .map_err(|_| publication_input_error("original cold native allowance is poisoned"))?
+            .content_ceiling()
     }
 
     pub fn cold_model_work_buffer(

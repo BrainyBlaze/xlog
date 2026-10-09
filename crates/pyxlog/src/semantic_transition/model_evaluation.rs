@@ -106,6 +106,8 @@ pub(crate) struct PySemanticModelEvaluation {
     cancelled: Mutex<Option<SemanticCancelledModelEvaluation>>,
     cancel_entered: AtomicBool,
     capture_owners: Mutex<Option<Arc<EvaluationCaptureOwners>>>,
+    cold_content_producers: Mutex<Option<(Py<PyAny>, Vec<Py<PyAny>>)>>,
+    cold_content_entered: AtomicBool,
 }
 
 struct EvaluationCaptureOwners {
@@ -128,6 +130,80 @@ pub(super) struct PendingEvaluationPreparation {
 }
 
 impl PySemanticModelEvaluation {
+    pub(in crate::semantic_transition) fn prepare_cold_content(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<xlog_cuda::SemanticColdEvaluationContent> {
+        if !value.is_exact_instance_of::<PyTuple>() || value.cast::<PyTuple>()?.len() != 2 {
+            return Err(invalid(
+                "evaluation_content requires the original output and objective tuples",
+            ));
+        }
+        self.cold_content_entered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                invalid(
+                    "original evaluation content handoff cannot repeat or reenter its producers",
+                )
+            })?;
+        let parent = self.parent.borrow(py);
+        let session = parent.session.borrow(py);
+        session.require_creator()?;
+        let stream = {
+            let owner = session.owner()?;
+            self.check(py, &owner)?;
+            owner.evaluation_stream(&self.inner).map_err(xlog_err)?
+        };
+        let check = || -> PyResult<()> {
+            let owner = session.owner()?;
+            self.check(py, &owner)
+        };
+        let mut budget = 16 * 1024 * 1024;
+        let rows = value.cast::<PyTuple>()?;
+        let ParsedTensorInputs {
+            handoff: output,
+            producers: mut producers,
+        } = parse_tensor_inputs_guarded(
+            &rows.get_item(0)?,
+            &mut budget,
+            session.device_ordinal,
+            stream,
+            &check,
+        )?;
+        let ParsedTensorInputs {
+            handoff: objective,
+            producers: objective_producers,
+        } = parse_tensor_inputs_guarded(
+            &rows.get_item(1)?,
+            &mut budget,
+            session.device_ordinal,
+            stream,
+            &check,
+        )?;
+        producers.extend(objective_producers);
+        check()?;
+        let result = {
+            let owner = session.owner()?;
+            self.check(py, &owner)?;
+            owner
+                .prepare_cold_evaluation_content(
+                    &*parent.lease()?,
+                    [output.into_native(), objective.into_native()],
+                )
+                .map_err(xlog_err)?
+        };
+        let mut retained = self
+            .cold_content_producers
+            .lock()
+            .map_err(|_| invalid("original evaluation content producer custody is poisoned"))?;
+        if retained.is_some() {
+            return Err(invalid("original evaluation content is admitted only once"));
+        }
+        *retained = Some((value.clone().unbind(), producers));
+        Ok(result)
+    }
+
     fn phase_cold_boundary(
         &self,
         py: Python<'_>,
@@ -217,6 +293,26 @@ impl PySemanticModelEvaluation {
             return Err(invalid("read-only evaluation is already closed"));
         }
         let parent = self.parent.borrow(py);
+        if owner
+            .model_evaluation_preparation_is_original(&*parent.lease()?, &self.inner)
+            .map_err(xlog_err)?
+        {
+            let issued = parent.task_use.borrow(py);
+            issued.issuance.require_current()?;
+            let state = issued.state()?;
+            if owner.task_evaluation_epoch() != issued.task_epoch
+                || owner
+                    .task_evaluation_identity()
+                    .is_none_or(|identity| identity.as_bytes() != &issued.task_identity)
+                || !matches!(state.phase, TaskUsePhase::Evaluating(_))
+                || state.content_handoff_binding()? != self.binding
+            {
+                return Err(invalid(
+                    "original evaluation preparation changed its task or authority binding",
+                ));
+            }
+            return Ok(());
+        }
         if !matches!(
             parent.task_use.borrow(py).state()?.phase,
             TaskUsePhase::Evaluating(_)
@@ -280,7 +376,16 @@ impl PySemanticModelEvaluation {
         let session = parent.session.borrow(py);
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
-        let tensor = f(&mut owner, &*parent.lease()?, &self.inner, stream).map_err(xlog_err)?;
+        let tensor = match f(&mut owner, &*parent.lease()?, &self.inner, stream) {
+            Ok(tensor) => tensor,
+            Err(error) if owner.model_evaluation_preparation_pending(&self.inner) => {
+                let pending = SemanticModelEvaluationPending::new_err(
+                    "original evaluation preparation is pending; retain this evaluation and resume the same buffer or view call");
+                pending.set_cause(py, Some(xlog_err(error)));
+                return Err(pending);
+            }
+            Err(error) => return Err(xlog_err(error)),
+        };
         let tensor = retain_export_owner(tensor, self.parent.clone_ref(py), session.owner_thread)?;
         crate::dlpack_capsule_from_tensor(py, tensor)
     }
@@ -677,6 +782,10 @@ impl PySemanticModelEvaluation {
         let session = parent.session.borrow(py);
         let mut owner = session.owner()?;
         self.check(py, &owner)?;
+        if owner.model_evaluation_preparation_pending(&self.inner) {
+            return Err(SemanticModelEvaluationPending::new_err(
+                "original evaluation preparation must resolve through the same buffer or view before cancellation"));
+        }
         if self
             .output
             .lock()
@@ -911,6 +1020,8 @@ impl PySemanticTransitionController {
                     cancelled: Mutex::new(None),
                     cancel_entered: AtomicBool::new(false),
                     capture_owners: Mutex::new(None),
+                    cold_content_producers: Mutex::new(None),
+                    cold_content_entered: AtomicBool::new(false),
                 },
             )?);
         }
