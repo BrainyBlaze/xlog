@@ -918,8 +918,6 @@ pub mod pack_kernels {
     pub const HASH_PACKED_KEYS: &str = "hash_packed_keys";
     /// Fused pack + hash in single pass (optimal for join key preparation)
     pub const PACK_AND_HASH_KEYS: &str = "pack_and_hash_keys";
-    /// Fused pack + hash for arbitrary key column counts
-    pub const PACK_AND_HASH_KEYS_GENERIC: &str = "pack_and_hash_keys_generic";
     /// Vectorized pack for 8-byte aligned columns
     pub const PACK_KEYS_ALIGNED: &str = "pack_keys_aligned";
     /// Unpack single column from packed row data

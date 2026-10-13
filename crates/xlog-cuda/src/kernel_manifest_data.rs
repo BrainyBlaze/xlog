@@ -200,7 +200,6 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "pack_keys",
             "hash_packed_keys",
             "pack_and_hash_keys",
-            "pack_and_hash_keys_generic",
             "pack_keys_aligned",
             "unpack_column",
             "unpack_column_counted",

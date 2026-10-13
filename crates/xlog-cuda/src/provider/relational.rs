@@ -4011,263 +4011,12 @@ impl super::CudaKernelProvider {
         }
     }
 
-    /// Pack key columns on GPU and compute hashes (no host roundtrip).
+    /// Pack and hash any number of key columns without host transfers.
     ///
-    /// Uses the fused `pack_and_hash_keys` kernel for optimal performance when both
-    /// packed keys and hashes are needed. This eliminates the host roundtrip that
-    /// was previously required for column-major to row-major conversion.
-    ///
-    /// # Arguments
-    /// * `buffer` - Source buffer with columns to pack
-    /// * `key_cols` - Indices of columns to pack as keys (max 4)
-    ///
-    /// # Returns
-    /// `PackedKeyData` containing GPU-resident packed keys and hashes
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if:
-    /// - No key columns specified
-    /// - More than 4 key columns specified (kernel limitation)
-    /// - Column index is out of bounds
-    /// - Kernel launch fails
-    fn pack_keys_gpu(&self, buffer: &CudaBuffer, key_cols: &[usize]) -> Result<PackedKeyData> {
-        if key_cols.is_empty() {
-            return Err(XlogError::Kernel(
-                "pack_keys_gpu: no key columns specified".into(),
-            ));
-        }
-        if key_cols.len() > 4 {
-            return Err(XlogError::Kernel(
-                "pack_keys_gpu: max 4 key columns supported".into(),
-            ));
-        }
-
-        let num_rows = self.device_row_count(buffer)?;
-        if num_rows > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "pack_keys_gpu supports at most {} rows, got {}",
-                u32::MAX,
-                num_rows
-            )));
-        }
-        let num_rows = num_rows as u32;
-        if num_rows == 0 {
-            // Handle empty buffer case
-            return Ok(PackedKeyData {
-                hashes: self.memory.alloc::<u64>(0)?,
-                packed_keys: self.memory.alloc::<u8>(0)?,
-                key_bytes: 0,
-            });
-        }
-
-        // Calculate column sizes and total row size
-        let mut col_sizes: Vec<u32> = Vec::with_capacity(key_cols.len());
-        let mut row_size: u32 = 0;
-        for &col_idx in key_cols {
-            let col_type = buffer
-                .schema()
-                .column_type(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Invalid column index: {}", col_idx)))?;
-            let size = col_type.size_bytes() as u32;
-            col_sizes.push(size);
-            row_size += size;
-        }
-
-        // Allocate output buffers on GPU
-        let packed_bytes = (num_rows as u64) * (row_size as u64);
-        let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
-        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
-
-        // Get column device pointers as u64 values for the kernel
-        // The kernel expects raw pointers as u64
-        let mut col_ptrs: [u64; 4] = [0; 4];
-        for (i, &col_idx) in key_cols.iter().enumerate() {
-            let col = buffer
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            // Get the device pointer as a raw u64 value
-            col_ptrs[i] = *col.device_ptr();
-        }
-        let mut packed_col_sizes = 0u64;
-        for (i, size) in col_sizes.iter().copied().enumerate() {
-            if size > u16::MAX as u32 {
-                return Err(XlogError::Kernel(format!(
-                    "pack_keys_gpu: column element size {} exceeds 16-bit kernel argument",
-                    size
-                )));
-            }
-            packed_col_sizes |= (size as u64) << (i * 16);
-        }
-
-        // Get the kernel function
-        let func = self
-            .device
-            .inner()
-            .get_func(PACK_MODULE, pack_kernels::PACK_AND_HASH_KEYS)
-            .ok_or_else(|| XlogError::Kernel("pack_and_hash_keys kernel not found".to_string()))?;
-
-        // Launch configuration
-        let block_size = 256u32;
-        let grid_size = num_rows.div_ceil(block_size);
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Launch the fused pack+hash kernel
-        // SAFETY: Kernel signature matches pack_and_hash_keys in pack.cu:
-        // pack_and_hash_keys(col0, col1, col2, col3, packed_col_sizes, num_cols, num_rows, row_size, packed_output, hashes)
-        // Column pointers are passed as CudaSlice references - the kernel sees raw device pointers.
-        // We pass column data as raw pointers cast to u8* in the kernel.
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            func.clone()
-                .launch(
-                    config,
-                    (
-                        col_ptrs[0],
-                        col_ptrs[1],
-                        col_ptrs[2],
-                        col_ptrs[3],
-                        packed_col_sizes,
-                        key_cols.len() as u32,
-                        num_rows,
-                        row_size,
-                        &packed_slice,
-                        &hash_slice,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("pack_and_hash_keys launch failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        Ok(PackedKeyData {
-            hashes: hash_slice,
-            packed_keys: packed_slice,
-            key_bytes: row_size,
-        })
-    }
-
-    /// Pack key columns on GPU and compute hashes for arbitrary column counts.
-    fn pack_keys_gpu_generic(
-        &self,
-        buffer: &CudaBuffer,
-        key_cols: &[usize],
-    ) -> Result<PackedKeyData> {
-        if key_cols.is_empty() {
-            return Err(XlogError::Kernel(
-                "pack_keys_gpu_generic: no key columns specified".into(),
-            ));
-        }
-
-        let num_rows = self.device_row_count(buffer)?;
-        if num_rows > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "pack_keys_gpu_generic supports at most {} rows, got {}",
-                u32::MAX,
-                num_rows
-            )));
-        }
-        let num_rows = num_rows as u32;
-        if num_rows == 0 {
-            return Ok(PackedKeyData {
-                hashes: self.memory.alloc::<u64>(0)?,
-                packed_keys: self.memory.alloc::<u8>(0)?,
-                key_bytes: 0,
-            });
-        }
-
-        let mut col_sizes: Vec<u32> = Vec::with_capacity(key_cols.len());
-        let mut col_ptrs: Vec<u64> = Vec::with_capacity(key_cols.len());
-        let mut row_size: u32 = 0;
-
-        for &col_idx in key_cols {
-            let col_type = buffer
-                .schema()
-                .column_type(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Invalid column index: {}", col_idx)))?;
-            let size = col_type.size_bytes() as u32;
-            row_size = row_size
-                .checked_add(size)
-                .ok_or_else(|| XlogError::Kernel("Row size overflow".to_string()))?;
-            col_sizes.push(size);
-
-            let col = buffer
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            col_ptrs.push(*col.device_ptr());
-        }
-
-        let packed_bytes = (num_rows as u64)
-            .checked_mul(row_size as u64)
-            .ok_or_else(|| XlogError::Kernel("Packed key byte size overflow".to_string()))?;
-        let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
-        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
-
-        let mut d_col_sizes = self.memory.alloc::<u32>(col_sizes.len())?;
-        self.htod_sync_copy_into_tracked(&col_sizes, &mut d_col_sizes)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload col_sizes: {}", e)))?;
-
-        let mut d_col_ptrs = self.memory.alloc::<u64>(col_ptrs.len())?;
-        self.htod_sync_copy_into_tracked(&col_ptrs, &mut d_col_ptrs)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload col_ptrs: {}", e)))?;
-
-        let func = self
-            .device
-            .inner()
-            .get_func(PACK_MODULE, pack_kernels::PACK_AND_HASH_KEYS_GENERIC)
-            .ok_or_else(|| {
-                XlogError::Kernel("pack_and_hash_keys_generic kernel not found".to_string())
-            })?;
-
-        let block_size = 256u32;
-        let grid_size = num_rows.div_ceil(block_size);
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            func.clone()
-                .launch(
-                    config,
-                    (
-                        &d_col_ptrs,
-                        &d_col_sizes,
-                        key_cols.len() as u32,
-                        num_rows,
-                        row_size,
-                        &packed_slice,
-                        &hash_slice,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("pack_and_hash_keys_generic launch failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        Ok(PackedKeyData {
-            hashes: hash_slice,
-            packed_keys: packed_slice,
-            key_bytes: row_size,
-        })
-    }
-
-    /// Compute composite hashes AND return packed key data for key verification.
-    ///
-    /// Uses GPU-side packing via `pack_keys_gpu` when possible (1-4 key columns).
-    /// Falls back to CPU packing for edge cases or when GPU packing fails.
-    ///
-    /// Uses FNV-1a hash to combine all key columns into a single u64 hash per row.
-    /// Also returns the packed key data for byte-by-byte comparison in join kernels.
+    /// Four column descriptors fit in each kernel launch. Later launches append
+    /// bytes to the same rows and continue their FNV-1a hashes on the device.
+    /// The default stream orders the chunks; all input and output allocations
+    /// remain alive until the final synchronization.
     pub(super) fn compute_hashes_and_pack_keys(
         &self,
         buffer: &CudaBuffer,
@@ -4275,15 +4024,95 @@ impl super::CudaKernelProvider {
     ) -> Result<PackedKeyData> {
         if key_cols.is_empty() {
             return Err(XlogError::Kernel(
-                "compute_hashes_and_pack_keys: no key columns specified".to_string(),
+                "compute_hashes_and_pack_keys: no key columns specified".into(),
             ));
         }
 
-        if key_cols.len() <= 4 {
-            self.pack_keys_gpu(buffer, key_cols)
-        } else {
-            self.pack_keys_gpu_generic(buffer, key_cols)
+        let mut columns = Vec::with_capacity(key_cols.len());
+        let mut row_size = 0u32;
+        for &col_idx in key_cols {
+            let ty = buffer
+                .schema()
+                .column_type(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Invalid column index: {}", col_idx)))?;
+            let size = u16::try_from(ty.size_bytes()).map_err(|_| {
+                XlogError::Kernel(format!(
+                    "Key column element size {} exceeds 16-bit kernel argument",
+                    ty.size_bytes()
+                ))
+            })?;
+            let col = buffer
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
+            row_size = row_size
+                .checked_add(u32::from(size))
+                .ok_or_else(|| XlogError::Kernel("Packed key row size overflow".into()))?;
+            columns.push((*col.device_ptr(), size));
         }
+
+        let num_rows = u32::try_from(self.device_row_count(buffer)?)
+            .map_err(|_| XlogError::Kernel("GPU key packing row count exceeds u32".into()))?;
+        let packed_bytes = (num_rows as usize)
+            .checked_mul(row_size as usize)
+            .ok_or_else(|| XlogError::Kernel("Packed key byte size overflow".into()))?;
+        let packed_slice = self.memory.alloc::<u8>(packed_bytes)?;
+        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
+
+        if num_rows != 0 {
+            let func = self
+                .device
+                .inner()
+                .get_func(PACK_MODULE, pack_kernels::PACK_AND_HASH_KEYS)
+                .ok_or_else(|| XlogError::Kernel("pack_and_hash_keys kernel not found".into()))?;
+            let config = LaunchConfig::for_num_elems(num_rows);
+            let mut row_offset = 0u32;
+
+            for chunk in columns.chunks(4) {
+                let mut pointers = [0u64; 4];
+                let mut sizes = 0u64;
+                let mut chunk_bytes = 0u32;
+                for (index, &(pointer, size)) in chunk.iter().enumerate() {
+                    pointers[index] = pointer;
+                    sizes |= u64::from(size) << (index * 16);
+                    chunk_bytes += u32::from(size);
+                }
+
+                // SAFETY: Each descriptor names a validated source column with
+                // num_rows elements. The checked total row width bounds every
+                // chunk write in packed_slice. The first chunk initializes the
+                // hashes; subsequent chunks read them only after the preceding
+                // launch on this same stream has completed.
+                unsafe {
+                    func.clone().launch(
+                        config,
+                        (
+                            pointers[0],
+                            pointers[1],
+                            pointers[2],
+                            pointers[3],
+                            sizes,
+                            chunk.len() as u32,
+                            num_rows,
+                            row_size,
+                            row_offset,
+                            &packed_slice,
+                            &hash_slice,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("pack_and_hash_keys launch failed: {}", e))
+                })?;
+                row_offset += chunk_bytes;
+            }
+            self.device.synchronize()?;
+        }
+
+        Ok(PackedKeyData {
+            hashes: hash_slice,
+            packed_keys: packed_slice,
+            key_bytes: row_size,
+        })
     }
 
     /// Build a cache-friendly hash table from u64 hashes (v2).

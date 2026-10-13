@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- *(cuda)* keep join-key packing on the GPU for every key width. Ordered four-column chunks preserve complete typed keys and hashes without uploading column descriptor arrays during evaluation.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.

@@ -959,6 +959,7 @@ impl super::CudaKernelProvider {
                     key_cols.len() as u32,
                     num_rows,
                     row_size,
+                    0u32,
                     &packed_slice,
                     &hash_slice,
                 ),
