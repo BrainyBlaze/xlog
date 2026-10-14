@@ -12,7 +12,7 @@ use xlog_core::ScalarType;
 
 use crate::ast::{
     AggOp, ArithExpr, Atom, BodyLiteral, CompOp, EpistemicOp, FuncBody, NeuralLabel, Program,
-    ProgramMergeReport, Term, TypeRef,
+    ProgramMergeDisposition, ProgramMergeReport, Term, TypeRef,
 };
 use crate::stratify::analyze_stratification;
 
@@ -21,14 +21,65 @@ use super::{
     ResolvedSourceObjectKind,
 };
 
-const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v1";
+mod values;
+pub use values::{
+    ComparisonOperand, ContextualValueProjection, NativeScalarValue, NativeSourceDiagnostic,
+    NativeTermOccurrence, NativeTermOutcome, NativeTermPath, NativeValueContext,
+    NativeValueOwnership, NativeValueScope, ValueProjectionStage,
+};
+
+const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v2";
 
 /// Source inventory and executable dependency structure for one resolved program.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedProgramExtraction {
     pub schema_version: String,
     pub source_manifest: ResolvedProgramManifest,
+    /// Exactly one disposition per manifest object, scoped to this entry module.
+    pub source_object_dispositions: Vec<SourceObjectDisposition>,
+    pub native_values: ContextualValueProjection,
     pub executable_program: ExecutableProgram,
+}
+
+/// Custody of an authored object under the entrypoint's actual import selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceObjectDisposition {
+    pub module_id: String,
+    pub source_object_id: String,
+    #[serde(flatten)]
+    pub disposition: SourceObjectDispositionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "disposition", rename_all = "snake_case")]
+pub enum SourceObjectDispositionKind {
+    /// Retained as the executable object's actual owner.
+    Admitted { executable_source_object_id: String },
+    /// Selected but merged into an existing object without another execution.
+    Coalesced {
+        executable_source_object_id: String,
+        equivalence: SourceObjectEquivalence,
+    },
+    /// An imported private predicate, its clauses, or a private function.
+    Private,
+    /// Public content omitted by all actual selections of this source.
+    Unselected,
+    /// A construct the import merge does not retain, such as an imported query.
+    NotMerged,
+    /// An import declaration consumed by module resolution.
+    Resolution,
+    /// An entrypoint directive retained as compilation configuration.
+    Configuration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceObjectEquivalence {
+    /// The canonical merge compared the complete native AST objects as equal.
+    AstEqual,
+    /// ASTs differ; resolver validation established equal normalized declaration
+    /// schemas. This says nothing about source identity or runtime value equality.
+    NativeSchema,
 }
 
 /// Executable rule graph after module visibility and selection are applied.
@@ -550,6 +601,7 @@ struct AstOrigin {
 
 struct MergedProgram {
     program: Program,
+    source_dispositions: BTreeMap<String, SourceObjectDispositionKind>,
     domain_origins: Vec<AstOrigin>,
     function_origins: Vec<AstOrigin>,
     predicate_origins: Vec<AstOrigin>,
@@ -645,10 +697,55 @@ impl ModuleResolver {
         let source_manifest = self.resolved_program_manifest(source_root)?;
         let catalog = OriginCatalog::new(source_root, &source_manifest)?;
         let merged = self.merge_program_with_origins(&catalog)?;
-        let executable_program = build_executable_program(merged)?;
+        let source_object_dispositions: Vec<_> = source_manifest
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module.source_objects.iter().map(|object| {
+                    let disposition = match object.kind {
+                        ResolvedSourceObjectKind::Import => SourceObjectDispositionKind::Resolution,
+                        ResolvedSourceObjectKind::Directive
+                            if module.module_id == source_manifest.entry_module_id =>
+                        {
+                            SourceObjectDispositionKind::Configuration
+                        }
+                        _ if module.module_id == source_manifest.entry_module_id => {
+                            SourceObjectDispositionKind::Admitted {
+                                executable_source_object_id: object.object_id.clone(),
+                            }
+                        }
+                        ResolvedSourceObjectKind::Query
+                        | ResolvedSourceObjectKind::ProbabilisticQuery
+                        | ResolvedSourceObjectKind::Directive => {
+                            SourceObjectDispositionKind::NotMerged
+                        }
+                        // Import validation rejects every other entry-only construct;
+                        // the canonical merge reports every importable object, even
+                        // when private or unselected. Missing custody is an internal
+                        // invariant violation, never an inferred omission.
+                        _ => merged.source_dispositions[&object.object_id].clone(),
+                    };
+                    SourceObjectDisposition {
+                        module_id: module.module_id.clone(),
+                        source_object_id: object.object_id.clone(),
+                        disposition,
+                    }
+                })
+            })
+            .collect();
+        let executable_program = build_executable_program(&merged)?;
+        let native_values = values::build_native_values(
+            self,
+            &catalog,
+            &merged,
+            &source_object_dispositions,
+            &source_manifest.entry_module_id,
+        )?;
         Ok(ResolvedProgramExtraction {
             schema_version: EXTRACTION_SCHEMA_VERSION.to_string(),
             source_manifest,
+            source_object_dispositions,
+            native_values,
             executable_program,
         })
     }
@@ -762,34 +859,78 @@ impl ModuleResolver {
         })?;
 
         let mut rule_origins = Vec::new();
+        let mut source_dispositions = BTreeMap::new();
         for (source, report) in merge_reports {
-            for ordinal in report.domains {
-                domain_origins.push(catalog.origin(
-                    &source,
+            for (kind, outcomes, origins) in [
+                (
                     ResolvedSourceObjectKind::Domain,
-                    ordinal,
-                )?);
-            }
-            for ordinal in report.functions {
-                function_origins.push(catalog.origin(
-                    &source,
+                    &report.domains,
+                    &mut domain_origins,
+                ),
+                (
                     ResolvedSourceObjectKind::Function,
-                    ordinal,
-                )?);
-            }
-            for ordinal in report.predicates {
-                predicate_origins.push(catalog.origin(
-                    &source,
+                    &report.functions,
+                    &mut function_origins,
+                ),
+                (
                     ResolvedSourceObjectKind::Predicate,
-                    ordinal,
-                )?);
-            }
-            for ordinal in report.rules {
-                rule_origins.push(catalog.origin(
-                    &source,
+                    &report.predicates,
+                    &mut predicate_origins,
+                ),
+                (
                     ResolvedSourceObjectKind::Rule,
-                    ordinal,
-                )?);
+                    &report.rules,
+                    &mut rule_origins,
+                ),
+            ] {
+                for (ordinal, outcome) in outcomes.iter().enumerate() {
+                    let origin = catalog.origin(&source, kind, ordinal)?;
+                    let disposition = match outcome {
+                        ProgramMergeDisposition::Admitted { target_index } => {
+                            debug_assert_eq!(*target_index, origins.len());
+                            origins.push(origin.clone());
+                            SourceObjectDispositionKind::Admitted {
+                                executable_source_object_id: origin.source_object_id.clone(),
+                            }
+                        }
+                        ProgramMergeDisposition::Coalesced {
+                            target_index,
+                            ast_equal,
+                        } => {
+                            // The same resolver traversal has validated the normalized
+                            // predicate/domain schema before applying name-based merging.
+                            SourceObjectDispositionKind::Coalesced {
+                                executable_source_object_id: origins[*target_index]
+                                    .source_object_id
+                                    .clone(),
+                                equivalence: if *ast_equal {
+                                    SourceObjectEquivalence::AstEqual
+                                } else {
+                                    SourceObjectEquivalence::NativeSchema
+                                },
+                            }
+                        }
+                        ProgramMergeDisposition::Private => SourceObjectDispositionKind::Private,
+                        ProgramMergeDisposition::Unselected => {
+                            SourceObjectDispositionKind::Unselected
+                        }
+                    };
+                    // One file can be selected through several importing modules.
+                    // Omission in one selection cannot erase an admitted provider,
+                    // and a later self-coalescence cannot change the first owner.
+                    let existing = source_dispositions
+                        .entry(origin.source_object_id)
+                        .or_insert_with(|| disposition.clone());
+                    if !matches!(existing, SourceObjectDispositionKind::Admitted { .. })
+                        && matches!(
+                            disposition,
+                            SourceObjectDispositionKind::Admitted { .. }
+                                | SourceObjectDispositionKind::Coalesced { .. }
+                        )
+                    {
+                        *existing = disposition;
+                    }
+                }
             }
         }
         program.rules.extend(entry_rules);
@@ -802,6 +943,7 @@ impl ModuleResolver {
 
         Ok(MergedProgram {
             program,
+            source_dispositions,
             domain_origins,
             function_origins,
             predicate_origins,
@@ -830,8 +972,13 @@ fn origins_for_count(
 }
 
 fn build_executable_program(
-    merged: MergedProgram,
+    merged: &MergedProgram,
 ) -> Result<ExecutableProgram, ResolvedProgramExtractionError> {
+    let mut arities = BTreeMap::<String, usize>::new();
+    for (name, arity) in merged.program.relation_signatures() {
+        register_arity(&mut arities, name, arity)?;
+    }
+
     let analysis = analyze_stratification(&merged.program);
     let mut scc_by_predicate = BTreeMap::new();
     let mut sccs = Vec::with_capacity(analysis.sccs.len());
@@ -845,8 +992,12 @@ fn build_executable_program(
         let mut relation_ids = predicates
             .iter()
             .map(|predicate| {
-                relation_arity(&merged.program, predicate)
-                    .map(|arity| relation_id(predicate, arity))
+                arities
+                    .get(predicate)
+                    .map(|&arity| relation_id(predicate, arity))
+                    .ok_or_else(|| ResolvedProgramExtractionError::MissingRelationArity {
+                        name: predicate.clone(),
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         relation_ids.sort();
@@ -1066,7 +1217,7 @@ fn build_executable_program(
             body: rule.body.iter().map(executable_literal).collect(),
         });
     }
-    let relations = build_relations(&merged, &rules, &scc_by_predicate)?;
+    let relations = build_relations(merged, arities, &rules, &scc_by_predicate);
 
     Ok(ExecutableProgram {
         domains,
@@ -1088,67 +1239,10 @@ fn build_executable_program(
 
 fn build_relations(
     merged: &MergedProgram,
+    arities: BTreeMap<String, usize>,
     rules: &[ExecutableRule],
     scc_by_predicate: &BTreeMap<String, (String, Option<usize>, bool)>,
-) -> Result<Vec<ExecutableRelation>, ResolvedProgramExtractionError> {
-    let mut arities = BTreeMap::<String, usize>::new();
-    for declaration in &merged.program.predicates {
-        register_arity(
-            &mut arities,
-            &declaration.name,
-            declaration.schema_columns().len(),
-        )?;
-    }
-    for rule in &merged.program.rules {
-        register_atom_arities(&mut arities, &rule.head)?;
-        for literal in &rule.body {
-            if let Some(atom) = literal.atom() {
-                register_atom_arities(&mut arities, atom)?;
-            } else if let BodyLiteral::Epistemic(literal) = literal {
-                register_atom_arities(&mut arities, &literal.atom)?;
-            }
-        }
-    }
-    for constraint in &merged.program.constraints {
-        for literal in &constraint.body {
-            if let Some(atom) = literal.atom() {
-                register_atom_arities(&mut arities, atom)?;
-            } else if let BodyLiteral::Epistemic(literal) = literal {
-                register_atom_arities(&mut arities, &literal.atom)?;
-            }
-        }
-    }
-    for query in &merged.program.queries {
-        register_atom_arities(&mut arities, &query.atom)?;
-    }
-    for fact in &merged.program.prob_facts {
-        register_atom_arities(&mut arities, &fact.atom)?;
-    }
-    for disjunction in &merged.program.annotated_disjunctions {
-        for choice in &disjunction.choices {
-            register_atom_arities(&mut arities, &choice.atom)?;
-        }
-    }
-    for evidence in &merged.program.evidence {
-        register_atom_arities(&mut arities, &evidence.atom)?;
-    }
-    for query in &merged.program.prob_queries {
-        register_atom_arities(&mut arities, &query.atom)?;
-    }
-    for declaration in &merged.program.neural_predicates {
-        register_atom_arities(&mut arities, &declaration.predicate)?;
-    }
-    for rule in &merged.program.learnable_rules {
-        register_atom_arities(&mut arities, &rule.head)?;
-        for literal in &rule.body {
-            if let Some(atom) = literal.atom() {
-                register_atom_arities(&mut arities, atom)?;
-            } else if let BodyLiteral::Epistemic(literal) = literal {
-                register_atom_arities(&mut arities, &literal.atom)?;
-            }
-        }
-    }
-
+) -> Vec<ExecutableRelation> {
     let mut definitions = BTreeMap::<String, Vec<ExecutableRelationDefinition>>::new();
     for rule in rules {
         definitions
@@ -1241,7 +1335,7 @@ fn build_relations(
         });
     }
 
-    Ok(arities
+    arities
         .into_iter()
         .map(|(name, arity)| {
             let relation_id = relation_id(&name, arity);
@@ -1263,14 +1357,7 @@ fn build_relations(
                 non_monotone,
             }
         })
-        .collect())
-}
-
-fn register_atom_arities(
-    arities: &mut BTreeMap<String, usize>,
-    atom: &Atom,
-) -> Result<(), ResolvedProgramExtractionError> {
-    register_arity(arities, &atom.predicate, atom.terms.len())
+        .collect()
 }
 
 fn register_arity(
@@ -1288,77 +1375,6 @@ fn register_arity(
         }
     }
     Ok(())
-}
-
-fn relation_arity(
-    program: &Program,
-    predicate: &str,
-) -> Result<usize, ResolvedProgramExtractionError> {
-    let defined_arity = program
-        .rules
-        .iter()
-        .map(|rule| &rule.head)
-        .chain(program.prob_facts.iter().map(|fact| &fact.atom))
-        .chain(
-            program
-                .annotated_disjunctions
-                .iter()
-                .flat_map(|disjunction| disjunction.choices.iter().map(|choice| &choice.atom)),
-        )
-        .chain(
-            program
-                .neural_predicates
-                .iter()
-                .map(|declaration| &declaration.predicate),
-        )
-        .chain(program.learnable_rules.iter().map(|rule| &rule.head))
-        .find(|atom| atom.predicate == predicate)
-        .map(|atom| atom.terms.len());
-    let declared_arity = program
-        .predicates
-        .iter()
-        .find(|declaration| declaration.name == predicate)
-        .map(|declaration| declaration.schema_columns().len());
-    let referenced_arity = program
-        .rules
-        .iter()
-        .flat_map(|rule| &rule.body)
-        .chain(
-            program
-                .constraints
-                .iter()
-                .flat_map(|constraint| &constraint.body),
-        )
-        .chain(program.learnable_rules.iter().flat_map(|rule| &rule.body))
-        .find_map(|literal| literal_atom_arity(literal, predicate));
-    let observed_arity = program
-        .queries
-        .iter()
-        .map(|query| &query.atom)
-        .chain(program.evidence.iter().map(|evidence| &evidence.atom))
-        .chain(program.prob_queries.iter().map(|query| &query.atom))
-        .find(|atom| atom.predicate == predicate)
-        .map(|atom| atom.terms.len());
-
-    defined_arity
-        .or(declared_arity)
-        .or(referenced_arity)
-        .or(observed_arity)
-        .ok_or_else(|| ResolvedProgramExtractionError::MissingRelationArity {
-            name: predicate.to_string(),
-        })
-}
-
-fn literal_atom_arity(literal: &BodyLiteral, predicate: &str) -> Option<usize> {
-    match literal {
-        BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) if atom.predicate == predicate => {
-            Some(atom.terms.len())
-        }
-        BodyLiteral::Epistemic(literal) if literal.atom.predicate == predicate => {
-            Some(literal.atom.terms.len())
-        }
-        _ => None,
-    }
 }
 
 fn relation_dependency(

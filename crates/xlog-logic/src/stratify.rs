@@ -74,6 +74,10 @@ impl DependencyGraph {
 pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
     let mut graph = DependencyGraph::new();
 
+    for (predicate, _) in program.relation_signatures() {
+        graph.add_predicate(predicate.to_string());
+    }
+
     for rule in &program.rules {
         let head = &rule.head.predicate;
         graph.add_predicate(head.clone());

@@ -4,16 +4,20 @@ mod extraction;
 mod manifest;
 
 pub use extraction::{
-    AggregateOperator, ComparisonOperator, EpistemicOperator, ExecutableAnnotatedDisjunction,
-    ExecutableArithmeticExpression, ExecutableAtom, ExecutableBodyLiteral, ExecutableConstraint,
-    ExecutableDomain, ExecutableEvidence, ExecutableFunction, ExecutableFunctionBody,
-    ExecutableFunctionParameter, ExecutableLearnableRule, ExecutableNeuralLabel,
-    ExecutableNeuralPredicate, ExecutablePredicateColumn, ExecutableProbabilisticFact,
-    ExecutableProbabilisticQuery, ExecutableProbability, ExecutableProgram, ExecutableQuery,
-    ExecutableRelation, ExecutableRelationDefinition, ExecutableRelationDefinitionKind,
-    ExecutableRule, ExecutableScalarType, ExecutableScc, ExecutableTerm, ExecutableTypeReference,
-    ExecutableWeightedAtom, RelationDependency, RelationDependencyKind,
-    RelationDependencyProducerKind, ResolvedProgramExtraction, ResolvedProgramExtractionError,
+    AggregateOperator, ComparisonOperand, ComparisonOperator, ContextualValueProjection,
+    EpistemicOperator, ExecutableAnnotatedDisjunction, ExecutableArithmeticExpression,
+    ExecutableAtom, ExecutableBodyLiteral, ExecutableConstraint, ExecutableDomain,
+    ExecutableEvidence, ExecutableFunction, ExecutableFunctionBody, ExecutableFunctionParameter,
+    ExecutableLearnableRule, ExecutableNeuralLabel, ExecutableNeuralPredicate,
+    ExecutablePredicateColumn, ExecutableProbabilisticFact, ExecutableProbabilisticQuery,
+    ExecutableProbability, ExecutableProgram, ExecutableQuery, ExecutableRelation,
+    ExecutableRelationDefinition, ExecutableRelationDefinitionKind, ExecutableRule,
+    ExecutableScalarType, ExecutableScc, ExecutableTerm, ExecutableTypeReference,
+    ExecutableWeightedAtom, NativeScalarValue, NativeSourceDiagnostic, NativeTermOccurrence,
+    NativeTermOutcome, NativeTermPath, NativeValueContext, NativeValueOwnership, NativeValueScope,
+    RelationDependency, RelationDependencyKind, RelationDependencyProducerKind,
+    ResolvedProgramExtraction, ResolvedProgramExtractionError, SourceObjectDisposition,
+    SourceObjectDispositionKind, SourceObjectEquivalence, ValueProjectionStage,
 };
 pub use manifest::{
     ResolvedConstructCount, ResolvedImportManifest, ResolvedModuleManifest,

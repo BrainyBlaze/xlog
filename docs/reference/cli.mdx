@@ -3,8 +3,9 @@ title: "CLI reference"
 description: "Every xlog subcommand and flag, with input and output formats, environment variables, and exit codes."
 ---
 
-The `xlog` binary runs, inspects, and watches XLOG programs. It has five subcommands:
+The `xlog` binary runs, inspects, and watches XLOG programs.
 `run` and `prob` execute programs; `explain`, `repl`, and `watch` support development.
+`manifest` inventories resolved sources; `extract` exports their selected program.
 An unsupported subcommand fails explicitly rather than falling back to another mode.
 
 <Note>
@@ -200,6 +201,178 @@ xlog explain --format json program.xlog
 ```
 
 For the shared generated-rule diagnostics model, see [Diagnostics and provenance](/guides/diagnostics).
+
+## xlog extract
+
+Export a resolved program as JSON when you need to inspect its rules, declarations,
+dependencies, and every authored provider. Import selection is the same selection
+used by compilation. The command does not execute the program or certify that all
+extracted constructs can compile for a particular runtime.
+
+```bash
+xlog extract --source-root . examples/xlog/00-basics/01_tc_reachability.xlog > program.json
+```
+
+The output has `schema_version: "xlog.resolved-program-extraction.v2"` and four
+data fields:
+
+| Field | Meaning |
+|---|---|
+| `source_manifest` | Complete resolved source inventory, retaining `xlog.resolved-program-manifest.v1`, exact source hashes, object spans, and import selections. |
+| `source_object_dispositions` | Exactly one row for each manifest source object, ordered by manifest module and authored object order. |
+| `executable_program` | Selected native declarations, rules, constraints, queries, probabilistic and neural constructs, dependencies, and strongly connected components. |
+| `native_values` | Contextual scalar encodings and compiler-stage diagnostics, with `schema_version: "xlog.contextual-values.v1"`. |
+
+`--source-root <DIR>` is required. Every resolved source must be inside this
+directory; paths in the output are relative to it. `--module-path <DIR[:DIR...]>`
+adds module search paths. `xlog manifest` accepts the same arguments and emits only
+the source inventory.
+
+### Authored provider ownership
+
+Each disposition row identifies `module_id` and `source_object_id`. Its
+`disposition` explains what happened under the import selections of
+`source_manifest.entry_module_id`:
+
+| Disposition | Meaning and additional fields |
+|---|---|
+| `admitted` | The object was retained. `executable_source_object_id` is its own source-object ID. |
+| `coalesced` | The selected object was merged into an existing object. `executable_source_object_id` identifies the retained owner's source object; `equivalence` describes the comparison. No extra executable clause is added. |
+| `private` | An imported private declaration, function, or clause was excluded. |
+| `unselected` | Every actual import selection of this source omitted the public object. |
+| `not_merged` | The construct does not merge from an imported module, such as its query, probabilistic query, or pragma. |
+| `resolution` | An import declaration was consumed by module resolution. |
+| `configuration` | An entrypoint pragma was retained as compilation configuration. |
+
+For `coalesced` rows, `equivalence: "ast_equal"` means complete native parsed
+objects compared equal. `equivalence: "native_schema"` means the parsed
+declarations differ, but module validation established equal normalized schemas.
+For example, a predicate column using a domain alias can have the same native
+schema as a column using that alias's scalar type. A name match alone does not
+establish equivalence. Neither value claims that distinct source objects have
+the same identity or that differently written constants compare equal at runtime.
+
+When two imported modules both contain `shared(same).`, extraction retains the
+actual first rule owner and links the other provider to it. Private clauses stay
+excluded. Repeated imports and source aliases produce one effective disposition
+per authored object: a later omission cannot erase an earlier admission. Entry
+clauses retain the compiler's existing behavior, including repeated clauses.
+
+Provider mappings apply only to the stated entrypoint. The same source object
+can be selected by one entrypoint and omitted by another. Domain aliases merge
+even with selective imports. Private objects are retained when their own module
+is the entrypoint. To list all providers of a retained declaration or clause,
+collect the `admitted` and `coalesced` rows targeting its source-object ID.
+The executable object's owner fields and relation declaration IDs continue to
+identify retained objects.
+
+### Relation graph coverage
+
+Every emitted relation belongs to one strongly connected component (SCC), a group
+of relations connected by recursive dependencies. This includes isolated
+declarations and relations used only by constraints, queries, probabilistic
+constructs, evidence, or neural declarations. Registering an isolated relation
+adds no dependency edge and no executable rule.
+
+Each relation's `scc_id`, `stratum`, and `non_monotone` agree with its SCC record.
+A stratum is an evaluation layer; isolated relations have stratum zero. Components
+containing a cycle through negation, aggregation, or epistemic literals are marked
+`non_monotone` and have no stratum. Positive, negative, aggregate, and epistemic
+rule dependencies keep their native meanings. SCC IDs are local to one extraction
+and may change when its relation universe changes.
+
+Extraction preserves authored constructs before runtime lowering. For example,
+learnable templates with non-positive bodies remain visible in the export, while
+compilation still rejects them: supported learnable templates require exactly two
+positive atoms and variable-only heads. Their graph follows the native conservative
+template analysis; extraction is not evidence that an unsupported template ran.
+Use `xlog explain --format json` to inspect compilation and check `rir.status`
+and its reason as well as the process exit status.
+
+### Contextual scalar values
+
+Use contextual values to compare literals under their column types while keeping
+their original spelling and source ownership. Save this as `values.xlog`:
+
+```prolog
+pred label(symbol).
+label(example).
+label("example").
+```
+
+Run `xlog extract --source-root . values.xlog`. The two retained occurrences have
+different `authored_term` values and the same constant `value`:
+`{"kind":"symbol","value":"example"}`. Check the stage statuses before treating
+the complete program as compilable.
+
+`native_values.entry_module_id` binds the report to the selected program. Its
+`normalization`, `frontend`, `schema_validation`, and `ordinary_rir` fields each
+have a `status` of `accepted`, `rejected`, or `unavailable`; the latter two include
+a `reason`. Normalization expands functions and term/list syntax. Frontend
+preparation handles queries, constraints, and safety checks. Schema validation
+checks native column and variable types. `ordinary_rir` includes
+stratification and construction of the unoptimized relational intermediate plan.
+It does not certify optimizer, epistemic execution, probabilistic evaluation, or
+device support. A failed stage leaves later dependent stages unavailable.
+
+Each `occurrences` row has a `source_object_id`, the retained
+`executable_source_object_id`, `ownership`, and a structured `path`. Paths identify
+a head term, body atom term, comparison operand, standalone atom term, or annotated
+disjunction choice term; all ordinals are zero-based. `ownership: "authored"`
+reads each admitted or coalesced provider's original AST. `ownership: "retained"`
+reads the selected merged AST. Private, unselected, and non-merged objects remain
+in the source inventory and dispositions without receiving a selected-program
+value context. `authored_term` always preserves the original term structure.
+
+For a relation column, `context` gives its relation ID, column index, selected
+`type_reference`, and the provider's own `authored_type_reference` when that
+provider declares it. The latter is null when the provider has no declaration;
+it never borrows another provider's nominal domain. Nominal references remain
+distinct even when their native scalar types are compatible. `column_name` and
+`authored_column_name` likewise retain the optional declared column names.
+Comparison contexts
+identify the peer variable, when present. `scalar_type` gives the native storage
+scalar when it can be established.
+
+`scope` is `declared_scalar_carrier`, `inferred_scalar_carrier`,
+`comparison_operand`, or `unavailable`. These are local carrier encodings of
+authored terms, not mappings to generated or optimized occurrences and not proof
+that a complete rule can execute. Declared scalar encodings can therefore remain
+available beside a rejected program stage. Undeclared carriers come from the
+successfully validated prepared program's native schemas. Variable compatibility
+uses the compiler's scalar checks rather than nominal-name equality.
+
+`outcome` is a tagged `constant`, `variable`, `anonymous`, or `unavailable` value.
+Constants carry a typed `value`: `u32`, `u64`, `i32`, and `i64` use decimal strings;
+`f32` and `f64` use eight or sixteen lowercase hexadecimal `bits`; `bool` uses a
+JSON Boolean; and `symbol` uses a string. Thus `p(x)` and `p("x")` have equal
+values under `pred p(symbol)`, while the same authored integer can encode as
+different native types in different columns. The exact floating bits preserve
+native same-scalar total-order equality, including distinct positive and negative
+zero. Mixed-type comparison evaluation is not supplied by this report. Authored
+integer syntax is limited to signed 64-bit values; this syntax limit says nothing
+about the full range accepted through other numeric input interfaces.
+
+Import coalescing is a separate operation: native AST equality can coalesce
+`p(0.0)` and `p(-0.0)`. Each authored row keeps its own carrier conversion; the
+retained row keeps the selected first provider's bits. Never copy a retained
+value to every coalesced provider or interpret `ast_equal` as runtime equality.
+
+Unavailable outcomes retain `reason_code` and `reason`. Term, compound, list,
+and predicate-reference carriers need normalization and do not receive fabricated
+program-local scalar IDs. Aggregate results are computed values. Missing or
+rejected schemas and rejected constant conversions remain explicit. Variables
+and anonymous wildcards are non-constants; a wildcard's path identifies its
+independent occurrence. `source_diagnostics` records rule-variable and transformed
+expression/meta-literal limitations beside the preserved authored constructs.
+
+### Consuming earlier exports
+
+The current producer emits v2 only. Frozen v1 payloads lack complete provider
+dispositions and can omit isolated relations from their SCCs. Decode those payloads
+under their original version when replaying old evidence; absence of v2 fields is
+not complete provider coverage. Re-extract with the current binary to obtain v2,
+retaining the old payload and its original binary/source identities separately.
 
 ## xlog repl
 

@@ -77,7 +77,7 @@ enum ArithmeticExpressionTask<'a> {
     FinishConditional(CompOp),
 }
 
-fn resolve_pred_column_type(
+pub(crate) fn resolve_pred_column_type(
     predicate: &str,
     index: usize,
     typ: &TypeRef,
@@ -929,6 +929,11 @@ impl Lowerer {
         validate_lowerable_terms(program)?;
         validate_is_expression_bindings(program)?;
         self.infer_and_validate_schemas(program)?;
+        self.prepare_relation_metadata(program);
+        Ok(())
+    }
+
+    fn prepare_relation_metadata(&mut self, program: &Program) {
         self.infer_cardinalities(program);
 
         // Pre-allocate RelIds for declared predicates so schema-only programs
@@ -944,8 +949,6 @@ impl Lowerer {
         for fact in program.facts() {
             self.get_or_create_rel_id(&fact.head.predicate);
         }
-
-        Ok(())
     }
 
     /// Validate every source-level contract enforced while lowering, without
@@ -957,7 +960,6 @@ impl Lowerer {
     /// negation lowering, and head projection as production lowering.
     pub(crate) fn validate_program_without_plan(&mut self, program: &Program) -> Result<()> {
         self.prepare_program_for_lowering(program)?;
-
         for rule in program.proper_rules() {
             self.lower_rule(rule)?;
         }
@@ -983,7 +985,22 @@ impl Lowerer {
     /// Lower an entire program to an execution plan
     pub fn lower_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
         self.prepare_program_for_lowering(program)?;
+        self.lower_prepared_program(program)
+    }
 
+    /// Continue real plan construction after this instance successfully inferred
+    /// and validated the same program's schemas. No schema pass is repeated.
+    pub(crate) fn lower_program_with_inferred_schemas(
+        &mut self,
+        program: &Program,
+    ) -> Result<ExecutionPlan> {
+        validate_lowerable_terms(program)?;
+        validate_is_expression_bindings(program)?;
+        self.prepare_relation_metadata(program);
+        self.lower_prepared_program(program)
+    }
+
+    fn lower_prepared_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
         // Build SCCs
         self.build_sccs(program);
 
@@ -2012,7 +2029,7 @@ impl Lowerer {
                 let typ = var_env.get_type(name).ok_or_else(|| {
                     XlogError::Compilation(format!("Missing type for variable {}", name))
                 })?;
-                if let Some(const_val) = term_to_typed_const_value(term, typ)? {
+                if let Some(const_val) = comparison_constant_value(term, Some(typ))? {
                     (Expr::Column(col), Expr::Const(const_val))
                 } else {
                     (
@@ -2028,7 +2045,7 @@ impl Lowerer {
                 let typ = var_env.get_type(name).ok_or_else(|| {
                     XlogError::Compilation(format!("Missing type for variable {}", name))
                 })?;
-                if let Some(const_val) = term_to_typed_const_value(term, typ)? {
+                if let Some(const_val) = comparison_constant_value(term, Some(typ))? {
                     (Expr::Const(const_val), Expr::Column(col))
                 } else {
                     (
@@ -2078,10 +2095,9 @@ impl Lowerer {
             Term::Anonymous => Err(XlogError::Compilation(
                 "Anonymous wildcard '_' not allowed in comparisons".to_string(),
             )),
-            Term::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
-            Term::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
-            Term::String(s) => Ok(Expr::Const(ConstValue::Symbol(s.clone()))),
-            Term::Symbol(id) => Ok(Expr::Const(ConstValue::Symbol(symbol::resolve(*id)))),
+            Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => Ok(
+                Expr::Const(comparison_constant_value(term, None)?.expect("scalar term")),
+            ),
             Term::Aggregate(_) => Err(XlogError::Compilation(
                 "Aggregates not allowed in comparisons".to_string(),
             )),
@@ -3032,6 +3048,18 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         | Term::Cons { .. }
         | Term::Compound { .. }
         | Term::PredRef(_) => None,
+    }
+}
+
+/// A comparison coerces a constant only when its peer is a typed bound variable.
+/// Otherwise its expression retains the native literal type.
+pub(crate) fn comparison_constant_value(
+    term: &Term,
+    peer_type: Option<ScalarType>,
+) -> Result<Option<ConstValue>> {
+    match peer_type {
+        Some(typ) => term_to_typed_const_value(term, typ),
+        None => Ok(term_to_const_value(term)),
     }
 }
 

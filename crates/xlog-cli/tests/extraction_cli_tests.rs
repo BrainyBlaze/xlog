@@ -45,7 +45,7 @@ fn xlog_extract_emits_the_resolved_executable_program() {
     let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON extraction");
     assert_eq!(
         payload["schema_version"],
-        "xlog.resolved-program-extraction.v1"
+        "xlog.resolved-program-extraction.v2"
     );
     assert_eq!(
         payload["source_manifest"]["modules"]
@@ -72,6 +72,24 @@ fn xlog_extract_emits_the_resolved_executable_program() {
         payload["executable_program"]["queries"][0]["goal"]["relation_id"],
         "relation:answer/1"
     );
+    let source_count: usize = payload["source_manifest"]["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|module| module["source_objects"].as_array().unwrap().len())
+        .sum();
+    assert_eq!(
+        payload["source_object_dispositions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        source_count
+    );
+    assert!(payload["executable_program"]["relations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|relation| relation["scc_id"].is_string() && relation["stratum"].is_number()));
     assert!(!stdout.contains(fixture.path().to_str().unwrap()));
 }
 
