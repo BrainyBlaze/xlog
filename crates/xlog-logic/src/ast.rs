@@ -952,16 +952,69 @@ pub struct Program {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProgramMergeReport {
-    pub domains: Vec<usize>,
-    pub predicates: Vec<usize>,
-    pub functions: Vec<usize>,
-    pub rules: Vec<usize>,
+    pub domains: Vec<ProgramMergeDisposition>,
+    pub predicates: Vec<ProgramMergeDisposition>,
+    pub functions: Vec<ProgramMergeDisposition>,
+    pub rules: Vec<ProgramMergeDisposition>,
+}
+
+/// One outcome per source vector element, in source order. Target indices refer
+/// to the destination vector after merging; coalescing never appends an object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProgramMergeDisposition {
+    Admitted {
+        target_index: usize,
+    },
+    Coalesced {
+        target_index: usize,
+        ast_equal: bool,
+    },
+    Private,
+    Unselected,
 }
 
 impl Program {
     /// Create an empty program.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// All declared and atom-referenced relation signatures in the native AST.
+    /// This traversal establishes the shared extraction and dependency-graph
+    /// universe. Repeated signatures are retained for arity validation.
+    pub(crate) fn relation_signatures(&self) -> impl Iterator<Item = (&str, usize)> {
+        let atoms = self
+            .rules
+            .iter()
+            .flat_map(|rule| {
+                std::iter::once(&rule.head).chain(rule.body.iter().filter_map(BodyLiteral::atom))
+            })
+            .chain(
+                self.constraints
+                    .iter()
+                    .flat_map(|constraint| constraint.body.iter().filter_map(BodyLiteral::atom)),
+            )
+            .chain(self.queries.iter().map(|query| &query.atom))
+            .chain(self.prob_facts.iter().map(|fact| &fact.atom))
+            .chain(
+                self.annotated_disjunctions
+                    .iter()
+                    .flat_map(|disjunction| disjunction.choices.iter().map(|choice| &choice.atom)),
+            )
+            .chain(self.evidence.iter().map(|evidence| &evidence.atom))
+            .chain(self.prob_queries.iter().map(|query| &query.atom))
+            .chain(
+                self.neural_predicates
+                    .iter()
+                    .map(|declaration| &declaration.predicate),
+            )
+            .chain(self.learnable_rules.iter().flat_map(|rule| {
+                std::iter::once(&rule.head).chain(rule.body.iter().filter_map(BodyLiteral::atom))
+            }));
+        self.predicates
+            .iter()
+            .map(|declaration| (declaration.name.as_str(), declaration.arity()))
+            .chain(atoms.map(|atom| (atom.predicate.as_str(), atom.terms.len())))
     }
 
     /// Assign or validate stable authored identities before any program transforms.
@@ -1143,71 +1196,98 @@ impl Program {
             .map(|p| p.name.as_str())
             .collect();
 
-        let _private_funcs: HashSet<&str> = other
-            .functions
-            .iter()
-            .filter(|f| f.is_private)
-            .map(|f| f.name.as_str())
-            .collect();
-
         // Merge predicate declarations (only public ones)
-        for (source_index, pred) in other.predicates.iter().enumerate() {
+        for pred in &other.predicates {
             if pred.is_private {
+                report.predicates.push(ProgramMergeDisposition::Private);
                 continue;
             }
             // Check if this is in the import list (if specified)
             if let Some(items) = imported_items {
                 if !items.contains(&pred.name) {
+                    report.predicates.push(ProgramMergeDisposition::Unselected);
                     continue;
                 }
             }
             // Avoid duplicate declarations
-            if !self.predicates.iter().any(|p| p.name == pred.name) {
+            if let Some(target_index) = self.predicates.iter().position(|p| p.name == pred.name) {
+                report.predicates.push(ProgramMergeDisposition::Coalesced {
+                    target_index,
+                    ast_equal: self.predicates[target_index] == *pred,
+                });
+            } else {
+                report.predicates.push(ProgramMergeDisposition::Admitted {
+                    target_index: self.predicates.len(),
+                });
                 self.predicates.push(pred.clone());
-                report.predicates.push(source_index);
             }
         }
 
         // Merge functions (only public ones)
-        for (source_index, func) in other.functions.iter().enumerate() {
+        for func in &other.functions {
             if func.is_private {
+                report.functions.push(ProgramMergeDisposition::Private);
                 continue;
             }
             if let Some(items) = imported_items {
                 if !items.contains(&func.name) {
+                    report.functions.push(ProgramMergeDisposition::Unselected);
                     continue;
                 }
             }
             // Avoid duplicate functions
-            if !self.functions.iter().any(|f| f.name == func.name) {
+            if let Some(target_index) = self.functions.iter().position(|f| f.name == func.name) {
+                report.functions.push(ProgramMergeDisposition::Coalesced {
+                    target_index,
+                    ast_equal: self.functions[target_index] == *func,
+                });
+            } else {
+                report.functions.push(ProgramMergeDisposition::Admitted {
+                    target_index: self.functions.len(),
+                });
                 self.functions.push(func.clone());
-                report.functions.push(source_index);
             }
         }
 
         // Merge rules (facts and rules for public predicates)
-        for (source_index, rule) in other.rules.iter().enumerate() {
+        for rule in &other.rules {
             // Skip if the head predicate is private
             if private_preds.contains(rule.head.predicate.as_str()) {
+                report.rules.push(ProgramMergeDisposition::Private);
                 continue;
             }
             // Check import list for facts/rules
             if let Some(items) = imported_items {
                 if !items.contains(&rule.head.predicate) {
+                    report.rules.push(ProgramMergeDisposition::Unselected);
                     continue;
                 }
             }
-            if !self.rules.iter().any(|existing| existing == rule) {
+            if let Some(target_index) = self.rules.iter().position(|existing| existing == rule) {
+                report.rules.push(ProgramMergeDisposition::Coalesced {
+                    target_index,
+                    ast_equal: true,
+                });
+            } else {
+                report.rules.push(ProgramMergeDisposition::Admitted {
+                    target_index: self.rules.len(),
+                });
                 self.rules.push(rule.clone());
-                report.rules.push(source_index);
             }
         }
 
         // Merge domains
-        for (source_index, domain) in other.domains.iter().enumerate() {
-            if !self.domains.iter().any(|d| d.name == domain.name) {
+        for domain in &other.domains {
+            if let Some(target_index) = self.domains.iter().position(|d| d.name == domain.name) {
+                report.domains.push(ProgramMergeDisposition::Coalesced {
+                    target_index,
+                    ast_equal: self.domains[target_index] == *domain,
+                });
+            } else {
+                report.domains.push(ProgramMergeDisposition::Admitted {
+                    target_index: self.domains.len(),
+                });
                 self.domains.push(domain.clone());
-                report.domains.push(source_index);
             }
         }
 

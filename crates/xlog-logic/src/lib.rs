@@ -35,6 +35,7 @@ pub mod compiler_config;
 pub mod diagnostics;
 pub mod eir;
 pub mod epistemic;
+pub mod execution_normalize;
 pub mod expand;
 mod fact_fast_path;
 pub mod function;
@@ -72,6 +73,7 @@ pub use diagnostics::{
     RuleSourceKind,
 };
 pub use eir::build_eir;
+pub use execution_normalize::normalize_program_for_execution;
 pub use expand::{expand_program_functions, expand_program_functions_owned};
 pub use incremental_parse::{
     IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,

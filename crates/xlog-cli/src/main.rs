@@ -9,12 +9,11 @@ use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
-use xlog_gpu::logic::{
-    download_logic_rows, normalize_program_for_execution, LogicProgram, LogicScalarValue,
-};
+use xlog_gpu::logic::{download_logic_rows, LogicProgram, LogicScalarValue};
 use xlog_ir::{EirBodyLiteral, EirTerm};
 use xlog_logic::ast::{BodyLiteral, ProbEngine, Program};
 use xlog_logic::compile::load_modules;
+use xlog_logic::normalize_program_for_execution;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
 use xlog_logic::IncrementalParseResult;

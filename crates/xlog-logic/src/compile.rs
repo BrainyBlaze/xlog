@@ -278,9 +278,7 @@ impl Compiler {
         config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
-        program.validate_prepared_authored_constraint_identity()?;
-        let generated_query_heads = generated_query_heads_for_program(&program)?;
-        let program = run_frontend_passes(program)?;
+        let (program, generated_query_heads) = prepare_program_frontend(program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
@@ -589,6 +587,13 @@ fn run_frontend_passes(program: Program) -> Result<Program> {
     let program = rewrite_magic_sets_owned(program)?.program;
     validate_negation_safety(&program)?;
     Ok(program)
+}
+
+/// The exact prepared-source boundary shared by ordinary compilation and extraction.
+pub(crate) fn prepare_program_frontend(program: Program) -> Result<(Program, Vec<String>)> {
+    program.validate_prepared_authored_constraint_identity()?;
+    let generated_query_heads = generated_query_heads_for_program(&program)?;
+    Ok((run_frontend_passes(program)?, generated_query_heads))
 }
 
 fn desugar_queries_and_constraints(program: Program) -> Result<Program> {
