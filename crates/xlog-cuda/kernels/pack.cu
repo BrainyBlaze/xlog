@@ -398,6 +398,33 @@ extern "C" __global__ void unpack_column_counted(
     }
 }
 
+// Packed rows may start at any byte alignment, even when the allocation is
+// aligned. Only use word copies when both row addresses satisfy that alignment.
+__device__ __forceinline__ void copy_packed_row(
+    const uint8_t* src,
+    uint8_t* dst,
+    uint32_t row_size
+) {
+    const uintptr_t addresses = reinterpret_cast<uintptr_t>(src)
+        | reinterpret_cast<uintptr_t>(dst);
+    uint32_t i = 0;
+    if ((addresses & 7) == 0) {
+        for (; row_size - i >= 8; i += 8) {
+            *reinterpret_cast<uint64_t*>(dst + i) =
+                *reinterpret_cast<const uint64_t*>(src + i);
+        }
+    }
+    if ((addresses & 3) == 0) {
+        for (; row_size - i >= 4; i += 4) {
+            *reinterpret_cast<uint32_t*>(dst + i) =
+                *reinterpret_cast<const uint32_t*>(src + i);
+        }
+    }
+    for (; i < row_size; i++) {
+        dst[i] = src[i];
+    }
+}
+
 /**
  * Gather rows from packed data based on index array.
  *
@@ -424,14 +451,7 @@ extern "C" __global__ void gather_packed_rows(
     const uint8_t* src = src_packed + (uint64_t)src_row * row_size;
     uint8_t* dst = dst_packed + (uint64_t)out_row * row_size;
 
-    // Copy row data - use vectorized loads where possible
-    uint32_t i = 0;
-    for (; i + 8 <= row_size; i += 8) {
-        *((uint64_t*)(dst + i)) = *((const uint64_t*)(src + i));
-    }
-    for (; i < row_size; i++) {
-        dst[i] = src[i];
-    }
+    copy_packed_row(src, dst, row_size);
 }
 
 /**
@@ -456,13 +476,7 @@ extern "C" __global__ void gather_packed_rows_counted(
     const uint8_t* src = src_packed + (uint64_t)src_row * row_size;
     uint8_t* dst = dst_packed + (uint64_t)out_row * row_size;
 
-    uint32_t i = 0;
-    for (; i + 8 <= row_size; i += 8) {
-        *((uint64_t*)(dst + i)) = *((const uint64_t*)(src + i));
-    }
-    for (; i < row_size; i++) {
-        dst[i] = src[i];
-    }
+    copy_packed_row(src, dst, row_size);
 }
 
 /**
@@ -495,14 +509,7 @@ extern "C" __global__ void scatter_packed_rows(
     const uint8_t* src = src_packed + (uint64_t)src_row * row_size;
     uint8_t* dst = dst_packed + (uint64_t)dst_row * row_size;
 
-    // Copy row data - use vectorized loads where possible
-    uint32_t i = 0;
-    for (; i + 8 <= row_size; i += 8) {
-        *((uint64_t*)(dst + i)) = *((const uint64_t*)(src + i));
-    }
-    for (; i < row_size; i++) {
-        dst[i] = src[i];
-    }
+    copy_packed_row(src, dst, row_size);
 }
 
 /**

@@ -654,6 +654,93 @@ fn wcoj_triangle_groupby_root_agg_measurement_fused_vs_unfused() {
     }
 }
 
+/// Three Symbol keys pack into twelve bytes, so successive group rows have
+/// different alignment even when their allocation is aligned.
+#[test]
+fn groupby_three_symbol_keys_preserves_multiple_groups() {
+    let fix = make_fixture().expect("CUDA device is required for the packed group regression");
+    fix.provider.enable_strict_deterministic_d2h();
+    let keys = [[1u32, 2, 9], [1, 2, 7], [1, 2, 9], [1, 2, 7]];
+    let values = [5_000_000_000u64, 7, 11, 3];
+    let mut bytes: Vec<Vec<u8>> = (0..3)
+        .map(|column| {
+            keys.iter()
+                .flat_map(|key| key[column].to_le_bytes())
+                .collect()
+        })
+        .collect();
+    bytes.push(
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
+    );
+    let device = fix.memory.device().inner();
+    let columns = bytes
+        .iter()
+        .map(|bytes| {
+            let mut column = fix.memory.alloc::<u8>(bytes.len()).expect("alloc column");
+            device
+                .htod_sync_copy_into(bytes, &mut column)
+                .expect("upload column");
+            CudaColumn::from(column)
+        })
+        .collect();
+    let mut d_num_rows = fix.memory.alloc::<u32>(1).expect("alloc row count");
+    device
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("upload row count");
+    let mut schema = (0..3)
+        .map(|column| (format!("key{column}"), ScalarType::Symbol))
+        .collect::<Vec<_>>();
+    schema.push(("value".into(), ScalarType::U64));
+    let buffer =
+        CudaBuffer::from_columns_with_host_count(columns, 4, d_num_rows, Schema::new(schema), 4);
+    let stream = fix.pool.acquire().expect("stream");
+    fix.provider.reset_host_transfer_stats();
+    let grouped = fix
+        .provider
+        .groupby_multi_agg_recorded(
+            &buffer,
+            &[0, 1, 2],
+            &[
+                (3, AggOp::Sum),
+                (3, AggOp::Min),
+                (3, AggOp::Max),
+                (3, AggOp::Count),
+            ],
+            stream,
+        )
+        .expect("aggregate multiple groups with twelve-byte packed keys");
+    fix.memory
+        .device()
+        .synchronize()
+        .expect("complete grouped kernels");
+    let transfers = fix.provider.host_transfer_stats();
+    assert_eq!(transfers.htod_calls, 0);
+    assert_eq!(transfers.dtoh_calls, 0);
+    assert_eq!(fix.provider.deterministic_d2h_violation_count(), 0);
+    for column in 0..3 {
+        assert_eq!(
+            grouped.schema().column_type(column),
+            Some(ScalarType::Symbol)
+        );
+    }
+    assert_eq!(download_u32_column(&fix.memory, &grouped, 0), [1, 1]);
+    assert_eq!(download_u32_column(&fix.memory, &grouped, 1), [2, 2]);
+    assert_eq!(download_u32_column(&fix.memory, &grouped, 2), [7, 9]);
+    assert_eq!(
+        download_u64_column(&fix.memory, &grouped, 3),
+        [10, 5_000_000_011]
+    );
+    assert_eq!(download_u64_column(&fix.memory, &grouped, 4), [3, 11]);
+    assert_eq!(
+        download_u64_column(&fix.memory, &grouped, 5),
+        [7, 5_000_000_000]
+    );
+    assert_eq!(download_u64_column(&fix.memory, &grouped, 6), [2, 2]);
+}
+
 /// The recorded groupby Sum extension consumed by the fused sum path:
 /// U64 value columns must reduce with u64 accumulation.
 #[test]
