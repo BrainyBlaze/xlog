@@ -1818,14 +1818,31 @@ impl Lowerer {
     ) -> Result<RirNode> {
         let mut result = positive_root;
 
-        // Apply comparisons as filters.
-        for cmp in comparisons {
-            result = self.apply_comparison(result, cmp, var_env)?;
-        }
-
-        // Apply is-expressions (must be after atoms that bind the input variables).
+        // A comparison can depend on a calculated column. Apply every available
+        // guard before the next arithmetic binding, so input and intermediate
+        // guards still protect later operations such as division. Is-expression
+        // order and fresh targets were already checked for the whole program.
+        let mut pending_comparisons = comparisons.to_vec();
         for is_expr in is_exprs {
+            let mut deferred = Vec::new();
+            for cmp in pending_comparisons {
+                if cmp
+                    .left
+                    .variables()
+                    .into_iter()
+                    .chain(cmp.right.variables())
+                    .all(|name| var_env.get_column(name).is_some())
+                {
+                    result = self.apply_comparison(result, cmp, var_env)?;
+                } else {
+                    deferred.push(cmp);
+                }
+            }
+            pending_comparisons = deferred;
             result = self.lower_is_expr(is_expr, result, var_env)?;
+        }
+        for cmp in pending_comparisons {
+            result = self.apply_comparison(result, cmp, var_env)?;
         }
 
         // Handle negated atoms via Diff / semi-join.

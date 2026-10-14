@@ -908,6 +908,20 @@ mod tests {
     }
 
     #[test]
+    fn compiler_accepts_comparisons_on_calculated_variables() {
+        for body in [
+            "value(X), A is X + 1, A > 1, B is A * 2, B < 10",
+            "B < 10, value(X), A > 1, A is X + 1, B is A * 2",
+        ] {
+            Compiler::new()
+                .compile(&format!(
+                    "pred value(i64). pred result(i64). value(2). result(B) :- {body}. ?- result(B)."
+                ))
+                .expect("comparisons must wait until their calculated operands exist");
+        }
+    }
+
+    #[test]
     fn compiler_reports_unbound_is_input_before_a_later_duplicate_target() {
         let error = Compiler::new()
             .compile(
