@@ -63,6 +63,14 @@ fn make_fixture() -> Option<Fixture> {
 }
 
 fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    upload_binary_typed(memory, rows, [ScalarType::U32; 2])
+}
+
+fn upload_binary_typed(
+    memory: &Arc<GpuMemoryManager>,
+    rows: &[(u32, u32)],
+    types: [ScalarType; 2],
+) -> CudaBuffer {
     let n = rows.len() as u32;
     let mut col0 = memory
         .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
@@ -84,8 +92,8 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
         .htod_sync_copy_into(&[n], &mut d_num_rows)
         .expect("htod d_num_rows");
     let schema = Schema::new(vec![
-        ("col0".to_string(), ScalarType::U32),
-        ("col1".to_string(), ScalarType::U32),
+        ("col0".to_string(), types[0]),
+        ("col1".to_string(), types[1]),
     ]);
     CudaBuffer::from_columns_with_host_count(
         vec![col0.into(), col1.into()],
@@ -1218,6 +1226,137 @@ fn chain_count_plan_full() -> FjPlan {
     let mut plan = chain_plan_natural();
     plan.output_vars = vec![0];
     plan
+}
+
+#[test]
+fn free_join_preserves_mixed_symbol_types_in_projection_and_count() {
+    let fix = make_fixture().expect("CUDA device is required for the symbol schema regression");
+    fix.provider.enable_strict_deterministic_d2h();
+    let stream = fix.pool.acquire().expect("stream");
+    for (empty_input, disjoint_input) in [(false, false), (true, false), (false, true)] {
+        let rows = [
+            vec![(1, 10), (2, 20)],
+            vec![(10, 100), (20, 200)],
+            if empty_input {
+                vec![]
+            } else if disjoint_input {
+                vec![(300, 3000)]
+            } else {
+                vec![(100, 1000), (200, 2000)]
+            },
+            vec![(1000, 7), (1000, 9), (2000, 8)],
+        ];
+        let types = [
+            [ScalarType::Symbol, ScalarType::U32],
+            [ScalarType::U32, ScalarType::Symbol],
+            [ScalarType::Symbol, ScalarType::U32],
+            [ScalarType::U32, ScalarType::Symbol],
+        ];
+        let bufs: Vec<CudaBuffer> = rows
+            .iter()
+            .zip(types)
+            .map(|(rows, types)| upload_binary_typed(&fix.memory, rows, types))
+            .collect();
+        let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+        let expected = oracle_chain(&rows[0], &rows[1], &rows[2], &rows[3]);
+        let mut plan = chain_plan_natural();
+        plan.output_vars = vec![4, 1, 0, 4];
+        fix.provider.reset_host_transfer_stats();
+        let out = fix
+            .provider
+            .free_join_execute_u32_recorded(&inputs, &plan, stream)
+            .expect("project mixed logical types");
+        let transfers = fix.provider.host_transfer_stats();
+        assert_eq!(transfers.htod_calls, 0);
+        assert_eq!(transfers.dtoh_calls, 0);
+        assert_eq!(fix.provider.deterministic_d2h_violation_count(), 0);
+        for (column, expected_type) in [
+            ScalarType::Symbol,
+            ScalarType::U32,
+            ScalarType::Symbol,
+            ScalarType::Symbol,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(out.schema().column_type(column), Some(expected_type));
+        }
+        let mut projected: Vec<Vec<u32>> = expected
+            .iter()
+            .map(|row| vec![row[4], row[1], row[0], row[4]])
+            .collect();
+        projected.sort();
+        projected.dedup();
+        assert_eq!(download_rows_sorted(&fix.memory, &out), projected);
+
+        for count_plan in [chain_count_plan_full(), chain_count_plan_factorized()] {
+            fix.provider.reset_host_transfer_stats();
+            let counted = fix
+                .provider
+                .free_join_count_by_root_u32_recorded(&inputs, &count_plan, stream)
+                .expect("count by symbol root");
+            let transfers = fix.provider.host_transfer_stats();
+            assert_eq!(transfers.htod_calls, 0);
+            assert_eq!(transfers.dtoh_calls, 0);
+            assert_eq!(fix.provider.deterministic_d2h_violation_count(), 0);
+            assert_eq!(counted.schema().column_type(0), Some(ScalarType::Symbol));
+            assert_eq!(counted.schema().column_type(1), Some(ScalarType::U64));
+            let keys = download_u32_column(&fix.memory, &counted, 0);
+            let counts = download_u64_column(&fix.memory, &counted, 1);
+            let mut actual: Vec<_> = keys.into_iter().zip(counts).collect();
+            actual.sort();
+            assert_eq!(actual, count_by_root_u32(&expected));
+        }
+    }
+}
+
+#[test]
+fn free_join_rejects_conflicting_probe_types() {
+    let fix = make_fixture().expect("CUDA device is required for the probe type regression");
+    fix.provider.enable_strict_deterministic_d2h();
+    let stream = fix.pool.acquire().expect("stream");
+    for (cover_type, probe_type) in [
+        (ScalarType::Symbol, ScalarType::U32),
+        (ScalarType::U32, ScalarType::Symbol),
+    ] {
+        for empty_probe in [false, true] {
+            let probe_rows = if empty_probe { vec![] } else { vec![(10, 100)] };
+            let bufs = [
+                upload_binary_typed(&fix.memory, &[(1, 10)], [ScalarType::U32, cover_type]),
+                upload_binary_typed(&fix.memory, &probe_rows, [probe_type, ScalarType::U32]),
+                upload_binary_u32(&fix.memory, &[(100, 1000)]),
+                upload_binary_u32(&fix.memory, &[(1000, 7)]),
+            ];
+            let inputs: Vec<&CudaBuffer> = bufs.iter().collect();
+            for (count_mode, plan) in [
+                (false, chain_plan_natural()),
+                (true, chain_count_plan_full()),
+                (true, chain_count_plan_factorized()),
+            ] {
+                fix.provider.reset_host_transfer_stats();
+                let result = if count_mode {
+                    fix.provider
+                        .free_join_count_by_root_u32_recorded(&inputs, &plan, stream)
+                } else {
+                    fix.provider
+                        .free_join_execute_u32_recorded(&inputs, &plan, stream)
+                };
+                let error = result
+                    .err()
+                    .expect("conflicting probe logical types must be rejected");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("probe type mismatch for variable 1"),
+                    "{error}"
+                );
+                let transfers = fix.provider.host_transfer_stats();
+                assert_eq!(transfers.htod_calls, 0);
+                assert_eq!(transfers.dtoh_calls, 0);
+                assert_eq!(fix.provider.deterministic_d2h_violation_count(), 0);
+            }
+        }
+    }
 }
 
 fn count_by_root_u32(rows: &[Vec<u32>]) -> Vec<(u32, u64)> {

@@ -1,0 +1,27 @@
+   Compiling xlog-cuda v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda)
+   Compiling xlog-runtime v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-runtime)
+   Compiling xlog-induce v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-induce)
+   Compiling xlog-solve v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-solve)
+   Compiling xlog-cuda-tests v0.5.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda-tests)
+    Finished `release` profile [optimized] target(s) in 23.13s
+     Running tests/test_free_join_spike.rs (target/release/deps/test_free_join_spike-61d67592b0dc6ac6)
+
+running 15 tests
+test fj_chain_matches_oracle ... ok
+test fj_chain_u64_matches_oracle ... ok
+test fj_count_by_root_matches_oracle ... ok
+test fj_empty_result_is_empty_buffer ... ok
+test fj_layout_normalizes_unsorted_inputs ... ok
+test fj_rejects_unbound_probe_vars ... ok
+test fj_star_matches_oracle ... ok
+test fj_triangle_matches_oracle_and_dedicated_kernel ... ok
+test fj_triangle_u64_matches_oracle ... ok
+test free_join_measurement_blowup_chain_vs_binary ... ignored, Free Join measurement: run explicitly with --ignored --nocapture
+test free_join_measurement_count_fusion_gate ... ignored, Free Join measurement: run explicitly with --ignored --nocapture
+test free_join_measurement_triangle_at_scale ... ignored, Free Join scale measurement: run explicitly with --ignored --nocapture
+test free_join_measurement_triangle_vs_dedicated_kernel ... ignored, Free Join measurement: run explicitly with --ignored --nocapture
+test free_join_preserves_mixed_symbol_types_in_projection_and_count ... ok
+test free_join_rejects_conflicting_probe_types ... ok
+
+test result: ok. 11 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.65s
+

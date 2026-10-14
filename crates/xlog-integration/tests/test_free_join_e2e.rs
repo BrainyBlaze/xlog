@@ -54,6 +54,14 @@ fn make_fixture() -> Option<Fixture> {
 }
 
 fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    upload_binary_typed(memory, rows, [ScalarType::U32; 2])
+}
+
+fn upload_binary_typed(
+    memory: &Arc<GpuMemoryManager>,
+    rows: &[(u32, u32)],
+    types: [ScalarType; 2],
+) -> CudaBuffer {
     let n = rows.len() as u32;
     let mut col0 = memory
         .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
@@ -75,8 +83,8 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
         .htod_sync_copy_into(&[n], &mut d_num_rows)
         .expect("htod d_num_rows");
     let schema = Schema::new(vec![
-        ("col0".to_string(), ScalarType::U32),
-        ("col1".to_string(), ScalarType::U32),
+        ("col0".to_string(), types[0]),
+        ("col1".to_string(), types[1]),
     ]);
     CudaBuffer::from_columns_with_host_count(
         vec![col0.into(), col1.into()],
@@ -222,6 +230,61 @@ fn free_join_fires_on_4atom_chain_with_kill_switch_parity() {
     }
     assert_eq!(unfused, expected, "kill-switch fallback row set");
     assert_eq!(unfused_count, 0, "kill switch must keep the counter at 0");
+}
+
+#[test]
+fn free_join_symbol_results_compose_with_union_branches() {
+    let fix = make_fixture().expect("CUDA device is required for the symbol union regression");
+    fix.provider.enable_strict_deterministic_d2h();
+    let _guard = env_lock();
+    let source = format!("q(A, B) :- alternative(A, B).\n{CHAIN_SOURCE}");
+    for empty_alternative in [true, false] {
+        for empty_chain in [false, true] {
+            let mut inputs = chain_inputs();
+            let alternative = if empty_alternative {
+                vec![]
+            } else {
+                vec![(1, 7), (4, 10)]
+            };
+            inputs.insert("alternative", alternative.clone());
+            if empty_chain {
+                inputs.insert("t", vec![]);
+            }
+            let mut compiler = Compiler::new();
+            let plan = compiler.compile(&source).expect("compile symbol union");
+            let mut executor = Executor::new(Arc::clone(&fix.provider));
+            for (name, rel_id) in compiler.rel_ids() {
+                executor.register_relation(*rel_id, name);
+            }
+            for (name, rows) in &inputs {
+                executor.put_relation(
+                    name,
+                    upload_binary_typed(&fix.memory, rows, [ScalarType::Symbol; 2]),
+                );
+            }
+            fix.provider.reset_host_transfer_stats();
+            executor.execute_plan(&plan).expect("execute symbol union");
+            let transfers = fix.provider.host_transfer_stats();
+            assert_eq!(transfers.htod_calls, 0, "execution must remain on device");
+            assert_eq!(transfers.dtoh_calls, 0, "execution must remain on device");
+            assert_eq!(fix.provider.deterministic_d2h_violation_count(), 0);
+            if !empty_chain {
+                assert_eq!(executor.free_join_dispatch_count(), 1);
+            }
+            let q = executor.store().get("q").expect("union result");
+            assert_eq!(q.schema().column_type(0), Some(ScalarType::Symbol));
+            assert_eq!(q.schema().column_type(1), Some(ScalarType::Symbol));
+            let mut expected = if empty_chain {
+                vec![]
+            } else {
+                chain_expected()
+            };
+            expected.extend(alternative.iter().map(|&(a, b)| vec![a, b]));
+            expected.sort();
+            expected.dedup();
+            assert_eq!(download_row_set(&fix.memory, q), expected);
+        }
+    }
 }
 
 /// Dedicated-shape carve-out: a canonical triangle routes through the

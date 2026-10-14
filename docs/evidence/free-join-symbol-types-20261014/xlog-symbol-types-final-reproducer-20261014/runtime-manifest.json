@@ -1,0 +1,93 @@
+{
+  "package_root": "/tmp/mistaber-pyxlog-symbol-types-final-20261014/pyxlog",
+  "files": {
+    "wheel": {
+      "path": "/dev/shm/xlog-symbol-types-final-wheels/pyxlog-0.12.0-cp310-cp310-manylinux_2_34_x86_64.whl",
+      "sha256": "5bc23ab8a1e854d9374642661cf53ca6c4f7cbb51d11d503d32d9ecbc9bf8cba"
+    },
+    "native_extension": {
+      "path": "/tmp/mistaber-pyxlog-symbol-types-final-20261014/pyxlog/_native.cpython-310-x86_64-linux-gnu.so",
+      "sha256": "a956c0198cc98d66d99b44d21913a096bf2733113c7bc96cb800e6a671c53cf7"
+    },
+    "pinned_previous_extension": {
+      "path": "/tmp/mistaber-pyxlog-key-packing-20261013/pyxlog/_native.cpython-310-x86_64-linux-gnu.so",
+      "sha256": "1ffa8aa947d62ed6a4768be4ebc4b510877a44baf9017b548352955e687f6410"
+    },
+    "pinned_compiler_binary": {
+      "path": "/tmp/native-contextual-values-20261008/xlog",
+      "sha256": "b0ec6359506153759a6ab3678aa9377f9b0e30c31c9277b86be3f9d0851c7104"
+    },
+    "frozen_facts": {
+      "path": "/dev/shm/mistaber-yd96-union-failure/facts.json",
+      "sha256": "ec0a7481eb03d01a202e8710e1ce8d8cbae45213620c75bec3633420443404de"
+    },
+    "frozen_failure": {
+      "path": "/dev/shm/mistaber-yd96-union-failure/runtime-stderr.txt",
+      "sha256": "25feaeb69ff70300fd70a3de33f3454508582987c595c1dc62f8b139b2961913"
+    }
+  },
+  "cubin_dir": "/tmp/mistaber-pyxlog-symbol-types-final-20261014/kernels",
+  "kernel_hashes": {
+    "arith.portable.ptx": "5a2753f18bb801c49e0e228bd094ded9042a69f6bec2e99edf35e564a426996b",
+    "arith.sm_86.cubin": "3bde19061fdc33c088ebcdd6b66c3c08d20e499090041b02c6b53047cb48976e",
+    "cache.portable.ptx": "0bd5d911f3806875f036d0c5fab4b0878a0e79cf6d8c8148ba2ec4f4fa92b83c",
+    "cache.sm_86.cubin": "ff978b610464ea7ec15d3ef23d2ae0562acbcbfea7fd1d6f436191c5a235a11e",
+    "circuit.portable.ptx": "1754d7423b75fb6ea51e1578b236628383760b838d88df3526398040756fb4de",
+    "circuit.sm_86.cubin": "d90b5c69b5e7eaf6c42515d4132591465ed19807ff47810d8d2391884dedf3b9",
+    "cnf.portable.ptx": "6136bc0b3a5ca859b15acf5f4de9f0aabc32d250414e705b93ac564b5b5095f6",
+    "cnf.sm_86.cubin": "0e13668388a31b4ce0a54cec18d1dbfb097f1aa019e2a4438477470d1511b3a8",
+    "d4.portable.ptx": "a2de8630a084d65d771409a7defdc1fc0a39d96ad442182e83541f5a1d86ff1d",
+    "d4.sm_86.cubin": "778501d081aa0fd3ca86c4e420b896633dd72cd208482283ddfd782ac29ed4e2",
+    "dedup.portable.ptx": "dcacb1209ac83b533cec456a6105db56742fd24017a50c5418cccc1c7629f78b",
+    "dedup.sm_86.cubin": "9f5f16f80b46229ef82b56ae8a9a40acd6e34e93b5e0d34f80fdb2e61012830e",
+    "embedded_kernel_data.rs": "d43a9fd58437abf3c2770708f02909bb6a6c8e7d68991734ab5d69fb7216822f",
+    "epistemic.portable.ptx": "2c56365e39c8afdcb43ca2b3d95e3cf799d4285b36cdbd1d1c0150c43e790464",
+    "epistemic.sm_86.cubin": "0f55372db1a6b9ba00bcb05d50dfd4e4201d372be5721d8b05bc121fbd690179",
+    "filter.portable.ptx": "c5ab296a5f0cc8fde296e11e0d62dd997bdf0446e5103a2a4000ceec14ede64b",
+    "filter.sm_86.cubin": "ab1bd8d9b8b9ff38c8e64584dc9d5f2ad6374d90876823bd8cfb29ae1d909319",
+    "groupby.portable.ptx": "2088f08484996580a670da9d1e393ceae8f4fca896f29d7857f003ffc9ab2d0d",
+    "groupby.sm_86.cubin": "595384b38625a5640ca1e3079a2de70ccdb6b501b5f2db943c2e27c4bc02880f",
+    "ilp.portable.ptx": "2b43f1c550e22416f5633d17ad85616d064d0bac891ebd12ae61242c70b0522f",
+    "ilp.sm_86.cubin": "ced26afc78d21bfc8036cbcf0a6346d9fe8f96da54c875fd1a15db01f66674f5",
+    "ilp_credit.portable.ptx": "3ec29772d33555426317706c6abb6d97e4d039bb6c485e790c3d529864907681",
+    "ilp_credit.sm_86.cubin": "3586fdadca8395f7c2a4a06686378180f487343a96aebe9447068e31373cbe9a",
+    "ilp_exact.portable.ptx": "b3153bfac495700c19f54369a6cb2c837a223a1d7433ae7577ac2c176ea1ddd2",
+    "ilp_exact.sm_86.cubin": "8f2d1d4c294d77dea62a61c8d8cac748ab8dd5e4ae3765c369e85f6b6aab0310",
+    "ilp_exact_nary.portable.ptx": "a880e1b57be0ba26d435133a539816a1fa53470fd77087640716f19ce9904504",
+    "ilp_exact_nary.sm_86.cubin": "c43bd9b7235863229303b6c38fe688b4d63593d3219e60939a87fda54dde0d08",
+    "join.portable.ptx": "7b7f0cd512af3a5a6c008c109300b145b159138ad03316ce6bef5b9bf5b21b33",
+    "join.sm_86.cubin": "f5baa01e515c660e3360f11eab2f8b2c803b8175fcd1691e11440602cbf90179",
+    "joint_solve.portable.ptx": "4ce2597b3125cb556ac94dbf28151982b1a876a7c9aa94e8503cfd220a45a816",
+    "joint_solve.sm_86.cubin": "f434864e3fe0f068d048702fe83e755f5f758c428f25672df92519e3535f817c",
+    "mc_eval.portable.ptx": "ead49db195701a0d06e2560907e5788287588343e9df9458f52918917117db9a",
+    "mc_eval.sm_86.cubin": "9c8351734c15eabe530b9298bf99108a5785644e604982ef4f50df5362692e8a",
+    "mc_resident.portable.ptx": "538900d96f44ac3cded575e81fd0d70fb99e4663edc87f1680743d1d14dbf52b",
+    "mc_resident.sm_86.cubin": "21a740654df5915e15c75708ab8fdc8fecc2aced00d02d566235a3bc6dfbcf0a",
+    "mc_sample.portable.ptx": "c0dc95569d2c2955bc019d3b00ede6fbcc97922fba9959b90297d2e48f30f91e",
+    "mc_sample.sm_86.cubin": "bbd049892198d7eae7f5ecd7169310d420dd724e5a2dccca140c1d1139bcbf42",
+    "neural.portable.ptx": "761d938015f2ae0150846e3f7a8183baf683613a5f203fa4ea1975923d19a36c",
+    "neural.sm_86.cubin": "5cd802b15b144336518e199bf5585b5c1c6511e279a1cd91c7371e448cf3a566",
+    "pack.portable.ptx": "cc3139d99da88d2477ab2150b8ea4db575da531e1855075d031c86ee200a8764",
+    "pack.sm_86.cubin": "038c508411ba17a3400b59fe250db09644ce95260a8c909da22b974ded940a89",
+    "pir.portable.ptx": "628acd9245b08e326c5d90e28cf2f8cfa7568a6a8a300812e08824a5cb4e8ad4",
+    "pir.sm_86.cubin": "487ef73fb6f9c308e0db50a9e8dee2c71f3e36e396f711db1cc559bef963ee05",
+    "resident_filter_project.portable.ptx": "b405754e32e84bffbcdd11f63d5fa3cb174fa337dfa9e17c040e9fe66812339d",
+    "resident_filter_project.sm_86.cubin": "356f05813d53a24ba7919d9f343c4aca982013bc843aaea8ecb45dc7eb1ce9fe",
+    "resident_relational.portable.ptx": "d672f6078d58649faef3ac14c0521888b1fd8b6ffd0166b06bc1b9d865ef8a96",
+    "resident_relational.sm_86.cubin": "2b5d80604d2242c328ccccd98e51484f78e26096ff8b22fd360fd30de0b245c0",
+    "resident_schedule.portable.ptx": "543317f1bee6cd123169a716ec5a8fca2d2837266ecea0074fd419e574b3da90",
+    "resident_schedule.sm_86.cubin": "59f2290242000deb48249868bc1c23873193dab42af962e8d0da3d7b8935cab7",
+    "sat.portable.ptx": "d58fdaedf266728a63e70d8e9ea11734fe0beda26bec8188acb0ba864a081565",
+    "sat.sm_86.cubin": "40ac9d34918e99553b34004e00c213611ec15e514c9c342ec52056e0b7119206",
+    "scan.portable.ptx": "e54c1bb1e9253bbd65f22701e7eb345c54ead3c875a3a5fa2eea57a05477eb80",
+    "scan.sm_86.cubin": "f6f3dc267122b8d65852407a1c90cd32d146f1152b82f01e403c99675fb7bded",
+    "set_ops.portable.ptx": "ba90e52e50e2c78e6e318607d98005fd9af16c46ca0f19fe3314d6afec014c14",
+    "set_ops.sm_86.cubin": "afb4ff75e8812fc9fd2f884cb9a5bbcb22a8397272a1bdcd0e2eab444f3451d5",
+    "sort.portable.ptx": "516e3c96cb70498fe81ba056e65538d6925c37284ba0bd852a81c40c13272526",
+    "sort.sm_86.cubin": "b89a4b685cb077adef712f289c1ede65f706cd705a28b1974f23d58e45ac1be9",
+    "wcoj.portable.ptx": "f041c78695fd7b89b84bd4689fcb069c7e000f766f40ef83c41d0d97c5f6d095",
+    "wcoj.sm_86.cubin": "ca89ec52bc30e0b327177fda8e04e4ecb8af54eba66c336253c4aa5adf673e97",
+    "weights.portable.ptx": "ee6889b9741beb6efb6c771353c4ce17576ea658f8ca6e40d0dffb1e4915947e",
+    "weights.sm_86.cubin": "15668da99a466b04fdad9824127bfa13500a7360acedbd3d4436f6926094d772"
+  }
+}

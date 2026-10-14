@@ -1,0 +1,23 @@
+   Compiling xlog-cuda v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda)
+   Compiling xlog-runtime v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-runtime)
+   Compiling xlog-solve v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-solve)
+   Compiling xlog-gpu v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-gpu)
+   Compiling xlog-prob v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-prob)
+   Compiling xlog-integration v0.1.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-integration)
+    Finished `release` profile [optimized] target(s) in 25.56s
+     Running tests/test_free_join_e2e.rs (target/release/deps/test_free_join_e2e-81eb5f8e50671f31)
+
+running 8 tests
+test free_join_adversarial_chain_stays_within_binary_peak ... [free-join order gate] N=100 result_rows=1 | FJ-path peak=243276 B / binary peak=243276 B | ratio=1.00 | fj_dispatch_count=0
+[free-join order gate] Free Join DECLINED to binary (no prefix-key-joinable order within 1.2x) → loss avoided.
+ok
+test free_join_declines_dedicated_triangle_shape ... ok
+test free_join_declines_non_prefix_body_with_correct_fallback ... ok
+test free_join_fires_inside_recursive_scc_with_kill_switch_parity ... ok
+test free_join_fires_on_4atom_chain_with_kill_switch_parity ... ok
+test free_join_fires_on_u64_chain_with_kill_switch_parity ... ok
+test free_join_fused_count_fires_with_kill_switch_parity ... ok
+test free_join_symbol_results_compose_with_union_branches ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+

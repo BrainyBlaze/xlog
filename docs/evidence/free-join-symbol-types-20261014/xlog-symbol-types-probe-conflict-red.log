@@ -1,0 +1,19 @@
+   Compiling xlog-cuda-tests v0.5.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda-tests)
+    Finished `release` profile [optimized] target(s) in 2.55s
+     Running tests/test_free_join_spike.rs (target/release/deps/test_free_join_spike-61d67592b0dc6ac6)
+
+running 1 test
+test free_join_rejects_conflicting_probe_types ... 
+thread 'free_join_rejects_conflicting_probe_types' (168821) panicked at crates/xlog-cuda-tests/tests/test_free_join_spike.rs:1354:22:
+conflicting probe logical types must be rejected
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    free_join_rejects_conflicting_probe_types
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `-p xlog-cuda-tests --test test_free_join_spike`

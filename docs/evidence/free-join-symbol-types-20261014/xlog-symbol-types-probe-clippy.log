@@ -1,0 +1,9 @@
+    Checking xlog-cuda v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda)
+    Checking xlog-runtime v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-runtime)
+    Checking xlog-induce v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-induce)
+    Checking xlog-solve v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-solve)
+    Checking xlog-gpu v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-gpu)
+    Checking xlog-prob v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-prob)
+    Checking xlog-cuda-tests v0.5.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda-tests)
+    Checking xlog-integration v0.1.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-integration)
+    Finished `release` profile [optimized] target(s) in 12.03s

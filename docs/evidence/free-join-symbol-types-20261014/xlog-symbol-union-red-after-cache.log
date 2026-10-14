@@ -1,0 +1,24 @@
+   Compiling xlog-cuda v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-cuda)
+   Compiling xlog-runtime v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-runtime)
+   Compiling xlog-solve v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-solve)
+   Compiling xlog-gpu v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-gpu)
+   Compiling xlog-prob v0.12.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-prob)
+   Compiling xlog-integration v0.1.0 (/tmp/xlog-gpu-arbitrary-key-packing/crates/xlog-integration)
+    Finished `release` profile [optimized] target(s) in 26.00s
+     Running tests/test_free_join_e2e.rs (target/release/deps/test_free_join_e2e-81eb5f8e50671f31)
+
+running 1 test
+
+thread 'free_join_symbol_results_compose_with_union_branches' (164271) panicked at crates/xlog-integration/tests/test_free_join_e2e.rs:265:42:
+execute symbol union: Kernel("Union requires compatible schemas: Schema { columns: [(\"col0\", Symbol), (\"col1\", Symbol)], key_columns: [0, 1], sort_labels: [\"col0\", \"col1\"] } vs Schema { columns: [(\"v0\", U32), (\"v4\", U32)], key_columns: [0, 1], sort_labels: [\"v0\", \"v4\"] }")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test free_join_symbol_results_compose_with_union_branches ... FAILED
+
+failures:
+
+failures:
+    free_join_symbol_results_compose_with_union_branches
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p xlog-integration --test test_free_join_e2e`

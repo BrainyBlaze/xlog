@@ -68,7 +68,8 @@ pub struct FjSubAtom {
 
 /// One plan node: iterate the cover subatom (bulk EXPAND over the
 /// whole frontier), then refine every probe subatom (PROBE +
-/// compaction). Probe variables must already be bound.
+/// compaction). Probe variables must already be bound with the same
+/// logical scalar type as their probe columns.
 #[derive(Debug, Clone)]
 pub struct FjNode {
     pub cover: FjSubAtom,
@@ -123,13 +124,6 @@ impl FjWidth {
         }
     }
 
-    fn var_type(self) -> ScalarType {
-        match self {
-            Self::U32 => ScalarType::U32,
-            Self::U64 => ScalarType::U64,
-        }
-    }
-
     fn count_kernel(self) -> &'static str {
         match self {
             Self::U32 => wcoj_kernels::FJ_EXPAND_COUNT_U32,
@@ -152,11 +146,11 @@ impl FjWidth {
     }
 }
 
-/// Per-tag column type within a frontier of the given width: VAR
-/// columns are width-sized data, RANGE columns are u32 row indices.
-fn tag_type(tag: ColTag, width: FjWidth) -> ScalarType {
+/// Preserve the binding column's logical type independently of the
+/// kernel width class. RANGE columns remain u32 row indices.
+fn tag_type(tag: ColTag, variable_types: &[Option<ScalarType>]) -> ScalarType {
     match tag {
-        ColTag::Var(_) => width.var_type(),
+        ColTag::Var(var) => variable_types[var].expect("frontier variables are bound"),
         ColTag::RangeLo(_) | ColTag::RangeHi(_) => ScalarType::U32,
     }
 }
@@ -197,21 +191,24 @@ fn find_col<'a>(
         .ok_or_else(|| XlogError::Kernel(format!("{ctx}: frontier column {tag:?} missing")))
 }
 
-/// Validate the plan against the input arities. Returns the variable
-/// binding order (covers' variables in plan order).
-fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> Result<Vec<usize>> {
+/// Validate the plan and retain each variable's binding-column type.
+fn validate_plan(
+    plan: &FjPlan,
+    inputs: &[&CudaBuffer],
+    mode: FjMode,
+    ctx: &str,
+) -> Result<Vec<Option<ScalarType>>> {
     if plan.nodes.is_empty() {
         return Err(XlogError::Kernel(format!("{ctx}: plan has no nodes")));
     }
-    let mut bound = vec![false; plan.num_vars];
-    let mut bind_order: Vec<usize> = Vec::new();
-    let mut consumed = vec![0usize; arities.len()];
+    let mut bound = vec![None; plan.num_vars];
+    let mut consumed = vec![0usize; inputs.len()];
     let check_sub = |sub: &FjSubAtom, consumed: &[usize], what: &str| -> Result<()> {
-        if sub.input_idx >= arities.len() {
+        if sub.input_idx >= inputs.len() {
             return Err(XlogError::Kernel(format!(
                 "{ctx}: {what} input_idx {} out of bounds ({} inputs)",
                 sub.input_idx,
-                arities.len()
+                inputs.len()
             )));
         }
         if sub.var_positions.is_empty() {
@@ -220,11 +217,12 @@ fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> R
                 sub.input_idx
             )));
         }
-        if consumed[sub.input_idx] + sub.var_positions.len() > arities[sub.input_idx] {
+        let arity = inputs[sub.input_idx].arity();
+        if consumed[sub.input_idx] + sub.var_positions.len() > arity {
             return Err(XlogError::Kernel(format!(
                 "{ctx}: {what} over-consumes input {} (arity {}, consumed {}, +{})",
                 sub.input_idx,
-                arities[sub.input_idx],
+                arity,
                 consumed[sub.input_idx],
                 sub.var_positions.len()
             )));
@@ -241,14 +239,15 @@ fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> R
     };
     for (k, node) in plan.nodes.iter().enumerate() {
         check_sub(&node.cover, &consumed, "cover")?;
-        for &v in &node.cover.var_positions {
-            if bound[v] {
+        for (offset, &v) in node.cover.var_positions.iter().enumerate() {
+            if bound[v].is_some() {
                 return Err(XlogError::Kernel(format!(
                     "{ctx}: node {k} cover rebinds variable {v}"
                 )));
             }
-            bound[v] = true;
-            bind_order.push(v);
+            bound[v] = inputs[node.cover.input_idx]
+                .schema()
+                .column_type(consumed[node.cover.input_idx] + offset);
         }
         consumed[node.cover.input_idx] += node.cover.var_positions.len();
         let mut seen_atoms = vec![node.cover.input_idx];
@@ -261,17 +260,30 @@ fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> R
                 )));
             }
             seen_atoms.push(probe.input_idx);
-            for &v in &probe.var_positions {
-                if !bound[v] {
+            for (offset, &v) in probe.var_positions.iter().enumerate() {
+                let Some(bound_type) = bound[v] else {
                     return Err(XlogError::Kernel(format!(
                         "{ctx}: node {k} probes unbound variable {v}"
+                    )));
+                };
+                let column = consumed[probe.input_idx] + offset;
+                let probe_type = inputs[probe.input_idx]
+                    .schema()
+                    .column_type(column)
+                    .expect("validated probe column is in bounds");
+                if probe_type != bound_type {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: node {k} probe type mismatch for variable {v}: \
+                         bound as {bound_type:?}, input {} column {column} is {probe_type:?}",
+                        probe.input_idx
                     )));
                 }
             }
             consumed[probe.input_idx] += probe.var_positions.len();
         }
     }
-    for (i, (&used, &arity)) in consumed.iter().zip(arities.iter()).enumerate() {
+    for (i, &used) in consumed.iter().enumerate() {
+        let arity = inputs[i].arity();
         match mode {
             FjMode::Materialize => {
                 if used != arity {
@@ -304,13 +316,13 @@ fn validate_plan(plan: &FjPlan, arities: &[usize], mode: FjMode, ctx: &str) -> R
         )));
     }
     for &v in &plan.output_vars {
-        if v >= plan.num_vars || !bound[v] {
+        if v >= plan.num_vars || bound[v].is_none() {
             return Err(XlogError::Kernel(format!(
                 "{ctx}: output variable {v} is never bound"
             )));
         }
     }
-    Ok(bind_order)
+    Ok(bound)
 }
 
 impl CudaKernelProvider {
@@ -322,8 +334,9 @@ impl CudaKernelProvider {
     /// Inputs are layout-normalized per dispatch (sorted + deduped via
     /// the existing WCOJ layout entries — already-normalized inputs
     /// take the recorded fast-path check). The output contains one
-    /// column per `output_vars` entry (all `U32`) holding the join's
-    /// projected row set under set semantics.
+    /// column per `output_vars` entry, retaining that variable's input
+    /// scalar type (`U32` or `Symbol`), and holds the join's projected
+    /// row set under set semantics.
     ///
     /// # Errors
     /// * `XlogError::Kernel` if the manager has no runtime, the launch
@@ -374,7 +387,8 @@ impl CudaKernelProvider {
     /// PARTIALLY consumed — each surviving frontier row contributes
     /// the product of its remaining live trie-range lengths (the
     /// d-representation count), so trailing private variables never
-    /// expand the frontier. Output schema: `(group: U32, count: U64)`.
+    /// expand the frontier. The group column retains its input scalar
+    /// type (`U32` or `Symbol`); the count column is `U64`.
     ///
     /// u32/Symbol width-class only: the reduction reuses the recorded
     /// groupby, whose KEY columns are bounded engine-wide to
@@ -419,7 +433,7 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel(format!("{ctx}: no inputs")));
         }
         let arities: Vec<usize> = inputs.iter().map(|b| b.arity()).collect();
-        let bind_order = validate_plan(plan, &arities, mode, ctx)?;
+        let variable_types = validate_plan(plan, inputs, mode, ctx)?;
 
         // Layout-normalize every input per dispatch. Arity-2 inputs
         // go through the triangle-grade
@@ -448,11 +462,19 @@ impl CudaKernelProvider {
             FjMode::Materialize => Schema::new(
                 plan.output_vars
                     .iter()
-                    .map(|v| (format!("v{v}"), width.var_type()))
+                    .map(|&v| {
+                        (
+                            format!("v{v}"),
+                            variable_types[v].expect("validated output variable is bound"),
+                        )
+                    })
                     .collect(),
             ),
             FjMode::CountByRoot => Schema::new(vec![
-                (format!("v{}", plan.output_vars[0]), width.var_type()),
+                (
+                    format!("v{}", plan.output_vars[0]),
+                    variable_types[plan.output_vars[0]].expect("validated group variable is bound"),
+                ),
                 ("count".to_string(), ScalarType::U64),
             ]),
         };
@@ -1137,7 +1159,7 @@ impl CudaKernelProvider {
                 let schema = Schema::new(
                     tags.iter()
                         .enumerate()
-                        .map(|(i, t)| (format!("f{i}"), tag_type(*t, width)))
+                        .map(|(i, t)| (format!("f{i}"), tag_type(*t, &variable_types)))
                         .collect(),
                 );
                 let d_nr = self.memory().alloc::<u32>(1)?;
@@ -1277,15 +1299,11 @@ impl CudaKernelProvider {
                 &cu_stream,
                 &format!("{ctx}: staging num_rows"),
             )?;
-            let staging_schema = Schema::new(vec![
-                (format!("v{group_var}"), width.var_type()),
-                ("count".to_string(), ScalarType::U64),
-            ]);
             let staging = CudaBuffer::from_columns_with_host_count(
                 vec![key_col.into(), mult.into()],
                 u64::from(frontier_cap),
                 d_nr,
-                staging_schema,
+                out_schema,
                 count,
             );
             return self.groupby_multi_agg_recorded(
@@ -1314,7 +1332,7 @@ impl CudaKernelProvider {
             frontier
                 .iter()
                 .enumerate()
-                .map(|(i, (t, _))| (format!("f{i}"), tag_type(*t, width)))
+                .map(|(i, (t, _))| (format!("f{i}"), tag_type(*t, &variable_types)))
                 .collect(),
         );
         let d_nr = self.memory().alloc::<u32>(1)?;
@@ -1342,7 +1360,7 @@ impl CudaKernelProvider {
         // (the full projection is duplicate-free by construction).
         let distinct_outputs: std::collections::BTreeSet<usize> =
             plan.output_vars.iter().copied().collect();
-        if distinct_outputs.len() < bind_order.len() {
+        if distinct_outputs.len() < variable_types.iter().flatten().count() {
             return self.dedup_full_row_recorded(&projected, launch_stream);
         }
         Ok(projected)
