@@ -58,6 +58,10 @@ pub(crate) mod material_bytes;
 pub(crate) mod material_owner;
 mod material_source;
 #[cfg(feature = "semantic-policy")]
+mod model_context_checkpoint;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod model_context_continuation;
+#[cfg(feature = "semantic-policy")]
 pub(crate) mod model_evaluation;
 pub(crate) mod model_work_port;
 #[cfg(feature = "semantic-policy")]
@@ -80,6 +84,13 @@ pyo3::create_exception!(
 
 pyo3::create_exception!(
     pyxlog._native,
+    SemanticDeliveryAcknowledgementPending,
+    PyRuntimeError,
+    "An original acknowledgement retains unfinished execution or an unissued known result; join the same request without another delivery."
+);
+
+pyo3::create_exception!(
+    pyxlog._native,
     SemanticTrainingArenaPending,
     PyRuntimeError,
     "Original training roster admission retains its owners; resolve without rematerializing."
@@ -98,6 +109,12 @@ pyo3::create_exception!(
     PyRuntimeError,
     "The original model-free import retains an unfinished terminal join; resolve that same release."
 );
+
+fn fallible_python_u64(py: Python<'_>, value: u64) -> PyResult<Bound<'_, PyAny>> {
+    // SAFETY: the constructor returns a new owned integer reference or null
+    // with a Python exception. Preserve allocation failure as a Python error.
+    unsafe { Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyLong_FromUnsignedLongLong(value)) }
+}
 
 fn training_arena_pending_error(
     py: Python<'_>,
@@ -753,15 +770,15 @@ impl PySemanticTransitionSession {
             });
             self.issuance.fetch_add(1, Ordering::AcqRel);
         }
-        if let Err(original) = retained
+        // This owner is issued only after the original terminal join succeeded.
+        // A failed allocation retirement retains its custody, but does not grant
+        // another terminal-join continuation through the Python Pending protocol.
+        retained
             .as_mut()
             .expect("retained original allocation retirement")
             .owner
             .resolve()
-        {
-            pending.set_cause(py, Some(xlog_err(original)));
-            return Err(pending);
-        }
+            .map_err(xlog_err)?;
         self.training_canary_owner
             .lock()
             .map_err(|_| invalid("symbolic canary owner mutex is poisoned"))?
@@ -1016,6 +1033,7 @@ struct SemanticCheckpointManifest {
     task: Vec<u8>,
     session: Vec<u8>,
     initial_prefill: Vec<u8>,
+    model_context: Vec<u8>,
     phase_seal: Vec<u8>,
 }
 
@@ -1026,6 +1044,7 @@ struct BorrowedSemanticCheckpointManifest<'a> {
     task: &'a [u8],
     session: &'a [u8],
     initial_prefill: &'a [u8],
+    model_context: &'a [u8],
     phase_seal: &'a [u8],
 }
 
@@ -1058,6 +1077,7 @@ trait CheckpointManifestReader {
             manifest.task,
             manifest.session,
             manifest.initial_prefill,
+            manifest.model_context,
             manifest.phase_seal,
         ]
         .iter()
@@ -1092,6 +1112,7 @@ trait CheckpointManifestReader {
             manifest.task,
             manifest.session,
             manifest.initial_prefill,
+            manifest.model_context,
             manifest.phase_seal,
         ];
         write(SemanticCheckpointManifest::MAGIC)?;
@@ -1127,6 +1148,7 @@ trait CheckpointManifestReader {
             manifest.task,
             manifest.session,
             manifest.initial_prefill,
+            manifest.model_context,
         ] {
             root.update((section.len() as u64).to_le_bytes());
             root.update(Sha256::digest(section));
@@ -1143,6 +1165,7 @@ impl CheckpointManifestReader for SemanticCheckpointManifest {
             task: &self.task,
             session: &self.session,
             initial_prefill: &self.initial_prefill,
+            model_context: &self.model_context,
             phase_seal: &self.phase_seal,
         }
     }
@@ -1685,6 +1708,8 @@ struct CheckpointSources {
     limits: Option<CheckpointSourceLimits>,
     resolver: Option<Py<PyAny>>,
     verified: BTreeMap<[u8; 32], Arc<VerifiedCheckpointSource>>,
+    #[cfg(feature = "semantic-policy")]
+    _continuation_index_metadata: Option<xlog_cuda::SemanticReplayMaterialReservation>,
 }
 
 struct VerifiedCheckpointSource {
@@ -1723,6 +1748,8 @@ impl CheckpointSources {
             limits,
             resolver: None,
             verified: BTreeMap::new(),
+            #[cfg(feature = "semantic-policy")]
+            _continuation_index_metadata: None,
         }
     }
 
@@ -2194,8 +2221,8 @@ fn resolve_replay_checkpoint_referents(
 
 impl SemanticCheckpointManifest {
     const MAGIC: &'static [u8] = b"XLOG-SEMANTIC-CHECKPOINT\0";
-    const SECTION_COUNT: usize = 6;
-    const VERSION: u32 = 4;
+    const SECTION_COUNT: usize = 7;
+    const VERSION: u32 = 5;
 
     /// The canonical unsigned state root covers every original section and
     /// format version. The phase seal is outside this root to avoid self-signing.
@@ -2215,6 +2242,7 @@ impl SemanticCheckpointManifest {
             task: sections.task.to_vec(),
             session: sections.session.to_vec(),
             initial_prefill: sections.initial_prefill.to_vec(),
+            model_context: sections.model_context.to_vec(),
             phase_seal: sections.phase_seal.to_vec(),
         })
     }
@@ -2286,13 +2314,14 @@ impl SemanticCheckpointManifest {
             sections[index] = section;
             payload = rest;
         }
-        let [native, model, task, session, initial_prefill, phase_seal] = sections;
+        let [native, model, task, session, initial_prefill, model_context, phase_seal] = sections;
         Ok(BorrowedSemanticCheckpointManifest {
             native,
             model,
             task,
             session,
             initial_prefill,
+            model_context,
             phase_seal,
         })
     }
@@ -2592,7 +2621,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, material_source, max_resolved_material_bytes, original_program=None, original_task_use=None, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None))]
+    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, material_source, max_resolved_material_bytes, original_program=None, original_task_use=None, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None, target_task_use=None, prepare_restore_context=None, restore_context=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -2619,6 +2648,9 @@ impl PySemanticTransitionSession {
         learning_phase_record_limits: Option<&Bound<'_, PyAny>>,
         learning_phase_fence: Option<&Bound<'_, PyAny>>,
         learning_phase_checkpoint_issuer: Option<&Bound<'_, PyAny>>,
+        target_task_use: Option<Py<PySemanticTransitionTaskUse>>,
+        prepare_restore_context: Option<Py<PyAny>>,
+        restore_context: Option<Py<PyAny>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if !checkpoint.is_exact_instance_of::<material_bytes::PySemanticMaterialBytes>() {
             return Err(invalid(
@@ -2630,6 +2662,25 @@ impl PySemanticTransitionSession {
             .borrow();
         let raw = checkpoint_material.as_bytes();
         let manifest = SemanticCheckpointManifest::decode_borrowed(raw)?;
+        let has_model_context = !manifest.model_context.is_empty();
+        if has_model_context != target_task_use.is_some()
+            || has_model_context != prepare_restore_context.is_some()
+            || has_model_context != restore_context.is_some()
+            || prepare_restore_context
+                .as_ref()
+                .is_some_and(|callback| !callback.bind(py).is_callable())
+            || restore_context
+                .as_ref()
+                .is_some_and(|callback| !callback.bind(py).is_callable())
+        {
+            return Err(invalid("model context checkpoint and its original target/factory owners must agree in both directions"));
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        if has_model_context {
+            return Err(invalid(
+                "model context checkpoint requires semantic policy support",
+            ));
+        }
         let (saved_store, item_cap, store_cap, saved_resolved_cap) =
             checkpoint_material_source_header(manifest.task)?;
         let resolved_cap = ColdValue::read(max_resolved_material_bytes, &mut 128, 0)?.unsigned()?;
@@ -2705,6 +2756,41 @@ impl PySemanticTransitionSession {
             .map(|closure| closure.restored_expense(raw))
             .transpose()?
             .flatten();
+        #[cfg(feature = "semantic-policy")]
+        if let Some(admission) = seed.proposal_expense()?.original_admission.as_ref() {
+            SemanticTransitionSession::verify_model_context_checkpoint_presence(
+                &mut native_state,
+                model_context.as_ref(),
+                cancelled_checkpoint::initial_index(admission)?,
+                seed.actor_refresh_assignments.as_deref(),
+                &admission.program,
+                has_model_context,
+            )
+            .map_err(xlog_err)?;
+        } else if has_model_context {
+            return Err(invalid(
+                "model context checkpoint requires its complete original Program",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let context_source = if has_model_context {
+            Some(
+                native_state
+                    .slice_payload(0..native_state.as_bytes().len())
+                    .map_err(xlog_err)?,
+            )
+        } else {
+            None
+        };
+        #[cfg(feature = "semantic-policy")]
+        let context_material = if has_model_context {
+            let loaded = original_loaded
+                .slice_payload(checkpoint_section_range(raw, manifest.model_context)?)
+                .map_err(xlog_err)?;
+            Some(model_context_checkpoint::LoadedModelContextCheckpoint::decode(&loaded)?)
+        } else {
+            None
+        };
         if let Some(closure) = &closure {
             // Fresh recovery preserves the old signed certificate/history.
             // Admit this actual process/device against every unchanged B before
@@ -2741,8 +2827,39 @@ impl PySemanticTransitionSession {
         if let Some(closure) = closure {
             session.install_checkpoint_custody(closure, origin)?;
         }
+        #[cfg(feature = "semantic-policy")]
+        session
+            .owner()?
+            .seal_restored_model_context_checkpoint(
+                &*restored_owner.parent.borrow(py).lease()?,
+                Identity256::from_bytes(origin),
+            )
+            .map_err(xlog_err)?;
         drop(session);
         drop(restored_owner);
+        #[cfg(feature = "semantic-policy")]
+        if let (Some(mut native), Some(context)) = (context_source, context_material) {
+            let pending = model_context_checkpoint::OriginalModelContextRestore::prepare(
+                py,
+                &restored,
+                target_task_use.expect("original target context"),
+                &mut native,
+                context,
+                prepare_restore_context.expect("original declaration callback"),
+                restore_context.expect("original context callback"),
+            )?;
+            *restored
+                .borrow(py)
+                .model_context_restore
+                .lock()
+                .map_err(|_| invalid("original model context restore is poisoned"))? =
+                Some(pending);
+            match model_context_checkpoint::resolve_model_context_restore(py, &restored) {
+                Ok(()) => {}
+                Err(error) if error.is_instance_of::<model_context_continuation::SemanticModelContextContinuationPending>(py) => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(restored)
     }
 
@@ -2932,6 +3049,7 @@ impl PySemanticTransitionSession {
                 task_length,
                 config_length,
                 original.prefill_extent,
+                original.model_context_capacity,
                 seal_extent,
             ]
             .into_iter()
@@ -3142,6 +3260,10 @@ impl PySemanticTransitionSession {
                         .as_ref()
                         .expect("original prefill section")
                         .as_bytes(),
+                    model_context: original
+                        .model_context
+                        .as_ref()
+                        .map_or(&[][..], |material| material.as_bytes()),
                     phase_seal: &[],
                 };
                 let seal = custody.seal(&manifest, self.owner()?.learning_phase_history())?;
@@ -3171,11 +3293,25 @@ impl PySemanticTransitionSession {
                         .as_ref()
                         .expect("original prefill section")
                         .as_bytes(),
+                    model_context: original
+                        .model_context
+                        .as_ref()
+                        .map_or(&[][..], |material| material.as_bytes()),
                     phase_seal: original.phase_seal.as_ref().expect("original phase seal"),
                 };
                 let model_begin =
                     SemanticCheckpointManifest::MAGIC.len() + 4 + manifest.native.len();
                 let model_end = model_begin + manifest.model.len();
+                let suffix_extent = manifest
+                    .encoded_extent()?
+                    .checked_sub(model_end)
+                    .ok_or_else(|| invalid("checkpoint suffix extent is inconsistent"))?;
+                original
+                    .output
+                    .as_ref()
+                    .expect("original checkpoint backing")
+                    .declare_frame_suffix(suffix_extent)
+                    .map_err(xlog_err)?;
                 let mut offset = 0usize;
                 manifest.write_encoded(|part| {
                     let end = offset
@@ -3258,6 +3394,8 @@ impl PySemanticTransitionSession {
             (
                 original.observation.take(),
                 original.prefill_observation.take(),
+                #[cfg(feature = "semantic-policy")]
+                original.model_context_custody.take(),
             )
         };
         drop(observations);
@@ -3313,6 +3451,11 @@ impl PySemanticTransitionSession {
                 learning_transition,
             )?;
         }
+        #[cfg(feature = "semantic-policy")]
+        let private_checkpoint_origin = learning_owner
+            .map(|pending| pending.borrow(py).model_context_checkpoint_origin(py))
+            .transpose()?
+            .flatten();
         if !restore_model.is_callable() {
             return Err(invalid(
                 "checkpoint restore requires one trusted model factory",
@@ -3731,6 +3874,8 @@ impl PySemanticTransitionSession {
                 task_epoch: native_binding.epoch,
                 authority,
                 checkpoint: seed,
+                #[cfg(feature = "semantic-policy")]
+                frozen_model_context: AtomicBool::new(false),
                 state: Mutex::new(TaskUseState {
                     phase: if learning_owner.is_some() {
                         TaskUsePhase::ArenaPreparing(Box::new(task_phase))
@@ -3847,6 +3992,52 @@ impl PySemanticTransitionSession {
                 return Err(error);
             }
         };
+        #[cfg(feature = "semantic-policy")]
+        let model_context_return = (|| -> PyResult<_> {
+            if manifest.model_context.is_empty() {
+                return Ok((model, None));
+            }
+            let returned = model.bind(py);
+            if !returned.is_exact_instance_of::<PyTuple>() {
+                return Err(invalid(
+                    "model context restore requires its original model and complete rosters",
+                ));
+            }
+            let fields = returned.cast::<PyTuple>()?;
+            if fields.len() != 3 {
+                return Err(invalid(
+                    "model context restore model callback must return three original owners",
+                ));
+            }
+            let selected = fields.get_item(0)?.unbind();
+            let tensors = fields.get_item(1)?;
+            let allocations = fields.get_item(2)?;
+            if !tensors.is_exact_instance_of::<PyTuple>()
+                || !allocations.is_exact_instance_of::<PyTuple>()
+                || tensors.cast::<PyTuple>()?.is_empty()
+                || allocations.cast::<PyTuple>()?.is_empty()
+            {
+                return Err(invalid(
+                    "restored model context requires immutable complete typed and backing rosters",
+                ));
+            }
+            Ok((selected, Some((tensors.unbind(), allocations.unbind()))))
+        })();
+        #[cfg(feature = "semantic-policy")]
+        let (model, model_context_rosters) = match model_context_return {
+            Ok(original) => original,
+            Err(error) => {
+                if learning_owner.is_none() {
+                    if let Ok(mut owner) = session.borrow(py).owner() {
+                        owner.abort();
+                    }
+                    if let Ok(mut state) = task_use.borrow(py).state() {
+                        state.phase = TaskUsePhase::Refused;
+                    }
+                }
+                return Err(error);
+            }
+        };
         if let Some(pending) = learning_owner {
             pending.borrow(py).retain_restored_model(py, &model)?;
         }
@@ -3909,6 +4100,16 @@ impl PySemanticTransitionSession {
                 }
                 issued.state()?.snapshot = latest;
             }
+            #[cfg(feature = "semantic-policy")]
+            if let Some(origin) = &private_checkpoint_origin {
+                owner
+                    .retain_private_model_context_checkpoint_origin(
+                        &*acquired.lease()?,
+                        Identity256::from_bytes(Sha256::digest(checkpoint).into()),
+                        origin,
+                    )
+                    .map_err(xlog_err)?;
+            }
             Ok(())
         })();
         if let Err(error) = verified {
@@ -3922,9 +4123,19 @@ impl PySemanticTransitionSession {
             }
             return Err(error);
         }
-        PySemanticTransitionRestoredCheckpoint::issue(
+        let restored = PySemanticTransitionRestoredCheckpoint::issue(
             py, session, controller, task_use, parent, model,
-        )
+        )?;
+        #[cfg(feature = "semantic-policy")]
+        {
+            *restored
+                .borrow(py)
+                .model_context_rosters
+                .lock()
+                .map_err(|_| invalid("restored model context roster custody is poisoned"))? =
+                model_context_rosters;
+        }
+        Ok(restored)
     }
 }
 
@@ -4445,6 +4656,12 @@ enum PublishedExportOwner {
     Producers {
         _producers: Vec<Py<PyAny>>,
     },
+    #[cfg(feature = "semantic-policy")]
+    RestoredPrefill {
+        _prefill:
+            Py<model_context_continuation::restored_prefill::PySemanticRestoredModelContextPrefill>,
+        _metadata: xlog_cuda::SemanticReplayMaterialReservation,
+    },
 }
 
 /// The graph and Session share the original pool/model owner until explicit
@@ -4501,6 +4718,9 @@ struct SegmentInstructionCustody {
 #[cfg(feature = "semantic-policy")]
 #[derive(Default)]
 struct SegmentInstructionPreparation {
+    model_context_owner: Option<Arc<model_context_continuation::ModelContextPythonCustody>>,
+    model_context_continuation:
+        Option<Py<model_context_continuation::PySemanticModelContextContinuation>>,
     callback: Option<Py<PyAny>>,
     work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
     source_geometry: Option<source_content_geometry::OriginalSourceGeometry>,
@@ -5452,6 +5672,8 @@ struct PreparedPythonSegment {
     scope: Arc<()>,
     #[cfg(feature = "semantic-policy")]
     instruction: Option<Arc<SegmentInstructionCustody>>,
+    #[cfg(feature = "semantic-policy")]
+    model_context: Option<xlog_cuda::SemanticModelContextContinuation>,
     task_use: Py<PySemanticTransitionTaskUse>,
     steps: Vec<Py<PySemanticPreparedStep>>,
     resources: Arc<PreparedProducerResources>,
@@ -6507,24 +6729,26 @@ fn tensor_layout_from_values(
     }
 }
 
+fn tensor_layout_value(py: Python<'_>, layout: SemanticTensorLayout) -> PyResult<Py<PyTuple>> {
+    Ok((
+        layout.role,
+        layout.index,
+        layout.element_bytes,
+        layout.scalar_type,
+        layout.rank,
+        layout.logical_axis,
+        PyTuple::new(py, layout.dimensions)?,
+        PyTuple::new(py, layout.strides_bytes)?,
+    )
+        .into_pyobject(py)?
+        .unbind())
+}
+
 fn tensor_metadata_value(
     py: Python<'_>,
     (layout, begin, end): (SemanticTensorLayout, u64, u64),
 ) -> PyResult<Py<PyTuple>> {
-    Ok((
-        (
-            layout.role,
-            layout.index,
-            layout.element_bytes,
-            layout.scalar_type,
-            layout.rank,
-            layout.logical_axis,
-            PyTuple::new(py, layout.dimensions)?,
-            PyTuple::new(py, layout.strides_bytes)?,
-        ),
-        begin,
-        end,
-    )
+    Ok((tensor_layout_value(py, layout)?, begin, end)
         .into_pyobject(py)?
         .unbind())
 }
@@ -11238,6 +11462,11 @@ enum TaskUsePhase {
         scope: Arc<()>,
         operation: Option<String>,
     },
+    #[cfg(feature = "semantic-policy")]
+    ContextActivated {
+        scope: Arc<()>,
+        operation: Option<String>,
+    },
     ExecutionPending {
         scope: Arc<()>,
         operation: String,
@@ -11257,6 +11486,10 @@ enum TaskUsePhase {
         operation: String,
     },
     Segment(String),
+    #[cfg(feature = "semantic-policy")]
+    ContextRetired {
+        operation: String,
+    },
     ArenaPreparing(Box<TaskUsePhase>),
     Evaluating(Box<TaskUsePhase>),
     CheckpointReading {
@@ -11759,6 +11992,12 @@ fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> 
     match phase {
         TaskUsePhase::Imported => Ok(CheckpointTaskPhase::Imported),
         TaskUsePhase::InitialPrefillBound => Ok(CheckpointTaskPhase::InitialPrefillBound),
+        #[cfg(feature = "semantic-policy")]
+        TaskUsePhase::ContextActivated { operation, .. } => Ok(operation
+            .as_ref()
+            .map_or(CheckpointTaskPhase::InitialPrefillBound, |operation| {
+                CheckpointTaskPhase::Segment(operation.clone())
+            })),
         TaskUsePhase::Segment(operation) => Ok(CheckpointTaskPhase::Segment(operation.clone())),
         TaskUsePhase::CancelledPrivate { checkpoint, .. } if private => Ok(checkpoint.clone()),
         _ => Err(invalid(
@@ -12639,6 +12878,19 @@ impl TaskUseState {
     }
 
     fn prepared_content_binding(&self, scope: &Arc<()>) -> PyResult<(Option<String>, Vec<u8>)> {
+        #[cfg(feature = "semantic-policy")]
+        if let TaskUsePhase::ContextRetired { operation } = &self.phase {
+            return Ok((Some(operation.clone()), self.snapshot.canonical.clone()));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let TaskUsePhase::ContextActivated { scope: current, .. } = &self.phase {
+            if !Arc::ptr_eq(current, scope) {
+                return Err(invalid(
+                    "activated context changed its original prepared scope",
+                ));
+            }
+            return Ok((None, self.snapshot.canonical.clone()));
+        }
         let operation = match &self.phase {
             TaskUsePhase::Recording { scope: current, .. }
             | TaskUsePhase::Prepared { scope: current, .. }
@@ -12683,14 +12935,15 @@ impl TaskUseState {
         operation: String,
         snapshot: AuthoritySnapshot,
     ) -> PyResult<()> {
-        let TaskUsePhase::Prepared {
-            scope: current,
-            operation: original,
-        } = &self.phase
-        else {
-            return Err(invalid(
-                "built segment may be submitted exactly once after recording",
-            ));
+        let (current, original) = match &self.phase {
+            TaskUsePhase::Prepared { scope, operation } => (scope, operation),
+            #[cfg(feature = "semantic-policy")]
+            TaskUsePhase::ContextActivated { scope, operation } => (scope, operation),
+            _ => {
+                return Err(invalid(
+                    "built segment may be submitted exactly once after recording",
+                ))
+            }
         };
         if !Arc::ptr_eq(current, scope)
             || original.as_ref().is_some_and(|value| value != &operation)
@@ -12735,6 +12988,13 @@ impl TaskUseState {
     }
 
     fn require_read(&self) -> PyResult<()> {
+        #[cfg(feature = "semantic-policy")]
+        if matches!(
+            self.phase,
+            TaskUsePhase::ContextRetired { .. } | TaskUsePhase::ContextActivated { .. }
+        ) {
+            return Ok(());
+        }
         match &self.phase {
             TaskUsePhase::Imported
             | TaskUsePhase::InitialPrefillReady { .. }
@@ -12788,6 +13048,14 @@ impl TaskUseState {
     }
 
     fn content_handoff_binding(&self) -> PyResult<(Option<String>, Vec<u8>)> {
+        #[cfg(feature = "semantic-policy")]
+        if let TaskUsePhase::ContextActivated { operation, .. } = &self.phase {
+            return Ok((operation.clone(), self.snapshot.canonical.clone()));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let TaskUsePhase::ContextRetired { operation } = &self.phase {
+            return Ok((Some(operation.clone()), self.snapshot.canonical.clone()));
+        }
         if matches!(self.phase, TaskUsePhase::CheckpointReading { .. }) {
             let operation = match checkpoint_task_phase(self)? {
                 CheckpointTaskPhase::Segment(operation) => Some(operation),
@@ -12989,6 +13257,8 @@ pub(crate) struct PySemanticTransitionTaskUse {
     authority: TaskAuthority,
     checkpoint: TaskCheckpointSeed,
     state: Mutex<TaskUseState>,
+    #[cfg(feature = "semantic-policy")]
+    frozen_model_context: AtomicBool,
     delivery: Mutex<Option<DeliveryReceiverBinding>>,
     pending_delivery_receiver: Mutex<Option<PendingDeliveryReceiver>>,
 }
@@ -13027,23 +13297,29 @@ impl PySemanticTransitionTaskUse {
             return Ok(());
         }
         self.checkpoint.proposal_expense()?.require_learning()?;
-        if let Some(record) = owner.learning_phase_history().last() {
-            let purpose = match record.target {
-                xlog_cuda::SemanticLearningPhase::Fast => "current-request-fast-adaptation",
-                xlog_cuda::SemanticLearningPhase::Alignment
-                | xlog_cuda::SemanticLearningPhase::Consolidation => "durable-slow-consolidation",
-            };
-            if self.authority.training.is_empty()
-                || self
-                    .authority
-                    .training
-                    .iter()
-                    .any(|grant| grant.learning_purpose.as_deref() != Some(purpose))
-            {
-                return Err(invalid(
-                    "training grant purpose differs from the actual native learning phase",
-                ));
-            }
+        // Native phase lineage begins in alignment. Parameter speed does not
+        // turn durably admitted training data into request-local material.
+        let phase = owner
+            .learning_phase_history()
+            .last()
+            .map_or(xlog_cuda::SemanticLearningPhase::Alignment, |record| {
+                record.target
+            });
+        if self.authority.training.is_empty()
+            || !self.authority.training.iter().all(|grant| {
+                matches!(
+                    (phase, grant.learning_purpose.as_deref()),
+                    (_, Some("durable-slow-consolidation"))
+                        | (
+                            xlog_cuda::SemanticLearningPhase::Fast,
+                            Some("current-request-fast-adaptation")
+                        )
+                )
+            })
+        {
+            return Err(invalid(
+                "training grant purpose does not permit the actual native learning phase",
+            ));
         }
         Ok(())
     }
@@ -13167,6 +13443,9 @@ pub(crate) struct PySemanticInitialPrefillStage {
     model_producers: Mutex<Vec<Py<PyAny>>>,
     input_producer: Mutex<Option<Py<PyAny>>>,
     output_producers: Mutex<Vec<Py<PyAny>>>,
+    #[cfg(feature = "semantic-policy")]
+    restored_custody:
+        Option<Arc<model_context_continuation::restored_prefill::RestoredPrefillPythonCustody>>,
 }
 
 /// A completed, one-use handoff from the original model wrapper hooks to the
@@ -13208,9 +13487,17 @@ impl PySemanticInitialPrefillContentWitness {
     ) -> PyResult<()> {
         let stage = self.stage.borrow(py);
         let session = stage.session.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if stage.restored_custody.is_some() {
+            stage.require_active(py)?;
+        }
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
         let check = || -> PyResult<()> {
+            #[cfg(feature = "semantic-policy")]
+            if stage.restored_custody.is_some() {
+                stage.require_active(py)?;
+            }
             let owner = session.witness_owner()?;
             stage.task_use.borrow(py).require_identity(&owner)
         };
@@ -13224,19 +13511,32 @@ impl PySemanticInitialPrefillContentWitness {
         )?;
         let mut owner = session.witness_owner()?;
         stage.task_use.borrow(py).require_identity(&owner)?;
-        owner
-            .verify_initial_prefill_tensor_content(
-                &stage.lease,
-                &self.inner,
-                parsed.handoff.into_native(),
-                stream,
-            )
-            .map_err(xlog_err)
+        let result = owner.verify_initial_prefill_tensor_content(
+            &stage.lease,
+            &self.inner,
+            parsed.handoff.into_native(),
+            stream,
+        );
+        // The restored pending query authenticates through the same Target
+        // owner. Release the verifier mutex before querying its original
+        // command so a typed join does not reenter a held native lock.
+        drop(owner);
+        result.map_err(|error| {
+            #[cfg(feature = "semantic-policy")]
+            if let Some(custody) = &stage.restored_custody {
+                return custody.content_error(py, error);
+            }
+            xlog_err(error)
+        })
     }
 }
 
 impl PySemanticInitialPrefillStage {
     fn require_active(&self, py: Python<'_>) -> PyResult<()> {
+        #[cfg(feature = "semantic-policy")]
+        if let Some(custody) = &self.restored_custody {
+            return custody.require_current(py);
+        }
         let session = self.session.borrow(py);
         session.require_creator()?;
         let issued = self.task_use.borrow(py);
@@ -13245,6 +13545,18 @@ impl PySemanticInitialPrefillStage {
         drop(owner);
         let result = issued.state()?.require_initial_prefill(&self.scope);
         result
+    }
+}
+
+impl PySemanticInitialPrefillStage {
+    fn require_wrapper_hook(&self) -> PyResult<()> {
+        #[cfg(feature = "semantic-policy")]
+        if self.restored_custody.is_some() {
+            return Err(invalid(
+                "restored completed prefill cannot re-enter model wrapper hooks",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -13269,6 +13581,7 @@ impl PySemanticInitialPrefillStage {
     ) -> PyResult<Py<PySemanticInitialPrefillContentWitness>> {
         let stage = slf.borrow(py);
         let this = &*stage;
+        this.require_wrapper_hook()?;
         this.require_active(py)?;
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
@@ -13316,6 +13629,7 @@ impl PySemanticInitialPrefillStage {
     ) -> PyResult<Py<PySemanticInitialPrefillContentWitness>> {
         let stage = slf.borrow(py);
         let this = &*stage;
+        this.require_wrapper_hook()?;
         this.require_active(py)?;
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
@@ -13355,6 +13669,7 @@ impl PySemanticInitialPrefillStage {
         token_tensor: &Bound<'_, PyAny>,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        self.require_wrapper_hook()?;
         self.require_active(py)?;
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
@@ -13414,6 +13729,7 @@ impl PySemanticInitialPrefillStage {
     ) -> PyResult<Py<PySemanticInitialPrefillReceipt>> {
         let stage = slf.borrow(py);
         let this = &*stage;
+        this.require_wrapper_hook()?;
         this.require_active(py)?;
         let mut budget = 16 * 1024 * 1024;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
@@ -13665,6 +13981,11 @@ pub(crate) struct PySemanticTransitionRestoredCheckpoint {
     task_use: Py<PySemanticTransitionTaskUse>,
     parent: Py<PySemanticPublishedParent>,
     model: Py<PyAny>,
+    #[cfg(feature = "semantic-policy")]
+    model_context_rosters: Mutex<Option<(Py<PyAny>, Py<PyAny>)>>,
+    #[cfg(feature = "semantic-policy")]
+    model_context_restore: Mutex<Option<model_context_checkpoint::OriginalModelContextRestore>>,
+    _metadata: xlog_cuda::SemanticReplayMaterialReservation,
 }
 
 impl PySemanticTransitionRestoredCheckpoint {
@@ -13699,6 +14020,12 @@ impl PySemanticTransitionRestoredCheckpoint {
                 .published_identity(&*acquired.lease()?)
                 .map_err(xlog_err)?;
         }
+        let budget = task_use
+            .borrow(py)
+            .checkpoint
+            .material_sources
+            .native_budget()?;
+        let metadata = material_bytes::reserve_python_material::<Self>(py, &budget)?;
         Py::new(
             py,
             Self {
@@ -13707,6 +14034,11 @@ impl PySemanticTransitionRestoredCheckpoint {
                 task_use,
                 parent,
                 model,
+                #[cfg(feature = "semantic-policy")]
+                model_context_rosters: Mutex::new(None),
+                #[cfg(feature = "semantic-policy")]
+                model_context_restore: Mutex::new(None),
+                _metadata: metadata,
             },
         )
     }
@@ -19328,22 +19660,10 @@ impl PySemanticPolicyInvocation {
             .map(|lane| {
                 PyTuple::new(
                     py,
-                    lane.program_rules.iter().map(|rule| {
-                        rule.map(|rule| {
-                            (
-                                rule.head_predicate,
-                                rule.left_predicate,
-                                rule.right_predicate,
-                                rule.body_count,
-                                rule.head_variables[0],
-                                rule.head_variables[1],
-                                rule.left_variables[0],
-                                rule.left_variables[1],
-                                rule.right_variables[0],
-                                rule.right_variables[1],
-                            )
-                        })
-                    }),
+                    lane.program_rules
+                        .iter()
+                        .map(|rule| rule.map(|rule| PyTuple::new(py, rule.words())).transpose())
+                        .collect::<PyResult<Vec<_>>>()?,
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -19916,8 +20236,10 @@ fn descriptor_meaning_object(
                 .into_pyobject(py)?
                 .into_any()
         }
-        SemanticActionDescriptor::RulePredicate { predicate } => {
-            ("rule_predicate", *predicate).into_pyobject(py)?.into_any()
+        SemanticActionDescriptor::RulePredicate { predicate, arity } => {
+            ("rule_predicate", *predicate, *arity)
+                .into_pyobject(py)?
+                .into_any()
         }
         SemanticActionDescriptor::RuleVariable { index } => {
             ("rule_variable", *index).into_pyobject(py)?.into_any()
@@ -20790,6 +21112,12 @@ impl PySemanticTransitionTaskUse {
         model_generation: u64,
     ) -> PyResult<Py<PySemanticInitialPrefillStage>> {
         let issued = slf.borrow(py);
+        #[cfg(feature = "semantic-policy")]
+        if issued.frozen_model_context.load(Ordering::Acquire) {
+            return Err(invalid(
+                "frozen initial prefill requires its original continuation permission",
+            ));
+        }
         let layout = issued.checked_initial_source_layout(
             py,
             prefix_capacity,
@@ -20826,6 +21154,8 @@ impl PySemanticTransitionTaskUse {
                 model_producers: Mutex::new(Vec::new()),
                 input_producer: Mutex::new(None),
                 output_producers: Mutex::new(Vec::new()),
+                #[cfg(feature = "semantic-policy")]
+                restored_custody: None,
             },
         )
     }
@@ -21337,7 +21667,7 @@ impl PySemanticTransitionController {
         let session = self.session.borrow(py);
         session.require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_issued(&issued)?;
+        self.require_read_issued(&issued)?;
         if issued.session.as_ptr() != self.session.as_ptr()
             || !session.recording.load(Ordering::Acquire)
             || layouts.get_type().as_ptr() != py.get_type::<PyTuple>().as_ptr()
@@ -21433,10 +21763,49 @@ impl PySemanticTransitionController {
         consumer_streams: &Bound<'_, PyAny>,
         execute_prepared_imports: Option<Py<PyAny>>,
     ) -> PyResult<()> {
+        self.build_segment_impl(
+            py,
+            task_use,
+            transitions,
+            producer,
+            segment_capacity_bytes,
+            other_external_cuda_bytes,
+            instruction_admission,
+            consumer_streams,
+            execute_prepared_imports,
+            None,
+        )
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticTransitionController {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one canonical recording path retains complete producer custody"
+    )]
+    fn build_segment_impl(
+        &self,
+        py: Python<'_>,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        transitions: &Bound<'_, PyAny>,
+        producer: Py<PyAny>,
+        segment_capacity_bytes: &Bound<'_, PyAny>,
+        other_external_cuda_bytes: &Bound<'_, PyAny>,
+        instruction_admission: Option<Py<PySemanticSegmentInstructionAdmission>>,
+        consumer_streams: &Bound<'_, PyAny>,
+        execute_prepared_imports: Option<Py<PyAny>>,
+        continuation: Option<&model_context_continuation::PySemanticModelContextContinuation>,
+    ) -> PyResult<()> {
         let session = self.session.borrow(py);
         session.require_creator()?;
         let issued = task_use.borrow(py);
-        self.require_issued(&issued)?;
+        if let Some(continuation) = continuation {
+            self.require_read_issued(&issued)?;
+            continuation.require_target(py, self, &issued)?;
+        } else {
+            self.require_issued(&issued)?;
+        }
         if self.session.as_ptr() != issued.session.as_ptr() {
             return Err(invalid("segment task belongs to another Session"));
         }
@@ -21450,8 +21819,9 @@ impl PySemanticTransitionController {
         }
         let transitions = prepared_transitions(transitions)?;
         let original_admission = issued.checkpoint.proposal_expense()?.original_admission;
-        let instruction = match (original_admission, instruction_admission) {
-            (Some(_), Some(admission)) => {
+        let instruction = match (continuation, original_admission, instruction_admission) {
+            (Some(_), _, None) => None,
+            (None, Some(_), Some(admission)) => {
                 let admission = Arc::clone(&admission.borrow(py).inner);
                 if admission.session.as_ptr() != self.session.as_ptr() {
                     return Err(invalid(
@@ -21460,7 +21830,7 @@ impl PySemanticTransitionController {
                 }
                 Some(admission)
             }
-            (None, None) => {
+            (None, None, None) => {
                 if transitions.clone().any(|kind| {
                     matches!(
                         kind,
@@ -21489,6 +21859,13 @@ impl PySemanticTransitionController {
                 .unsigned()?,
         };
         let streams = checkpoint_consumer_streams(consumer_streams, &mut (16 * 1024 * 1024))?;
+        if let Some(continuation) = continuation {
+            continuation.require_build(
+                py,
+                &transitions.clone().collect::<Vec<_>>(),
+                &cold_capacity,
+            )?;
+        }
         if let Some(instruction) = &instruction {
             instruction.require_build(
                 py,
@@ -21604,6 +21981,7 @@ impl PySemanticTransitionController {
                 Some(PreparedPythonSegment {
                     scope: Arc::clone(&scope),
                     instruction: instruction.as_ref().map(Arc::clone),
+                    model_context: continuation.map(|owner| owner.inner.clone()),
                     task_use: task_use.clone_ref(py),
                     steps: Vec::new(),
                     resources: Arc::clone(&resources),
@@ -21623,7 +22001,9 @@ impl PySemanticTransitionController {
                     actor_refreshes: Vec::new(),
                 });
             guard.construction = Some(Arc::clone(&construction));
-            let prepared = if let Some(instruction) = &instruction {
+            let prepared = if let Some(continuation) = continuation {
+                owner.prepare_model_context_segment(&continuation.inner)
+            } else if let Some(instruction) = &instruction {
                 {
                     let mut preparation = instruction.preparation()?;
                     preparation.build_entered = true;
@@ -21733,7 +22113,9 @@ impl PySemanticTransitionController {
             .owner()?
             .prepared_stream(&steps[0].borrow(py).inner)
             .map_err(xlog_err)?;
-        let ordinary_work = if private.is_none() {
+        let ordinary_work = if let Some(continuation) = continuation {
+            Some(continuation.prepare_cold_work(py, &steps[0].borrow(py).inner)?)
+        } else if private.is_none() {
             instruction
                 .as_ref()
                 .map(|instruction| {
@@ -22018,9 +22400,15 @@ impl PySemanticTransitionController {
         }
         issued.state()?.finish_build(&scope)?;
         guard.committed = true;
+        if let Some(continuation) = continuation {
+            continuation.finish_build(py, &scope, &steps, &streams)?;
+        }
         Ok(())
     }
+}
 
+#[pymethods]
+impl PySemanticTransitionController {
     /// Submit the original built graph exactly once, await actual completion,
     /// and refresh original rights before exposing any result (including refusal
     /// and drain). No producer callback runs between submission and completion.
@@ -22167,6 +22555,28 @@ impl PySemanticTransitionController {
             issued.require_learning_operation(&owner, &operation)?;
             let mut state = issued.state()?;
             state.admit_built_segment(&scope, &issued.authority, operation.clone(), snapshot)?;
+            {
+                let stored = session
+                    .prepared_segment
+                    .lock()
+                    .map_err(|_| invalid("prepared segment mutex is poisoned"))?;
+                let stored = stored
+                    .as_ref()
+                    .ok_or_else(|| invalid("original built segment disappeared"))?;
+                if let Some(context) = &stored.model_context {
+                    let instruction = stored
+                        .instruction
+                        .as_ref()
+                        .ok_or_else(|| invalid("frozen target has no actual live instruction"))?;
+                    owner
+                        .enter_model_context_continuation_execution(
+                            context,
+                            &instruction.inner,
+                            &*instruction.parent.borrow(py).lease()?,
+                        )
+                        .map_err(xlog_err)?;
+                }
+            }
             let native_steps = steps
                 .iter()
                 .map(|step| step.borrow(py).inner.clone())
@@ -23003,7 +23413,9 @@ impl PySemanticTransitionController {
     /// Terminally release a genuine completed ordinary import that has never
     /// allocated a model, bound a parent, or executed a segment. A retained
     /// immutable model-context token does not retain this Session's GPU storage.
-    /// Unknown retains the original TaskUse and terminal join for the same call.
+    /// An unfinished terminal join retains the original TaskUse for the same call.
+    /// An allocation retirement error after that join retains its owner without
+    /// granting another pending terminal-join continuation.
     fn close_imported_task(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -24026,6 +24438,8 @@ impl PySemanticTransitionController {
                 task_epoch,
                 authority,
                 checkpoint,
+                #[cfg(feature = "semantic-policy")]
+                frozen_model_context: AtomicBool::new(false),
                 state: Mutex::new(TaskUseState { phase, snapshot }),
                 delivery: Mutex::new(None),
                 pending_delivery_receiver: Mutex::new(None),
@@ -24333,7 +24747,7 @@ impl PySemanticTransitionController {
     /// a native or task-state mutex held. Native ownership and authority are
     /// revalidated afterwards. A preissued cold writer remains the same object
     /// through its actual callback and any unresolved handoff.
-    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, model_material_capacity, model_material_working_bytes, original_writer=None))]
+    #[pyo3(signature = (task_use, *, parent, consumer_streams, snapshot, snapshot_model_state, model_material_capacity, model_material_working_bytes, original_writer=None, model_context_continuation=None))]
     fn save_checkpoint(
         &self,
         py: Python<'_>,
@@ -24345,21 +24759,56 @@ impl PySemanticTransitionController {
         model_material_capacity: usize,
         model_material_working_bytes: u64,
         original_writer: Option<Py<material_bytes::PySemanticMaterialWriter>>,
+        model_context_continuation: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<material_bytes::PySemanticMaterialBytes>> {
         let parent_handle = parent.clone().unbind();
         let parent = parent.borrow();
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
         if !matches!(task_use.state()?.phase, TaskUsePhase::ArenaPreparing(_)) {
-            task_use.state()?.require_public_use()?;
+            #[cfg(feature = "semantic-policy")]
+            let activated = {
+                let state = task_use.state()?;
+                if let TaskUsePhase::ContextActivated { scope, .. } = &state.phase {
+                    let session = self.session.borrow(py);
+                    let prepared = session
+                        .prepared_segment
+                        .lock()
+                        .map_err(|_| invalid("activated checkpoint lost its prepared owner"))?;
+                    let prepared = prepared
+                        .as_ref()
+                        .filter(|prepared| Arc::ptr_eq(scope, &prepared.scope))
+                        .ok_or_else(|| {
+                            invalid("activated checkpoint changed its original frozen scope")
+                        })?;
+                    let context = prepared.model_context.as_ref().ok_or_else(|| {
+                        invalid("activated checkpoint lost its original continuation")
+                    })?;
+                    session
+                        .owner()?
+                        .require_activated_model_context_checkpoint(context, &*parent.lease()?)
+                        .map_err(xlog_err)?;
+                    true
+                } else {
+                    false
+                }
+            };
+            #[cfg(not(feature = "semantic-policy"))]
+            let activated = false;
+            if !activated {
+                task_use.state()?.require_public_use()?;
+            }
         }
         parent.require_task(py, task_use)?;
         #[cfg(feature = "semantic-policy")]
-        if let Some(private) = private_execution_owner(py, &self.session.borrow(py))? {
-            private
-                .borrow(py)
-                .require_private_checkpoint_save(py, self, task_use, &parent)?;
-        }
+        let private_save = private_execution_owner(py, &self.session.borrow(py))?
+            .map(|private| {
+                private
+                    .borrow(py)
+                    .require_private_checkpoint_save(py, self, task_use, &parent)
+            })
+            .transpose()?
+            .flatten();
         #[cfg(feature = "semantic-policy")]
         let cancellation = private_execution_owner(py, &self.session.borrow(py))?
             .map(|private| {
@@ -24369,6 +24818,17 @@ impl PySemanticTransitionController {
             })
             .transpose()?
             .flatten();
+        #[cfg(feature = "semantic-policy")]
+        self.session
+            .borrow(py)
+            .owner()?
+            .require_model_context_checkpoint_attachment_presence(
+                &*parent.lease()?,
+                model_context_continuation.is_some(),
+                private_save.as_ref(),
+                cancellation.as_ref(),
+            )
+            .map_err(xlog_err)?;
         if !snapshot_model_state.is_callable() {
             return Err(invalid(
                 "checkpoint save requires one trusted model-state serializer",
@@ -24419,6 +24879,15 @@ impl PySemanticTransitionController {
                 let prior_snapshot = state.snapshot.canonical.clone();
                 drop(state);
                 let lease = parent.lease()?;
+                #[cfg(feature = "semantic-policy")]
+                owner
+                    .require_model_context_checkpoint_attachment_presence(
+                        &lease,
+                        model_context_continuation.is_some(),
+                        private_save.as_ref(),
+                        cancellation.as_ref(),
+                    )
+                    .map_err(xlog_err)?;
                 #[cfg(feature = "semantic-policy")]
                 if let Some(proof) = &cancellation {
                     owner
@@ -24491,6 +24960,10 @@ impl PySemanticTransitionController {
             original.saved_phase = Some(phase);
             original.saved_task_binding = Some(binding);
             original.saved_proposal_expense = Some(expense);
+            #[cfg(feature = "semantic-policy")]
+            {
+                original.private_model_context_save = private_save.clone();
+            }
             original.native_capacity = native_capacity;
             original.prefill_extent = prefill_extent;
             original.config = Some(config);
@@ -24516,6 +24989,43 @@ impl PySemanticTransitionController {
                 .owner()?
                 .require_published_state_observation_binding(&*lease, binding)
                 .map_err(xlog_err)?;
+        }
+        {
+            let mut original = pending
+                .lock()
+                .map_err(|_| invalid("checkpoint export custody is poisoned"))?;
+            if original.model_context_request_bound {
+                #[cfg(feature = "semantic-policy")]
+                if let Some(context) = &original.model_context_custody {
+                    context.require_request(model_context_continuation)?;
+                } else if model_context_continuation.is_some() {
+                    return Err(invalid("checkpoint cannot acquire a later model context"));
+                }
+            } else {
+                #[cfg(feature = "semantic-policy")]
+                if let Some(context) = model_context_continuation {
+                    if !context.is_exact_instance_of::<model_context_continuation::PySemanticModelContextContinuation>() {
+                        return Err(invalid("checkpoint requires its original model continuation"));
+                    }
+                    let (custody, capacity) = model_context_checkpoint::CheckpointModelContextCustody::new(
+                        py,
+                        context.cast::<model_context_continuation::PySemanticModelContextContinuation>()?,
+                        self,
+                        task_use,
+                        &parent,
+                        &pool,
+                    )?;
+                    original.model_context_custody = Some(custody);
+                    original.model_context_capacity = capacity;
+                }
+                #[cfg(not(feature = "semantic-policy"))]
+                if model_context_continuation.is_some() {
+                    return Err(invalid(
+                        "model continuation checkpoint requires semantic policy support",
+                    ));
+                }
+                original.model_context_request_bound = true;
+            }
         }
         session.prepare_checkpoint_writer(
             py,
@@ -24701,6 +25211,32 @@ impl PySemanticTransitionController {
                     ));
                 }
                 original.initial_prefill = Some(prefill);
+            }
+            #[cfg(feature = "semantic-policy")]
+            if original.model_context.is_none() && original.model_context_custody.is_some() {
+                let material_bytes::OriginalCheckpointExport {
+                    model_context_custody,
+                    native,
+                    model_context,
+                    model_context_capacity,
+                    ..
+                } = &mut *original;
+                let context = model_context_custody
+                    .as_mut()
+                    .expect("original model context custody");
+                let loaded = context.resolve(
+                    py,
+                    &mut owner,
+                    &lease,
+                    native.as_mut().expect("original source native material"),
+                    &pool,
+                )?;
+                if loaded.as_bytes().len() > *model_context_capacity {
+                    return Err(invalid(
+                        "model context checkpoint exceeds its original capacity",
+                    ));
+                }
+                *model_context = Some(loaded);
             }
         }
         session.install_checkpoint_prefix(py, &pending)?;
@@ -25761,6 +26297,62 @@ impl PySemanticTransitionController {
         model_views: &Bound<'_, PyAny>,
         prefill_receipt: Option<&PySemanticInitialPrefillReceipt>,
     ) -> PyResult<Py<PyTuple>> {
+        #[cfg(feature = "semantic-policy")]
+        if task_use.frozen_model_context.load(Ordering::Acquire) {
+            return Err(invalid(
+                "frozen parent binding requires its original continuation",
+            ));
+        }
+        let identity = self
+            .bind_parent_impl(
+                py,
+                task_use,
+                metadata,
+                source,
+                prefix,
+                records,
+                tensors,
+                model_allocations,
+                model_storages,
+                model_views,
+                prefill_receipt,
+                #[cfg(feature = "semantic-policy")]
+                None,
+            )?
+            .ok_or_else(|| invalid("ordinary parent binding has no publication identity"))?;
+        Ok((
+            PyBytes::new(py, identity.instance.as_bytes()),
+            identity.word,
+            PyBytes::new(py, identity.logical_digest.as_bytes()),
+            PyBytes::new(py, identity.state_digest.as_bytes()),
+        )
+            .into_pyobject(py)?
+            .unbind())
+    }
+}
+
+impl PySemanticTransitionController {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one canonical parent parser serves live and frozen binding"
+    )]
+    fn bind_parent_impl(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        metadata: &Bound<'_, PyAny>,
+        source: &Bound<'_, PyAny>,
+        prefix: &Bound<'_, PyAny>,
+        records: &Bound<'_, PyAny>,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        model_storages: &Bound<'_, PyAny>,
+        model_views: &Bound<'_, PyAny>,
+        prefill_receipt: Option<&PySemanticInitialPrefillReceipt>,
+        #[cfg(feature = "semantic-policy")] continuation: Option<
+            &model_context_continuation::PySemanticModelContextContinuation,
+        >,
+    ) -> PyResult<Option<xlog_cuda::SemanticPublishedIdentity>> {
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
         {
@@ -25836,6 +26428,16 @@ impl PySemanticTransitionController {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| invalid("initial prefill receipt was already consumed"))?;
         }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(continuation) = continuation {
+            continuation.require_target(py, self, task_use)?;
+            drop(owner);
+            continuation.prepare_parent_binding(py, parent)?;
+            if let Some(scope) = prefill_scope {
+                task_use.state()?.commit_initial_prefill(&scope)?;
+            }
+            return Ok(None);
+        }
         let identity = match owner.bind_parent(parent) {
             Ok(identity) => identity,
             Err(error) => {
@@ -25849,16 +26451,12 @@ impl PySemanticTransitionController {
         if let Some(scope) = prefill_scope {
             task_use.state()?.commit_initial_prefill(&scope)?;
         }
-        Ok((
-            PyBytes::new(py, identity.instance.as_bytes()),
-            identity.word,
-            PyBytes::new(py, identity.logical_digest.as_bytes()),
-            PyBytes::new(py, identity.state_digest.as_bytes()),
-        )
-            .into_pyobject(py)?
-            .unbind())
+        Ok(Some(identity))
     }
+}
 
+#[pymethods]
+impl PySemanticTransitionController {
     /// Revalidate after the segment, before any externally visible activation.
     /// Fresh independent rights and this actual acquired FINAL bank's native
     /// terminal intent are both required. This check does not deliver an effect.
@@ -26190,19 +26788,22 @@ impl PySemanticTransitionController {
 
     /// Commit one durable receiver acknowledgement after FINAL. The key and
     /// recipient come from the trusted local grant, never from task content.
-    /// A byte-identical retry returns the existing publication identity.
+    /// A byte-identical retry joins the original retained command and returns
+    /// its existing publication identity, without another receiver delivery.
     #[pyo3(signature = (task_use, *, parent, snapshot, receipt))]
     fn acknowledge_delivery(
-        &self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         task_use: &PySemanticTransitionTaskUse,
-        parent: &PySemanticPublishedParent,
+        parent: &Bound<'_, PySemanticPublishedParent>,
         snapshot: &Bound<'_, PyAny>,
         receipt: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
-        self.session.borrow(py).require_creator()?;
-        self.require_issued(task_use)?;
-        parent.require_task(py, task_use)?;
+        let controller = slf.borrow();
+        let acquired = parent.borrow();
+        controller.session.borrow(py).require_creator()?;
+        controller.require_issued(task_use)?;
+        acquired.require_task(py, task_use)?;
         if !receipt.is_exact_instance_of::<PyBytes>() {
             return Err(invalid(
                 "delivery acknowledgement requires exact receipt bytes",
@@ -26211,29 +26812,195 @@ impl PySemanticTransitionController {
         let binding = task_use.delivery_binding()?;
         let mut budget = 16 * 1024 * 1024;
         let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
-        let session = self.session.borrow(py);
+        // Establish both execution and result-emission custody before native
+        // entry. A known result never becomes another execution attempt.
+        let prepare_pending = |completion_known: bool,
+                               checkpoint_recovery_required: bool|
+         -> PyResult<PyErr> {
+            let pending = SemanticDeliveryAcknowledgementPending::new_err(
+                if checkpoint_recovery_required {
+                    "the original acknowledgement read limit is exhausted with an unresolved outcome; retain its owners and recover the last full durable checkpoint in a fresh instance"
+                } else if completion_known {
+                    "the original acknowledgement outcome is known; join the same request to receive its retained result without another delivery"
+                } else {
+                    "retain the original acknowledgement owners and join the same request without another delivery"
+                },
+            );
+            let value = pending.value(py);
+            value.setattr("controller", slf)?;
+            value.setattr("task_use", acquired.task_use.clone_ref(py))?;
+            value.setattr("parent", parent)?;
+            value.setattr("receipt", receipt)?;
+            value.setattr("completion_known", completion_known)?;
+            value.setattr("checkpoint_recovery_required", checkpoint_recovery_required)?;
+            Ok(pending)
+        };
+        let pending_error = prepare_pending(false, false)?;
+        let result_pending_error = prepare_pending(true, false)?;
+        let recovery_pending_error = prepare_pending(false, true)?;
+        let session = controller.session.borrow(py);
         let mut owner = session.owner()?;
-        task_use.require_current(&owner)?;
-        task_use
-            .state()?
-            .revalidate_activation(&task_use.authority, snapshot)?;
-        let identity = owner
-            .acknowledge_delivery(
-                &*parent.lease()?,
-                receipt.cast::<PyBytes>()?.as_bytes(),
-                binding.recipient_id,
-                &binding.verification_key,
-                &binding.expected_effect,
-            )
+        let joining = owner
+            .delivery_acknowledgement_has_original(&*acquired.lease()?)
             .map_err(xlog_err)?;
-        Ok((
-            PyBytes::new(py, identity.instance.as_bytes()),
-            identity.word,
-            PyBytes::new(py, identity.logical_digest.as_bytes()),
-            PyBytes::new(py, identity.state_digest.as_bytes()),
-        )
-            .into_pyobject(py)?
+        if joining {
+            // Unknown may poison only the original native completion. It does
+            // not replace this task, reader, or retained acknowledgement.
+            task_use.require_original_identity(&owner)?;
+            task_use
+                .state()?
+                .require_read_during_import(task_use.importing.load(Ordering::Acquire))?;
+        } else {
+            task_use.require_current(&owner)?;
+            task_use
+                .state()?
+                .revalidate_activation(&task_use.authority, snapshot)?;
+        }
+        let result = owner.acknowledge_delivery(
+            &*acquired.lease()?,
+            receipt.cast::<PyBytes>()?.as_bytes(),
+            binding.recipient_id,
+            &binding.verification_key,
+            &binding.expected_effect,
+        );
+        let pending = result.is_err() && owner.delivery_acknowledgement_pending();
+        let recovery_required =
+            result.is_err() && owner.delivery_acknowledgement_checkpoint_recovery_required();
+        drop(owner);
+        let identity = match result {
+            Ok(identity) => identity,
+            Err(error) if pending || recovery_required => {
+                let pending = if recovery_required {
+                    recovery_pending_error
+                } else {
+                    pending_error
+                };
+                pending.set_cause(py, Some(xlog_err(error)));
+                return Err(pending);
+            }
+            Err(error) => return Err(xlog_err(error)),
+        };
+        let project_bytes = |bytes: &[u8]| {
+            PyBytes::new_with(py, bytes.len(), |destination| {
+                destination.copy_from_slice(bytes);
+                Ok(())
+            })
+        };
+        let projection = (|| -> PyResult<Py<PyTuple>> {
+            let word = fallible_python_u64(py, identity.word)?;
+            Ok(PyTuple::new(
+                py,
+                [
+                    project_bytes(identity.instance.as_bytes())?.into_any(),
+                    word,
+                    project_bytes(identity.logical_digest.as_bytes())?.into_any(),
+                    project_bytes(identity.state_digest.as_bytes())?.into_any(),
+                ],
+            )?
             .unbind())
+        })();
+        let value = match projection {
+            Ok(value) => value,
+            Err(original) => {
+                result_pending_error.set_cause(py, Some(original));
+                return Err(result_pending_error);
+            }
+        };
+        let completion = (|| -> PyResult<()> {
+            let mut owner = session.owner()?;
+            task_use.require_original_identity(&owner)?;
+            let result = owner.acknowledge_delivery_completion(&*acquired.lease()?);
+            drop(owner);
+            result.map_err(xlog_err)
+        })();
+        if let Err(original) = completion {
+            result_pending_error.set_cause(py, Some(original));
+            return Err(result_pending_error);
+        }
+        Ok(value)
+    }
+
+    /// Inspect cumulative acknowledgement-only read accounting without joining
+    /// or submitting work. An uncertain or unfinished read has no actual byte
+    /// total; this does not extend the frozen resident-segment observation.
+    #[pyo3(signature = (task_use, *, parent))]
+    fn delivery_acknowledgement_dma_accounting(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<Py<PyDict>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        self.require_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        let accounting = {
+            let owner = session.owner()?;
+            task_use.require_original_identity(&owner)?;
+            task_use
+                .state()?
+                .require_read_during_import(task_use.importing.load(Ordering::Acquire))?;
+            if !owner
+                .delivery_acknowledgement_has_original(&*parent.lease()?)
+                .map_err(xlog_err)?
+            {
+                return Err(invalid(
+                    "acknowledgement accounting requires the retained original parent",
+                ));
+            }
+            owner.delivery_acknowledgement_dma_accounting()
+        }
+        .map_err(xlog_err)?;
+        // SAFETY: PyDict_New returns a new exact dictionary or null with a
+        // Python exception. All projection happens after releasing the owner.
+        let result = unsafe {
+            Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyDict_New())?
+                .cast_into_unchecked::<PyDict>()
+        };
+        let keys = [
+            "read_attempt_limit",
+            "read_byte_limit",
+            "read_reserved_operations",
+            "read_reserved_bytes",
+            "read_entered_operations",
+            "read_requested_byte_bound",
+            "read_confirmed_submitted_operations",
+            "read_confirmed_submitted_bytes",
+            "read_unconfirmed_operations",
+            "read_unconfirmed_byte_bound",
+            "read_confirmed_completed_operations",
+            "read_confirmed_completed_bytes",
+            "read_actual_bytes",
+        ];
+        let actual_known = accounting[8] == 0
+            && accounting[9] == 0
+            && accounting[4] == accounting[6]
+            && accounting[6] == accounting[10]
+            && accounting[5] == accounting[7]
+            && accounting[7] == accounting[11];
+        for (index, key) in keys.into_iter().enumerate() {
+            // SAFETY: these short static ASCII keys fit Py_ssize_t; the UTF-8
+            // constructor copies their bytes and returns an owned reference or
+            // null with a Python exception. Avoid infallible string conversion.
+            let key = unsafe {
+                Bound::from_owned_ptr_or_err(
+                    py,
+                    pyo3::ffi::PyUnicode_FromStringAndSize(
+                        key.as_ptr().cast(),
+                        key.len() as pyo3::ffi::Py_ssize_t,
+                    ),
+                )
+            }?;
+            let value = if index < accounting.len() {
+                fallible_python_u64(py, accounting[index])?
+            } else if actual_known {
+                fallible_python_u64(py, accounting[11])?
+            } else {
+                py.None().into_bound(py)
+            };
+            result.set_item(key, value)?;
+        }
+        Ok(result.unbind())
     }
 
     /// Publish the authenticated acquired replay row and its delivery receipt
@@ -27785,6 +28552,12 @@ impl PySemanticTransitionController {
 
     fn require_issued(&self, task_use: &PySemanticTransitionTaskUse) -> PyResult<()> {
         self.require_read_issued(task_use)?;
+        #[cfg(feature = "semantic-policy")]
+        if task_use.frozen_model_context.load(Ordering::Acquire) {
+            return Err(invalid(
+                "frozen future context grants no live task operation",
+            ));
+        }
         task_use.state()?.require_public_use()
     }
 

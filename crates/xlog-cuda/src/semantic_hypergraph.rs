@@ -3323,11 +3323,13 @@ struct OriginalSemanticCommand {
     access: ArenaAccess,
     upload: crate::device::RetainedDeviceWrite<DeviceCommand>,
     upload_admitted: bool,
+    upload_completed: bool,
     #[cfg(feature = "semantic-policy")]
     upload_dma_recorded: bool,
     completion_entered: bool,
     kernel_entered: bool,
     kernel_submitted: bool,
+    kernel_completed: bool,
     launch_counted: bool,
     receipt_admitted: bool,
     #[cfg(feature = "semantic-policy")]
@@ -3854,6 +3856,10 @@ impl SemanticHypergraph {
         self.cold_work_custody
             .as_ref()
             .and_then(|_| self.cold_work.clone())
+    }
+
+    pub(crate) fn active_cold_work(&self) -> Option<DeviceMemoryView<u64>> {
+        self.cold_work.clone()
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -5044,6 +5050,279 @@ impl SemanticHypergraph {
         self.root_export = None;
     }
 
+    fn require_root_restore_target(
+        &self,
+        material: &SemanticRootMaterial,
+    ) -> Result<&SemanticAdmission, SemanticHypergraphError> {
+        let admission = self
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("root restoration requires typed admission"))?;
+        if admission.base != self.empty_root
+            || self.current_fork.is_some()
+            || self.fork.generation != 1
+            || self.roots.iter().filter(|slot| slot.live).count() != 1
+            || self.statements.iter().any(|slot| slot.live)
+            || self.supports.iter().any(|slot| slot.live)
+            || self.versions.iter().any(|slot| slot.live)
+        {
+            return Err(admission_error(
+                "root restoration requires a fresh empty native owner",
+            ));
+        }
+        let base_versions = material.admission_base_extents[2] as usize;
+        let needed_roots = 1
+            + u32::from(!material.insertions.is_empty())
+            + u32::from(base_versions > 0 && base_versions < material.insertions.len());
+        if material.extents[0] > self.capacities.statements
+            || material.extents[1] > self.capacities.supports
+            || material.extents[2] > self.capacities.versions
+            || self.capacities.roots < needed_roots
+        {
+            return Err(admission_error(
+                "root material exceeds fresh native capacities",
+            ));
+        }
+        Ok(admission)
+    }
+
+    /// Geometry of the canonical host-command restoration before any command
+    /// enters. Successful insertions allocate consecutive physical slots; their
+    /// original statement identities determine each reached support-chain length.
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn root_restore_native_work_ceilings(
+        &self,
+        material: &SemanticRootMaterial,
+    ) -> Result<([u64; 9], [u64; 9]), SemanticHypergraphError> {
+        fn sum(values: &[u64]) -> Result<u64, SemanticHypergraphError> {
+            values.iter().try_fold(0u64, |total, value| {
+                total.checked_add(*value).ok_or_else(size_overflow)
+            })
+        }
+        fn product(left: u64, right: u64) -> Result<u64, SemanticHypergraphError> {
+            left.checked_mul(right).ok_or_else(size_overflow)
+        }
+        fn add(total: &mut [u64; 9], value: [u64; 9]) -> Result<(), SemanticHypergraphError> {
+            for (total, value) in total.iter_mut().zip(value) {
+                *total = total.checked_add(value).ok_or_else(size_overflow)?;
+            }
+            Ok(())
+        }
+        let admission = self.require_root_restore_target(material)?;
+        // Lineage verification and the geometry map are finite host metadata,
+        // charged to the same pool before either allocates its tree nodes.
+        let _geometry_reservation = self
+            .replay_material_budget
+            .as_ref()
+            .map(|budget| {
+                let mut bytes = semantic_records_clone_allocation_bound(&admission.records)?;
+                bytes = bytes
+                    .checked_add(
+                        admission
+                            .symbols
+                            .entries()
+                            .len()
+                            .checked_mul(size_of::<String>())
+                            .ok_or_else(size_overflow)?,
+                    )
+                    .ok_or_else(size_overflow)?;
+                for (_, text) in admission.symbols.entries() {
+                    bytes = bytes.checked_add(text.len()).ok_or_else(size_overflow)?;
+                }
+                for node_bytes in [
+                    size_of::<([u8; 32], ([u8; 32], u64))>(),
+                    size_of::<([u8; 32], [u8; 32])>(),
+                    size_of::<([u8; 32], (u64, u64))>(),
+                ] {
+                    let node_bytes = node_bytes
+                        .checked_mul(11)
+                        .and_then(|bytes| bytes.checked_add(16 * size_of::<usize>()))
+                        .ok_or_else(size_overflow)?;
+                    bytes = bytes
+                        .checked_add(
+                            material
+                                .insertions
+                                .len()
+                                .checked_mul(node_bytes)
+                                .ok_or_else(size_overflow)?,
+                        )
+                        .ok_or_else(size_overflow)?;
+                }
+                budget
+                    .reserve_auxiliary(u64::try_from(bytes).map_err(|_| size_overflow())?)
+                    .map_err(|error| admission_error(error.to_string()))
+            })
+            .transpose()?;
+        material.validate_lineage(admission)?;
+        let statements = u64::from(self.capacities.statements);
+        let records = sum(&[
+            statements,
+            u64::from(self.capacities.supports),
+            u64::from(self.capacities.versions),
+        ])?;
+        // execute clears the receipt and writes its two owner words. Digest
+        // producers also charge their initialized input and final 32-byte output.
+        let receipt_bytes = size_of::<DeviceReceipt>() as u64 + 2 * 8;
+        let version_digest_bytes = 104 + b"xlog.semantic.version.v1\0".len() as u64 + 64 + 8 + 32;
+        let root_digest_bytes = 108 + b"xlog.semantic.root.v1\0".len() as u64 + 64 + 12 + 32;
+        let fork = [
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            sum(&[receipt_bytes, 19 * 8, product(statements, 8)?])?,
+        ];
+        let seal = |root_slot, new_statements, insertions| {
+            Ok::<_, SemanticHypergraphError>([
+                1,
+                sum(&[records, root_slot, 4])?,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                sum(&[
+                    receipt_bytes,
+                    23 * 8,
+                    product(statements, 16)?,
+                    product(sum(&[new_statements, product(insertions, 2)?])?, 16)?,
+                ])?,
+            ])
+        };
+        let mut kernel = [0; 9];
+        let mut heads = std::collections::BTreeMap::<[u8; 32], (u64, u64)>::new();
+        let mut sealed_insertions = 0u64;
+        let mut sealed_statements = 0u64;
+        let mut root_slot = 1u64;
+        let base_versions = u64::from(material.admission_base_extents[2]);
+        let insertions = u64::try_from(material.insertions.len()).map_err(|_| size_overflow())?;
+        if insertions != 0 {
+            add(&mut kernel, fork)?;
+        }
+        for (ordinal, insertion) in material.insertions.iter().enumerate() {
+            let ordinal = u64::try_from(ordinal).map_err(|_| size_overflow())?;
+            let key =
+                material_statement_key(admission, insertion.statement, &insertion.reconstruction)?;
+            let slots = u64::try_from(heads.len()).map_err(|_| size_overflow())?;
+            let (table_slots, chain_links, sha_blocks, canonical_bytes) =
+                if let Some(&(slot, history)) = heads.get(&key.identity.0) {
+                    // find_statement visits its occupied prefix. Chain
+                    // validation visits five records per link and four more
+                    // for each predecessor, then insertion visits both free
+                    // tables, three destinations, its head and three receipts.
+                    let predecessors = history.checked_sub(1).ok_or_else(size_overflow)?;
+                    let table_slots = sum(&[
+                        product(sum(&[slot, 1])?, 4)?,
+                        1,
+                        product(history, 5)?,
+                        product(predecessors, 4)?,
+                        product(sum(&[ordinal, 1])?, 2)?,
+                        7,
+                    ])?;
+                    let bytes = sum(&[
+                        receipt_bytes,
+                        version_digest_bytes,
+                        root_digest_bytes,
+                        58 * 8,
+                        32,
+                        product(history, version_digest_bytes)?,
+                        product(predecessors, 32)?,
+                    ])?;
+                    heads.insert(key.identity.0, (slot, sum(&[history, 1])?));
+                    (
+                        table_slots,
+                        history,
+                        sum(&[4, product(history, 2)?])?,
+                        bytes,
+                    )
+                } else {
+                    // An absent statement scans the whole head table and
+                    // validates each occupied head, then finds consecutive
+                    // fresh statement/support/version slots and fills receipts.
+                    let table_slots = sum(&[
+                        statements,
+                        product(slots, 3)?,
+                        slots,
+                        product(ordinal, 2)?,
+                        9,
+                    ])?;
+                    let bytes = sum(&[
+                        receipt_bytes,
+                        version_digest_bytes,
+                        root_digest_bytes,
+                        58 * 8,
+                        6 * 8,
+                    ])?;
+                    heads.insert(key.identity.0, (slots, 1));
+                    (table_slots, 0, 4, bytes)
+                };
+            add(
+                &mut kernel,
+                [
+                    1,
+                    table_slots,
+                    chain_links,
+                    0,
+                    0,
+                    0,
+                    0,
+                    sha_blocks,
+                    canonical_bytes,
+                ],
+            )?;
+            let reached = sum(&[ordinal, 1])?;
+            if reached == base_versions && reached < insertions {
+                let statements = u64::try_from(heads.len()).map_err(|_| size_overflow())?;
+                add(&mut kernel, seal(root_slot, statements, reached)?)?;
+                add(&mut kernel, fork)?;
+                sealed_insertions = reached;
+                sealed_statements = statements;
+                root_slot = sum(&[root_slot, 1])?;
+            }
+        }
+        if insertions != 0 {
+            let statements = u64::try_from(heads.len()).map_err(|_| size_overflow())?;
+            add(
+                &mut kernel,
+                seal(
+                    root_slot,
+                    statements
+                        .checked_sub(sealed_statements)
+                        .ok_or_else(size_overflow)?,
+                    insertions
+                        .checked_sub(sealed_insertions)
+                        .ok_or_else(size_overflow)?,
+                )?,
+            )?;
+        }
+        add(&mut kernel, Self::snapshot_kernel_work_ceiling())?;
+        if insertions != base_versions {
+            add(&mut kernel, Self::snapshot_kernel_work_ceiling())?;
+        }
+        let dma = [
+            product(kernel[0], 2)?,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            product(
+                kernel[0],
+                (size_of::<DeviceCommand>() + size_of::<DeviceReceipt>()) as u64,
+            )?,
+        ];
+        let mut total = kernel;
+        add(&mut total, dma)?;
+        Ok((dma, total))
+    }
+
     /// Rematerializes a complete root on a fresh, already-admitted native owner.
     /// No original physical slot, generation, or encoded embedding is imported.
     pub(crate) fn restore_root(
@@ -5064,22 +5343,7 @@ impl SemanticHypergraph {
             return self.resolve_root_restore();
         }
         self.ensure_host_facade_available()?;
-        let admission = self
-            .admission
-            .as_ref()
-            .ok_or_else(|| admission_error("root restoration requires typed admission"))?;
-        if admission.base != self.empty_root
-            || self.current_fork.is_some()
-            || self.fork.generation != 1
-            || self.roots.iter().filter(|slot| slot.live).count() != 1
-            || self.statements.iter().any(|slot| slot.live)
-            || self.supports.iter().any(|slot| slot.live)
-            || self.versions.iter().any(|slot| slot.live)
-        {
-            return Err(admission_error(
-                "root restoration requires a fresh empty native owner",
-            ));
-        }
+        let admission = self.require_root_restore_target(material)?;
         let allocation_owner = self
             .replay_material_budget
             .as_ref()
@@ -5164,19 +5428,6 @@ impl SemanticHypergraph {
             })
             .collect::<Result<Vec<_>, SemanticHypergraphError>>()?;
         let authenticated = self.prepare_authenticated_supports(&sources)?;
-        let base_versions = material.admission_base_extents[2] as usize;
-        let needed_roots = 1
-            + u32::from(!material.insertions.is_empty())
-            + u32::from(base_versions > 0 && base_versions < material.insertions.len());
-        if material.extents[0] > self.capacities.statements
-            || material.extents[1] > self.capacities.supports
-            || material.extents[2] > self.capacities.versions
-            || self.capacities.roots < needed_roots
-        {
-            return Err(admission_error(
-                "root material exceeds fresh native capacities",
-            ));
-        }
         let empty = material.insertions.is_empty();
         let original = OriginalRootRestoration {
             material: material.clone(),
@@ -5361,6 +5612,27 @@ impl SemanticHypergraph {
                 original.stage != RootRestoreStage::Completed
             })
         })
+    }
+
+    pub(crate) fn root_restore_completion_pending(&self) -> Result<bool, SemanticHypergraphError> {
+        let Some((scope, _)) = &self.root_restoration else {
+            return Ok(false);
+        };
+        let Some((command_scope, command)) = &self.original_command else {
+            return Ok(false);
+        };
+        if command_scope
+            .as_ref()
+            .is_none_or(|actual| !Arc::ptr_eq(actual, scope))
+        {
+            return Ok(false);
+        }
+        let original = command
+            .lock()
+            .map_err(|_| admission_error("original root command lock is poisoned"))?;
+        Ok((original.upload.submitted() && !original.upload_completed)
+            || (original.kernel_submitted && !original.kernel_completed)
+            || (original.receipt.submitted() && !original.receipt.completed()))
     }
 
     pub(crate) fn restored_root_snapshot(
@@ -6078,11 +6350,13 @@ impl SemanticHypergraph {
             )
             .map_err(|error| runtime_error("semantic command staging", error))?,
             upload_admitted: false,
+            upload_completed: false,
             #[cfg(feature = "semantic-policy")]
             upload_dma_recorded: false,
             completion_entered: false,
             kernel_entered: false,
             kernel_submitted: false,
+            kernel_completed: false,
             launch_counted: false,
             receipt_admitted: false,
             #[cfg(feature = "semantic-policy")]
@@ -6224,6 +6498,7 @@ impl SemanticHypergraph {
             original.poisoned = true;
             runtime_error("original semantic upload completion", error)
         })?;
+        original.upload_completed = true;
         if !original.kernel_entered {
             if original.completion_entered {
                 original.completion.wait().map_err(|error| {
@@ -6294,6 +6569,7 @@ impl SemanticHypergraph {
             original.poisoned = true;
             runtime_error("original semantic completion", error)
         })?;
+        original.kernel_completed = original.kernel_submitted;
         if !original.kernel_submitted {
             return Err(runtime_error(
                 "original semantic completion",

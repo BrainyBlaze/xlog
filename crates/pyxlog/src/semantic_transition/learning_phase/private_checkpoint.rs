@@ -135,6 +135,22 @@ impl PySemanticLearningPhaseTransition {
             &manifest,
             &saved_snapshot,
         )?;
+        if let Some(origin) = self.model_context_checkpoint_origin(py)?
+            .filter(xlog_cuda::SemanticPrivateModelContextCheckpointOrigin::requires_public_checkpoint_promotion)
+        {
+            let mut native = checkpoint
+                .slice_payload(checkpoint_section_range(checkpoint.as_bytes(), manifest.native)?)
+                .map_err(xlog_err)?;
+            let proof = native.checkpoint_proof().map_err(xlog_err)?;
+            let selected_session = session.borrow(py);
+            let mut native_owner = selected_session.owner()?;
+            native_owner.prepare_private_model_context_checkpoint_delivery(
+                &*selected.parent.borrow(py).lease()?,
+                &origin,
+                Identity256::from_bytes(Sha256::digest(checkpoint.as_bytes()).into()),
+                &proof,
+            ).map_err(xlog_err)?;
+        }
         {
             let retained = self
                 .candidate
@@ -267,12 +283,14 @@ impl PySemanticLearningPhaseTransition {
         controller: &PySemanticTransitionController,
         task: &PySemanticTransitionTaskUse,
         parent: &PySemanticPublishedParent,
-    ) -> PyResult<()> {
+    ) -> PyResult<Option<xlog_cuda::SemanticPrivateModelContextCheckpointSave>> {
         if self.intermediate_snapshot_active.load(Ordering::Acquire) {
-            return self.require_intermediate_snapshot_save(py, controller, task, parent);
+            self.require_intermediate_snapshot_save(py, controller, task, parent)?;
+            return self.private_checkpoint_save_permit(py, controller, parent);
         }
         if self.phase_evaluation_active.load(Ordering::Acquire) {
-            return self.require_terminal_private_checkpoint(py, controller, task, parent);
+            self.require_terminal_private_checkpoint(py, controller, task, parent)?;
+            return self.private_checkpoint_save_permit(py, controller, parent);
         }
         if !self.private_checkpoint_active.load(Ordering::Acquire) {
             return Err(invalid(
@@ -303,7 +321,25 @@ impl PySemanticLearningPhaseTransition {
         }
         // Consume before the canonical save can enter any external serializer.
         current.save_admitted = true;
-        Ok(())
+        drop(retained);
+        self.private_checkpoint_save_permit(py, controller, parent)
+    }
+
+    fn private_checkpoint_save_permit(
+        &self,
+        py: Python<'_>,
+        controller: &PySemanticTransitionController,
+        parent: &PySemanticPublishedParent,
+    ) -> PyResult<Option<xlog_cuda::SemanticPrivateModelContextCheckpointSave>> {
+        let Some(origin) = self.model_context_checkpoint_origin(py)? else {
+            return Ok(None);
+        };
+        let session = controller.session.borrow(py);
+        let owner = session.owner()?;
+        let permit = owner
+            .private_model_context_checkpoint_save(&*parent.lease()?, &origin)
+            .map_err(xlog_err)?;
+        Ok(Some(permit))
     }
 
     fn save_private_checkpoint(
@@ -586,6 +622,8 @@ impl PySemanticLearningPhaseTransition {
                     capacity,
                     working_bytes,
                     Some(writer.clone_ref(py)),
+                    // This private restored session owns no future model continuation.
+                    None,
                 )
             };
             let mut retained = self.private_checkpoints()?;

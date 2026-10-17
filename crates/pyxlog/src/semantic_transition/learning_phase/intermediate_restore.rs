@@ -934,6 +934,8 @@ impl PySemanticLearningPhaseTransition {
                 capacity,
                 working_bytes,
                 Some(writer.clone_ref(py)),
+                // Both snapshots belong to private restored sessions without a future context.
+                None,
             )
         };
         let mut retained = self.intermediate()?;

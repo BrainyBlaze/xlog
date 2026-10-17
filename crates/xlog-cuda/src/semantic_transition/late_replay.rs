@@ -133,6 +133,10 @@ pub(super) struct PendingReplayDelivery {
     disposition: u64,
     lease_token: u64,
     completion: Option<SemanticPublishedIdentity>,
+    #[cfg(feature = "semantic-policy")]
+    context_acknowledgement: Option<
+        Arc<std::sync::Mutex<model_context_continuation::OriginalModelContextAcknowledgement>>,
+    >,
     receipt: ReplayUpload<u8>,
     payload: ReplayUpload<u8>,
     observations: ReplayUpload<u64>,
@@ -1901,12 +1905,22 @@ impl SemanticTransitionSession {
         ));
         // All pinned sources, destinations and pre-reserved graph references
         // precede the first transfer or numerical/publication entry boundary.
+        #[cfg(feature = "semantic-policy")]
+        let context_acknowledgement = self.stage_model_context_acknowledgement(
+            lease,
+            delivery_receipt,
+            delivery_digest,
+            recipient_id,
+            Some(result_receipt),
+        )?;
         self.pending_replay_delivery = Some(PendingReplayDelivery {
             base: lease.identity,
             fuel: lease.header.fuel,
             disposition,
             lease_token: lease.token,
             completion: None,
+            #[cfg(feature = "semantic-policy")]
+            context_acknowledgement,
             receipt,
             payload,
             observations,
@@ -1942,6 +1956,14 @@ impl SemanticTransitionSession {
         {
             // Every original DMA completed and the driver kernel boundary was
             // provably untouched. No publication can have committed.
+            #[cfg(feature = "semantic-policy")]
+            if let Some(edge) = self
+                .pending_replay_delivery
+                .as_ref()
+                .and_then(|pending| pending.context_acknowledgement.as_ref())
+            {
+                self.abandon_model_context_acknowledgement(edge)?;
+            }
             self.pending_replay_delivery = None;
         }
         result
@@ -2121,6 +2143,14 @@ impl SemanticTransitionSession {
         let expected_word = ((base.word >> 1) + 1) << 1 | ((base.word & 1) ^ 1);
         if control.word == base.word && control.refusal != 0 {
             let status = control.refusal;
+            #[cfg(feature = "semantic-policy")]
+            if let Some(edge) = self
+                .pending_replay_delivery
+                .as_ref()
+                .and_then(|pending| pending.context_acknowledgement.as_ref())
+            {
+                self.abandon_model_context_acknowledgement(edge)?;
+            }
             self.pending_replay_delivery = None;
             return Err(SemanticTransitionError::PublicationRefused { status });
         }
@@ -2147,6 +2177,14 @@ impl SemanticTransitionSession {
             logical_digest: header.logical_digest,
             state_digest: header.state_digest,
         };
+        #[cfg(feature = "semantic-policy")]
+        if let Some(edge) = self
+            .pending_replay_delivery
+            .as_ref()
+            .and_then(|pending| pending.context_acknowledgement.as_ref())
+        {
+            self.complete_model_context_acknowledgement(lease, edge, header)?;
+        }
         let references = &self
             .pending_replay_delivery
             .as_ref()

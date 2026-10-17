@@ -1412,39 +1412,36 @@ fn semantic_query_validation_allocation_bytes(query: &Query) -> Result<u64> {
         .ok_or_else(|| XlogError::allocation_extent_overflow("semantic query"))
 }
 
-/// Lower an admitted editable source to the exact positive binary program bank
+/// Lower an admitted editable source to the exact positive scalar program bank
 /// consumed by the resident semantic evaluator. The independent observer is
 /// deliberately absent: it may supply expected truth, never candidate syntax.
-pub fn compile_positive_binary_task(
+pub fn compile_positive_task(
     initial_theory: &str,
     input_facts: &str,
     statements: &[&str],
     query_records: &[u32],
 ) -> Result<xlog_cuda::SemanticProgramAdmission> {
-    compile_positive_binary_task_owned(initial_theory, input_facts, statements, query_records, None)
+    compile_positive_task_owned(initial_theory, input_facts, statements, query_records, None)
         .map(|(program, _)| program)
 }
 
 /// Original positive task compiler with a retained owner for the resulting
 /// native program. Transient parser/compiler/certificate leases retire only
 /// after their real ASTs and plans; global symbol leases stay in that registry.
-pub struct PositiveBinaryTaskAllocations {
+pub struct PositiveTaskAllocations {
     _result: Arc<dyn Send + Sync>,
 }
 
 /// Reserve actual source and typed compiler geometry through the caller's
 /// original capacity owner, then use the same validators and full compiler.
-pub fn compile_positive_binary_task_with_allocation_owner(
+pub fn compile_positive_task_with_allocation_owner(
     initial_theory: &str,
     input_facts: &str,
     statements: &[&str],
     query_records: &[u32],
     reserve: &mut dyn FnMut(u64) -> Result<Arc<dyn Send + Sync>>,
-) -> Result<(
-    xlog_cuda::SemanticProgramAdmission,
-    PositiveBinaryTaskAllocations,
-)> {
-    let (program, owner) = compile_positive_binary_task_owned(
+) -> Result<(xlog_cuda::SemanticProgramAdmission, PositiveTaskAllocations)> {
+    let (program, owner) = compile_positive_task_owned(
         initial_theory,
         input_facts,
         statements,
@@ -1453,7 +1450,7 @@ pub fn compile_positive_binary_task_with_allocation_owner(
     )?;
     Ok((
         program,
-        PositiveBinaryTaskAllocations {
+        PositiveTaskAllocations {
             _result: owner.expect("original compiler allocation owner"),
         },
     ))
@@ -1560,7 +1557,7 @@ fn positive_schema_extent(schema: &Schema) -> Result<usize> {
         .ok_or_else(overflow)
 }
 
-fn compile_positive_binary_task_owned(
+fn compile_positive_task_owned(
     initial_theory: &str,
     input_facts: &str,
     statements: &[&str],
@@ -1589,13 +1586,14 @@ fn compile_positive_binary_task_owned(
     let theory = &theory_owner.program;
     let facts_owner = parse_positive_source(input_facts, &mut reserve)?;
     let facts = &facts_owner.program;
-    if !positive_binary_source_only(&theory)
-        || !positive_binary_source_only(&facts)
+    if theory.predicates.len() > u32::MAX as usize
+        || !positive_task_source_only(&theory)
+        || !positive_task_source_only(&facts)
         || !facts.predicates.is_empty()
         || facts.rules.iter().any(|rule| !rule.is_fact())
     {
         return Err(XlogError::Compilation(
-            "editable semantic source requires declarations, positive binary rules and separate ground facts only".into(),
+            "editable semantic source requires declarations, positive scalar rules and separate ground facts only".into(),
         ));
     }
     // The ordered source and selector storage are reserved before collection.
@@ -1613,8 +1611,7 @@ fn compile_positive_binary_task_owned(
     let selected_source_bytes =
         positive_source_extent(initial_theory, input_facts, &selected_statements)?;
     let _executable_owner = reserve_positive_host(&mut reserve, selected_source_bytes)?;
-    let executable_source =
-        positive_binary_task_source(initial_theory, input_facts, &selected_statements);
+    let executable_source = positive_task_source(initial_theory, input_facts, &selected_statements);
     // One B-tree node per original declaration is an upper envelope even at
     // minimum occupancy; all eleven key/value slots and twelve edges are real
     // canonical B-tree node geometry, not a source-name tariff.
@@ -1639,7 +1636,7 @@ fn compile_positive_binary_task_owned(
     let _predicate_owner = reserve_positive_host(&mut reserve, predicate_bytes as u64)?;
     let mut predicate_indices = BTreeMap::new();
     for (index, declaration) in theory.predicates.iter().enumerate() {
-        if declaration.types.len() != 2
+        if !(1..=2).contains(&declaration.types.len())
             || declaration
                 .types
                 .iter()
@@ -1649,7 +1646,8 @@ fn compile_positive_binary_task_owned(
                 .is_some()
         {
             return Err(XlogError::Compilation(
-                "editable semantic predicates must be distinct binary u32 declarations".into(),
+                "editable semantic predicates must be distinct unary or binary u32 declarations"
+                    .into(),
             ));
         }
     }
@@ -1674,6 +1672,7 @@ fn compile_positive_binary_task_owned(
             XlogError::Compilation("editable program allocation extent overflow".into())
         })?;
     let result_bytes = [
+        (theory.predicates.len(), std::mem::size_of::<u32>()),
         (fact_count, std::mem::size_of::<SemanticProgramFact>()),
         (
             rule_count,
@@ -1701,66 +1700,36 @@ fn compile_positive_binary_task_owned(
         },
     )?;
     let result_owner = reserve_positive_host(&mut reserve, result_bytes as u64)?;
-    let mut lowering_bytes = 0usize;
-    for rule in &theory.rules {
-        let mut bytes = 0usize;
-        for literal in &rule.body {
-            if let BodyLiteral::Positive(atom) = literal {
-                for term in &atom.terms {
-                    if let Term::Variable(name) = term {
-                        bytes = bytes
-                            .checked_add(name.len())
-                            .and_then(|n| {
-                                n.checked_add(
-                                    2 * std::mem::size_of::<usize>()
-                                        + 2 * std::mem::size_of::<u16>()
-                                        + 11 * std::mem::size_of::<(String, u32)>()
-                                        + 12 * std::mem::size_of::<usize>(),
-                                )
-                            })
-                            .ok_or_else(|| {
-                                XlogError::Compilation(
-                                    "binary rule lowering allocation extent overflow".into(),
-                                )
-                            })?;
-                    }
-                }
-            }
-        }
-        bytes = bytes
-            .checked_add(
-                rule.body
-                    .len()
-                    .checked_mul(std::mem::size_of::<(u32, u32, u32)>())
-                    .ok_or_else(|| {
-                        XlogError::Compilation(
-                            "binary rule lowering allocation extent overflow".into(),
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                XlogError::Compilation("binary rule lowering allocation extent overflow".into())
-            })?;
-        lowering_bytes = lowering_bytes.max(bytes);
-    }
-    let _lowering_owner = reserve_positive_host(&mut reserve, lowering_bytes as u64)?;
+    let predicate_arities = theory
+        .predicates
+        .iter()
+        .map(|declaration| declaration.types.len() as u32)
+        .collect::<Vec<_>>();
     let mut initial_facts = Vec::with_capacity(fact_count);
     let mut initial_rules = Vec::with_capacity(rule_count);
     for rule in theory.rules.iter().chain(&facts.rules) {
         if rule.is_fact() {
-            initial_facts.push(lower_binary_fact(&rule.head, &predicate_indices)?);
+            initial_facts.push(lower_positive_fact(
+                &rule.head,
+                &predicate_indices,
+                &predicate_arities,
+            )?);
         } else {
-            initial_rules.push(lower_positive_binary_rule(rule, &predicate_indices)?);
+            initial_rules.push(lower_positive_rule(
+                rule,
+                &predicate_indices,
+                &predicate_arities,
+            )?);
         }
     }
     let statement_source_bytes = positive_source_extent(initial_theory, input_facts, statements)?;
     let _statement_source_owner = reserve_positive_host(&mut reserve, statement_source_bytes)?;
-    let statement_source = positive_binary_task_source(initial_theory, input_facts, statements);
+    let statement_source = positive_task_source(initial_theory, input_facts, statements);
     let mut statements_owner = parse_positive_source(&statement_source, &mut reserve)?;
     let parsed_statements = &mut statements_owner.program;
     let parsed_queries = std::mem::take(&mut parsed_statements.queries);
     if parsed_queries.len() != statements.len()
-        || !positive_binary_source_only(&parsed_statements)
+        || !positive_task_source_only(&parsed_statements)
         || parsed_statements.predicates.len() != theory.predicates.len()
         || parsed_statements.rules.len() != theory.rules.len() + facts.rules.len()
     {
@@ -1772,7 +1741,7 @@ fn compile_positive_binary_task_owned(
     for (record, query) in parsed_queries.iter().enumerate() {
         observation_facts.push((
             record as u32,
-            lower_binary_fact(&query.atom, &predicate_indices)?,
+            lower_positive_fact(&query.atom, &predicate_indices, &predicate_arities)?,
         ));
     }
     // Validate the same native subset before entering the general compiler so
@@ -1782,9 +1751,7 @@ fn compile_positive_binary_task_owned(
     let compiler_input = parse_positive_source(&executable_source, &mut reserve)?;
     let _compiler_owner = match reserve.as_deref_mut() {
         Some(reserve) => Some(reserve(
-            xlog_logic::compile::positive_binary_compiler_allocation_bound(
-                &compiler_input.program,
-            )?,
+            xlog_logic::compile::positive_task_compiler_allocation_bound(&compiler_input.program)?,
         )?),
         None => None,
     };
@@ -1799,6 +1766,7 @@ fn compile_positive_binary_task_owned(
     Ok((
         SemanticProgramAdmission {
             predicate_count: theory.predicates.len() as u32,
+            predicate_arities,
             initial_facts,
             initial_rules,
             observation_facts,
@@ -1811,7 +1779,7 @@ fn compile_positive_binary_task_owned(
 
 /// The original admitted initial theory and facts with their ordered ground
 /// queries. Both cold execution and resident lowering use this exact source.
-pub fn positive_binary_task_source(
+pub fn positive_task_source(
     initial_theory: &str,
     input_facts: &str,
     statements: &[&str],
@@ -1831,7 +1799,7 @@ pub fn positive_binary_task_source(
     source
 }
 
-fn positive_binary_source_only(program: &Program) -> bool {
+fn positive_task_source_only(program: &Program) -> bool {
     program.imports.is_empty()
         && program.functions.is_empty()
         && program.domains.is_empty()
@@ -1847,104 +1815,153 @@ fn positive_binary_source_only(program: &Program) -> bool {
         && program.directives == Default::default()
 }
 
-fn lower_binary_fact(
+fn positive_atom_predicate(
     atom: &Atom,
     predicates: &BTreeMap<String, u32>,
-) -> Result<xlog_cuda::SemanticProgramFact> {
-    use xlog_cuda::SemanticProgramFact;
+    predicate_arities: &[u32],
+) -> Result<u32> {
     let predicate = *predicates.get(&atom.predicate).ok_or_else(|| {
         XlogError::Compilation(format!("undeclared editable predicate {}", atom.predicate))
     })?;
-    if atom.terms.len() != 2 {
+    if atom.terms.len() != predicate_arities[predicate as usize] as usize {
         return Err(XlogError::Compilation(
-            "editable fact must be binary".into(),
+            "editable atom arity must match its declaration".into(),
         ));
     }
-    let value = |term: &Term| match term {
+    Ok(predicate)
+}
+
+fn positive_ground_value(term: &Term) -> Result<u32> {
+    match term {
         Term::Integer(value) => u32::try_from(*value).map_err(|_| {
-            XlogError::Compilation("editable fact requires a u32 ground value".into())
+            XlogError::Compilation("editable constant requires a u32 ground value".into())
         }),
         _ => Err(XlogError::Compilation(
-            "editable fact requires a u32 ground value".into(),
+            "editable constant requires a u32 ground value".into(),
         )),
-    };
+    }
+}
+
+fn lower_positive_fact(
+    atom: &Atom,
+    predicates: &BTreeMap<String, u32>,
+    predicate_arities: &[u32],
+) -> Result<xlog_cuda::SemanticProgramFact> {
+    use xlog_cuda::SemanticProgramFact;
+    let predicate = positive_atom_predicate(atom, predicates, predicate_arities)?;
     Ok(SemanticProgramFact {
         predicate,
-        first: value(&atom.terms[0])?,
-        second: value(&atom.terms[1])?,
+        arity: atom.terms.len() as u32,
+        first: positive_ground_value(&atom.terms[0])?,
+        second: atom
+            .terms
+            .get(1)
+            .map(positive_ground_value)
+            .transpose()?
+            .unwrap_or(0),
     })
 }
 
-fn lower_positive_binary_rule(
+fn lower_positive_rule(
     rule: &Rule,
     predicates: &BTreeMap<String, u32>,
+    predicate_arities: &[u32],
 ) -> Result<xlog_cuda::SemanticProgramRule> {
-    use xlog_cuda::SemanticProgramRule;
-    if !(1..=2).contains(&rule.body.len()) || rule.head.terms.len() != 2 {
+    use xlog_cuda::{SemanticProgramAtom, SemanticProgramRule, SemanticProgramTerm};
+    if !(1..=3).contains(&rule.body.len()) {
         return Err(XlogError::Compilation(
-            "editable rule requires one or two positive binary body atoms".into(),
+            "editable rule requires one to three positive scalar body atoms".into(),
         ));
     }
-    let predicate = |atom: &Atom| -> Result<u32> {
-        if atom.terms.len() != 2 {
-            return Err(XlogError::Compilation(
-                "editable rule atom must be binary".into(),
-            ));
-        }
-        predicates.get(&atom.predicate).copied().ok_or_else(|| {
-            XlogError::Compilation(format!("undeclared editable predicate {}", atom.predicate))
-        })
+    let inactive_term = SemanticProgramTerm { kind: 0, value: 0 };
+    let inactive_atom = SemanticProgramAtom {
+        predicate: 0,
+        arity: 0,
+        terms: [inactive_term; 2],
     };
-    let mut names = BTreeMap::new();
-    let mut next = 0u32;
-    let mut body = Vec::with_capacity(rule.body.len());
-    for literal in &rule.body {
+    // At most six authored body coordinates exist. Borrowed names and inline
+    // atom storage require no heap allocation or detached lowering workspace.
+    let mut names: [Option<&str>; 6] = [None; 6];
+    let mut next = 0usize;
+    let mut body = [inactive_atom; 3];
+    for (body_position, literal) in rule.body.iter().enumerate() {
         let BodyLiteral::Positive(atom) = literal else {
             return Err(XlogError::Compilation(
                 "editable rule body must contain positive atoms only".into(),
             ));
         };
-        let mut variables = [0; 2];
-        for (position, term) in atom.terms.iter().enumerate().take(2) {
-            variables[position] = match term {
-                Term::Variable(name) => *names.entry(name.clone()).or_insert_with(|| {
-                    let value = next;
-                    next += 1;
-                    value
-                }),
+        let predicate = positive_atom_predicate(atom, predicates, predicate_arities)?;
+        let mut terms = [inactive_term; 2];
+        for (position, term) in atom.terms.iter().enumerate() {
+            terms[position] = match term {
+                Term::Variable(name) => {
+                    let variable = match names[..next]
+                        .iter()
+                        .position(|entry| *entry == Some(name.as_str()))
+                    {
+                        Some(variable) => variable,
+                        None => {
+                            let variable = next;
+                            names[next] = Some(name.as_str());
+                            next += 1;
+                            variable
+                        }
+                    };
+                    SemanticProgramTerm {
+                        kind: 0,
+                        value: variable as u32,
+                    }
+                }
                 Term::Anonymous => {
-                    let value = next;
+                    let variable = next;
                     next += 1;
-                    value
+                    SemanticProgramTerm {
+                        kind: 0,
+                        value: variable as u32,
+                    }
                 }
-                _ => {
-                    return Err(XlogError::Compilation(
-                        "editable rule body requires variables only".into(),
-                    ))
-                }
+                _ => SemanticProgramTerm {
+                    kind: 1,
+                    value: positive_ground_value(term)?,
+                },
             };
         }
-        body.push((predicate(atom)?, variables));
-    }
-    let mut head_variables = [0; 2];
-    for (position, term) in rule.head.terms.iter().enumerate() {
-        let Term::Variable(name) = term else {
-            return Err(XlogError::Compilation(
-                "editable rule head requires bound variables".into(),
-            ));
+        body[body_position] = SemanticProgramAtom {
+            predicate,
+            arity: atom.terms.len() as u32,
+            terms,
         };
-        head_variables[position] = *names.get(name).ok_or_else(|| {
-            XlogError::Compilation("editable rule head variable is unbound".into())
-        })?;
+    }
+    let predicate = positive_atom_predicate(&rule.head, predicates, predicate_arities)?;
+    let mut head_terms = [inactive_term; 2];
+    for (position, term) in rule.head.terms.iter().enumerate() {
+        head_terms[position] = match term {
+            Term::Variable(name) => {
+                let variable = names[..next]
+                    .iter()
+                    .position(|entry| *entry == Some(name.as_str()))
+                    .ok_or_else(|| {
+                        XlogError::Compilation("editable rule head variable is unbound".into())
+                    })?;
+                SemanticProgramTerm {
+                    kind: 0,
+                    value: variable as u32,
+                }
+            }
+            _ => SemanticProgramTerm {
+                kind: 1,
+                value: positive_ground_value(term)?,
+            },
+        };
     }
     Ok(SemanticProgramRule {
-        head_predicate: predicate(&rule.head)?,
-        left_predicate: body[0].0,
-        right_predicate: body.get(1).map_or(0, |item| item.0),
-        body_count: body.len() as u32,
-        head_variables,
-        left_variables: body[0].1,
-        right_variables: body.get(1).map_or([0, 0], |item| item.1),
+        head: SemanticProgramAtom {
+            predicate,
+            arity: rule.head.terms.len() as u32,
+            terms: head_terms,
+        },
+        body,
+        body_count: rule.body.len() as u32,
     })
 }
 

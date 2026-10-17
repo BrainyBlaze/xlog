@@ -12,6 +12,7 @@ pub mod joint_solver;
 pub mod kernel_manifest_data;
 pub mod launch;
 pub mod memory;
+pub mod module_backing;
 pub mod multi_gpu_memory;
 pub mod provider;
 mod semantic_hypergraph;
@@ -63,7 +64,10 @@ pub use semantic_hypergraph::{
     SemanticSupportRecord, SemanticSupportRef, SemanticTruth, SemanticTypedRecord,
     SemanticVersionHandle, SemanticVersionIdentity, SemanticVersionRef, SemanticView,
 };
-pub use semantic_program::{SemanticProgramAdmission, SemanticProgramFact, SemanticProgramRule};
+pub use semantic_program::{
+    SemanticProgramAdmission, SemanticProgramAtom, SemanticProgramFact, SemanticProgramRule,
+    SemanticProgramTerm,
+};
 pub use semantic_training_view::{
     validate_training_view_layout, SemanticSelectedTrainingView, SemanticTrainingCanary,
     SemanticTrainingCanaryKind, SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
@@ -127,12 +131,16 @@ pub use semantic_transition::{
     SemanticCompletedLaneOutcomeMaterial, SemanticCompletedMaterialCapacity,
     SemanticCompletedModelCarrierMaterial, SemanticCompletedReplayMaterials,
     SemanticCompletedStepWitnessMaterial, SemanticCompletedTaskGroundMaterial,
-    SemanticCompletedTheoryDeltaMaterial, SemanticPolicyGradients,
-    SemanticPolicyNumericalDomainLayout, SemanticPreparedActorRefresh,
-    SemanticPreparedResidentModelRestoration, SemanticResidentModelRead,
-    SemanticSegmentInstructionAdmission, SemanticSelectedPolicyGradients,
-    SemanticTransitionSessionConstruction, SemanticUpdateCanaryMeasurement,
-    SemanticUpdateForwardReceipt, SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
+    SemanticCompletedTheoryDeltaMaterial, SemanticModelContextCheckpointAttachment,
+    SemanticModelContextContinuation, SemanticModelContextPrefillContentGeometry,
+    SemanticModelContextPrefillRestoreDeclaration, SemanticModelContextPrefillTensorGeometry,
+    SemanticPolicyGradients, SemanticPolicyNumericalDomainLayout, SemanticPreparedActorRefresh,
+    SemanticPreparedResidentModelRestoration, SemanticPrivateModelContextCheckpointOrigin,
+    SemanticPrivateModelContextCheckpointSave, SemanticResidentModelRead,
+    SemanticRestoredModelContextPrefill, SemanticSegmentInstructionAdmission,
+    SemanticSelectedPolicyGradients, SemanticTransitionSessionConstruction,
+    SemanticUpdateCanaryMeasurement, SemanticUpdateForwardReceipt,
+    SemanticUpdateForwardReceiptMaterial, SemanticUpdateMeasurements,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{

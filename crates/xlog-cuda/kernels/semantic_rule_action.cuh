@@ -33,19 +33,25 @@ __device__ bool context_category(const uint64_t* books, uint32_t field,
 // graph descriptors. No ordinary value or statement target decodes as a rule.
 template <typename Charge = UnaccountedPrefixWork>
 __device__ bool head_predicate(const uint64_t* books, uint32_t category,
-                               uint32_t predicate_count, uint32_t* predicate,
+                               const semantic_program::Bank& bank,
+                               uint32_t* predicate, uint32_t* arity,
                                Charge charge = {}) {
     charge(PrefixWorkEvent::Category);
-    if (!books || !predicate || !category || category >= books[1] ||
+    if (!books || !predicate || !arity || !category || category >= books[1] ||
         !context_category(books, 2, category, charge)) return false;
     const uint64_t* row = books + books[0] + 10 * uint64_t(category);
     if ((charge(PrefixWorkEvent::TableSlot), row[1] != UINT64_MAX) ||
-        (charge(PrefixWorkEvent::TableSlot), row[0] >= predicate_count)) return false;
-    for (uint32_t index = 2; index < 10; ++index) {
+        (charge(PrefixWorkEvent::TableSlot), row[0] >= bank.predicate_count)) return false;
+    charge(PrefixWorkEvent::TableSlot);
+    const uint32_t declared_arity = semantic_program::bank_predicate_arity(bank, uint32_t(row[0]));
+    if ((charge(PrefixWorkEvent::TableSlot), row[2] != declared_arity) ||
+        declared_arity < 1 || declared_arity > 2) return false;
+    for (uint32_t index = 3; index < 10; ++index) {
         charge(PrefixWorkEvent::TableSlot);
         if (row[index]) return false;
     }
     *predicate = uint32_t(row[0]);
+    *arity = declared_arity;
     return true;
 }
 
@@ -69,9 +75,25 @@ __device__ bool operand(const uint64_t* books, uint32_t category,
 
 template <typename Charge = UnaccountedPrefixWork>
 __device__ bool body_predicate(const uint64_t* books, uint32_t category,
-                               uint32_t predicate_count, uint32_t* predicate,
+                               const semantic_program::Bank& bank,
+                               uint32_t* predicate, uint32_t* arity,
                                Charge charge = {}) {
-    return operand(books, category, 1, predicate_count, predicate, charge);
+    charge(PrefixWorkEvent::Category);
+    if (!books || !predicate || !arity || !category || category >= books[3] ||
+        !context_category(books, 3, category, charge)) return false;
+    const uint64_t* row = books + books[2] + 6 * uint64_t(category);
+    if ((charge(PrefixWorkEvent::TableSlot), row[0]) ||
+        (charge(PrefixWorkEvent::TableSlot), row[1]) ||
+        (charge(PrefixWorkEvent::TableSlot), row[2]) ||
+        (charge(PrefixWorkEvent::TableSlot), row[3] != 1) ||
+        (charge(PrefixWorkEvent::TableSlot), row[4] >= bank.predicate_count)) return false;
+    charge(PrefixWorkEvent::TableSlot);
+    const uint32_t declared_arity = semantic_program::bank_predicate_arity(bank, uint32_t(row[4]));
+    if ((charge(PrefixWorkEvent::TableSlot), row[5] != declared_arity) ||
+        declared_arity < 1 || declared_arity > 2) return false;
+    *predicate = uint32_t(row[4]);
+    *arity = declared_arity;
+    return true;
 }
 
 template <typename Charge = UnaccountedPrefixWork>
@@ -82,10 +104,11 @@ __device__ bool variable(const uint64_t* books, uint32_t category,
 
 template <typename Charge = UnaccountedPrefixWork>
 __device__ bool decode(const uint64_t* books, const uint32_t choices[18],
-                       uint32_t predicate_count, semantic_program::Rule* rule,
+                       const semantic_program::Bank& bank,
+                       semantic_program::Rule* rule,
                        Charge charge = {}) {
     charge(PrefixWorkEvent::Category);
-    if (!books || !choices || !rule || !predicate_count || choices[0] != 1 ||
+    if (!books || !choices || !rule || !bank.predicate_count || choices[0] != 1 ||
         choices[1] != 2) return false;
     for (uint32_t field = 11; field < 18; ++field) {
         charge(PrefixWorkEvent::TableSlot);
@@ -94,21 +117,49 @@ __device__ bool decode(const uint64_t* books, const uint32_t choices[18],
     }
     semantic_program::Rule decoded{};
     decoded.body_count = 2;
-    if (!head_predicate(books, choices[2], predicate_count,
-                        &decoded.head_predicate, charge) ||
-        !body_predicate(books, choices[3], predicate_count,
-                        &decoded.left_predicate, charge) ||
-        !body_predicate(books, choices[4], predicate_count,
-                        &decoded.right_predicate, charge) ||
-        !variable(books, choices[5], &decoded.head_variables[0], charge) ||
-        !variable(books, choices[6], &decoded.head_variables[1], charge) ||
-        !variable(books, choices[7], &decoded.left_variables[0], charge) ||
-        !variable(books, choices[8], &decoded.left_variables[1], charge) ||
-        !variable(books, choices[9], &decoded.right_variables[0], charge) ||
-        !variable(books, choices[10], &decoded.right_variables[1], charge) ||
-        !(charge(PrefixWorkEvent::Category), semantic_program::valid_rule(decoded, predicate_count))) return false;
+    if (!head_predicate(books, choices[2], bank,
+                        &decoded.head.predicate, &decoded.head.arity, charge) ||
+        !body_predicate(books, choices[3], bank,
+                        &decoded.body[0].predicate, &decoded.body[0].arity, charge) ||
+        !body_predicate(books, choices[4], bank,
+                        &decoded.body[1].predicate, &decoded.body[1].arity, charge)) return false;
+    for (uint32_t atom_index = 0; atom_index < 3; ++atom_index) {
+        charge(PrefixWorkEvent::TableSlot);
+        auto& atom = atom_index ? decoded.body[atom_index - 1] : decoded.head;
+        for (uint32_t argument = 0; argument < 2; ++argument) {
+            charge(PrefixWorkEvent::TableSlot);
+            const uint32_t field = 5 + 2 * atom_index + argument;
+            if (argument < atom.arity) {
+                if (!variable(books, choices[field], &atom.terms[argument].value, charge)) return false;
+            } else if ((charge(PrefixWorkEvent::Category), choices[field])) return false;
+        }
+    }
+    if (!(charge(PrefixWorkEvent::Category), semantic_program::valid_rule(decoded, bank))) return false;
     charge(PrefixWorkEvent::TableSlot);
     *rule = decoded;
+    return true;
+}
+
+// The bound bank supplies arities for this generated-only recipe. Authored
+// constants and three-body rules always retain their complete typed encoding.
+__device__ bool receipt_words(const semantic_program::Bank& bank,
+                              const semantic_program::Rule& rule,
+                              uint64_t words[10]) {
+    if (!words || rule.body_count != 2 || !semantic_program::valid_rule(rule, bank)) return false;
+    for (uint32_t atom_index = 0; atom_index < 3; ++atom_index) {
+        const auto& atom = atom_index ? rule.body[atom_index - 1] : rule.head;
+        for (uint32_t argument = 0; argument < atom.arity; ++argument)
+            if (atom.terms[argument].kind != 0 || atom.terms[argument].value >= 4) return false;
+    }
+    words[0] = rule.head.predicate;
+    words[1] = rule.body[0].predicate;
+    words[2] = rule.body[1].predicate;
+    words[3] = rule.body_count;
+    for (uint32_t argument = 0; argument < 2; ++argument) {
+        words[4 + argument] = rule.head.terms[argument].value;
+        words[6 + argument] = rule.body[0].terms[argument].value;
+        words[8 + argument] = rule.body[1].terms[argument].value;
+    }
     return true;
 }
 
@@ -117,9 +168,10 @@ __device__ bool prefix_completes(const uint64_t* books,
                                  const Component* components,
                                  const uint8_t* support, uint32_t start,
                                  const uint32_t choices[18], uint32_t field,
-                                 uint32_t category, uint32_t predicate_count,
+                                 uint32_t category, const semantic_program::Bank& bank,
                                  Charge charge = {}) {
     charge(PrefixWorkEvent::Category);
+    const uint32_t predicate_count = bank.predicate_count;
     if (!books || !components || !support || !choices || !predicate_count ||
         field < 1 || field >= 18 || books[1] <= uint64_t(predicate_count) ||
         books[3] <= uint64_t(predicate_count) + 4 ||
@@ -144,34 +196,37 @@ __device__ bool prefix_completes(const uint64_t* books,
     };
     for (uint32_t position = 11; position < 18; ++position)
         if (!admitted(position, 0)) return false;
+    uint32_t arities[3] = {};
     for (uint32_t position = 2; position <= 4; ++position) {
         charge(PrefixWorkEvent::TableSlot);
         if (position <= field) {
             const uint32_t fixed = position == field ? category : choices[position];
             const uint32_t begin = position == 2 ? head_start : body_start;
             uint32_t decoded = UINT32_MAX;
+            uint32_t arity = 0;
             charge(PrefixWorkEvent::Category);
             if (fixed < begin || fixed - begin >= predicate_count ||
                 !admitted(position, fixed) ||
-                !(position == 2 ? head_predicate(books, fixed, predicate_count, &decoded, charge)
-                                 : body_predicate(books, fixed, predicate_count, &decoded, charge)) ||
+                !(position == 2 ? head_predicate(books, fixed, bank, &decoded, &arity, charge)
+                                 : body_predicate(books, fixed, bank, &decoded, &arity, charge)) ||
                 decoded != fixed - begin) return false;
+            arities[position - 2] = 1U << arity;
             continue;
         }
-        bool found = false;
         for (uint32_t predicate = 0; predicate < predicate_count; ++predicate) {
             charge(PrefixWorkEvent::TableSlot);
             const uint32_t candidate = (position == 2 ? head_start : body_start) + predicate;
             uint32_t decoded = UINT32_MAX;
+            uint32_t arity = 0;
             if (admitted(position, candidate) &&
-                (position == 2 ? head_predicate(books, candidate, predicate_count, &decoded, charge)
-                               : body_predicate(books, candidate, predicate_count, &decoded, charge)) &&
+                (position == 2 ? head_predicate(books, candidate, bank, &decoded, &arity, charge)
+                               : body_predicate(books, candidate, bank, &decoded, &arity, charge)) &&
                 decoded == predicate) {
-                found = true;
-                break;
+                arities[position - 2] |= 1U << arity;
+                if (arities[position - 2] == 6) break;
             }
         }
-        if (!found) return false;
+        if (!arities[position - 2]) return false;
     }
     auto available_variable = [&](uint32_t position, uint32_t index) {
         charge(PrefixWorkEvent::Category);
@@ -180,40 +235,52 @@ __device__ bool prefix_completes(const uint64_t* books,
         return admitted(position, candidate) && variable(books, candidate, &decoded, charge) &&
                decoded == index;
     };
-    if (field >= 5 && field <= 10) {
-        uint32_t decoded = UINT32_MAX;
-        charge(PrefixWorkEvent::Category);
-        if (category < variable_start || category - variable_start >= 4 ||
-            !admitted(field, category) || !variable(books, category, &decoded, charge) ||
-            decoded != category - variable_start) return false;
-    }
-    for (uint32_t first = 0; first < 4; ++first) {
+    // Each bit names the set of variables in one possible atom. Inactive unary
+    // arguments admit only NULL and contribute no variable to range restriction.
+    uint32_t atom_variables[3] = {};
+    for (uint32_t atom = 0; atom < 3; ++atom) {
         charge(PrefixWorkEvent::TableSlot);
-        if (!available_variable(5, first)) continue;
-        for (uint32_t second = 0; second < 4; ++second) {
+        const uint32_t first_position = 5 + 2 * atom;
+        const bool null_second = (arities[atom] & 2) && admitted(first_position + 1, 0);
+        uint32_t first_variables = 0, second_variables = 0;
+        for (uint32_t index = 0; index < 4; ++index) {
             charge(PrefixWorkEvent::TableSlot);
-            if (!available_variable(6, second)) continue;
-            const uint32_t required = (1U << first) | (1U << second);
-            uint32_t coverings = 1;
-            for (uint32_t position = 7; position <= 10; ++position) {
+            if (available_variable(first_position, index)) first_variables |= 1U << index;
+            if ((arities[atom] & 4) && available_variable(first_position + 1, index))
+                second_variables |= 1U << index;
+        }
+        for (uint32_t first = 0; first < 4; ++first) {
+            charge(PrefixWorkEvent::TableSlot);
+            if (!(first_variables & (1U << first))) continue;
+            if (null_second) atom_variables[atom] |= 1U << (1U << first);
+            for (uint32_t second = 0; second < 4; ++second) {
                 charge(PrefixWorkEvent::TableSlot);
-                uint32_t next = 0;
-                for (uint32_t covered = 0; covered < 16; ++covered) {
-                    charge(PrefixWorkEvent::TableSlot);
-                    charge(PrefixWorkEvent::Category);
-                    if (!(coverings & (1U << covered))) continue;
-                    for (uint32_t index = 0; index < 4; ++index)
-                        if (available_variable(position, index))
-                            next |= 1U << (covered | (1U << index));
-                }
-                coverings = next;
+                if (second_variables & (1U << second))
+                    atom_variables[atom] |= 1U << ((1U << first) | (1U << second));
             }
-            for (uint32_t covered = 0; covered < 16; ++covered) {
-                charge(PrefixWorkEvent::TableSlot);
-                charge(PrefixWorkEvent::Category);
-                if ((coverings & (1U << covered)) && (covered & required) == required)
-                    return true;
-            }
+        }
+        if (!atom_variables[atom]) return false;
+    }
+    uint32_t coverings = 0;
+    for (uint32_t left = 1; left < 16; ++left) {
+        charge(PrefixWorkEvent::TableSlot);
+        charge(PrefixWorkEvent::Category);
+        if (!(atom_variables[1] & (1U << left))) continue;
+        for (uint32_t right = 1; right < 16; ++right) {
+            charge(PrefixWorkEvent::TableSlot);
+            charge(PrefixWorkEvent::Category);
+            if (atom_variables[2] & (1U << right)) coverings |= 1U << (left | right);
+        }
+    }
+    for (uint32_t covered = 1; covered < 16; ++covered) {
+        charge(PrefixWorkEvent::TableSlot);
+        charge(PrefixWorkEvent::Category);
+        if (!(coverings & (1U << covered))) continue;
+        for (uint32_t required = 1; required < 16; ++required) {
+            charge(PrefixWorkEvent::TableSlot);
+            charge(PrefixWorkEvent::Category);
+            if ((atom_variables[0] & (1U << required)) && (covered & required) == required)
+                return true;
         }
     }
     return false;

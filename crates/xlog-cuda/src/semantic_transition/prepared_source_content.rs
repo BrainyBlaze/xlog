@@ -548,6 +548,7 @@ pub struct SemanticSourceGeometryAllocation {
 }
 
 /// An original typed view and its complete backing, without a device address.
+#[derive(Clone)]
 pub struct SemanticSourceGeometryTensor {
     pub layout: SemanticTensorLayout,
     pub logical_begin: u64,
@@ -557,6 +558,38 @@ pub struct SemanticSourceGeometryTensor {
 }
 
 impl SemanticSourceGeometryAllocation {
+    fn declared(
+        scope: &Arc<()>,
+        port: SourceGeometryAllocationPort,
+        prepared_section: Option<(SemanticTransitionKind, usize)>,
+        span_bytes: u64,
+    ) -> Self {
+        Self {
+            scope: Arc::clone(scope),
+            port,
+            prepared_section,
+            span_bytes,
+        }
+    }
+
+    pub(super) fn restored_prefill(
+        scope: &Arc<()>,
+        model: bool,
+        index: usize,
+        span_bytes: u64,
+    ) -> Self {
+        Self::declared(
+            scope,
+            if model {
+                SourceGeometryAllocationPort::Model(index)
+            } else {
+                SourceGeometryAllocationPort::Publication(index)
+            },
+            None,
+            span_bytes,
+        )
+    }
+
     pub fn span_bytes(&self) -> u64 {
         self.span_bytes
     }
@@ -1288,16 +1321,16 @@ impl SourceContentGeometryOwner {
             logical_begin,
             logical_end,
             byte_offset,
-            allocation: SemanticSourceGeometryAllocation {
-                scope: Arc::clone(if matches!(port, SourceGeometryAllocationPort::Model(_)) {
+            allocation: SemanticSourceGeometryAllocation::declared(
+                if matches!(port, SourceGeometryAllocationPort::Model(_)) {
                     self.model_scope()
                 } else {
                     &self.scope
-                }),
+                },
                 port,
-                prepared_section: self.allocation_section(port, section)?,
+                self.allocation_section(port, section)?,
                 span_bytes,
-            },
+            ),
         })
     }
 }

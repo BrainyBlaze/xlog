@@ -2524,10 +2524,17 @@ still required before this can be the full operation expense.
 
 The returned native-issued `SemanticLearningPhaseTransition` retains both
 owners privately. A fast successor resumes inference; consolidation resumes
-training, subject to its original rights. A later fast training segment requires
-`current-request-fast-adaptation` grants, while consolidation requires
-`durable-slow-consolidation` grants. Phase adoption does not issue those rights
-or make the resident fast Update a durable consolidation commit.
+training, subject to its original rights. Training purpose follows the admitted
+data, independently of the phase's trainable parameter set. Original
+`durable-slow-consolidation` grants permit compatible train/development data in
+alignment, fast learning and consolidation. Original
+`current-request-fast-adaptation` grants permit only fast learning on immutable
+request-local replay; they never authorize alignment, consolidation or a durable
+phase successor. Before the first admitted phase transition, the native phase
+is alignment. Every use still checks the complete original grant coverage,
+data partition, replay scope, live authority, expiry and revocation. Phase
+adoption and checkpoint restoration neither change those fields nor issue new
+rights, and a resident fast Update is not a durable consolidation commit.
 The original Session blocks further import, execution and abort until resolution.
 `controller.pending_learning_phase_transition()` recovers that same retained
 object if the application loses its reference.

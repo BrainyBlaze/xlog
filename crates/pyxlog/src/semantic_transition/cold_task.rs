@@ -34,7 +34,7 @@ pub(super) struct EditableTaskSource {
 struct EditableTaskAllocations {
     _vectors: xlog_cuda::SemanticReplayMaterialReservation,
     _text: xlog_cuda::SemanticReplayMaterialReservation,
-    _program: xlog_gpu::logic::PositiveBinaryTaskAllocations,
+    _program: xlog_gpu::logic::PositiveTaskAllocations,
 }
 
 pub(super) struct EditableProgramOwner {
@@ -373,20 +373,19 @@ fn editable_source_from_admission_owned(
     let statement_texts = statements.iter().map(String::as_str).collect::<Vec<_>>();
     let (program, allocations) = match budget {
         Some(budget) => {
-            let (program, native) =
-                xlog_gpu::logic::compile_positive_binary_task_with_allocation_owner(
-                    &sources[0],
-                    &sources[1],
-                    &statement_texts,
-                    &query_records,
-                    &mut |bytes| {
-                        budget
-                            .reserve_auxiliary(bytes)
-                            .map(|owner| Arc::new(owner) as Arc<dyn Send + Sync>)
-                            .map_err(|error| xlog_core::XlogError::Compilation(error.to_string()))
-                    },
-                )
-                .map_err(xlog_err)?;
+            let (program, native) = xlog_gpu::logic::compile_positive_task_with_allocation_owner(
+                &sources[0],
+                &sources[1],
+                &statement_texts,
+                &query_records,
+                &mut |bytes| {
+                    budget
+                        .reserve_auxiliary(bytes)
+                        .map(|owner| Arc::new(owner) as Arc<dyn Send + Sync>)
+                        .map_err(|error| xlog_core::XlogError::Compilation(error.to_string()))
+                },
+            )
+            .map_err(xlog_err)?;
             (
                 program,
                 Some(Arc::new(EditableTaskAllocations {
@@ -397,7 +396,7 @@ fn editable_source_from_admission_owned(
             )
         }
         None => (
-            xlog_gpu::logic::compile_positive_binary_task(
+            xlog_gpu::logic::compile_positive_task(
                 &sources[0],
                 &sources[1],
                 &statement_texts,
@@ -410,7 +409,7 @@ fn editable_source_from_admission_owned(
     Ok(Some(EditableTaskSource {
         program: Arc::new(program),
         observer_source: sources.get(2).cloned(),
-        initial_source: xlog_gpu::logic::positive_binary_task_source(
+        initial_source: xlog_gpu::logic::positive_task_source(
             &sources[0],
             &sources[1],
             &query_records
@@ -816,11 +815,8 @@ impl PySemanticTransitionColdTask {
             .iter()
             .map(|record| statements[*record as usize].0.as_str())
             .collect::<Vec<_>>();
-        let initial_source = xlog_gpu::logic::positive_binary_task_source(
-            &initial_theory,
-            &input_facts,
-            &statement_texts,
-        );
+        let initial_source =
+            xlog_gpu::logic::positive_task_source(&initial_theory, &input_facts, &statement_texts);
         let mut program = xlog_gpu::logic::SemanticLogicTaskProgram::compile(
             observer_program.clone().unwrap_or(initial_source),
             if observer_program.is_some() {

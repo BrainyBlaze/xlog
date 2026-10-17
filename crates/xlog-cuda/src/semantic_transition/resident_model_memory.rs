@@ -511,8 +511,10 @@ impl ResidentModelExportOwner {
                 runtime_error("model consumer retirement event allocation", error)
             })?;
             *retirement = Some(ModelExportUse {
-                _generation: Arc::clone(&self.generation),
+                _generation: Some(Arc::clone(&self.generation)),
                 _view: self.view.clone(),
+                _publication: None,
+                _guard: None,
                 event,
                 stream: Arc::clone(stream),
                 consumer_stream,

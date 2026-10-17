@@ -431,7 +431,7 @@ fn actor_work_hash(ceiling: &mut [u64; 9], bytes: u64) -> Result<(), SemanticTra
 /// Bound the same operation-10 initializer from its retained publication and
 /// semantic arena geometry. These are producer loop ceilings, not execution
 /// charges or a substitute for the enclosing Update's original allowance.
-fn actor_initialize_native_work_ceiling(
+pub(super) fn actor_initialize_native_work_ceiling(
     child: &SemanticTransitionSession,
 ) -> Result<[u64; 9], SemanticTransitionError> {
     let storage = child

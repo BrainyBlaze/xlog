@@ -23,6 +23,9 @@ use xlog_core::{Result, XlogError};
 
 use crate::device_runtime::{Access, ResourceResult};
 use crate::memory::{with_memory_access, DeviceMemoryView, DeviceRead, DeviceWrite};
+use crate::module_backing::{
+    ModuleBacking, MODULE_INPUT_CUBIN, MODULE_INPUT_FILE, MODULE_INPUT_PTX,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 enum HostTransferCompletion {
@@ -93,6 +96,7 @@ pub(crate) struct PinnedHostBuffer {
     completion: HostTransferCompletion,
     retirement_proven: bool,
     retained_owner: Option<Arc<dyn Send + Sync>>,
+    execution_failure: RecordedExecutionFailure,
 }
 
 impl std::fmt::Debug for PinnedHostBuffer {
@@ -133,6 +137,7 @@ impl PinnedHostBuffer {
             completion: HostTransferCompletion::Complete,
             retirement_proven: false,
             retained_owner,
+            execution_failure: RecordedExecutionFailure::default(),
         })
     }
 
@@ -195,17 +200,39 @@ impl PinnedHostBuffer {
             .submit(|| transfer(self.ptr as *mut u8), || event.record(stream))
     }
 
+    fn wait_on(&mut self, stream: &CudaStream) -> std::result::Result<(), DriverError> {
+        if self.retirement_proven {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        if stream.context().cu_ctx() != self.context.cu_ctx() {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_CONTEXT));
+        }
+        let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
+        self.context.bind_to_thread()?;
+        let event = self.event.as_ref().expect("pinned owner event present");
+        let execution_failure = &self.execution_failure;
+        self.completion.wait(
+            || {
+                event
+                    .synchronize()
+                    .inspect_err(|error| execution_failure.record_synchronize_error(error))
+            },
+            || event.record(stream),
+        )
+    }
+
     pub(crate) fn wait(&mut self) -> std::result::Result<(), DriverError> {
         if self.retirement_proven {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
         }
         let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
+        let event = self.event.as_ref().expect("pinned owner event present");
+        let execution_failure = &self.execution_failure;
         self.completion.wait(
             || {
-                self.event
-                    .as_ref()
-                    .expect("pinned owner event present")
+                event
                     .synchronize()
+                    .inspect_err(|error| execution_failure.record_synchronize_error(error))
             },
             // Both original-frame record attempts failed. An old event or a
             // different thread's PTDS cannot prove this prefix complete. A
@@ -234,12 +261,17 @@ impl PinnedHostBuffer {
                     .as_ref()
                     .expect("pinned owner event present")
                     .synchronize()
+                    .inspect_err(|error| self.execution_failure.record_synchronize_error(error))
                     .is_err()
                 {
-                    stream.synchronize()?;
+                    stream.synchronize().inspect_err(|error| {
+                        self.execution_failure.record_synchronize_error(error)
+                    })?;
                 }
             }
-            HostTransferCompletion::Unfenced => stream.synchronize()?,
+            HostTransferCompletion::Unfenced => stream
+                .synchronize()
+                .inspect_err(|error| self.execution_failure.record_synchronize_error(error))?,
         }
         // This proof permits only freeing the original allocation. It does not
         // authenticate successful DMA or make any staged value readable.
@@ -324,6 +356,7 @@ pub(crate) struct RetainedDeviceMemoryCommand {
     entered: bool,
     submitted: bool,
     completed: bool,
+    completion_failure: Option<sys::CUresult>,
 }
 
 impl RetainedDeviceMemoryCommand {
@@ -352,6 +385,7 @@ impl RetainedDeviceMemoryCommand {
     ) -> std::result::Result<Self, DriverError> {
         Ok(Self {
             completed: destination.len() == 0,
+            completion_failure: None,
             source,
             destination,
             stream: Arc::clone(stream),
@@ -371,6 +405,14 @@ impl RetainedDeviceMemoryCommand {
         &self.destination
     }
 
+    pub(crate) fn submitted(&self) -> bool {
+        self.submitted
+    }
+
+    pub(crate) fn completion_pending(&self) -> bool {
+        self.submitted && !self.completed && self.completion_failure.is_none()
+    }
+
     pub(crate) fn source(&self) -> Option<&DeviceMemoryView<u8>> {
         self.source.as_ref()
     }
@@ -379,11 +421,19 @@ impl RetainedDeviceMemoryCommand {
         if self.completed {
             return Ok(());
         }
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error).into());
+        }
         if self.entered || crate::cuda_graph::stream_execution_id(&self.stream)? != self.stream_id {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE).into());
         }
         if self.completion_entered {
-            self.completion.wait()?;
+            self.completion
+                .resolve_original_on(&self.stream)
+                .map_err(|error| {
+                    self.completion_failure = self.completion.known_completion_failure();
+                    error
+                })?;
             self.completion = ExecutionCompletion::new(self.stream.context())?;
             self.completion_entered = false;
         }
@@ -398,6 +448,7 @@ impl RetainedDeviceMemoryCommand {
         let submitted = &mut self.submitted;
         let completion = &mut self.completion;
         let completion_entered = &mut self.completion_entered;
+        let completion_failure = &mut self.completion_failure;
         let stream = &self.stream;
         with_memory_access(Arc::clone(stream), accesses, |proof| {
             let mut destination = proof.write(destination)?;
@@ -410,36 +461,52 @@ impl RetainedDeviceMemoryCommand {
             // A failed event/manifest prefix is distinct from memory-command
             // entry. Only a positively unentered memory suffix may be rearmed.
             *completion_entered = true;
-            completion.submit(stream, None, || {
+            let result = completion.submit(stream, None, || {
                 // SAFETY: original typed views and their access proof retain
                 // both exact byte extents through this one driver command.
                 unsafe {
                     *entered = true;
-                    match source.as_ref() {
+                    let submitted_result = match source.as_ref() {
                         Some((source_ptr, _guard)) => sys::cuMemcpyDtoDAsync_v2(
                             destination_ptr,
                             *source_ptr,
                             bytes,
                             stream.cu_stream(),
                         )
-                        .result()?,
+                        .result(),
                         None => sys::cuMemsetD8Async(destination_ptr, 0, bytes, stream.cu_stream())
-                            .result()?,
+                            .result(),
+                    };
+                    if let Err(error) = &submitted_result {
+                        *completion_failure = known_command_submission_failure(error);
                     }
+                    submitted_result?;
                     *submitted = true;
                 }
                 Ok(())
-            })?;
+            });
+            result?;
             Ok(())
         })
     }
 
     pub(crate) fn resolve(&mut self) -> std::result::Result<(), DriverError> {
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        let result = self.resolve_original();
+        if result.is_err() {
+            self.completion_failure = self.completion.known_completion_failure();
+        }
+        result
+    }
+
+    fn resolve_original(&mut self) -> std::result::Result<(), DriverError> {
         if self.completed {
             return Ok(());
         }
         if self.entered {
-            self.completion.wait()?;
+            self.completion.resolve_original_on(&self.stream)?;
         }
         if !self.submitted {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_UNKNOWN));
@@ -475,6 +542,45 @@ impl Drop for RetainedDeviceMemoryCommand {
     }
 }
 
+#[derive(Default)]
+struct RecordedExecutionFailure(std::sync::atomic::AtomicU32);
+
+impl RecordedExecutionFailure {
+    const FAULTS: [sys::CUresult; 10] = [
+        sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+        sys::CUresult::CUDA_ERROR_LAUNCH_FAILED,
+        sys::CUresult::CUDA_ERROR_LAUNCH_TIMEOUT,
+        sys::CUresult::CUDA_ERROR_ASSERT,
+        sys::CUresult::CUDA_ERROR_HARDWARE_STACK_ERROR,
+        sys::CUresult::CUDA_ERROR_ILLEGAL_INSTRUCTION,
+        sys::CUresult::CUDA_ERROR_MISALIGNED_ADDRESS,
+        sys::CUresult::CUDA_ERROR_INVALID_ADDRESS_SPACE,
+        sys::CUresult::CUDA_ERROR_INVALID_PC,
+        sys::CUresult::CUDA_ERROR_ECC_UNCORRECTABLE,
+    ];
+
+    fn record_synchronize_error(&self, error: &DriverError) {
+        if Self::FAULTS.contains(&error.0) {
+            self.0
+                .store(error.0 as u32, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn known(&self) -> Option<sys::CUresult> {
+        let code = self.0.load(std::sync::atomic::Ordering::Acquire);
+        Self::FAULTS.into_iter().find(|error| *error as u32 == code)
+    }
+}
+
+/// Preserve direct command rejection, not an error from recording its fence.
+fn known_command_submission_failure(error: &DriverError) -> Option<sys::CUresult> {
+    (!matches!(
+        error.0,
+        sys::CUresult::CUDA_ERROR_UNKNOWN | sys::CUresult::CUDA_ERROR_NOT_READY
+    ))
+    .then_some(error.0)
+}
+
 /// Original initialized host staging and its admitted device destination.
 /// Resolution waits for the retained copy; it never repeats an entered DMA.
 pub(crate) struct RetainedDeviceWrite<T: DeviceRepr> {
@@ -483,11 +589,49 @@ pub(crate) struct RetainedDeviceWrite<T: DeviceRepr> {
     entered: bool,
     submitted: bool,
     completed: bool,
+    completion_failure: Option<sys::CUresult>,
     original_stream_id: u64,
     retired: bool,
 }
 
 impl<T: DeviceRepr> RetainedDeviceWrite<T> {
+    pub(crate) fn resolve_on(
+        &mut self,
+        stream: &CudaStream,
+    ) -> std::result::Result<(), DriverError> {
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        if self.entered && !self.completed && !self.retired {
+            let result = self
+                .buffer
+                .as_mut()
+                .expect("original write staging")
+                .wait_on(stream);
+            if result.is_err() {
+                self.completion_failure = self
+                    .buffer
+                    .as_ref()
+                    .and_then(|buffer| buffer.execution_failure.known());
+            }
+            result?;
+        }
+        self.resolve()
+    }
+
+    pub(crate) fn known_completion_failure(&self) -> Option<sys::CUresult> {
+        self.completion_failure.or_else(|| {
+            self.buffer
+                .as_ref()
+                .and_then(|buffer| buffer.execution_failure.known())
+        })
+    }
+    pub(crate) fn completion_pending(&self) -> bool {
+        self.submitted && !self.completed && !self.retired && self.completion_failure.is_none()
+    }
     pub(crate) fn submitted(&self) -> bool {
         self.submitted
     }
@@ -521,6 +665,7 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
             entered: false,
             submitted: false,
             completed: false,
+            completion_failure: None,
             original_stream_id,
             retired: false,
         })
@@ -562,22 +707,43 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
         let (ptr, _guard) = destination.device_ptr_mut(stream);
         let entered = &mut self.entered;
         let submitted = &mut self.submitted;
+        let completion_failure = &mut self.completion_failure;
         let buffer = self.buffer.as_mut().expect("original write staging");
         let bytes = buffer.bytes;
         // SAFETY: this exact destination is covered by the original admission;
         // device storage and pinned staging survive any uncertain completion.
-        unsafe {
+        let result = unsafe {
             buffer.enqueue(stream, |host| {
                 *entered = true;
-                sys::cuMemcpyHtoDAsync_v2(ptr, host.cast(), bytes, stream.cu_stream()).result()?;
+                let submitted_result =
+                    sys::cuMemcpyHtoDAsync_v2(ptr, host.cast(), bytes, stream.cu_stream()).result();
+                if let Err(error) = &submitted_result {
+                    *completion_failure = known_command_submission_failure(error);
+                }
+                submitted_result?;
                 *submitted = true;
                 Ok(())
-            })?;
-        }
+            })
+        };
+        result?;
         Ok(())
     }
 
     pub(crate) fn resolve(&mut self) -> std::result::Result<(), DriverError> {
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        let result = self.resolve_original();
+        if result.is_err() {
+            self.completion_failure = self
+                .buffer
+                .as_ref()
+                .and_then(|buffer| buffer.execution_failure.known());
+        }
+        result
+    }
+
+    fn resolve_original(&mut self) -> std::result::Result<(), DriverError> {
         if self.retired {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
         }
@@ -616,7 +782,12 @@ impl<T: DeviceRepr> RetainedDeviceWrite<T> {
             return Ok(());
         }
         if let Some(buffer) = self.buffer.as_mut() {
-            buffer.prove_retirement(stream, self.original_stream_id)?;
+            let result = buffer.prove_retirement(stream, self.original_stream_id);
+            self.completion_failure = self.known_completion_failure();
+            result?;
+        }
+        if let Some(error) = self.known_completion_failure() {
+            return Err(DriverError(error));
         }
         self.retired = true;
         self.buffer = None;
@@ -634,12 +805,61 @@ pub(crate) struct RetainedDeviceRead<T: DeviceRepr + Copy> {
     retired: bool,
     original_stream_id: u64,
     values: Option<Vec<T>>,
+    completion_failure: Option<sys::CUresult>,
     // The pin can retire before resolve clones its result. Cached values keep
     // the original phase owner until the caller retires those real values.
     values_allocation_owner: Option<Arc<dyn Send + Sync>>,
 }
 
 impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
+    pub(crate) fn resolve_on(
+        &mut self,
+        stream: &CudaStream,
+    ) -> std::result::Result<Vec<T>, DriverError> {
+        if crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id {
+            return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
+        }
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        if self.entered && self.values.is_none() && !self.retired {
+            let result = self
+                .buffer
+                .as_mut()
+                .expect("original read staging")
+                .wait_on(stream);
+            if result.is_err() {
+                self.completion_failure = self
+                    .buffer
+                    .as_ref()
+                    .and_then(|buffer| buffer.execution_failure.known());
+            }
+            result?;
+        }
+        self.resolve()
+    }
+
+    pub(crate) fn known_completion_failure(&self) -> Option<sys::CUresult> {
+        self.completion_failure.or_else(|| {
+            self.buffer
+                .as_ref()
+                .and_then(|buffer| buffer.execution_failure.known())
+        })
+    }
+
+    pub(crate) fn lifetime_retired(&self) -> bool {
+        self.retired
+    }
+
+    pub(crate) fn unconfirmed_retired(&self) -> bool {
+        self.retired && self.entered && !self.submitted && self.known_completion_failure().is_none()
+    }
+    pub(crate) fn completion_pending(&self) -> bool {
+        self.submitted
+            && self.values.is_none()
+            && !self.retired
+            && self.completion_failure.is_none()
+    }
     pub(crate) fn submitted(&self) -> bool {
         self.submitted
     }
@@ -672,6 +892,7 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
             retired: false,
             original_stream_id: crate::cuda_graph::stream_execution_id(stream)?,
             values: None,
+            completion_failure: None,
             values_allocation_owner: retained_owner,
         })
     }
@@ -690,6 +911,13 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
 
     /// The caller must record this exact retained source in its execution domain.
     pub(crate) fn enqueue(&mut self, stream: &CudaStream) -> std::result::Result<(), DriverError> {
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        self.enqueue_original(stream)
+    }
+
+    fn enqueue_original(&mut self, stream: &CudaStream) -> std::result::Result<(), DriverError> {
         if self.entered
             || self.retired
             || crate::cuda_graph::stream_execution_id(stream)? != self.original_stream_id
@@ -699,6 +927,7 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
         let source = &self.source;
         let entered = &mut self.entered;
         let submitted = &mut self.submitted;
+        let completion_failure = &mut self.completion_failure;
         let buffer = self.buffer.as_mut().expect("original read staging");
         let bytes = buffer.bytes;
         // SAFETY: this owner retains the complete source and pinned destination.
@@ -708,13 +937,17 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
                 // Pin/context/capture preflight has succeeded. Only this actual
                 // driver boundary makes completion uncertain.
                 *entered = true;
-                sys::cuMemcpyDtoHAsync_v2(
+                let submitted_result = sys::cuMemcpyDtoHAsync_v2(
                     destination.cast(),
                     *source.device_ptr(),
                     bytes,
                     stream.cu_stream(),
                 )
-                .result()?;
+                .result();
+                if let Err(error) = &submitted_result {
+                    *completion_failure = known_command_submission_failure(error);
+                }
+                submitted_result?;
                 *submitted = true;
                 Ok(())
             })
@@ -722,6 +955,20 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
     }
 
     pub(crate) fn resolve(&mut self) -> std::result::Result<Vec<T>, DriverError> {
+        if let Some(error) = self.completion_failure {
+            return Err(DriverError(error));
+        }
+        let result = self.resolve_original();
+        if result.is_err() {
+            self.completion_failure = self
+                .buffer
+                .as_ref()
+                .and_then(|buffer| buffer.execution_failure.known());
+        }
+        result
+    }
+
+    fn resolve_original(&mut self) -> std::result::Result<Vec<T>, DriverError> {
         if self.retired {
             return Err(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE));
         }
@@ -775,8 +1022,22 @@ impl<T: DeviceRepr + Copy> RetainedDeviceRead<T> {
         if self.retired {
             return Ok(());
         }
-        if let Some(buffer) = self.buffer.as_mut() {
+        if self.entered && !self.submitted {
+            if let Some(error) = self.known_completion_failure() {
+                return Err(DriverError(error));
+            }
+            let result = self
+                .buffer
+                .as_mut()
+                .expect("original read staging")
+                .wait_on(stream);
+            self.completion_failure = self.known_completion_failure();
+            result?;
+        } else if let Some(buffer) = self.buffer.as_mut() {
             buffer.prove_retirement(stream, self.original_stream_id)?;
+        }
+        if let Some(error) = self.known_completion_failure() {
+            return Err(DriverError(error));
         }
         self.retired = true;
         self.buffer = None;
@@ -1114,6 +1375,7 @@ pub(crate) struct LoadedModule {
     artifact_sha256: Option<[u8; 32]>,
     context: Arc<CudarcContext>,
     completion: Mutex<ExecutionCompletion>,
+    backing: Option<Mutex<ModuleBacking>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1179,6 +1441,7 @@ pub(crate) struct ExecutionCompletion {
     spare: Option<CudaEvent>,
     uncertain: bool,
     allocation_owner: Option<Arc<dyn Send + Sync>>,
+    execution_failure: RecordedExecutionFailure,
 }
 
 impl std::fmt::Debug for ExecutionCompletion {
@@ -1193,6 +1456,46 @@ impl std::fmt::Debug for ExecutionCompletion {
 }
 
 impl ExecutionCompletion {
+    pub(crate) fn known_completion_failure(&self) -> Option<sys::CUresult> {
+        self.execution_failure.known()
+    }
+    pub(crate) fn resolve_original_on(
+        &mut self,
+        stream: &CudaStream,
+    ) -> std::result::Result<(), DriverError> {
+        let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
+        let key = crate::cuda_graph::stream_execution_id(stream)?;
+        stream.context().bind_to_thread()?;
+        let execution_failure = &self.execution_failure;
+        let (event, completion) = self
+            .events
+            .get_mut(&key)
+            .ok_or(DriverError(sys::CUresult::CUDA_ERROR_INVALID_VALUE))?;
+        if !completion
+            .confirmation
+            .as_ref()
+            .is_some_and(|proof| proof.is_complete())
+        {
+            completion.state.wait(
+                || {
+                    event
+                        .synchronize()
+                        .inspect_err(|error| execution_failure.record_synchronize_error(error))
+                },
+                || event.record(stream),
+            )?;
+        }
+        for (event, completion) in self.events.values() {
+            completion.wait(|| {
+                event
+                    .synchronize()
+                    .inspect_err(|error| execution_failure.record_synchronize_error(error))
+            })?;
+        }
+        self.uncertain = false;
+        Ok(())
+    }
+
     pub(crate) fn new(context: &Arc<CudarcContext>) -> std::result::Result<Self, DriverError> {
         Self::new_with_owner(context, None)
     }
@@ -1258,7 +1561,11 @@ impl ExecutionCompletion {
     pub(crate) fn wait(&self) -> std::result::Result<(), DriverError> {
         let _ordinary = crate::cuda_graph::reserve_capture_exclusion()?;
         for (event, completion) in self.events.values() {
-            completion.wait(|| event.synchronize())?;
+            completion.wait(|| {
+                event.synchronize().inspect_err(|error| {
+                    self.execution_failure.record_synchronize_error(error);
+                })
+            })?;
         }
         Ok(())
     }
@@ -1281,16 +1588,41 @@ impl Drop for LoadedModule {
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+        let backing = self.backing.take();
         crate::cuda_graph::retire_resources_after_completion(
-            (module, context, completion),
-            |(_, context, completion)| context.bind_to_thread().and_then(|()| completion.wait()),
-            |(module, _, _)| {
+            (module, context, completion, backing),
+            |(_, context, completion, backing)| {
+                if let Some(backing) = backing {
+                    backing
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .ready()?;
+                }
+                context.bind_to_thread().and_then(|()| completion.wait())
+            },
+            |(module, _, _, _)| {
                 // SAFETY: direct submissions are complete; captured submissions
                 // retained this module through their graph's retirement fence.
                 unsafe { result::module::unload(*module as sys::CUmodule) }
             },
-            |_| Ok(()),
-            |(_, context, _), error| context.record_err::<()>(Err(error)),
+            |(_, _, _, backing)| {
+                if let Some(backing) = backing {
+                    backing
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .unloaded()?;
+                }
+                Ok(())
+            },
+            |(_, context, _, backing), error| {
+                if let Some(backing) = backing {
+                    backing
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .unknown(Some(&error));
+                }
+                context.record_err::<()>(Err(error));
+            },
         );
     }
 }
@@ -1698,6 +2030,7 @@ impl CudaDeviceInner {
         artifact_sha256: Option<[u8; 32]>,
         cu_module: sys::CUmodule,
         kernels: &[&str],
+        backing: Option<ModuleBacking>,
     ) -> std::result::Result<(), DriverError> {
         // Establish ownership before fallible symbol lookup. A rejected module
         // is retired without leaking it or disturbing the previous registry entry.
@@ -1709,11 +2042,24 @@ impl CudaDeviceInner {
             artifact_sha256,
             context: self.context.clone(),
             completion: Mutex::default(),
+            backing: backing.map(Mutex::new),
         };
+        if let Some(backing) = &mut module.backing {
+            backing
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .loaded(cu_module)?;
+        }
         for &kernel in kernels {
             let name_c = CString::new(kernel).unwrap();
             let cu_function = unsafe { result::module::get_function(cu_module, name_c) }?;
             module.functions.insert(Arc::from(kernel), cu_function);
+        }
+        if let Some(backing) = &mut module.backing {
+            backing
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .read_static(&self.context)?;
         }
 
         let previous = self
@@ -1765,21 +2111,23 @@ impl CudaDeviceInner {
             .and_then(|name| name.to_str())
             .unwrap_or("file-artifact")
             .to_string();
-        if let Ok(bytes) = std::fs::read(path) {
-            let is_cubin = path.extension().and_then(|value| value.to_str()) == Some("cubin");
-            return self.load_artifact_bytes(
-                &bytes,
-                is_cubin,
-                module_name,
-                &artifact_name,
-                kernels,
-            );
-        }
+        let artifact_sha256 = std::fs::read(path)
+            .ok()
+            .map(|bytes| Sha256::digest(bytes).into());
         crate::cuda_graph::with_module_loading(|| {
             self.context.bind_to_thread()?;
+            let backing =
+                ModuleBacking::prepare(&self.context, MODULE_INPUT_FILE, artifact_sha256)?;
             let name_c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
             let cu_module = result::module::load(name_c)?;
-            self.insert_module(module_name, &artifact_name, None, cu_module, kernels)
+            self.insert_module(
+                module_name,
+                &artifact_name,
+                artifact_sha256,
+                cu_module,
+                kernels,
+                backing,
+            )
         })
     }
 
@@ -1794,6 +2142,15 @@ impl CudaDeviceInner {
         let artifact_sha256 = Sha256::digest(bytes).into();
         crate::cuda_graph::with_module_loading(|| {
             self.context.bind_to_thread()?;
+            let backing = ModuleBacking::prepare(
+                &self.context,
+                if is_cubin {
+                    MODULE_INPUT_CUBIN
+                } else {
+                    MODULE_INPUT_PTX
+                },
+                Some(artifact_sha256),
+            )?;
             let cu_module = if is_cubin {
                 unsafe { result::module::load_data(bytes.as_ptr().cast()) }?
             } else {
@@ -1806,6 +2163,7 @@ impl CudaDeviceInner {
                 Some(artifact_sha256),
                 cu_module,
                 kernels,
+                backing,
             )
         })
     }
@@ -1828,19 +2186,25 @@ impl CudaDeviceInner {
     ) -> std::result::Result<(), DriverError> {
         crate::cuda_graph::with_module_loading(|| {
             self.context.bind_to_thread()?;
-            let (cu_module, artifact_sha256) = if let Some(bytes) = ptx.as_bytes() {
+            let (cu_module, artifact_sha256, backing) = if let Some(bytes) = ptx.as_bytes() {
                 let digest = Sha256::digest(bytes).into();
+                let backing =
+                    ModuleBacking::prepare(&self.context, MODULE_INPUT_PTX, Some(digest))?;
                 (
                     unsafe { result::module::load_data(bytes.as_ptr() as *const _) }?,
                     digest,
+                    backing,
                 )
             } else {
                 let source = ptx.to_src();
                 let digest = Sha256::digest(source.as_bytes()).into();
                 let src = CString::new(source).unwrap();
+                let backing =
+                    ModuleBacking::prepare(&self.context, MODULE_INPUT_PTX, Some(digest))?;
                 (
                     unsafe { result::module::load_data(src.as_ptr() as *const _) }?,
                     digest,
+                    backing,
                 )
             };
             self.insert_module(
@@ -1849,6 +2213,7 @@ impl CudaDeviceInner {
                 Some(artifact_sha256),
                 cu_module,
                 kernels,
+                backing,
             )
         })
     }

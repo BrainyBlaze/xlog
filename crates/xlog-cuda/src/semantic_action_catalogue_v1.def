@@ -1,7 +1,7 @@
 # Canonical encoding: non-comment lines, single spaces between tokens, LF terminator.
 # SHA-256 of that encoding is the catalogue identity, generated at build time.
-domain xlog.semantic-action-catalogue.v1
-generation 4
+domain xlog.semantic-action-catalogue.v2
+generation 5
 constant TEXT_CARDINALITY 248077
 constant MASK_TOKEN 248078
 constant TEXT_NULL 0xffffffff
@@ -45,7 +45,10 @@ opcode 2 INSERT_RULE INSERT_RULE_ACTIVE_MASK INSERT_RULE_NULL_MASK
 rule TARGET_ARITY_PREFIX target_arity_0_to_4 operand_i_non_NULL_iff_i_lt_arity
 rule QUALIFIER_EMPTY distinct_EMPTY_BUNDLE_non_NULL
 rule SUPPORT_EVENT PRO_or_CONTRA unit_presence provenance source context scope ABSTAIN_illegal
-rule INSERT_RULE positive_range_restricted_binary_head two_binary_body_atoms admitted_predicates four_variable_slots immutable_input_facts
+rule INSERT_RULE positive_range_restricted_head two_positive_body_atoms declared_arity_1_or_2 four_variable_slots active_argument_bindings immutable_input_facts
+rule RULE_ARGUMENTS unary_second_argument_NULL category_0 inactive_not_a_variable prefix_completion_uses_real_arguments
+rule PROGRAM_BANK encoding_v2 declaration_order typed_u32 variable_kind_0 constant_kind_1 authored_body_count_1_to_3 shared_substitution exact_constants canonical_inactive_zero
+rule RULE_RECEIPT generated_variable_two_body_recipe_10_words program_bank_digest_binding authored_rules_full_25_words
 rule NULL entry_0 inactive_singleton still_consumes_Philox P_1 Q_1 mass_2pow63
 rule TEXT_ACTIVITY acquired_valid_MASK_and_retained_selected_bitmap original_ring_slot_and_logical_position
 rule MASK_SOURCE exact_MASK_TOKEN no_token_provenance not_an_ordinary_token

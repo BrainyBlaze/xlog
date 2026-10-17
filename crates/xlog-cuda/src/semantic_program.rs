@@ -1,4 +1,4 @@
-//! Binary positive program data shared by cold source lowering and the resident evaluator.
+//! Arity-aware positive program data shared by cold source lowering and the resident evaluator.
 
 use crate::DeviceRepr;
 
@@ -7,39 +7,95 @@ pub(crate) const RESIDENT_PROGRAM_FACT_CAPACITY: usize = 4096;
 /// The two sampled edits reserve two entries in this resident rule bank.
 pub(crate) const RESIDENT_PROGRAM_RULE_CAPACITY: usize = 256;
 
-/// One typed binary tuple. Predicate indices come from the admitted declaration order.
+/// One typed tuple. Predicate indices come from the admitted declaration order.
+/// Unary tuples have a canonical zero in the inactive second argument.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SemanticProgramFact {
     pub predicate: u32,
+    pub arity: u32,
     pub first: u32,
     pub second: u32,
 }
 
-// SAFETY: the C layout has three u32 fields and no references or padding.
+// SAFETY: the C layout has four u32 fields and no references or padding.
 unsafe impl DeviceRepr for SemanticProgramFact {}
 
-/// One range-restricted positive rule with one or two binary body atoms.
-/// Equal variable indices encode repeated-variable equalities.
+/// An active term is either a variable (kind zero) or a u32 constant (kind one).
+/// Equal variable indices retain repeated-variable equalities across all atoms.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SemanticProgramRule {
-    pub head_predicate: u32,
-    pub left_predicate: u32,
-    pub right_predicate: u32,
-    pub body_count: u32,
-    pub head_variables: [u32; 2],
-    pub left_variables: [u32; 2],
-    pub right_variables: [u32; 2],
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticProgramTerm {
+    pub kind: u32,
+    pub value: u32,
 }
 
-// SAFETY: the C layout has ten u32 fields and no references or padding.
+// SAFETY: the C layout has two u32 fields and no references or padding.
+unsafe impl DeviceRepr for SemanticProgramTerm {}
+
+/// One unary or binary atom; inactive argument storage is canonical zero.
+/// An unused body atom has every field zero, including its arity.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticProgramAtom {
+    pub predicate: u32,
+    pub arity: u32,
+    pub terms: [SemanticProgramTerm; 2],
+}
+
+// SAFETY: the C layout has six u32 fields and no references or padding.
+unsafe impl DeviceRepr for SemanticProgramAtom {}
+
+impl SemanticProgramAtom {
+    fn valid_for(&self, predicate_arities: &[u32]) -> bool {
+        (1..=2).contains(&self.arity)
+            && predicate_arities.get(self.predicate as usize) == Some(&self.arity)
+            && self.terms[..self.arity as usize]
+                .iter()
+                .all(|term| term.kind == 1 || (term.kind == 0 && term.value < 6))
+            && self.terms[self.arity as usize..]
+                .iter()
+                .all(|term| *term == SemanticProgramTerm::default())
+    }
+}
+
+/// One range-restricted positive rule with one to three authored body atoms.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticProgramRule {
+    pub head: SemanticProgramAtom,
+    pub body: [SemanticProgramAtom; 3],
+    pub body_count: u32,
+}
+
+// SAFETY: the C layout has twenty-five u32 fields and no references or padding.
 unsafe impl DeviceRepr for SemanticProgramRule {}
+
+impl SemanticProgramRule {
+    /// Canonical device words, independent of host struct layout.
+    pub fn words(&self) -> [u64; 25] {
+        let mut words = [0; 25];
+        words[0] = u64::from(self.body_count);
+        for (index, atom) in std::iter::once(&self.head).chain(&self.body).enumerate() {
+            let offset = 1 + 6 * index;
+            words[offset..offset + 6].copy_from_slice(&[
+                u64::from(atom.predicate),
+                u64::from(atom.arity),
+                u64::from(atom.terms[0].kind),
+                u64::from(atom.terms[0].value),
+                u64::from(atom.terms[1].kind),
+                u64::from(atom.terms[1].value),
+            ]);
+        }
+        words
+    }
+}
 
 /// Exact initial program and input facts prepared before a resident task starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticProgramAdmission {
     pub predicate_count: u32,
+    pub predicate_arities: Vec<u32>,
     pub initial_facts: Vec<SemanticProgramFact>,
     pub initial_rules: Vec<SemanticProgramRule>,
     pub queries: Vec<SemanticProgramFact>,
@@ -52,7 +108,17 @@ pub struct SemanticProgramAdmission {
 
 impl SemanticProgramAdmission {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let valid_fact = |fact: &SemanticProgramFact| {
+            (1..=2).contains(&fact.arity)
+                && self.predicate_arities.get(fact.predicate as usize) == Some(&fact.arity)
+                && (fact.arity == 2 || fact.second == 0)
+        };
         if self.predicate_count == 0
+            || self.predicate_arities.len() != self.predicate_count as usize
+            || self
+                .predicate_arities
+                .iter()
+                .any(|arity| !(1..=2).contains(arity))
             || self.queries.is_empty()
             || self.queries.len() > u32::MAX as usize
             || self.query_records.len() != self.queries.len()
@@ -62,11 +128,11 @@ impl SemanticProgramAdmission {
                 .queries
                 .iter()
                 .chain(&self.initial_facts)
-                .any(|fact| fact.predicate >= self.predicate_count)
+                .any(|fact| !valid_fact(fact))
             || self
                 .observation_facts
                 .iter()
-                .any(|(_, fact)| fact.predicate >= self.predicate_count)
+                .any(|(_, fact)| !valid_fact(fact))
             || self
                 .observation_facts
                 .iter()
@@ -87,42 +153,39 @@ impl SemanticProgramAdmission {
                         .any(|(original, tuple)| original == record && tuple == fact)
                 })
         {
-            return Err("binary program has an invalid predicate or fact count");
+            return Err("positive program has an invalid predicate, arity, or fact count");
         }
         if self.initial_facts.len() > RESIDENT_PROGRAM_FACT_CAPACITY {
-            return Err("binary program exceeds resident fact capacity");
+            return Err("positive program exceeds resident fact capacity");
         }
         if self.initial_rules.len() > RESIDENT_PROGRAM_RULE_CAPACITY - 2 {
-            return Err("binary program leaves no room for two rule edits");
+            return Err("positive program leaves no room for two rule edits");
         }
         for rule in &self.initial_rules {
-            if !(1..=2).contains(&rule.body_count)
-                || rule.head_predicate >= self.predicate_count
-                || rule.left_predicate >= self.predicate_count
-                || (rule.body_count == 2 && rule.right_predicate >= self.predicate_count)
-                || (rule.body_count == 1
-                    && (rule.right_predicate != 0 || rule.right_variables != [0, 0]))
+            if !(1..=3).contains(&rule.body_count)
+                || !rule.head.valid_for(&self.predicate_arities)
+                || rule.body[..rule.body_count as usize]
+                    .iter()
+                    .any(|atom| !atom.valid_for(&self.predicate_arities))
+                || rule.body[rule.body_count as usize..]
+                    .iter()
+                    .any(|atom| *atom != SemanticProgramAtom::default())
             {
-                return Err("binary program has an invalid rule predicate or body");
+                return Err("positive program has an invalid rule atom or body");
             }
-            let mut bound = [false; 4];
-            for &variable in rule.left_variables.iter().chain(
-                (rule.body_count == 2)
-                    .then_some(&rule.right_variables)
-                    .into_iter()
-                    .flatten(),
-            ) {
-                let slot = bound
-                    .get_mut(variable as usize)
-                    .ok_or("binary rule variable exceeds its four-slot domain")?;
-                *slot = true;
+            let mut bound = [false; 6];
+            for atom in &rule.body[..rule.body_count as usize] {
+                for term in &atom.terms[..atom.arity as usize] {
+                    if term.kind == 0 {
+                        bound[term.value as usize] = true;
+                    }
+                }
             }
-            if rule
-                .head_variables
+            if rule.head.terms[..rule.head.arity as usize]
                 .iter()
-                .any(|&variable| !bound.get(variable as usize).copied().unwrap_or(false))
+                .any(|term| term.kind == 0 && !bound[term.value as usize])
             {
-                return Err("binary rule head contains an unbound variable");
+                return Err("positive rule head contains an unbound variable");
             }
         }
         Ok(())
@@ -132,39 +195,33 @@ impl SemanticProgramAdmission {
     pub(crate) fn words(&self) -> Vec<u64> {
         let mut words = Vec::new();
         words.extend([
+            2,
             u64::from(self.predicate_count),
             self.initial_facts.len() as u64,
             self.initial_rules.len() as u64,
             self.queries.len() as u64,
         ]);
+        words.extend(self.predicate_arities.iter().copied().map(u64::from));
         for fact in self.queries.iter().chain(&self.initial_facts) {
             words.extend([
                 u64::from(fact.predicate),
+                u64::from(fact.arity),
                 u64::from(fact.first),
                 u64::from(fact.second),
             ]);
         }
         for rule in &self.initial_rules {
-            words.extend([
-                u64::from(rule.head_predicate),
-                u64::from(rule.left_predicate),
-                u64::from(rule.right_predicate),
-                u64::from(rule.body_count),
-                u64::from(rule.head_variables[0]),
-                u64::from(rule.head_variables[1]),
-                u64::from(rule.left_variables[0]),
-                u64::from(rule.left_variables[1]),
-                u64::from(rule.right_variables[0]),
-                u64::from(rule.right_variables[1]),
-            ]);
+            words.extend(rule.words());
         }
         words
     }
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<SemanticProgramFact>() == 12);
-    assert!(std::mem::size_of::<SemanticProgramRule>() == 40);
+    assert!(std::mem::size_of::<SemanticProgramFact>() == 16);
+    assert!(std::mem::size_of::<SemanticProgramTerm>() == 8);
+    assert!(std::mem::size_of::<SemanticProgramAtom>() == 24);
+    assert!(std::mem::size_of::<SemanticProgramRule>() == 100);
 };
 
 #[cfg(test)]

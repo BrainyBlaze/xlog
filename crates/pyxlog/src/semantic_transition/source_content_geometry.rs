@@ -292,6 +292,43 @@ pub(crate) struct PySemanticSourceGeometryAllocation {
 enum SourceGeometryAllocationOwner {
     Source(xlog_cuda::SemanticPreparedSourceContentGeometry),
     InputGeneration(xlog_cuda::SemanticModelInputGenerationPort),
+    PrefillRestore(xlog_cuda::SemanticModelContextPrefillRestoreDeclaration),
+}
+
+pub(in crate::semantic_transition) fn prefill_restore_allocation(
+    py: Python<'_>,
+    inner: xlog_cuda::SemanticSourceGeometryAllocation,
+    declaration: &xlog_cuda::SemanticModelContextPrefillRestoreDeclaration,
+) -> PyResult<Py<PySemanticSourceGeometryAllocation>> {
+    let metadata = material_bytes::reserve_python_material::<PySemanticSourceGeometryAllocation>(
+        py,
+        declaration.material_budget(),
+    )?;
+    Py::new(
+        py,
+        PySemanticSourceGeometryAllocation {
+            inner,
+            _owner: SourceGeometryAllocationOwner::PrefillRestore(declaration.clone()),
+            _metadata: metadata,
+        },
+    )
+}
+
+pub(in crate::semantic_transition) fn prefill_restore_model_memory(
+    py: Python<'_>,
+    declaration: &xlog_cuda::SemanticModelContextPrefillRestoreDeclaration,
+) -> PyResult<(Py<PyTuple>, xlog_cuda::SemanticReplayMaterialReservation)> {
+    let original = model_memory_projection(
+        py,
+        declaration.material_budget(),
+        SourceGeometryAllocationOwner::PrefillRestore(declaration.clone()),
+        declaration.model_allocation_layouts().count(),
+        declaration.model_allocation_layouts(),
+        declaration.model_storage_layouts(),
+        declaration.model_view_layouts().count(),
+        declaration.model_view_layouts(),
+    )?;
+    Ok((original.value, original._metadata))
 }
 
 #[pyclass(
@@ -1282,7 +1319,7 @@ impl PySemanticPreparedSourceContentGeometry {
     }
 }
 
-fn add(left: usize, right: usize) -> PyResult<usize> {
+pub(super) fn add(left: usize, right: usize) -> PyResult<usize> {
     left.checked_add(right)
         .ok_or_else(|| invalid("original source metadata extent overflow"))
 }

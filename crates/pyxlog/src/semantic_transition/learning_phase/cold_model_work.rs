@@ -23,9 +23,71 @@ pub(in crate::semantic_transition) struct ColdModelWorkCustody {
     pub(in crate::semantic_transition) reader: Py<PySemanticPublishedParent>,
     pub(in crate::semantic_transition) inner: SemanticColdModelWork,
     pub(in crate::semantic_transition) region: Option<SemanticColdModelWorkRegion>,
+    #[cfg(feature = "semantic-policy")]
+    future: Option<FrozenContextColdReader>,
+    #[cfg(feature = "semantic-policy")]
+    material_restore: Option<MaterialRestoreColdReader>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct MaterialRestoreColdReader {
+    context: xlog_cuda::SemanticModelContextContinuation,
+    target_task: Py<PySemanticTransitionTaskUse>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct FrozenContextColdReader {
+    context: xlog_cuda::SemanticModelContextContinuation,
+    step: SemanticPreparedStep,
+    task_use: Py<PySemanticTransitionTaskUse>,
+    scope: Arc<()>,
+    activation: bool,
 }
 
 impl ColdModelWorkCustody {
+    fn callback_session(&self, py: Python<'_>) -> PyResult<Py<PySemanticTransitionSession>> {
+        #[cfg(feature = "semantic-policy")]
+        if self.future.is_some() {
+            return Ok(self.session(py));
+        }
+        Ok(self.parent()?.borrow(py).session.clone_ref(py))
+    }
+    fn session(&self, py: Python<'_>) -> Py<PySemanticTransitionSession> {
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &self.future {
+            return future.task_use.borrow(py).session.clone_ref(py);
+        }
+        self.reader.borrow(py).session.clone_ref(py)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn require_future(&self, py: Python<'_>) -> PyResult<bool> {
+        let Some(future) = &self.future else {
+            return Ok(false);
+        };
+        let task = future.task_use.borrow(py);
+        let session = task.session.borrow(py);
+        session.require_creator()?;
+        let owner = session.owner()?;
+        task.require_identity(&owner)?;
+        let phase = task.state()?.phase.clone();
+        let phase_matches = if future.activation {
+            matches!(&phase, TaskUsePhase::Prepared { scope, .. } | TaskUsePhase::ContextActivated { scope, .. } if Arc::ptr_eq(scope, &future.scope))
+                && !session.recording.load(Ordering::Acquire)
+        } else {
+            session.recording.load(Ordering::Acquire)
+                && matches!(&phase, TaskUsePhase::Recording { scope, .. } | TaskUsePhase::Prepared { scope, .. } if Arc::ptr_eq(scope, &future.scope))
+        };
+        if !task.frozen_model_context.load(Ordering::Acquire) || !phase_matches {
+            return Err(invalid(
+                "future cold callback changed its original recording scope",
+            ));
+        }
+        owner
+            .require_frozen_context_cold_model_work(&future.context, &future.step, &self.inner)
+            .map_err(xlog_err)?;
+        Ok(true)
+    }
     pub(in crate::semantic_transition) fn parent(
         &self,
     ) -> PyResult<&Py<PySemanticPublishedParent>> {
@@ -69,6 +131,10 @@ impl PySemanticColdModelWork {
                 reader,
                 inner,
                 region,
+                #[cfg(feature = "semantic-policy")]
+                future: None,
+                #[cfg(feature = "semantic-policy")]
+                material_restore: None,
             }),
             active: AtomicBool::new(active),
             #[cfg(feature = "semantic-policy")]
@@ -91,7 +157,104 @@ impl PySemanticColdModelWork {
             reader: original.reader.clone_ref(py),
             inner: original.inner.clone(),
             region: original.region.clone(),
+            #[cfg(feature = "semantic-policy")]
+            future: original
+                .future
+                .as_ref()
+                .map(|future| FrozenContextColdReader {
+                    context: future.context.clone(),
+                    step: future.step.clone(),
+                    task_use: future.task_use.clone_ref(py),
+                    scope: Arc::clone(&future.scope),
+                    activation: future.activation,
+                }),
+            #[cfg(feature = "semantic-policy")]
+            material_restore: original.material_restore.as_ref().map(|restore| {
+                MaterialRestoreColdReader {
+                    context: restore.context.clone(),
+                    target_task: restore.target_task.clone_ref(py),
+                }
+            }),
         })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn new_model_context_restore(
+        parent: Py<PySemanticPublishedParent>,
+        inner: SemanticColdModelWork,
+        region: SemanticColdModelWorkRegion,
+        context: xlog_cuda::SemanticModelContextContinuation,
+        target_task: Py<PySemanticTransitionTaskUse>,
+    ) -> Self {
+        let reader = Python::attach(|py| parent.clone_ref(py));
+        let mut work = Self::new(Some(parent), reader, inner, Some(region), false);
+        work.custody
+            .get_mut()
+            .expect("new cold custody is unpoisoned")
+            .material_restore = Some(MaterialRestoreColdReader {
+            context,
+            target_task,
+        });
+        work
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn new_frozen_context(
+        reader: Py<PySemanticPublishedParent>,
+        inner: SemanticColdModelWork,
+        context: xlog_cuda::SemanticModelContextContinuation,
+        step: SemanticPreparedStep,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        scope: Arc<()>,
+    ) -> Self {
+        Self::new_model_context(reader, inner, context, step, task_use, scope, None, false)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn new_activation_context(
+        reader: Py<PySemanticPublishedParent>,
+        inner: SemanticColdModelWork,
+        context: xlog_cuda::SemanticModelContextContinuation,
+        step: SemanticPreparedStep,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        scope: Arc<()>,
+        region: SemanticColdModelWorkRegion,
+    ) -> Self {
+        Self::new_model_context(
+            reader,
+            inner,
+            context,
+            step,
+            task_use,
+            scope,
+            Some(region),
+            true,
+        )
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn new_model_context(
+        reader: Py<PySemanticPublishedParent>,
+        inner: SemanticColdModelWork,
+        context: xlog_cuda::SemanticModelContextContinuation,
+        step: SemanticPreparedStep,
+        task_use: Py<PySemanticTransitionTaskUse>,
+        scope: Arc<()>,
+        region: Option<SemanticColdModelWorkRegion>,
+        activation: bool,
+    ) -> Self {
+        let mut work = Self::new(None, reader, inner, region, false);
+        work.custody
+            .get_mut()
+            .expect("new cold custody is unpoisoned")
+            .future = Some(FrozenContextColdReader {
+            context,
+            step,
+            task_use,
+            scope,
+            activation,
+        });
+        work
     }
 
     pub(in crate::semantic_transition) fn bind_callback_parent(
@@ -206,6 +369,10 @@ impl PySemanticColdModelWork {
             reader,
             inner,
             region,
+            #[cfg(feature = "semantic-policy")]
+            future: None,
+            #[cfg(feature = "semantic-policy")]
+            material_restore: None,
         };
         Ok(())
     }
@@ -216,6 +383,38 @@ impl PySemanticColdModelWork {
             #[cfg(feature = "semantic-policy")]
             ColdCallbackAccess::Active,
         )
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn bind_activation_model_region(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<()> {
+        let original = self.custody(py)?;
+        let Some(future) = original.future.as_ref().filter(|future| future.activation) else {
+            return Ok(());
+        };
+        let session_handle = original.session(py);
+        let region = session_handle
+            .borrow(py)
+            .owner()?
+            .model_context_activation_model_region(&future.context, &original.inner)
+            .map_err(xlog_err)?;
+        let mut custody = self
+            .custody
+            .lock()
+            .map_err(|_| invalid("activation model-region custody is poisoned"))?;
+        if !custody.inner.same_invocation(&original.inner) {
+            return Err(invalid("activation region changed its original report"));
+        }
+        if let Some(held) = &custody.region {
+            if held.ordinal() != region.ordinal() {
+                return Err(invalid("activation changed its original MODEL span"));
+            }
+        } else {
+            custody.region = Some(region);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -345,6 +544,16 @@ impl PySemanticColdModelWork {
         #[cfg(feature = "semantic-policy")] access: ColdCallbackAccess,
     ) -> PyResult<()> {
         let custody = self.custody(py)?;
+        #[cfg(feature = "semantic-policy")]
+        if custody.future.is_some() {
+            if !self.active.load(Ordering::Acquire) {
+                return Err(invalid(
+                    "future cold work requires its original active callback",
+                ));
+            }
+            custody.require_future(py)?;
+            return Ok(());
+        }
         let parent = custody.parent()?.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;
@@ -352,6 +561,44 @@ impl PySemanticColdModelWork {
             return Err(invalid(
                 "cold model work is accessible only inside its original admitted callback",
             ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(restore) = &custody.material_restore {
+            let task = restore.target_task.borrow(py);
+            if task.session.as_ptr() == parent.session.as_ptr() {
+                return Err(invalid(
+                    "material restore callback requires its distinct original target",
+                ));
+            }
+            let target = task.session.borrow(py);
+            target.require_creator()?;
+            let source_owner = source.owner()?;
+            let target_owner = target.owner()?;
+            parent.task_use.borrow(py).require_current(&source_owner)?;
+            task.require_identity(&target_owner)?;
+            let region = custody.region.as_ref().ok_or_else(|| {
+                invalid("material restore callback lost its original report region")
+            })?;
+            match access {
+                ColdCallbackAccess::Active => source_owner
+                    .require_model_context_material_restore_callback_work(
+                        &target_owner,
+                        &restore.context,
+                        &*parent.lease()?,
+                        &custody.inner,
+                        region,
+                    ),
+                ColdCallbackAccess::OriginalCounter => source_owner
+                    .require_model_context_material_restore_counter_read(
+                        &target_owner,
+                        &restore.context,
+                        &*parent.lease()?,
+                        &custody.inner,
+                        region,
+                    ),
+            }
+            .map_err(xlog_err)?;
+            return Ok(());
         }
         #[cfg(feature = "semantic-policy")]
         if match access {
@@ -443,6 +690,41 @@ impl PySemanticColdModelWork {
     ) -> PyResult<xlog_cuda::SemanticModelWorkBufferPort> {
         self.check(py)?;
         let custody = self.custody(py)?;
+        if let Some(future) = &custody.future {
+            let session = custody.session(py);
+            let result = session
+                .borrow(py)
+                .owner()?
+                .frozen_context_cold_model_work_buffer_port(
+                    &future.context,
+                    &future.step,
+                    &custody.inner,
+                    stream,
+                    custody.region.as_ref(),
+                )
+                .map_err(xlog_err);
+            return result;
+        }
+        if let Some(restore) = &custody.material_restore {
+            let parent = custody.reader.borrow(py);
+            let source = parent.session.borrow(py);
+            let task = restore.target_task.borrow(py);
+            let target = task.session.borrow(py);
+            let owner = source.owner()?;
+            let target_owner = target.owner()?;
+            return owner
+                .model_context_material_restore_buffer_port(
+                    &target_owner,
+                    &restore.context,
+                    &*parent.lease()?,
+                    &custody.inner,
+                    stream,
+                    custody.region.as_ref().ok_or_else(|| {
+                        invalid("material restore buffer lost its original report region")
+                    })?,
+                )
+                .map_err(xlog_err);
+        }
         let parent = custody.reader.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;
@@ -486,6 +768,42 @@ impl PySemanticColdModelWork {
     )> {
         self.check_callback(py, ColdCallbackAccess::OriginalCounter)?;
         let custody = self.custody(py)?;
+        if let Some(future) = &custody.future {
+            let session = custody.session(py);
+            let export = session
+                .borrow(py)
+                .owner()?
+                .export_frozen_context_cold_model_work_buffer_port(
+                    &future.context,
+                    &future.step,
+                    port,
+                    &custody.inner,
+                    custody.region.as_ref(),
+                )
+                .map_err(xlog_err)?;
+            return Ok((export, session));
+        }
+        if let Some(restore) = &custody.material_restore {
+            let parent = custody.reader.borrow(py);
+            let source = parent.session.borrow(py);
+            let task = restore.target_task.borrow(py);
+            let target = task.session.borrow(py);
+            let mut owner = source.owner()?;
+            let target_owner = target.owner()?;
+            let export = owner
+                .export_model_context_material_restore_buffer_port(
+                    &target_owner,
+                    &restore.context,
+                    &*parent.lease()?,
+                    port,
+                    &custody.inner,
+                    custody.region.as_ref().ok_or_else(|| {
+                        invalid("material restore buffer lost its original report region")
+                    })?,
+                )
+                .map_err(xlog_err)?;
+            return Ok((export, parent.session.clone_ref(py)));
+        }
         let parent = custody.reader.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;
@@ -526,6 +844,41 @@ impl PySemanticColdModelWork {
     ) -> PyResult<usize> {
         self.check_callback(py, ColdCallbackAccess::OriginalCounter)?;
         let custody = self.custody(py)?;
+        if let Some(future) = &custody.future {
+            let session = custody.session(py);
+            let result = session
+                .borrow(py)
+                .owner()?
+                .frozen_context_cold_model_work_buffer_port_finalized_extent(
+                    &future.context,
+                    &future.step,
+                    port,
+                    &custody.inner,
+                    custody.region.as_ref(),
+                )
+                .map_err(xlog_err);
+            return result;
+        }
+        if let Some(restore) = &custody.material_restore {
+            let parent = custody.reader.borrow(py);
+            let source = parent.session.borrow(py);
+            let task = restore.target_task.borrow(py);
+            let target = task.session.borrow(py);
+            let owner = source.owner()?;
+            let target_owner = target.owner()?;
+            return owner
+                .model_context_material_restore_buffer_port_finalized_extent(
+                    &target_owner,
+                    &restore.context,
+                    &*parent.lease()?,
+                    port,
+                    &custody.inner,
+                    custody.region.as_ref().ok_or_else(|| {
+                        invalid("material restore buffer lost its original report region")
+                    })?,
+                )
+                .map_err(xlog_err);
+        }
         let parent = custody.reader.borrow(py);
         let source = parent.session.borrow(py);
         source.require_creator()?;
@@ -577,8 +930,8 @@ impl PySemanticColdModelWorkOperation {
         let work = self.work.borrow(py);
         work.check(py)?;
         let custody = work.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let result = session
             .owner()?
             .cold_model_work_operation_slot(&self.inner)
@@ -590,8 +943,8 @@ impl PySemanticColdModelWorkOperation {
         let work = self.work.borrow(py);
         work.check(py)?;
         let custody = work.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let result = session
             .owner()?
             .enter_cold_model_work_operation(&self.inner)
@@ -603,8 +956,8 @@ impl PySemanticColdModelWorkOperation {
         let work = self.work.borrow(py);
         work.check(py)?;
         let custody = work.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let result = session
             .owner()?
             .complete_cold_model_work_operation(&self.inner)
@@ -616,8 +969,8 @@ impl PySemanticColdModelWorkOperation {
         let work = self.work.borrow(py);
         work.check(py)?;
         let custody = work.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let result = session
             .owner()?
             .retain_unknown_cold_model_work_operation(&self.inner)
@@ -629,8 +982,8 @@ impl PySemanticColdModelWorkOperation {
         let work = self.work.borrow(py);
         work.check(py)?;
         let custody = work.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let result = session
             .owner()?
             .cancel_unentered_cold_model_work_operation(&self.inner)
@@ -645,8 +998,8 @@ impl PySemanticColdModelWork {
     #[cfg(feature = "semantic-policy")]
     fn restore_material_mode(&self, py: Python<'_>) -> PyResult<&'static str> {
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         session.require_creator()?;
         let phase = session
             .learning_transition
@@ -668,8 +1021,8 @@ impl PySemanticColdModelWork {
         memory: &crate::semantic_transition::resident_model_memory::PySemanticPreparedResidentModelMemory,
     ) -> PyResult<Py<crate::semantic_transition::resident_model_memory::PySemanticPreparedResidentModelRestoration>>{
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         session.require_creator()?;
         let phase = session
             .learning_transition
@@ -687,8 +1040,8 @@ impl PySemanticColdModelWork {
     /// Native declaration/physical-slot proof, retained after known completion.
     fn report_cursor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         session.require_creator()?;
         let cursor = if let Some(completed) = custody
             .inner
@@ -699,6 +1052,13 @@ impl PySemanticColdModelWork {
         } else {
             let active = self.active.load(Ordering::Acquire);
             if active {
+                #[cfg(feature = "semantic-policy")]
+                if custody.material_restore.is_some() {
+                    self.check_callback(py, ColdCallbackAccess::OriginalCounter)?;
+                } else {
+                    self.check(py)?;
+                }
+                #[cfg(not(feature = "semantic-policy"))]
                 self.check(py)?;
             }
             let cursor = session
@@ -745,8 +1105,8 @@ impl PySemanticColdModelWork {
             ));
         }
         let (kind, values, rank) = parse_model_work(kind, dimensions)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let inner = session
             .owner()?
             .prepare_cold_model_work_operation(
@@ -801,8 +1161,8 @@ impl PySemanticColdModelWork {
                 operation.get_item(2)?.extract::<bool>()?,
             ));
         }
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let handles = session
             .owner()?
             .prepare_cold_model_work_operations(&custody.inner, custody.region.as_ref(), &parsed)
@@ -828,9 +1188,7 @@ impl PySemanticColdModelWork {
         self.check(py)?;
         let custody = self.custody(py)?;
         let result = custody
-            .reader
-            .borrow(py)
-            .session
+            .session(py)
             .borrow(py)
             .owner()?
             .cold_model_work_plan_is_admitted(&custody.inner)
@@ -844,9 +1202,7 @@ impl PySemanticColdModelWork {
         self.check(py)?;
         let custody = self.custody(py)?;
         let result = custody
-            .reader
-            .borrow(py)
-            .session
+            .session(py)
             .borrow(py)
             .owner()?
             .cold_model_work_region_count(&custody.inner)
@@ -972,8 +1328,8 @@ impl PySemanticColdModelWork {
         } else {
             (None, None)
         };
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let mut owner = session.owner()?;
         let result = (|| {
             if !operations.is_exact_instance_of::<PyTuple>() {
@@ -1006,14 +1362,29 @@ impl PySemanticColdModelWork {
                 recipe.push((kind, values[..rank].to_vec()));
             }
             let quantities = if let Some(region) = &custody.region {
-                owner.admit_cold_model_work_region_plan_with_sources(
-                    region,
-                    &recipe,
-                    &region_ends,
-                    content,
-                    &sources,
-                    &reads,
-                )
+                #[cfg(feature = "semantic-policy")]
+                let declaring_restore = custody.material_restore.is_some();
+                #[cfg(not(feature = "semantic-policy"))]
+                let declaring_restore = false;
+                if declaring_restore {
+                    owner.declare_cold_model_work_region_plan_with_sources(
+                        region,
+                        &recipe,
+                        &region_ends,
+                        content,
+                        &sources,
+                        &reads,
+                    )
+                } else {
+                    owner.admit_cold_model_work_region_plan_with_sources(
+                        region,
+                        &recipe,
+                        &region_ends,
+                        content,
+                        &sources,
+                        &reads,
+                    )
+                }
             } else {
                 owner.admit_cold_model_work_plan_with_sources(
                     &custody.inner,
@@ -1035,6 +1406,20 @@ impl PySemanticColdModelWork {
             owner.fail_cold_model_work(&custody.inner);
         }
         drop(owner);
+        #[cfg(feature = "semantic-policy")]
+        if custody
+            .future
+            .as_ref()
+            .is_some_and(|future| future.activation)
+        {
+            let admitted = session
+                .owner()?
+                .cold_model_work_plan_is_admitted(&custody.inner)
+                .map_err(xlog_err)?;
+            if admitted {
+                self.bind_activation_model_region(py)?;
+            }
+        }
         let quantities = result?;
         if let Some(phase) = phase {
             if let Err(error) = phase
@@ -1049,13 +1434,11 @@ impl PySemanticColdModelWork {
     }
 
     #[getter]
-    fn consumer_stream(&self, py: Python<'_>) -> PyResult<u64> {
+    pub(in crate::semantic_transition) fn consumer_stream(&self, py: Python<'_>) -> PyResult<u64> {
         self.check(py)?;
         let custody = self.custody(py)?;
         let result = custody
-            .reader
-            .borrow(py)
-            .session
+            .session(py)
             .borrow(py)
             .owner()?
             .cold_model_work_stream(&custody.inner)
@@ -1257,6 +1640,39 @@ impl PySemanticColdModelWork {
         self.check(py)?;
         let custody = self.custody(py)?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &custody.future {
+            let session = custody.session(py);
+            let (provenance, layout) = session
+                .borrow(py)
+                .owner()?
+                .frozen_context_cold_model_work_buffer_layout(
+                    &future.context,
+                    &future.step,
+                    &custody.inner,
+                    stream,
+                    custody.region.as_ref(),
+                )
+                .map_err(xlog_err)?;
+            return Ok((
+                Py::new(
+                    py,
+                    PyNativeTensorAllocation {
+                        provenance,
+                        policy_layout: None,
+                    },
+                )?,
+                PyTuple::new(py, layout.dimensions[..2].iter().copied())?.unbind(),
+                PyTuple::new(
+                    py,
+                    layout.strides_bytes[..2]
+                        .iter()
+                        .map(|stride| stride / layout.element_bytes),
+                )?
+                .unbind(),
+                (1, 64),
+            ));
+        }
         let parent = custody.reader.borrow(py);
         let source = parent.session.borrow(py);
         #[cfg(feature = "semantic-policy")]
@@ -1328,6 +1744,58 @@ impl PySemanticColdModelWork {
         self.check(py)?;
         let custody = self.custody(py)?;
         let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &custody.future {
+            let session = custody.session(py);
+            let owner_thread = session.borrow(py).owner_thread;
+            let tensor = session
+                .borrow(py)
+                .owner()?
+                .frozen_context_cold_model_work_buffer(
+                    &future.context,
+                    &future.step,
+                    &custody.inner,
+                    stream,
+                    custody.region.as_ref(),
+                )
+                .map_err(xlog_err)?;
+            return crate::dlpack_capsule_from_tensor(
+                py,
+                retain_export_owner(tensor, session, owner_thread)?,
+            );
+        }
+        #[cfg(feature = "semantic-policy")]
+        if let Some(restore) = &custody.material_restore {
+            let parent = custody.reader.borrow(py);
+            let source = parent.session.borrow(py);
+            let task = restore.target_task.borrow(py);
+            let target = task.session.borrow(py);
+            let tensor = {
+                let mut owner = source.owner()?;
+                let target_owner = target.owner()?;
+                owner
+                    .model_context_material_restore_buffer(
+                        &target_owner,
+                        &restore.context,
+                        &*parent.lease()?,
+                        &custody.inner,
+                        stream,
+                        custody.region.as_ref().ok_or_else(|| {
+                            invalid("material restore buffer lost its original report region")
+                        })?,
+                    )
+                    .map_err(xlog_err)?
+            };
+            let owner_thread = source.owner_thread;
+            drop(target);
+            drop(task);
+            drop(source);
+            drop(parent);
+            return crate::dlpack_capsule_from_tensor(
+                py,
+                retain_export_owner(tensor, custody.parent()?.clone_ref(py), owner_thread)?,
+            );
+        }
         let parent = custody.reader.borrow(py);
         let source = parent.session.borrow(py);
         #[cfg(feature = "semantic-policy")]
@@ -1372,8 +1840,8 @@ impl PySemanticColdModelWork {
     fn begin(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let mut owner = session.owner()?;
         if let Some(region) = &custody.region {
             owner.begin_cold_model_work_region(region)
@@ -1388,8 +1856,8 @@ impl PySemanticColdModelWork {
     fn end(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let mut owner = session.owner()?;
         if let Some(region) = &custody.region {
             owner.close_cold_model_work_region(region)
@@ -1403,9 +1871,7 @@ impl PySemanticColdModelWork {
         self.check(py)?;
         let custody = self.custody(py)?;
         custody
-            .reader
-            .borrow(py)
-            .session
+            .session(py)
             .borrow(py)
             .owner()?
             .fail_cold_model_work(&custody.inner);
@@ -1415,8 +1881,8 @@ impl PySemanticColdModelWork {
     fn record_model_invocation(&self, py: Python<'_>) -> PyResult<()> {
         self.check(py)?;
         let custody = self.custody(py)?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let mut owner = session.owner()?;
         if let Some(region) = &custody.region {
             owner.record_cold_model_region_invocation(region)
@@ -1455,8 +1921,8 @@ impl PySemanticColdModelWork {
     ) -> PyResult<usize> {
         self.check(py)?;
         let custody = self.custody(py)?;
-        let parent = custody.reader.borrow(py);
-        let source = parent.session.borrow(py);
+        let session_handle = custody.session(py);
+        let source = session_handle.borrow(py);
         let mut owner = source.owner()?;
         let result = (|| {
             let (kind, values, rank) = parse_model_work(kind, dimensions)?;
@@ -1489,16 +1955,21 @@ impl<'a> ColdCallbackScope<'a> {
         retained: Py<PySemanticColdModelWork>,
     ) -> PyResult<Self> {
         session.require_creator()?;
+        let custody = work.custody(py)?;
+        let session_handle = custody.callback_session(py)?;
         if !std::ptr::eq(&*retained.borrow(py), work)
-            || !std::ptr::eq(
-                &*work.custody(py)?.parent()?.borrow(py).session.borrow(py),
-                session,
-            )
+            || !std::ptr::eq(&*session_handle.borrow(py), session)
         {
             return Err(invalid(
                 "cold callback requires its actual original Session and registrar",
             ));
         }
+        #[cfg(feature = "semantic-policy")]
+        if custody.future.is_none() {
+            custody.parent()?;
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        custody.parent()?;
         let mut current = session
             .active_cold_model_work
             .lock()
@@ -1581,6 +2052,15 @@ impl PySemanticTransitionTaskUse {
         };
         let work = active.borrow(py);
         let custody = work.custody(py)?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &custody.future {
+            if !std::ptr::eq(&*future.task_use.borrow(py), self) {
+                return Err(invalid(
+                    "future cold metadata belongs to another original TaskUse",
+                ));
+            }
+            return Ok(active.clone_ref(py));
+        }
         let callback = custody.parent()?.borrow(py);
         if !std::ptr::eq(&*callback.task_use.borrow(py), self) {
             return Err(invalid("cold metadata belongs to another original TaskUse"));
@@ -1599,8 +2079,8 @@ impl PySemanticTransitionTaskUse {
         let active = self.already_issued_cold_model_work(py)?;
         let work = active.borrow(py);
         let custody = work.custody(py)?;
-        let callback = custody.parent()?.borrow(py);
-        let callback_session = callback.session.borrow(py);
+        let callback_session_handle = custody.callback_session(py)?;
+        let callback_session = callback_session_handle.borrow(py);
         let mut regions = None;
         #[cfg(feature = "semantic-policy")]
         if let Some(phase) = private_execution_owner(py, &callback_session)? {
@@ -1626,8 +2106,8 @@ impl PySemanticTransitionTaskUse {
                 Ok(original.region)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let reader = custody.reader.borrow(py);
-        let session = reader.session.borrow(py);
+        let session_handle = custody.session(py);
+        let session = session_handle.borrow(py);
         let owner = session.owner()?;
         if custody.region.is_some() {
             let original = native_regions
@@ -1698,6 +2178,15 @@ impl PySemanticTransitionTaskUse {
             }
         }
         let work = retained_work(py, &self.session.borrow(py))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &work.borrow(py).custody(py)?.future {
+            if !std::ptr::eq(&*future.task_use.borrow(py), self) {
+                return Err(invalid(
+                    "future cold work belongs to another original task owner",
+                ));
+            }
+            return Ok(work.clone_ref(py));
+        }
         if !std::ptr::eq(
             &*work
                 .borrow(py)
@@ -1720,6 +2209,16 @@ impl PySemanticTransitionTaskUse {
 impl PySemanticTransitionController {
     fn active_cold_model_work(&self, py: Python<'_>) -> PyResult<Py<PySemanticColdModelWork>> {
         let work = retained_work(py, &self.session.borrow(py))?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(future) = &work.borrow(py).custody(py)?.future {
+            self.require_read_issued(&future.task_use.borrow(py))?;
+            if future.task_use.borrow(py).session.as_ptr() != self.session.as_ptr() {
+                return Err(invalid(
+                    "future cold callback belongs to another controller Session",
+                ));
+            }
+            return Ok(work.clone_ref(py));
+        }
         let task = work
             .borrow(py)
             .custody(py)?

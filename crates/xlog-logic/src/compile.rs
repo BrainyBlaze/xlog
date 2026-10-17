@@ -91,15 +91,15 @@ pub fn formatted_text_allocation_bytes(arguments: std::fmt::Arguments<'_>) -> Re
     xlog_core::error::formatted_text_allocation_bytes(arguments)
 }
 
-/// Capacity of the original compiler's scalar binary subset, before owned
+/// Capacity of the original compiler's positive scalar subset, before owned
 /// normalization, graph, schema, and physical-plan storage is allocated.
-/// The caller must first use its canonical binary-rule and ground-query
+/// The caller must first use its canonical positive-rule and ground-query
 /// validators; this helper is capacity metadata, not a source admission.
-pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u64> {
+pub fn positive_task_compiler_allocation_bound(program: &Program) -> Result<u64> {
     use crate::ast::{Atom, PredColumn, PredDecl, TypeRef};
     use crate::stratify::{DepEdge, DependencyGraph, Stratum};
     use std::mem::size_of;
-    let overflow = || XlogError::allocation_extent_overflow("binary compiler");
+    let overflow = || XlogError::allocation_extent_overflow("positive task compiler");
     let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(overflow);
     let mul = |a: usize, b: usize| a.checked_mul(b).ok_or_else(overflow);
     let vector = |count: usize, width: usize| mul(add(mul(count, 2)?, 4)?, width);
@@ -124,8 +124,12 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
         )?,
     )?;
     let mut max_name = "__xlog_query_".len() + 20;
+    // Generated ground-query heads have one constant column. Original
+    // relations keep their declared one- or two-coordinate schema.
+    let mut max_arity = usize::from(!program.queries.is_empty());
     let mut names = 0usize;
     for declaration in &program.predicates {
+        max_arity = max_arity.max(declaration.types.len());
         ast = add(ast, size_of::<PredDecl>())?;
         ast = add(ast, declaration.name.len())?;
         names = add(names, declaration.name.len())?;
@@ -153,7 +157,8 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
                 Term::Integer(_) | Term::Anonymous => {}
                 _ => {
                     return Err(XlogError::Compilation(
-                        "binary compiler capacity requires the original scalar subset".into(),
+                        "positive task compiler capacity requires the original scalar subset"
+                            .into(),
                     ));
                 }
             }
@@ -164,16 +169,16 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
         ast = add(ast, add(size_of::<AstRule>(), atom_bytes(&rule.head)?)?)?;
         names = add(names, rule.head.predicate.len())?;
         max_name = max_name.max(rule.head.predicate.len());
-        if rule.body.len() > 2 {
+        if rule.body.len() > 3 {
             return Err(XlogError::Compilation(
-                "binary compiler capacity requires at most two original body atoms".into(),
+                "positive task compiler capacity requires at most three original body atoms".into(),
             ));
         }
         ast = add(ast, vector(rule.body.len(), size_of::<BodyLiteral>())?)?;
         for literal in &rule.body {
             let BodyLiteral::Positive(atom) = literal else {
                 return Err(XlogError::Compilation(
-                    "binary compiler capacity requires positive original body atoms".into(),
+                    "positive task compiler capacity requires positive original body atoms".into(),
                 ));
             };
             ast = add(ast, atom_bytes(atom)?)?;
@@ -192,23 +197,45 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
     let queries = program.queries.len();
     let rules = add(program.rules.len(), queries)?;
     let relations = add(program.predicates.len(), queries)?;
-    let edges = add(mul(program.rules.len(), 2)?, queries)?;
+    let edges = program
+        .rules
+        .iter()
+        .try_fold(queries, |edges, rule| add(edges, rule.body.len()))?;
+    let max_coordinates = program.rules.iter().try_fold(0usize, |maximum, rule| {
+        let coordinates = rule.body.iter().try_fold(0usize, |count, literal| {
+            let BodyLiteral::Positive(atom) = literal else {
+                return Err(XlogError::Compilation(
+                    "positive task compiler capacity requires positive original body atoms".into(),
+                ));
+            };
+            add(count, atom.terms.len())
+        })?;
+        Ok::<_, XlogError>(maximum.max(coordinates).max(rule.head.terms.len()))
+    })?;
+    let max_coordinates = program
+        .queries
+        .iter()
+        .fold(max_coordinates, |maximum, query| {
+            maximum.max(query.atom.terms.len())
+        });
     // Source snapshot, outer meta/list normalizers, prepared frontend clone,
     // query desugaring, inner meta/list normalizers, and error/reference copies.
     // These passes retain no generated finite lists or compound terms in the
-    // canonically validated scalar binary subset.
+    // canonically validated positive scalar subset.
     let mut bytes = mul(ast, 8)?;
-    let generated_ast = add(
-        size_of::<AstRule>(),
-        add(
-            size_of::<Atom>(),
-            add(size_of::<BodyLiteral>(), mul(3, size_of::<Term>())?)?,
-        )?,
-    )?;
-    bytes = add(
-        bytes,
-        mul(queries, mul(add(generated_ast, mul(max_name, 3)?)?, 8)?)?,
-    )?;
+    for query in &program.queries {
+        let generated_ast = add(
+            size_of::<AstRule>(),
+            add(
+                size_of::<Atom>(),
+                add(
+                    size_of::<BodyLiteral>(),
+                    mul(add(query.atom.terms.len(), 1)?, size_of::<Term>())?,
+                )?,
+            )?,
+        )?;
+        bytes = add(bytes, mul(add(generated_ast, mul(max_name, 3)?)?, 8)?)?;
+    }
     // Stratification and lowering each own a dependency graph. Tarjan's
     // indices/lowlinks, stack/on-stack sets, successor arrays and SCC/stratum
     // snapshots are included separately, not as a caller-supplied graph count.
@@ -250,10 +277,13 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
     let schema = add(
         size_of::<Schema>(),
         add(
-            vector(2, size_of::<(String, xlog_core::ScalarType)>())?,
+            vector(max_arity, size_of::<(String, xlog_core::ScalarType)>())?,
             add(
-                vector(2, size_of::<String>())?,
-                add(mul(max_name, 4)?, vector(2, size_of::<usize>())?)?,
+                vector(max_arity, size_of::<String>())?,
+                add(
+                    mul(mul(max_arity, 2)?, max_name)?,
+                    vector(max_arity, size_of::<usize>())?,
+                )?,
             )?,
         )?,
     )?;
@@ -282,7 +312,10 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
         )?,
     )?;
     let coordinate = add(size_of::<(String, xlog_core::ScalarType)>(), max_name)?;
-    bytes = add(bytes, mul(table(4, coordinate)?, add(rules, 4)?)?)?;
+    bytes = add(
+        bytes,
+        mul(table(max_coordinates, coordinate)?, add(rules, 4)?)?,
+    )?;
     bytes = add(
         bytes,
         table(
@@ -292,7 +325,7 @@ pub fn positive_binary_compiler_allocation_bound(program: &Program) -> Result<u6
     )?;
     bytes = add(
         bytes,
-        crate::lower::positive_binary_lowering_allocation_bound(program, max_name)?,
+        crate::lower::positive_task_lowering_allocation_bound(program, max_name)?,
     )?;
     // Generated-head provenance and sorting/reference arrays are live alongside
     // the plan; a failed semantic check may format every original identifier.

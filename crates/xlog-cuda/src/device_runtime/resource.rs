@@ -1178,8 +1178,18 @@ impl std::error::Error for ResourceError {}
 /// owner remains governed by its cold reaper, independently of this error.
 pub struct RetainedAllocation {
     bytes: usize,
-    cause: Box<ResourceError>,
+    cause: Arc<ResourceError>,
     reclamation: Arc<crate::memory::AllocationReclamation>,
+}
+
+impl RetainedAllocation {
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            bytes: self.bytes,
+            cause: Arc::clone(&self.cause),
+            reclamation: Arc::clone(&self.reclamation),
+        }
+    }
 }
 
 impl fmt::Debug for RetainedAllocation {
@@ -1198,9 +1208,14 @@ impl ResourceError {
         bytes: usize,
         reclamation: Arc<crate::memory::AllocationReclamation>,
     ) -> Self {
+        if let Self::AllocationRetained(owner) = &self {
+            if owner.bytes == bytes && Arc::ptr_eq(&owner.reclamation, &reclamation) {
+                return self;
+            }
+        }
         Self::AllocationRetained(RetainedAllocation {
             bytes,
-            cause: Box::new(self),
+            cause: Arc::new(self),
             reclamation,
         })
     }

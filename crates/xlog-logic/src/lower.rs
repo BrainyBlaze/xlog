@@ -490,61 +490,203 @@ impl LoweringAllocations<'_, '_> {
     }
 }
 
-pub(crate) fn positive_binary_lowering_allocation_bound(
+pub(crate) fn positive_task_lowering_allocation_bound(
     program: &Program,
     max_name: usize,
 ) -> Result<usize> {
     use std::mem::size_of;
-    let overflow = || XlogError::allocation_extent_overflow("binary lowering");
+    let overflow = || XlogError::allocation_extent_overflow("positive task lowering");
     let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(overflow);
     let mul = |a: usize, b: usize| a.checked_mul(b).ok_or_else(overflow);
-    let rules = add(program.rules.len(), program.queries.len())?;
     let relations = add(program.predicates.len(), program.queries.len())?;
-    // Two binary scans, at most two scalar filters, three Cartesian dummy
-    // projections and one join, then the head projection: nine physical nodes.
-    // Canonical chain promotion requires Project(Join(Scan, Scan)); its retained
-    // four-node fallback plus ChainJoin and two scans has only seven nodes.
-    // Six columns cover both dummy-extended binary inputs. A scalar filter has
-    // at most two comparisons joined by And (seven expression carriers).
-    let node = add(
-        size_of::<RirNode>(),
-        add(
-            mul(6, size_of::<ProjectExpr>())?,
-            add(mul(4, size_of::<usize>())?, mul(7, size_of::<Expr>())?)?,
-        )?,
-    )?;
-    let schema = add(
-        size_of::<Schema>(),
-        add(
-            mul(6, size_of::<(String, ScalarType)>())?,
+    let vector = |count: usize, width: usize| mul(add(mul(count, 2)?, 4)?, width);
+    let table = |count: usize, width: usize| -> Result<usize> {
+        if count == 0 {
+            return Ok(0);
+        }
+        let buckets = add(mul(count, 8)?, 6)?
+            .checked_div(7)
+            .and_then(|n| n.max(8).checked_next_power_of_two())
+            .ok_or_else(overflow)?;
+        add(mul(buckets, add(width, 1)?)?, 16)
+    };
+    let mut plans = 0usize;
+    let mut dp = 0usize;
+    // Ground queries become one-body rules with a one-column constant head in
+    // the original frontend. Facts contribute schemas but no executable tree.
+    for (head, body, query) in program
+        .rules
+        .iter()
+        .filter(|rule| !rule.is_fact())
+        .map(|rule| (rule.head.terms.len(), rule.body.as_slice(), None))
+        .chain(
+            program
+                .queries
+                .iter()
+                .map(|query| (1, &[][..], Some(&query.atom))),
+        )
+    {
+        let count = if query.is_some() { 1 } else { body.len() };
+        if !(1..=3).contains(&count) {
+            return Err(XlogError::Compilation(
+                "positive task lowering capacity requires one to three body atoms".into(),
+            ));
+        }
+        let mut arities = [0usize; 3];
+        let mut filters = [0usize; 3];
+        let mut variable_counts = [0usize; 3];
+        if let Some(query) = query {
+            arities[0] = query.terms.len();
+            filters[0] = arities[0];
+        } else {
+            for (index, literal) in body.iter().enumerate() {
+                let BodyLiteral::Positive(atom) = literal else {
+                    return Err(XlogError::Compilation(
+                        "positive task lowering capacity requires positive body atoms".into(),
+                    ));
+                };
+                arities[index] = atom.terms.len();
+                for (position, term) in atom.terms.iter().enumerate() {
+                    match term {
+                        Term::Integer(_) => filters[index] = add(filters[index], 1)?,
+                        Term::Variable(name) => {
+                            variable_counts[index] = add(variable_counts[index], 1)?;
+                            if atom.terms[..position].iter().any(|previous| matches!(previous, Term::Variable(previous) if previous == name)) {
+                                filters[index] = add(filters[index], 1)?;
+                            }
+                        }
+                        Term::Anonymous => {}
+                        _ => {
+                            return Err(XlogError::Compilation(
+                                "positive task lowering capacity requires scalar body terms".into(),
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+        if arities[..count]
+            .iter()
+            .any(|arity| !(1..=2).contains(arity))
+        {
+            return Err(XlogError::Compilation(
+                "positive task lowering capacity requires unary or binary atoms".into(),
+            ));
+        }
+        let tree = |mask: usize| -> Result<usize> {
+            let mut atoms = 0usize;
+            let mut columns = 0usize;
+            let mut comparisons = 0usize;
+            let mut filtered_atoms = 0usize;
+            for index in 0..count {
+                if mask & (1 << index) != 0 {
+                    atoms = add(atoms, 1)?;
+                    columns = add(columns, arities[index])?;
+                    comparisons = add(comparisons, filters[index])?;
+                    filtered_atoms = add(filtered_atoms, usize::from(filters[index] != 0))?;
+                }
+            }
+            let joins = atoms - 1;
+            // Each Cartesian join owns two dummy-input projections, its join
+            // and its output projection. Equijoins fit in the same geometry.
+            let nodes = add(add(atoms, filtered_atoms)?, add(mul(joins, 4)?, 1)?)?;
+            let width = add(columns, 2)?;
+            let projections = vector(width.max(head), size_of::<ProjectExpr>())?;
+            let keys = vector(columns, size_of::<usize>())?;
+            let expressions = mul(
+                add(mul(comparisons, 4)?, mul(joins, 2)?)?,
+                size_of::<Expr>(),
+            )?;
             add(
-                mul(6, size_of::<String>())?,
-                add(mul(12, max_name)?, mul(6, size_of::<usize>())?)?,
-            )?,
-        )?,
-    )?;
-    let tree = add(
-        mul(9, node)?,
-        add(
-            size_of::<CompiledRule>(),
-            add(max_name, add(size_of::<RirMeta>(), schema)?)?,
-        )?,
-    )?;
-    // Four DP cells for two atoms; the two singleton trees and both ordered
-    // candidates can coexist with their chosen replacements. Eight trees also
-    // cover optimizer input/output plus pass-local clones of that same tree.
-    let plans = mul(rules, mul(tree, 8)?)?;
-    let cell = add(
-        size_of::<Option<JoinPlan<'_>>>(),
-        add(
-            mul(2, size_of::<&Atom>())?,
+                mul(
+                    nodes,
+                    add(size_of::<RirNode>(), add(projections, mul(keys, 2)?)?)?,
+                )?,
+                expressions,
+            )
+        };
+        let full_mask = (1usize << count) - 1;
+        let full_tree = tree(full_mask)?;
+        let columns = arities[..count]
+            .iter()
+            .try_fold(0usize, |n, arity| add(n, *arity))?;
+        let variables = variable_counts[..count]
+            .iter()
+            .try_fold(0usize, |n, count| add(n, *count))?;
+        let width = add(columns, 2)?;
+        let schema = add(
+            size_of::<Schema>(),
             add(
-                mul(2, size_of::<usize>())?,
-                add(mul(8, add(size_of::<(String, usize)>(), max_name)?)?, 16)?,
+                vector(width, size_of::<(String, ScalarType)>())?,
+                add(
+                    vector(width, size_of::<String>())?,
+                    add(
+                        mul(mul(width, 2)?, max_name)?,
+                        vector(width, size_of::<usize>())?,
+                    )?,
+                )?,
             )?,
-        )?,
-    )?;
-    let dp = mul(4, cell)?;
+        )?;
+        let mut scratch = vector(1usize << count, size_of::<Option<JoinPlan<'_>>>())?;
+        // Every nonempty subset has its own best tree, ordered leaf rosters
+        // and variable-position table. Two oriented candidates can coexist
+        // with these cells during replacement in the original DP loop.
+        for mask in 1..=full_mask {
+            let leaves = mask.count_ones() as usize;
+            scratch = add(scratch, tree(mask)?)?;
+            scratch = add(scratch, vector(leaves, size_of::<&Atom>())?)?;
+            scratch = add(scratch, vector(leaves, size_of::<usize>())?)?;
+            scratch = add(
+                scratch,
+                table(variables, add(size_of::<(String, usize)>(), max_name)?)?,
+            )?;
+        }
+        scratch = add(scratch, mul(full_tree, 2)?)?;
+        scratch = add(scratch, mul(vector(variables, size_of::<usize>())?, 4)?)?;
+        scratch = add(scratch, vector(variables, size_of::<&String>())?)?;
+        scratch = add(
+            scratch,
+            mul(
+                table(variables, add(size_of::<(String, usize)>(), max_name)?)?,
+                2,
+            )?,
+        )?;
+        // Promotion retains the original fallback and adds owned input nodes,
+        // coordinate mappings, lookup permutations and projection buffers.
+        let promoted_tree = if count > 1 {
+            [
+                size_of::<RirNode>(),
+                vector(count, size_of::<RirNode>())?,
+                vector(count, size_of::<Vec<Option<u32>>>())?,
+                mul(count, vector(columns, size_of::<Option<u32>>())?)?,
+                vector(count, size_of::<xlog_ir::rir::LookupPerm>())?,
+                vector(width.max(head), size_of::<ProjectExpr>())?,
+                table(columns, size_of::<(usize, u32)>())?,
+                vector(columns, size_of::<u32>())?,
+                vector(count, size_of::<RelId>())?,
+                vector(count, size_of::<usize>())?,
+                vector(columns, size_of::<usize>())?,
+                vector(columns, size_of::<(usize, usize)>())?,
+            ]
+            .into_iter()
+            .try_fold(full_tree, add)?
+        } else {
+            full_tree
+        };
+        let compiled = add(
+            promoted_tree,
+            add(
+                size_of::<CompiledRule>(),
+                add(max_name, add(size_of::<RirMeta>(), schema)?)?,
+            )?,
+        )?;
+        // The pipeline has distinct lowered, helper-split, optimized,
+        // selectivity, promotion, clique-spec, provenance and returned owners.
+        // Include the promoted shape in each owner so subsequent whole-plan
+        // clones keep the same fallback and mapping buffers in this envelope.
+        plans = add(plans, mul(compiled, 8)?)?;
+        dp = dp.max(scratch);
+    }
     let topology = add(
         mul(
             relations,

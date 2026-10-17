@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(4)
-#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v4"
+#define XLOG_RESOURCE_OBSERVER_ABI_VERSION UINT32_C(6)
+#define XLOG_RESOURCE_OBSERVER_CAPSULE_NAME "xlog.resource_observer.v6"
 #define XLOG_RESOURCE_MEMORY_UNIT "owned-gpu-backing-peak-bytes"
 #define XLOG_RESOURCE_MEMORY_ADMISSION "whole-device-total-physical-bytes"
 
@@ -99,6 +99,252 @@ typedef struct XlogResourceBackingRoot {
     uint32_t device_ordinal;
     uint32_t reserved;
 } XlogResourceBackingRoot;
+
+#define XLOG_RESOURCE_MODULE_LOADED UINT32_C(1)
+#define XLOG_RESOURCE_MODULE_READ_STATIC UINT32_C(2)
+#define XLOG_RESOURCE_MODULE_CONFIRMED UINT32_C(3)
+#define XLOG_RESOURCE_MODULE_UNLOADED UINT32_C(4)
+#define XLOG_RESOURCE_MODULE_UNKNOWN UINT32_C(5)
+#define XLOG_RESOURCE_MODULE_DISCOVER_STATIC UINT32_C(6)
+
+#define XLOG_RESOURCE_MODULE_INPUT_UNAVAILABLE UINT32_C(0)
+#define XLOG_RESOURCE_MODULE_INPUT_CUBIN UINT32_C(1)
+#define XLOG_RESOURCE_MODULE_INPUT_PTX UINT32_C(2)
+#define XLOG_RESOURCE_MODULE_INPUT_FILE UINT32_C(3)
+#define XLOG_RESOURCE_MODULE_INPUT_DIGEST_VALID UINT64_C(1)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_LOAD_VALID UINT64_C(1)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_DELIVERY_COMPLETE UINT64_C(2)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_CUBIN_DIGEST_VALID UINT64_C(4)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_IMAGE_VALID UINT64_C(8)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_LIBRARY_HANDLE_VALID UINT64_C(16)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_UNLOAD_OBSERVED UINT64_C(32)
+#define XLOG_RESOURCE_MODULE_ORIGINAL_RESET_OBSERVED UINT64_C(64)
+
+#define XLOG_RESOURCE_STATIC_NAME_VALID UINT64_C(1)
+#define XLOG_RESOURCE_STATIC_SOURCE_VALID UINT64_C(2)
+#define XLOG_RESOURCE_STATIC_CONTEXT_VALID UINT64_C(4)
+#define XLOG_RESOURCE_STATIC_CORRELATION_VALID UINT64_C(8)
+
+/* Slots in cuda_status and valid_queries. An unset validity bit gives no
+ * evidence. UINT32_MAX means the corresponding query was never attempted. */
+#define XLOG_RESOURCE_STATIC_QUERY_GLOBAL UINT32_C(0)
+#define XLOG_RESOURCE_STATIC_QUERY_ALLOCATION UINT32_C(1)
+#define XLOG_RESOURCE_STATIC_QUERY_CONTEXT UINT32_C(2)
+#define XLOG_RESOURCE_STATIC_QUERY_DEVICE UINT32_C(3)
+#define XLOG_RESOURCE_STATIC_QUERY_MEMORY_TYPE UINT32_C(4)
+#define XLOG_RESOURCE_STATIC_QUERY_MAPPED UINT32_C(5)
+#define XLOG_RESOURCE_STATIC_QUERY_MAPPING_BASE UINT32_C(6)
+#define XLOG_RESOURCE_STATIC_QUERY_MAPPING_SIZE UINT32_C(7)
+#define XLOG_RESOURCE_STATIC_QUERY_PHYSICAL_BLOCK UINT32_C(8)
+#define XLOG_RESOURCE_STATIC_QUERY_BUFFER_ID UINT32_C(9)
+#define XLOG_RESOURCE_STATIC_QUERY_COUNT UINT32_C(10)
+
+/* Immutable copies of ORIGINAL activity fields, not reconstructed load events.
+ * name/source are length-delimited bytes owned by the lease, without an assumed
+ * trailing NUL. Absent fields remain absent even if their storage is zero.
+ * record_id identifies the original row, never its position or owner. */
+typedef struct XlogResourceOriginalStaticRecord {
+    uint32_t struct_size;
+    uint32_t memory_kind;
+    uint32_t operation;
+    uint32_t device_id;
+    uint32_t context_id;
+    uint32_t correlation_id;
+    uint64_t record_id;
+    uint64_t address;
+    uint64_t bytes;
+    uint64_t timestamp;
+    uint64_t valid_fields;
+    const uint8_t *name;
+    uint64_t name_size;
+    const uint8_t *source;
+    uint64_t source_size;
+} XlogResourceOriginalStaticRecord;
+
+/* Native confirmation of this original row under a LIVE module owner. GLOBAL
+ * validity requires its nonempty, nonoverflowing global address/bytes to equal
+ * original.address/bytes. A same-named foreign symbol keeps its original CUDA
+ * status and raw outputs but has no GLOBAL validity or dependent query facts.
+ * Symbol bytes are not root bytes.
+ * allocation_* comes from successful cuMemGetAddressRange, mapping_* from the
+ * actual mapping attributes, and physical_block_id from MEMORY_BLOCK_ID.
+ * These are distinct facts: neither a mapping nor its ID proves the full size
+ * of a physical allocation. No flag in this record claims that completeness.
+ * The collector joins original physical-allocation/map provenance and dedups
+ * aliases with its native/external allocator ledger before issuing any peak.
+ * Values are unavailable unless the exact successful query bit is present. */
+typedef struct XlogResourceStaticConfirmation {
+    uint32_t struct_size;
+    uint32_t reserved;
+    uint64_t record_id;
+    uint64_t valid_queries;
+    uint32_t cuda_status[10];
+    uint64_t global_address;
+    uint64_t global_bytes;
+    uint64_t allocation_base;
+    uint64_t allocation_bytes;
+    uint64_t mapping_base;
+    uint64_t mapping_bytes;
+    uint64_t physical_block_id;
+    uint64_t buffer_id;
+    uint64_t context_handle;
+    uint32_t device_ordinal;
+    uint32_t memory_type;
+    uint32_t mapped;
+    uint32_t reserved_tail;
+} XlogResourceStaticConfirmation;
+
+#define XLOG_RESOURCE_MODULE_FUNCTION_RUNTIME_ARGUMENT_VALID UINT64_C(1)
+#define XLOG_RESOURCE_MODULE_FUNCTION_RUNTIME_RESULT_VALID UINT64_C(2)
+#define XLOG_RESOURCE_MODULE_FUNCTION_LOOKUP_ARGUMENT_VALID UINT64_C(4)
+#define XLOG_RESOURCE_MODULE_FUNCTION_LOOKUP_RESULT_VALID UINT64_C(8)
+
+/* Original typed runtime FUNCTION argument and its nested cuModuleGetFunction,
+ * captured synchronously on the same host thread, never joined by callback
+ * arrival order, time proximity or symbol name. Variable-symbol arguments are
+ * not function arguments. The collector associates the lookup's actual module
+ * input and context with this lease's original live load identity, including
+ * lookups made after loading; a reused CUmodule is not the same load.
+ *
+ * ARGUMENT_VALID qualifies the corresponding callback/correlation and original
+ * input fields. RESULT_VALID qualifies the matching original API_EXIT status;
+ * UINT32_MAX means that status is unavailable, not success. function_handle is
+ * the original successful lookup output only when LOOKUP_RESULT_VALID is set
+ * and lookup_status is CUDA_SUCCESS. Failed outputs are not read or fabricated.
+ * record_id identifies the original lookup, not its array index.
+ *
+ * A runtime argument can also be cudaKernel_t, not a registered host symbol.
+ * These raw facts therefore prove neither registration nor CUDA ownership and
+ * never grant a right to dereference runtime_function_argument. An external
+ * producer must first hold its actual runtime/object/context owners, exclude
+ * permitted unregister/unload/reset throughout queries, establish the SAME
+ * runtime instance and cold-confirm the registered function/module identity.
+ * Failed getters cannot create ownership or trigger a replacement loader.
+ * Multiple original observations are retained, not selected by arrival order.
+ * Native module owners retain their existing ownership without runtime rows. */
+typedef struct XlogResourceOriginalModuleFunction {
+    uint32_t struct_size;
+    uint32_t reserved;
+    uint64_t record_id;
+    uint64_t valid_fields;
+    uint32_t runtime_callback_id;
+    uint32_t runtime_correlation_id;
+    uint32_t runtime_status;
+    uint32_t lookup_callback_id;
+    uint32_t lookup_correlation_id;
+    uint32_t lookup_status;
+    uint64_t runtime_function_argument;
+    uint64_t function_handle;
+    uint64_t module_handle;
+} XlogResourceOriginalModuleFunction;
+
+/* The original successful load API output, context and correlation establish
+ * the module association. A resource callback's moduleId or delivery order is
+ * not a CUmodule. actual_cubin_sha256 is copied from the original loaded image
+ * only with a proven original load-frame association; an input PTX digest is
+ * NEVER that digest. Cold READ_STATIC drains original activity outside every
+ * CUPTI callback, then returns this stable immutable lease. No collector mutex
+ * may remain held while native queries execute. The lease pins all row/string
+ * storage through known UNLOADED acknowledgement; uncertainty retains it.
+ * It neither pins the CUDA module by itself nor grants execution/recovery.
+ * original_loader_callback_id is the original driver load callback ID, not a
+ * guessed loader kind. IMAGE_VALID qualifies the original API input image/code
+ * pointer, never a filename or the collector's copied loaded cubin. It attests
+ * that original input, NOT its current lifetime or right to dereference it.
+ * original_image_bytes=0 means its size is unavailable. LIBRARY_HANDLE_VALID
+ * qualifies the original successful CUlibrary output, separately from CUmodule.
+ * UNLOAD_OBSERVED/RESET_OBSERVED preserve original invalidation history; their
+ * absence alone does not exclude concurrent destruction during a native query.
+ * functions is an immutable array of original runtime/function lookup facts,
+ * pinned by this SAME lease through known unload acknowledgement, including on
+ * a non-COMPLETE read. function_size is exactly sizeof its record; a zero count
+ * means no such facts, not runtime ownership. No borrowed collector lock crosses
+ * the cold-query boundary. Changing this view requires the exact new ABI, not
+ * reinterpretation of reserved fields in an already published version. */
+typedef struct XlogResourceModuleOriginalView {
+    uint32_t struct_size;
+    uint32_t state;
+    uint64_t lease_id;
+    uint64_t owner_generation;
+    uint64_t context_handle;
+    uint64_t module_handle;
+    uint64_t original_load_start;
+    uint64_t original_load_end;
+    uint32_t original_context_id;
+    uint32_t original_correlation_id;
+    uint32_t original_module_id;
+    uint32_t reserved;
+    uint64_t flags;
+    uint8_t actual_cubin_sha256[32];
+    const XlogResourceOriginalStaticRecord *records;
+    uint64_t record_count;
+    uint64_t record_size;
+    uint32_t original_loader_callback_id;
+    uint32_t reserved_tail;
+    uint64_t library_handle;
+    uint64_t original_image_pointer;
+    uint64_t original_image_bytes;
+    const XlogResourceOriginalModuleFunction *functions;
+    uint64_t function_count;
+    uint64_t function_size;
+} XlogResourceModuleOriginalView;
+
+/* One real module lifecycle, not a second loader or a synthetic allocation.
+ * LOADED registers the successful loader's actual owner before fallible symbol
+ * initialization. A native loader initially uses lease_id=0 and its own fresh
+ * owner_generation. READ_STATIC is called cold after requested function lookup,
+ * under that same live owner; it returns the immutable original host lease.
+ * CONFIRMED supplies cold driver query results for that exact immutable lease.
+ * It does not certify a physical peak. Input digest validity is explicit and
+ * remains separate from the original view's actual cubin digest/provenance.
+ * UNLOADED is emitted only after last-use joins and successful actual unload,
+ * never at UNLOAD_STARTING or registry replacement. UNKNOWN supplies no release
+ * proof. All operations retain generation/context/module identity; native must
+ * retain the actual CUDA owner and its original observer on uncertainty.
+ * Read/known-unload acknowledgement can be idempotent for the same lease;
+ * they must never repeat loader work, CUDA destruction or activity callbacks.
+ * This module protocol does not reinterpret BackingRoot.RELEASED/cuMemFree. */
+typedef struct XlogResourceModuleObservation {
+    uint32_t struct_size;
+    uint32_t operation;
+    uint64_t owner_generation;
+    uint64_t context_handle;
+    uint64_t module_handle;
+    uint8_t device_uuid[16];
+    uint32_t device_ordinal;
+    uint32_t input_kind;
+    uint64_t flags;
+    uint8_t input_sha256[32];
+    uint64_t lease_id;
+    const XlogResourceStaticConfirmation *confirmations;
+    uint64_t confirmation_count;
+    uint64_t confirmation_size;
+} XlogResourceModuleObservation;
+
+/* DISCOVER_STATIC uses this SAME entrypoint at a quiescent cold boundary, never
+ * inside a CUPTI callback or capture. Supply the actual context/device identity,
+ * owner_generation=module_handle=0, INPUT_UNAVAILABLE, flags=0, zero digest,
+ * no confirmations, and lease_id=cursor (0 for the first candidate). It drains
+ * original delivery and returns the next observed, unclaimed load in that
+ * context. A COMPLETE view with lease_id=0 is the drained end, not a module;
+ * INCOMPLETE/UNKNOWN is NOT end or permission to submit. Nonzero lease_id pins
+ * immutable HOST copies of the original load/rows/strings, not CUDA ownership.
+ * It is also the cursor for continuing past that candidate. Candidate identity
+ * is the pair (lease_id, owner_generation), issued from the collector's original
+ * load identity and never reused. Do not mint a separate discovery-owner counter
+ * or identify a new original load solely by its reusable CUDA handles.
+ *
+ * After establishing real runtime image/context ownership and excluding unload,
+ * the external producer calls LOADED with that SAME lease_id, owner_generation,
+ * context and module. The collector atomically verifies the original load and
+ * absence of invalidation before attaching that owner; then READ_STATIC and
+ * CONFIRMED use exactly that lease. Discovery/attach never loads, unloads or
+ * retains a CUDA module on the producer's behalf. Failure retains the original
+ * host lease and any actual runtime owners already acquired. External runtime
+ * owners cannot emit UNLOADED merely because they released host references;
+ * only the actual successful unload plus completed consumers proves release.
+ * original_view is non-NULL only for READ_STATIC or DISCOVER_STATIC. All output
+ * custody must be preserved even when either read returns non-COMPLETE. */
 
 #define XLOG_RESOURCE_EVENT_COPY UINT32_C(1)
 #define XLOG_RESOURCE_EVENT_PEER_COPY UINT32_C(2)
@@ -236,7 +482,9 @@ typedef struct XlogResourceTraceView {
 
 /* The capsule owns this immutable table and its original process context.
  * Functions never enter Python or throw through this C ABI. The native creator
- * calls them cold; callbacks collecting activity never poll or wait for CUDA.
+ * calls interval control cold. Original backing/module observations can also
+ * arrive on their native owners' cold reaper threads and must be thread-safe;
+ * callbacks collecting activity never poll or wait for CUDA.
  * begin binds a fresh native nonce minted after durable admission, before any
  * preparation allocation. If a failing begin returns an interval, retain it.
  * Never begin a replacement for an entered or unknown original interval.
@@ -320,6 +568,15 @@ typedef struct XlogResourceObserverApi {
                                           uint64_t original_operation_ordinal,
                                           uint64_t original_planned_count,
                                           uint64_t original_capture_stream);
+    /* Thread-safe original-owner entrypoint, including cold retirement reapers.
+     * READ_STATIC runs only at the live owner's quiescent cold boundary. It may
+     * drain original CUPTI delivery outside activity callbacks, but neither it
+     * nor other observations may call CUDA/Python or hold a collector mutex
+     * across the return to native queries. Even a non-COMPLETE original read may
+     * return a lease: preserve its output/custody before checking the status. */
+    uint32_t (*observe_native_module)(void *context,
+                                      const XlogResourceModuleObservation *observation,
+                                      XlogResourceModuleOriginalView *original_view);
 } XlogResourceObserverApi;
 
 #ifdef __cplusplus

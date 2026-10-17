@@ -329,7 +329,7 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
                 ));
             }
             ["domain", name] => {
-                assert_eq!(*name, "xlog.semantic-action-catalogue.v1");
+                assert_eq!(*name, "xlog.semantic-action-catalogue.v2");
             }
             [kind @ ("action" | "opcode"), value, name, signature @ ..] => {
                 assert!(!signature.is_empty());

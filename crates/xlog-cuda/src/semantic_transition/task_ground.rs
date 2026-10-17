@@ -384,7 +384,7 @@ impl SemanticTaskVerificationBinding {
 }
 
 pub(super) const TASK_GROUND_MAGIC: u64 = 0x584c4f4754475244;
-pub(super) const TASK_GROUND_VERSION: u64 = 2;
+pub(super) const TASK_GROUND_VERSION: u64 = 3;
 
 /// One result from the original numerical candidate/query invocation.
 #[repr(C)]

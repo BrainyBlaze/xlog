@@ -1268,6 +1268,11 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             .get_type::<semantic_transition::SemanticReplayDeliveryPending>(),
     )?;
     m.add(
+        "SemanticDeliveryAcknowledgementPending",
+        m.py()
+            .get_type::<semantic_transition::SemanticDeliveryAcknowledgementPending>(),
+    )?;
+    m.add(
         "SemanticTrainingArenaPending",
         m.py()
             .get_type::<semantic_transition::SemanticTrainingArenaPending>(),
@@ -1315,6 +1320,13 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?;
         m.add_class::<semantic_transition::actor_refresh::PySemanticPreparedActorRefresh>()?;
         m.add_class::<semantic_transition::PySemanticSegmentInstructionAdmission>()?;
+        m.add_class::<semantic_transition::model_context_continuation::PySemanticModelContextContinuation>()?;
+        m.add_class::<semantic_transition::model_context_continuation::restored_prefill::PySemanticRestoredModelContextPrefill>()?;
+        m.add_class::<semantic_transition::model_context_continuation::declaration::PySemanticModelContextPrefillRestoreDeclaration>()?;
+        m.add(
+            "SemanticModelContextContinuationPending",
+            m.py().get_type::<semantic_transition::model_context_continuation::SemanticModelContextContinuationPending>(),
+        )?;
         m.add_class::<semantic_transition::prepared_import::PySemanticPreparedTaskImport>()?;
         m.add_class::<semantic_transition::prepared_import::PySemanticPreparedSourceContent>()?;
         m.add_class::<semantic_transition::source_content_geometry::PySemanticPreparedSourceContentGeometry>()?;

@@ -2549,6 +2549,7 @@ impl PySemanticPreparedActorRefresh {
                 *stored = Some(PreparedPythonSegment {
                     scope: Arc::clone(&scope),
                     instruction: None,
+                    model_context: None,
                     construction: None,
                     task_use: task_use.clone_ref(py),
                     steps: steps.iter().map(|step| step.clone_ref(py)).collect(),

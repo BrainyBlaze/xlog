@@ -3,6 +3,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const PROGRAM_BYTES: usize = 16 * 1024 * 1024;
+const CONTEXT_CONTINUATION_MAGIC: &[u8] = b"XLOG-ORIGINAL-MODEL-CONTEXT-CONTINUATION\0";
+const CONTEXT_CONTINUATION_BYTES: usize = CONTEXT_CONTINUATION_MAGIC.len() + 8 + 64 + 5 * 8;
 
 struct UniqueJson(Value);
 
@@ -79,7 +81,7 @@ fn json_value(bytes: &[u8]) -> Result<Value, SemanticTransitionError> {
     Ok(value)
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ProgramStep {
     pub(super) ordinal: u64,
     pub(super) kind: Option<SemanticTransitionKind>,
@@ -131,6 +133,9 @@ struct InstructionCheckpointSource {
 }
 
 pub(super) struct InstructionAdmission {
+    // Checkpoint restoration retains durable parent identities; live handoff
+    // additionally retains the authentic issuing identity with the claim.
+    _issuer: Option<Arc<()>>,
     issuance: Arc<()>,
     first: u64,
     end: u64,
@@ -158,6 +163,7 @@ pub(super) struct InstructionAdmission {
 }
 
 pub(super) struct ActorRefreshProgram {
+    owner: Arc<()>,
     pub(super) bytes: Vec<u8>,
     pub(super) identity: Identity256,
     pub(super) proposals: u64,
@@ -167,6 +173,133 @@ pub(super) struct ActorRefreshProgram {
     pub(super) original_rng: Option<SemanticRngBinding>,
     pub(super) main_origins: Vec<MainActorAssignment>,
     admissions: Vec<InstructionAdmission>,
+}
+
+impl ActorRefreshProgram {
+    pub(super) fn checkpoint_owner_binding(&self) -> (Arc<()>, Identity256) {
+        (Arc::clone(&self.owner), self.identity)
+    }
+
+    pub(super) fn require_completed_checkpoint_prefix(
+        &self,
+    ) -> Result<(), SemanticTransitionError> {
+        if self
+            .admissions
+            .iter()
+            .any(|claim| claim.state != InstructionState::Completed)
+        {
+            return Err(publication_input_error(
+                "public checkpoint provenance requires its completed original instruction prefix",
+            ));
+        }
+        Ok(())
+    }
+}
+
+enum OriginalProgramContextSource {
+    Live(SemanticSegmentInstructionAdmission),
+    Restored(RestoredOriginalProgramContextSource),
+}
+
+struct RestoredOriginalProgramContextSource {
+    restoration: Arc<state_restoration::OriginalStateMaterialRestore>,
+    claim: Arc<()>,
+    first: u64,
+    native_digest: Identity256,
+    assignments_digest: Identity256,
+    checkpoint_parent: SemanticPublishedIdentity,
+    parent: SemanticPublishedIdentity,
+}
+
+/// Immutable future instruction geometry, never a live admission. The original
+/// Program moves once; the captured TARGET scope and its tokens remain fixed.
+pub(super) struct OriginalProgramContextContinuation {
+    source_issuer: Arc<()>,
+    target_issuer: Arc<()>,
+    source_program: Arc<()>,
+    target_program: Arc<()>,
+    program_identity: Identity256,
+    initial_index: Identity256,
+    source: OriginalProgramContextSource,
+    source_end: u64,
+    source_proposals: u64,
+    source_proposal: u64,
+    target_steps: Vec<ProgramStep>,
+    cold_capacity: SemanticSegmentColdCapacity,
+    prepared_steps: Vec<SemanticPreparedStep>,
+    transferred: bool,
+    admission: Option<SemanticSegmentInstructionAdmission>,
+    // Retire payload owners before releasing their original pool charges.
+    _frozen_reservation: Option<SemanticReplayMaterialReservation>,
+    _mapping_reservation: Option<SemanticReplayMaterialReservation>,
+}
+
+impl OriginalProgramContextContinuation {
+    pub(super) fn first_program_ordinal(&self) -> u64 {
+        self.target_steps[0].ordinal
+    }
+
+    pub(super) fn expected_source_proposals(&self) -> u64 {
+        self.source_proposals
+    }
+
+    pub(super) fn expected_source_proposal(&self) -> u64 {
+        self.source_proposal
+    }
+
+    pub(super) fn transitions(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone + '_ {
+        self.target_steps
+            .iter()
+            .map(|step| step.kind.expect("frozen original transition"))
+    }
+
+    pub(super) fn cold_capacity(&self) -> SemanticSegmentColdCapacity {
+        self.cold_capacity
+    }
+
+    pub(super) fn cold_budget(&self) -> [u64; 3] {
+        self.target_steps[0].budget
+    }
+
+    pub(super) fn instruction(&self) -> &[u8] {
+        &self.target_steps[0].instruction
+    }
+
+    fn source_first(&self) -> u64 {
+        match &self.source {
+            OriginalProgramContextSource::Live(source) => source.first,
+            OriginalProgramContextSource::Restored(source) => source.first,
+        }
+    }
+}
+
+fn decode_original_program_context_mapping(
+    program: &ActorRefreshProgram,
+    initial_index: Identity256,
+    bytes: &[u8],
+) -> Result<[u64; 5], SemanticTransitionError> {
+    if bytes.len() != CONTEXT_CONTINUATION_BYTES {
+        return Err(invalid_program());
+    }
+    let mut reader = SemanticMaterialReader::new(bytes);
+    let semantic = SemanticTransitionError::Semantic;
+    if reader
+        .take(CONTEXT_CONTINUATION_MAGIC.len())
+        .map_err(semantic)?
+        != CONTEXT_CONTINUATION_MAGIC
+        || reader.u64().map_err(semantic)? != 1
+        || reader.take(32).map_err(semantic)? != program.identity.as_bytes()
+        || reader.take(32).map_err(semantic)? != initial_index.as_bytes()
+    {
+        return Err(invalid_program());
+    }
+    let mut mapping = [0; 5];
+    for value in &mut mapping {
+        *value = reader.u64().map_err(semantic)?;
+    }
+    Ok(mapping)
 }
 
 pub(super) struct MainActorAssignment {
@@ -186,6 +319,17 @@ pub(super) enum AssignmentReplayProof {
 
 fn structural_bytes(value: &Value) -> Result<Vec<u8>, SemanticTransitionError> {
     serde_json::to_vec(value).map_err(|_| invalid_program())
+}
+
+fn program_step_payload_allocation_bound(
+    steps: &[ProgramStep],
+) -> Result<usize, SemanticTransitionError> {
+    steps.iter().try_fold(0usize, |bytes, step| {
+        bytes
+            .checked_add(step.instruction.len())
+            .and_then(|bytes| bytes.checked_add(step.branch.as_ref().map_or(0, String::len)))
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    })
 }
 
 fn instruction_projection(bytes: &[u8]) -> Result<Vec<u8>, SemanticTransitionError> {
@@ -914,6 +1058,7 @@ impl ActorRefreshProgram {
             return Err(invalid_program());
         }
         Ok(Self {
+            owner: Arc::new(()),
             bytes: bytes.to_vec(),
             identity: Identity256::from_bytes(Sha256::digest(bytes).into()),
             proposals,
@@ -1316,6 +1461,7 @@ fn decode_assignment_material(
         // An incomplete restored attempt is retained, not re-issued. Only
         // the original live handle can resolve its asynchronous owners.
         admissions.push(InstructionAdmission {
+            _issuer: None,
             issuance: Arc::new(()),
             first,
             end,
@@ -1434,6 +1580,777 @@ fn decode_assignment_material(
 }
 
 impl SemanticTransitionSession {
+    pub(super) fn freeze_original_program_context_continuation(
+        &mut self,
+        target: &Self,
+        source: &SemanticSegmentInstructionAdmission,
+    ) -> Result<OriginalProgramContextContinuation, SemanticTransitionError> {
+        self.freeze_original_program_context_source(
+            target,
+            OriginalProgramContextSource::Live(source.clone()),
+        )
+    }
+
+    /// Persist immutable original instruction geometry, not a live admission
+    /// or an assertion that SOURCE has already completed or retired.
+    pub(super) fn original_program_context_continuation_mapping(
+        &self,
+        frozen: &OriginalProgramContextContinuation,
+    ) -> Result<SemanticReplayLoadedMaterial, SemanticTransitionError> {
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let claim = self.original_program_context_source_claim(&frozen.source)?;
+        if frozen.transferred
+            || !Arc::ptr_eq(&self.publication_issuer, &frozen.source_issuer)
+            || !Arc::ptr_eq(&program.owner, &frozen.source_program)
+            || program.identity != frozen.program_identity
+            || Identity256::from_bytes(Sha256::digest(&program.bytes).into())
+                != frozen.program_identity
+            || claim.end != frozen.source_end
+            || instruction_proposals(program, claim) != frozen.source_proposals
+            || self
+                .actor_refresh_initial
+                .as_ref()
+                .is_none_or(|initial| initial.index != frozen.initial_index)
+            || program
+                .steps
+                .get(frozen.source_end as usize..frozen.target_steps[0].segment_end as usize)
+                != Some(frozen.target_steps.as_slice())
+        {
+            return Err(invalid_program());
+        }
+        let budget = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if frozen
+            ._frozen_reservation
+            .as_ref()
+            .is_none_or(|reservation| !budget.same_pool(&reservation.budget))
+        {
+            return Err(invalid_program());
+        }
+        let allocation_bytes = CONTEXT_CONTINUATION_BYTES
+            .checked_add(size_of::<PublicationMaterialBytesOwner>())
+            .and_then(|bytes| bytes.checked_add(2 * size_of::<usize>()))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = budget.reserve_auxiliary(allocation_bytes)?;
+        budget.require_host_allocation(allocation_bytes)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(CONTEXT_CONTINUATION_BYTES)
+            .map_err(|error| runtime_error("original context mapping custody", error))?;
+        bytes.extend_from_slice(CONTEXT_CONTINUATION_MAGIC);
+        material_u64(&mut bytes, 1);
+        bytes.extend_from_slice(frozen.program_identity.as_bytes());
+        bytes.extend_from_slice(frozen.initial_index.as_bytes());
+        for value in [
+            frozen.source_first(),
+            frozen.source_end,
+            frozen.first_program_ordinal(),
+            frozen.target_steps[0].segment_end,
+            frozen.source_proposals,
+        ] {
+            material_u64(&mut bytes, value);
+        }
+        Ok(SemanticReplayLoadedMaterial {
+            bytes: PublicationMaterialBytes::retained(bytes, Some(reservation)),
+            decoded: None,
+        })
+    }
+
+    pub(super) fn require_original_program_context_checkpoint(
+        &self,
+        frozen: &OriginalProgramContextContinuation,
+        parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.checked_step(parent)?;
+        self.checked_reader(parent)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let claim = self.original_program_context_source_claim(&frozen.source)?;
+        if frozen.transferred
+            || !Arc::ptr_eq(&self.publication_issuer, &frozen.source_issuer)
+            || !Arc::ptr_eq(&program.owner, &frozen.source_program)
+            || program.identity != frozen.program_identity
+            || Identity256::from_bytes(Sha256::digest(&program.bytes).into())
+                != frozen.program_identity
+            || claim.state != InstructionState::Completed
+            || claim.end != frozen.source_end
+            || program
+                .admissions
+                .iter()
+                .any(|claim| claim.first >= frozen.source_end)
+            || instruction_proposals(program, claim) != frozen.source_proposals
+            || u64::from(parent.header.rng_binding()?.proposal) != frozen.source_proposal
+            || self.prepared_segment.is_some()
+            || self.readers.len() != 1
+            || self.pending_replay_delivery.is_some()
+            || self.pending_training_materialization.is_some()
+        {
+            return Err(invalid_program());
+        }
+        require_retired_instruction_expense(claim)?;
+        require_completed_instruction_prefix(
+            program,
+            frozen.source_end as usize,
+            &program.admissions,
+        )
+    }
+
+    /// Reconstitute only dormant continuation geometry from the canonical full
+    /// SOURCE restore. Durable completion and retirement expense remain exactly
+    /// as decoded; a fresh process cannot promote older unfinished claims.
+    pub(super) fn freeze_restored_original_program_context_continuation(
+        &mut self,
+        target: &Self,
+        parent: &SemanticPublishedLease,
+        native_source: &mut SemanticReplayLoadedMaterial,
+        assignments: &SemanticReplayLoadedMaterial,
+        mapping: &SemanticReplayLoadedMaterial,
+    ) -> Result<OriginalProgramContextContinuation, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        target.ensure_quiescent()?;
+        self.checked_step(parent)?;
+        self.checked_reader(parent)?;
+        if self.readers.len() != 1 || self.prepared_segment.is_some() {
+            return Err(invalid_program());
+        }
+        let budget = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        assignments.require_budget(budget)?;
+        mapping.require_budget(budget)?;
+        let (native_digest, restored) =
+            self.verify_checkpoint_loaded_source_material(parent, native_source)?;
+        if !restored {
+            return Err(invalid_program());
+        }
+        let header = native_source.complete()?.bank.header;
+        let checkpoint_parent = SemanticPublishedIdentity {
+            instance: header.instance,
+            word: header.publication_word,
+            logical_digest: header.logical_digest,
+            state_digest: header.state_digest,
+        };
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let initial_index = self
+            .actor_refresh_initial
+            .as_ref()
+            .ok_or_else(invalid_program)?
+            .index;
+        let saved =
+            decode_original_program_context_mapping(program, initial_index, mapping.as_bytes())?;
+        let claim = program
+            .admissions
+            .iter()
+            .find(|claim| claim.first == saved[0] && claim.end == saved[1])
+            .ok_or_else(invalid_program)?;
+        require_retired_instruction_expense(claim)?;
+        if claim.state != InstructionState::Completed
+            || claim._issuer.is_some()
+            || program
+                .admissions
+                .iter()
+                .any(|claim| claim.first >= saved[1])
+        {
+            return Err(invalid_program());
+        }
+        require_completed_instruction_prefix(
+            program,
+            usize::try_from(saved[1]).map_err(|_| invalid_program())?,
+            &program.admissions,
+        )?;
+        let mut rng = parent.header.rng_binding()?;
+        let next = program
+            .steps
+            .get(usize::try_from(saved[2]).map_err(|_| invalid_program())?)
+            .ok_or_else(invalid_program)?;
+        rng.proposal = u32::try_from(
+            u64::from(rng.proposal)
+                .checked_sub(next.before_proposals)
+                .ok_or_else(invalid_program)?,
+        )
+        .map_err(|_| invalid_program())?;
+        if program.original_rng.is_none_or(|original| {
+            original.family_id != rng.family_id
+                || original.stream_serial != rng.stream_serial
+                || original.proposal != rng.proposal
+        }) {
+            return Err(invalid_program());
+        }
+        let assignments_digest =
+            Identity256::from_bytes(Sha256::digest(assignments.as_bytes()).into());
+        let (current_assignments, _reservation) = self.actor_refresh_assignment_bytes()?;
+        if Identity256::from_bytes(Sha256::digest(&current_assignments).into())
+            != assignments_digest
+        {
+            return Err(invalid_program());
+        }
+        let source = RestoredOriginalProgramContextSource {
+            restoration: Arc::clone(
+                self.state_material_restore
+                    .as_ref()
+                    .ok_or_else(invalid_program)?,
+            ),
+            claim: Arc::clone(&claim.issuance),
+            first: claim.first,
+            native_digest,
+            assignments_digest,
+            checkpoint_parent,
+            parent: parent.identity,
+        };
+        let frozen = self.freeze_original_program_context_source(
+            target,
+            OriginalProgramContextSource::Restored(source),
+        )?;
+        if saved
+            != [
+                frozen.source_first(),
+                frozen.source_end,
+                frozen.first_program_ordinal(),
+                frozen.target_steps[0].segment_end,
+                frozen.source_proposals,
+            ]
+        {
+            return Err(invalid_program());
+        }
+        Ok(frozen)
+    }
+
+    fn original_program_context_source_claim<'a>(
+        &'a self,
+        source: &OriginalProgramContextSource,
+    ) -> Result<&'a InstructionAdmission, SemanticTransitionError> {
+        match source {
+            OriginalProgramContextSource::Live(source) => self.instruction_admission(source),
+            OriginalProgramContextSource::Restored(source) => {
+                if self
+                    .state_material_restore
+                    .as_ref()
+                    .is_none_or(|restoration| !Arc::ptr_eq(restoration, &source.restoration))
+                {
+                    return Err(invalid_program());
+                }
+                self.actor_refresh_program
+                    .as_ref()
+                    .ok_or_else(invalid_program)?
+                    .admissions
+                    .iter()
+                    .find(|claim| {
+                        claim.first == source.first && Arc::ptr_eq(&claim.issuance, &source.claim)
+                    })
+                    .ok_or_else(invalid_program)
+            }
+        }
+    }
+
+    fn freeze_original_program_context_source(
+        &mut self,
+        target: &Self,
+        source: OriginalProgramContextSource,
+    ) -> Result<OriginalProgramContextContinuation, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        target.ensure_quiescent()?;
+        let claim = self.original_program_context_source_claim(&source)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let target_program = target
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let initial_index = self
+            .actor_refresh_initial
+            .as_ref()
+            .ok_or_else(invalid_program)?
+            .index;
+        let first = program
+            .steps
+            .iter()
+            .find(|step| step.kind.is_some())
+            .ok_or_else(invalid_program)?;
+        let source_steps = program
+            .steps
+            .get(claim.first as usize..claim.end as usize)
+            .ok_or_else(invalid_program)?;
+        let next = program
+            .steps
+            .get(claim.end as usize)
+            .ok_or_else(invalid_program)?;
+        let end = usize::try_from(next.segment_end).map_err(|_| invalid_program())?;
+        let target_steps = program
+            .steps
+            .get(claim.end as usize..end)
+            .ok_or_else(invalid_program)?;
+        let source_owned = match &source {
+            OriginalProgramContextSource::Live(_) => {
+                claim.state == InstructionState::Admitted
+                    && claim
+                        ._issuer
+                        .as_ref()
+                        .is_some_and(|issuer| Arc::ptr_eq(issuer, &self.publication_issuer))
+                    && self.readers.contains_key(&claim.parent_token)
+                    && self.prepared_segment.as_ref().is_none_or(|build| {
+                        build.structural_only
+                            && !build.capturing
+                            && !build.submitted
+                            && !build.completed
+                    })
+            }
+            OriginalProgramContextSource::Restored(_) => {
+                claim.state == InstructionState::Completed
+                    && claim._issuer.is_none()
+                    && self.prepared_segment.is_none()
+                    && claim._publication.is_none()
+                    && claim._model_owners.is_empty()
+                    && claim.cold_work.is_none()
+                    && claim.retirement_work.is_none()
+                    && claim.retirement_cancellation.is_none()
+                    && require_retired_instruction_expense(claim).is_ok()
+            }
+        };
+        if Arc::ptr_eq(&self.publication_issuer, &target.publication_issuer)
+            || !source_owned
+            || claim.first != first.ordinal
+            || source_steps.len() < 2
+            || source_steps
+                .last()
+                .is_none_or(|step| step.kind != Some(SemanticTransitionKind::Recompute))
+            || source_steps[..source_steps.len() - 1]
+                .iter()
+                .any(|step| step.kind != Some(SemanticTransitionKind::Proposal))
+            || source_steps.iter().any(|step| step.branch.is_some())
+            || next.segment_begin != next.ordinal
+            || next.request != first.request.checked_add(1).ok_or_else(invalid_program)?
+            || target_steps.len() != 1
+            || next.kind != Some(SemanticTransitionKind::Recompute)
+            || next.branch.is_some()
+            || program.bytes != target_program.bytes
+            || program.identity != target_program.identity
+            || !target_program.admissions.is_empty()
+            || !target_program.main_origins.is_empty()
+            || target_program.original_rng.is_some()
+            || target.prepared_segment.is_some()
+            || target
+                .actor_refresh_initial
+                .as_ref()
+                .is_none_or(|initial| initial.index != initial_index)
+        {
+            return Err(invalid_program());
+        }
+        // One absolute original RNG cursor serves live and restored SOURCE.
+        // Restoration has already authenticated this arithmetic against its
+        // actual current reader; no completed Proposal is added a second time.
+        let source_proposal = u64::from(program.original_rng.ok_or_else(invalid_program)?.proposal)
+            .checked_add(next.before_proposals)
+            .filter(|proposal| u32::try_from(*proposal).is_ok())
+            .ok_or_else(invalid_program)?;
+        let budget = self.replay_material_budget.as_ref().ok_or_else(|| {
+            publication_input_error("original context continuation requires its material budget")
+        })?;
+        if target
+            .replay_material_budget
+            .as_ref()
+            .is_none_or(|target_budget| !budget.same_pool(target_budget))
+        {
+            return Err(publication_input_error(
+                "original context continuation requires one shared material pool",
+            ));
+        }
+        let admission_count = program
+            .admissions
+            .len()
+            .checked_add(1)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let admission_peak = if program.admissions.capacity() < admission_count {
+            admission_count
+                .checked_mul(size_of::<InstructionAdmission>())
+                .ok_or(SemanticTransitionError::GenerationExhausted)?
+        } else {
+            0
+        };
+        let payload_bytes = program_step_payload_allocation_bound(target_steps)?;
+        let frozen_bytes = target_steps
+            .len()
+            .checked_mul(size_of::<ProgramStep>())
+            .and_then(|bytes| bytes.checked_add(payload_bytes))
+            .and_then(|bytes| bytes.checked_add(size_of::<OriginalProgramContextContinuation>()))
+            .and_then(|bytes| bytes.checked_add(admission_peak))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let frozen_reservation = budget.reserve_auxiliary(frozen_bytes)?;
+        let parse_reservation = budget.reserve_json_parse(&next.instruction)?;
+        budget.require_host_allocation(
+            frozen_bytes
+                .checked_add(parse_reservation.charged_bytes)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?,
+        )?;
+        let instruction = json_value(&next.instruction)?;
+        let frozen = OriginalProgramContextContinuation {
+            _frozen_reservation: Some(frozen_reservation),
+            _mapping_reservation: None,
+            source_issuer: Arc::clone(&self.publication_issuer),
+            target_issuer: Arc::clone(&target.publication_issuer),
+            source_program: Arc::clone(&program.owner),
+            target_program: Arc::clone(&target_program.owner),
+            program_identity: program.identity,
+            initial_index,
+            source_end: claim.end,
+            source_proposals: instruction_proposals(program, claim),
+            source_proposal,
+            source,
+            target_steps: target_steps.to_vec(),
+            cold_capacity: SemanticSegmentColdCapacity {
+                segment_capacity_bytes: integer(&instruction["capacity_bytes"])?,
+                other_external_cuda_bytes: integer(&instruction["other_external_cuda_bytes"])?,
+            },
+            prepared_steps: Vec::new(),
+            transferred: false,
+            admission: None,
+        };
+        self.actor_refresh_program
+            .as_mut()
+            .expect("original Program owner")
+            .admissions
+            .try_reserve_exact(1)
+            .map_err(|error| runtime_error("future original instruction custody", error))?;
+        Ok(frozen)
+    }
+
+    pub(super) fn bind_future_original_program_preparation(
+        &mut self,
+        frozen: &mut OriginalProgramContextContinuation,
+        steps: &[SemanticPreparedStep],
+    ) -> Result<(), SemanticTransitionError> {
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        self.require_original_prepared_structure()?;
+        if !Arc::ptr_eq(&self.publication_issuer, &frozen.target_issuer)
+            || !Arc::ptr_eq(&program.owner, &frozen.target_program)
+            || program.identity != frozen.program_identity
+            || Identity256::from_bytes(Sha256::digest(&program.bytes).into())
+                != frozen.program_identity
+            || program
+                .steps
+                .get(frozen.source_end as usize..frozen.target_steps[0].segment_end as usize)
+                != Some(frozen.target_steps.as_slice())
+            || frozen.transferred
+            || !frozen.prepared_steps.is_empty()
+            || !build.program_steps.is_empty()
+            || build.program_admission.is_some()
+            || build.cold_capacity != frozen.cold_capacity
+        {
+            return Err(invalid_program());
+        }
+        let budget = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if frozen
+            ._frozen_reservation
+            .as_ref()
+            .is_none_or(|original| !budget.same_pool(&original.budget))
+            || frozen._mapping_reservation.is_some()
+        {
+            return Err(invalid_program());
+        }
+        let node =
+            OwnedPublicationMaterial::tree_node_bound(size_of::<u64>(), size_of::<ProgramStep>())?;
+        let payload_bytes = program_step_payload_allocation_bound(&frozen.target_steps)?;
+        let mapping_bytes = steps
+            .len()
+            .checked_mul(node)
+            .and_then(|bytes| bytes.checked_add(size_of::<BTreeMap<u64, ProgramStep>>()))
+            .and_then(|bytes| {
+                steps
+                    .len()
+                    .checked_mul(size_of::<SemanticPreparedStep>())
+                    .and_then(|handles| bytes.checked_add(handles))
+            })
+            .and_then(|bytes| bytes.checked_add(payload_bytes))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let mapping_reservation = budget.reserve_auxiliary(mapping_bytes)?;
+        budget.require_host_allocation(mapping_bytes)?;
+        let mapping = self.original_segment_step_mapping(&frozen.target_steps, steps)?;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(steps.len())
+            .map_err(|error| runtime_error("future original prepared custody", error))?;
+        retained.extend_from_slice(steps);
+        self.prepared_segment
+            .as_mut()
+            .expect("original future scope")
+            .program_steps = mapping;
+        frozen.prepared_steps = retained;
+        frozen._mapping_reservation = Some(mapping_reservation);
+        Ok(())
+    }
+
+    pub(super) fn require_frozen_original_program_scope(
+        &self,
+        frozen: &OriginalProgramContextContinuation,
+    ) -> Result<(), SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        let budget = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if !Arc::ptr_eq(&self.publication_issuer, &frozen.target_issuer)
+            || frozen
+                ._frozen_reservation
+                .as_ref()
+                .is_none_or(|original| !budget.same_pool(&original.budget))
+            || frozen
+                ._mapping_reservation
+                .as_ref()
+                .is_none_or(|original| !budget.same_pool(&original.budget))
+            || frozen.prepared_steps.is_empty()
+            || build.tokens.len() != frozen.prepared_steps.len()
+            || build.program_steps.len() != frozen.target_steps.len()
+            || build.cold_capacity != frozen.cold_capacity
+            || build.cancelled.load(Ordering::Acquire)
+            || frozen
+                .prepared_steps
+                .iter()
+                .zip(&frozen.target_steps)
+                .zip(&build.tokens)
+                .any(|((step, expected), token)| {
+                    step.token != *token
+                        || build
+                            .check_retained(step, &self.publication_issuer)
+                            .is_err()
+                        || build.program_steps.get(token) != Some(expected)
+                        || build.requested_kind(step, &self.publication_issuer).ok()
+                            != expected.kind
+                })
+        {
+            return Err(invalid_program());
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_transfer_original_program_context_continuation(
+        &self,
+        source: &Self,
+        frozen: &OriginalProgramContextContinuation,
+        source_parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        source.checked_step(source_parent)?;
+        source.checked_reader(source_parent)?;
+        self.require_frozen_original_program_scope(frozen)?;
+        let claim = source.original_program_context_source_claim(&frozen.source)?;
+        let anchor = source.require_model_context_acknowledgement_parent(self, source_parent)?;
+        if let OriginalProgramContextSource::Restored(restored) = &frozen.source {
+            if restored.parent != anchor {
+                return Err(invalid_program());
+            }
+            source.require_model_context_checkpoint_anchor_digest(
+                anchor,
+                restored.checkpoint_parent,
+                restored.native_digest,
+            )?;
+            let (assignments, _reservation) = source.actor_refresh_assignment_bytes()?;
+            if Identity256::from_bytes(Sha256::digest(&assignments).into())
+                != restored.assignments_digest
+            {
+                return Err(invalid_program());
+            }
+            require_retired_instruction_expense(claim)?;
+        }
+        let program = source
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let target_program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let target_build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        let mut rng = source_parent.header.rng_binding()?;
+        let source_proposal = u64::from(rng.proposal);
+        rng.proposal = u32::try_from(
+            u64::from(rng.proposal)
+                .checked_sub(frozen.target_steps[0].before_proposals)
+                .ok_or_else(invalid_program)?,
+        )
+        .map_err(|_| invalid_program())?;
+        if frozen.transferred
+            || source_proposal != frozen.source_proposal
+            || source.replay_material_budget.as_ref().is_none_or(|budget| {
+                frozen
+                    ._frozen_reservation
+                    .as_ref()
+                    .is_none_or(|original| !budget.same_pool(&original.budget))
+            })
+            || !Arc::ptr_eq(&source.publication_issuer, &frozen.source_issuer)
+            || !Arc::ptr_eq(&program.owner, &frozen.source_program)
+            || !Arc::ptr_eq(&target_program.owner, &frozen.target_program)
+            || program.identity != frozen.program_identity
+            || Identity256::from_bytes(Sha256::digest(&program.bytes).into())
+                != frozen.program_identity
+            || program.bytes != target_program.bytes
+            || program
+                .steps
+                .get(frozen.source_end as usize..frozen.target_steps[0].segment_end as usize)
+                != Some(frozen.target_steps.as_slice())
+            || claim.state != InstructionState::Completed
+            || claim.end != frozen.source_end
+            || program
+                .admissions
+                .iter()
+                .any(|claim| claim.first >= frozen.source_end)
+            || instruction_proposals(program, claim) != frozen.source_proposals
+            || source.prepared_segment.is_some()
+            || !claim.resources_retired
+            || target_build.program_admission.is_some()
+            || !target_build.finished
+            || target_build.capturing
+            || target_build.submitted
+            || target_build.completed
+            || program.original_rng.is_none_or(|original| {
+                original.family_id != rng.family_id
+                    || original.stream_serial != rng.stream_serial
+                    || original.proposal != rng.proposal
+            })
+            || !target_program.admissions.is_empty()
+            || !target_program.main_origins.is_empty()
+            || target_program.original_rng.is_some()
+            || self
+                .actor_refresh_initial
+                .as_ref()
+                .is_none_or(|initial| initial.index != frozen.initial_index)
+            || source
+                .actor_refresh_initial
+                .as_ref()
+                .is_none_or(|initial| initial.index != frozen.initial_index)
+        {
+            return Err(invalid_program());
+        }
+        require_completed_instruction_prefix(
+            program,
+            frozen.source_end as usize,
+            &program.admissions,
+        )?;
+        Ok(())
+    }
+
+    // The ordinary continuation owner keeps these exact Sessions and frozen
+    // scope exclusive from validation through the known CUDA publication
+    // outcome. All refusals precede that publication; this move cannot refuse.
+    pub(super) fn transfer_original_program_context_continuation(
+        &mut self,
+        source: &mut Self,
+        frozen: &mut OriginalProgramContextContinuation,
+    ) {
+        self.actor_refresh_program = source.actor_refresh_program.take();
+        frozen.transferred = true;
+    }
+
+    pub(super) fn admit_future_original_program_instruction(
+        &mut self,
+        frozen: &mut OriginalProgramContextContinuation,
+        parent: &SemanticPublishedLease,
+        instruction_bytes: &[u8],
+    ) -> Result<SemanticSegmentInstructionAdmission, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.require_closed_evaluations()?;
+        self.require_frozen_original_program_scope(frozen)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        if !frozen.transferred
+            || frozen.admission.is_some()
+            || !Arc::ptr_eq(&program.owner, &frozen.source_program)
+            || program.identity != frozen.program_identity
+            || Identity256::from_bytes(Sha256::digest(&program.bytes).into())
+                != frozen.program_identity
+            || program
+                .steps
+                .get(frozen.source_end as usize..frozen.target_steps[0].segment_end as usize)
+                != Some(frozen.target_steps.as_slice())
+            || self.initial_prefill.is_some()
+            || self.task_observed
+            || self.policy.as_ref().is_some_and(|policy| policy.tape_live)
+            || self
+                .steps
+                .iter()
+                .any(|(token, step)| step.identity.is_none() && !build.tokens.contains(token))
+            || build.program_admission.is_some()
+            || !build.finished
+            || build.capturing
+            || build.submitted
+            || build.completed
+        {
+            return Err(invalid_program());
+        }
+        let admission = self.issue_original_segment_instruction(
+            parent,
+            frozen.first_program_ordinal(),
+            instruction_bytes,
+        )?;
+        self.prepared_segment
+            .as_mut()
+            .expect("same captured future scope")
+            .program_admission = Some(admission.clone());
+        frozen.admission = Some(admission.clone());
+        Ok(admission)
+    }
+
+    pub(super) fn enter_future_original_program_execution(
+        &mut self,
+        frozen: &OriginalProgramContextContinuation,
+        admission: &SemanticSegmentInstructionAdmission,
+        parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_frozen_original_program_scope(frozen)?;
+        self.require_segment_instruction_admission(admission, parent)?;
+        self.checked_step(parent)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        if frozen
+            .admission
+            .as_ref()
+            .is_none_or(|original| !original.same_handle(admission))
+            || build
+                .program_admission
+                .as_ref()
+                .is_none_or(|original| !original.same_handle(admission))
+            || self.instruction_admission(admission)?.state != InstructionState::Released
+            || parent.active
+            || self.readers.contains_key(&parent.token)
+            || !build.finished
+            || build.capturing
+            || build.submitted
+            || build.completed
+        {
+            return Err(invalid_program());
+        }
+        self.instruction_admission_mut(admission)?.state = InstructionState::Bound;
+        self.prepared_segment
+            .as_mut()
+            .expect("same captured future scope")
+            .parent_quiescent = true;
+        Ok(())
+    }
+
     pub fn bind_actor_refresh_program(
         &mut self,
         program_bytes: &[u8],
@@ -1463,9 +2380,21 @@ impl SemanticTransitionSession {
         instruction_bytes: &[u8],
     ) -> Result<SemanticSegmentInstructionAdmission, SemanticTransitionError> {
         self.ensure_rebindable()?;
+        if self.prepared_segment.is_some() {
+            return Err(invalid_program());
+        }
+        self.issue_original_segment_instruction(parent, first_program_ordinal, instruction_bytes)
+    }
+
+    fn issue_original_segment_instruction(
+        &mut self,
+        parent: &SemanticPublishedLease,
+        first_program_ordinal: u64,
+        instruction_bytes: &[u8],
+    ) -> Result<SemanticSegmentInstructionAdmission, SemanticTransitionError> {
         self.checked_step(parent)?;
         self.checked_reader(parent)?;
-        if self.prepared_segment.is_some() || self.readers.len() != 1 {
+        if self.readers.len() != 1 {
             return Err(invalid_program());
         }
         let program = self
@@ -1527,6 +2456,7 @@ impl SemanticTransitionSession {
             first: first_program_ordinal,
         };
         let claim = InstructionAdmission {
+            _issuer: Some(Arc::clone(&self.publication_issuer)),
             issuance,
             first: first_program_ordinal,
             end: end as u64,
@@ -1908,27 +2838,41 @@ impl SemanticTransitionSession {
             .as_ref()
             .expect("original program");
         let expected = &program.steps[claim.first as usize..claim.end as usize];
-        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
-        if steps.len() != expected.len()
-            || build.tokens.len() != steps.len()
-            || steps.iter().zip(&build.tokens).any(|(step, token)| {
-                step.token != *token
-                    || build
-                        .check_retained(step, &self.publication_issuer)
-                        .is_err()
-            })
-        {
-            return Err(invalid_program());
-        }
-        let mapping = steps
-            .iter()
-            .zip(expected)
-            .map(|(step, expected)| (step.token, expected.clone()))
-            .collect();
+        let mapping = self.original_segment_step_mapping(expected, steps)?;
         let build = self.prepared_segment.as_mut().expect("original scope");
         build.program_steps = mapping;
         build.program_admission = Some(admission.clone());
         Ok(())
+    }
+
+    fn original_segment_step_mapping(
+        &self,
+        expected: &[ProgramStep],
+        steps: &[SemanticPreparedStep],
+    ) -> Result<BTreeMap<u64, ProgramStep>, SemanticTransitionError> {
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        if steps.len() != expected.len()
+            || build.tokens.len() != steps.len()
+            || steps
+                .iter()
+                .zip(expected)
+                .zip(&build.tokens)
+                .any(|((step, expected), token)| {
+                    step.token != *token
+                        || build
+                            .check_retained(step, &self.publication_issuer)
+                            .is_err()
+                        || build.requested_kind(step, &self.publication_issuer).ok()
+                            != expected.kind
+                })
+        {
+            return Err(invalid_program());
+        }
+        Ok(steps
+            .iter()
+            .zip(expected)
+            .map(|(step, expected)| (step.token, expected.clone()))
+            .collect())
     }
 
     pub(super) fn complete_segment_instruction(&mut self) -> Result<(), SemanticTransitionError> {
@@ -2218,6 +3162,218 @@ impl SemanticTransitionSession {
             source.native,
             source.checkpoint,
         )))
+    }
+
+    /// Authenticate the original reader before any admitted instruction.
+    pub(super) fn require_initial_model_context_checkpoint_boundary(
+        &self,
+        parent: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_original_consumer_step(parent)?;
+        self.checked_reader(parent)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if !parent.active
+            || self.prepared_segment.is_some()
+            || !program.admissions.is_empty()
+            || program.original_rng.is_some()
+            || !program.main_origins.is_empty()
+            || self.actor_refresh_initial.is_none()
+            || parent.header.abi != 1
+            || parent.header.terminal != 0
+            || parent
+                .directory
+                .iter()
+                .find(|range| (range.role, range.index) == (30, 0))
+                .is_none_or(|range| range.length_bytes != size_of::<IntentQueueHeader>() as u64)
+            || parent
+                .directory
+                .iter()
+                .find(|range| (range.role, range.index) == (32, 0))
+                .is_none_or(|range| {
+                    range.length_bytes != size_of::<AcknowledgementQueueHeader>() as u64
+                })
+        {
+            return Err(publication_input_error(
+                "checkpoint is not its original pre-instruction source boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Authenticate attachment presence from the native instruction lifecycle,
+    /// complete current publication and sealed delivery queues, never an ordinal.
+    pub fn verify_model_context_checkpoint_presence(
+        native: &mut SemanticReplayLoadedMaterial,
+        model_context: Option<&SemanticFrozenModelContext>,
+        initial_index: Identity256,
+        assignments: Option<&[u8]>,
+        original_program: &[u8],
+        attachment_present: bool,
+    ) -> Result<(), SemanticTransitionError> {
+        let budget = native
+            .bytes
+            .budget()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .clone();
+        let state = native.checkpoint_proof()?;
+        state.require_frozen_model_context(model_context)?;
+        match model_context {
+            None => {
+                return if attachment_present {
+                    Err(publication_input_error(
+                        "ordinary checkpoint has no dormant model context",
+                    ))
+                } else {
+                    Ok(())
+                };
+            }
+            Some(context) => {
+                context.require_budget(&budget)?;
+                let saved = context
+                    .catalogue
+                    .context_for_header(&state.owner.codebook_header)?;
+                if saved.member != context.member {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                match context.member {
+                    0 => {}
+                    1 => {
+                        return if attachment_present {
+                            Err(publication_input_error(
+                                "selected target checkpoint cannot contain a dormant attachment",
+                            ))
+                        } else {
+                            Ok(())
+                        };
+                    }
+                    _ => return Err(SemanticTransitionError::ObservationMismatch),
+                }
+            }
+        }
+        let _program_parse = budget.reserve_json_parse(original_program)?;
+        let scratch = original_program
+            .len()
+            .checked_mul(12)
+            .and_then(|bytes| bytes.checked_add(assignments.map_or(0, <[u8]>::len).checked_mul(8)?))
+            .and_then(|bytes| bytes.checked_add(native.as_bytes().len().checked_mul(6)?))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        budget.require_host_allocation(scratch)?;
+        let _scratch = budget.reserve_auxiliary(scratch)?;
+        let program = ActorRefreshProgram::decode(original_program)?;
+        let (rng, admissions, actor_assignments) =
+            match assignments.filter(|bytes| !bytes.is_empty()) {
+                Some(bytes) => decode_assignment_material(&program, initial_index, bytes)?,
+                None => (None, Vec::new(), Vec::new()),
+            };
+        let material = native.complete()?;
+        let header = material.bank.header;
+        if header.abi != 1
+            || header.publication_word == 0
+            || header.model_generation != u64::from(material.bank.state.model_generation)
+            || header.stream_serial != material.bank.state.stream_serial
+            || header.family_id != u64::from(material.bank.state.family_id)
+        {
+            return Err(invalid_program());
+        }
+        let entries = material
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (30, 0))
+            .ok_or_else(invalid_program)?;
+        let payload = material
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (31, 0))
+            .ok_or_else(invalid_program)?;
+        let acknowledgements = material
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (32, 0))
+            .ok_or_else(invalid_program)?;
+        let intents = output_intents_from_ranges(entries, payload)?;
+        let acknowledged =
+            acknowledgement_receipts(&acknowledgements.bytes, acknowledgements.capacity)?;
+        if admissions.is_empty() {
+            if attachment_present
+                || !actor_assignments.is_empty()
+                || header.terminal != 0
+                || !intents.is_empty()
+                || !acknowledged.is_empty()
+                || rng.is_some_and(|rng| {
+                    header.stream_serial != rng.stream_serial
+                        || header.family_id != u64::from(rng.family_id)
+                        || header.proposal != u64::from(rng.proposal)
+                })
+            {
+                return Err(publication_input_error(
+                    "initial checkpoint predates any dormant model context",
+                ));
+            }
+            return Ok(());
+        }
+        let first = program
+            .steps
+            .iter()
+            .find(|step| step.kind.is_some())
+            .ok_or_else(invalid_program)?;
+        let claim = admissions.last().ok_or_else(invalid_program)?;
+        let next = program
+            .steps
+            .get(usize::try_from(claim.end).map_err(|_| invalid_program())?)
+            .ok_or_else(invalid_program)?;
+        let source_steps = program
+            .steps
+            .get(claim.first as usize..claim.end as usize)
+            .ok_or_else(invalid_program)?;
+        let original_rng = rng.ok_or_else(invalid_program)?;
+        if admissions.len() != 1
+            || claim.state != InstructionState::Completed
+            || claim.first != first.ordinal
+            || source_steps.len() < 2
+            || source_steps
+                .last()
+                .is_none_or(|step| step.kind != Some(SemanticTransitionKind::Recompute))
+            || source_steps[..source_steps.len() - 1].iter().any(|step| {
+                step.kind != Some(SemanticTransitionKind::Proposal) || step.branch.is_some()
+            })
+            || next.ordinal != claim.end
+            || next.segment_begin != next.ordinal
+            || next.request != first.request.checked_add(1).ok_or_else(invalid_program)?
+            || next.segment_end != next.ordinal.checked_add(1).ok_or_else(invalid_program)?
+            || next.kind != Some(SemanticTransitionKind::Recompute)
+            || next.branch.is_some()
+            || header.stream_serial != original_rng.stream_serial
+            || header.family_id != u64::from(original_rng.family_id)
+            || header.proposal
+                != u64::from(original_rng.proposal)
+                    .checked_add(next.before_proposals)
+                    .ok_or_else(invalid_program)?
+            || actor_assignments.len() as u64 != instruction_proposals(&program, claim)
+            || actor_assignments.iter().any(|assignment| {
+                assignment.ordinal < claim.first || assignment.ordinal >= claim.end
+            })
+            || intents.is_empty()
+            || intents.len() != acknowledged.len()
+            || intents.iter().any(|intent| {
+                !acknowledged
+                    .iter()
+                    .any(|(identity, _)| *identity == intent.stable_identity)
+            })
+        {
+            return Err(invalid_program());
+        }
+        require_retired_instruction_expense(claim)?;
+        require_completed_instruction_prefix(&program, claim.end as usize, &admissions)?;
+        if !attachment_present {
+            return Err(publication_input_error(
+                "completed source checkpoint requires its saved dormant model context",
+            ));
+        }
+        Ok(())
     }
 
     /// Restore every native-issued assignment from the authenticated checkpoint.

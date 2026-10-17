@@ -471,6 +471,9 @@ pub(crate) struct PySemanticLearningPhaseTransition {
     private_restore: Mutex<Option<PrivateRestoreOwners>>,
     source_checkpoint: xlog_cuda::SemanticReplayLoadedMaterial,
     source_checkpoint_handoff: Py<material_bytes::PySemanticMaterialBytes>,
+    #[cfg(feature = "semantic-policy")]
+    model_context_checkpoint_origin:
+        Mutex<Option<Option<xlog_cuda::SemanticPrivateModelContextCheckpointOrigin>>>,
     scientific_owner: Py<PyAny>,
     accept_learning_phase: Py<PyAny>,
     scientific_acceptance: Mutex<Option<ScientificAcceptance>>,
@@ -664,6 +667,49 @@ fn verify_phase_checkpoint(
 }
 
 impl PySemanticLearningPhaseTransition {
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn model_context_checkpoint_origin(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<xlog_cuda::SemanticPrivateModelContextCheckpointOrigin>> {
+        let mut retained = self
+            .model_context_checkpoint_origin
+            .lock()
+            .map_err(|_| invalid("private checkpoint provenance custody is poisoned"))?;
+        if let Some(original) = &*retained {
+            return Ok(original.clone());
+        }
+        let admission = self.records()?.confirmed_admission()?;
+        let source = self.source.borrow(py);
+        source.require_creator()?;
+        let owner = source.owner()?;
+        let pool = self
+            .task_use
+            .borrow(py)
+            .checkpoint
+            .material_sources
+            .native_budget()?;
+        let admission = xlog_cuda::SemanticLearningPhaseAdmission::from_loaded(admission, &pool)
+            .map_err(xlog_err)?;
+        let checkpoint = self.source_checkpoint.as_bytes();
+        let manifest = SemanticCheckpointManifest::decode_borrowed(checkpoint)?;
+        let mut native = self
+            .source_checkpoint
+            .slice_payload(checkpoint_section_range(checkpoint, manifest.native)?)
+            .map_err(xlog_err)?;
+        let proof = native.checkpoint_proof().map_err(xlog_err)?;
+        let origin = owner
+            .prepare_private_model_context_checkpoint_origin(
+                &*self.parent.borrow(py).lease()?,
+                &proof,
+                Identity256::from_bytes(Sha256::digest(checkpoint).into()),
+                admission,
+            )
+            .map_err(xlog_err)?;
+        *retained = Some(origin.clone());
+        Ok(origin)
+    }
+
     fn model_owner(&self, py: Python<'_>, kind: PhaseModelOwner) -> PyResult<Py<PyAny>> {
         let retained = self
             .model_owners
@@ -2202,6 +2248,16 @@ impl PySemanticLearningPhaseTransition {
             TaskUsePhase::ArenaPreparing(original) => *original.clone(),
             _ => unreachable!("checked private learning successor"),
         };
+        #[cfg(feature = "semantic-policy")]
+        if let Some(origin) = self.model_context_checkpoint_origin(py)? {
+            successor
+                .owner()?
+                .promote_private_model_context_checkpoint(
+                    &*candidate.parent.borrow(py).lease()?,
+                    &origin,
+                )
+                .map_err(xlog_err)?;
+        }
         // The actual source Session release already invalidated its issuance.
         old.phase = TaskUsePhase::Refused;
         new.phase = activated;
@@ -2887,6 +2943,8 @@ impl PySemanticTransitionController {
                 private_restore: Mutex::new(None),
                 source_checkpoint: source_checkpoint_loaded,
                 source_checkpoint_handoff,
+                #[cfg(feature = "semantic-policy")]
+                model_context_checkpoint_origin: Mutex::new(None),
                 scientific_owner: scientific_owner.clone_ref(py),
                 accept_learning_phase: accept_learning_phase.unbind(),
                 scientific_acceptance: Mutex::new(None),

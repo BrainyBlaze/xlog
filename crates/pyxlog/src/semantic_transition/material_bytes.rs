@@ -29,6 +29,9 @@ pub(super) struct OriginalCheckpointExport {
     #[cfg(feature = "semantic-policy")]
     pub(super) saved_completed_binding: Option<(Option<String>, Vec<u8>)>,
     #[cfg(feature = "semantic-policy")]
+    pub(super) private_model_context_save:
+        Option<xlog_cuda::SemanticPrivateModelContextCheckpointSave>,
+    #[cfg(feature = "semantic-policy")]
     pub(super) saved_model_binding: Option<(
         xlog_cuda::SemanticPublishedIdentity,
         Option<xlog_cuda::SemanticPublishedIdentity>,
@@ -40,6 +43,12 @@ pub(super) struct OriginalCheckpointExport {
     pub(super) prefill_observation: Option<xlog_cuda::SemanticCheckpointInitialPrefillObservation>,
     pub(super) native: Option<xlog_cuda::SemanticReplayLoadedMaterial>,
     pub(super) initial_prefill: Option<xlog_cuda::SemanticReplayLoadedMaterial>,
+    pub(super) model_context: Option<xlog_cuda::SemanticReplayLoadedMaterial>,
+    pub(super) model_context_capacity: usize,
+    pub(super) model_context_request_bound: bool,
+    #[cfg(feature = "semantic-policy")]
+    pub(super) model_context_custody:
+        Option<Box<model_context_checkpoint::CheckpointModelContextCustody>>,
     pub(super) task: Option<EncodedTaskCheckpoint>,
     pub(super) config: Option<Vec<u8>>,
     pub(super) output: Option<xlog_cuda::SemanticReplayMaterialOutput>,
@@ -102,11 +111,18 @@ impl OriginalCheckpointExport {
             #[cfg(feature = "semantic-policy")]
             saved_completed_binding: None,
             #[cfg(feature = "semantic-policy")]
+            private_model_context_save: None,
+            #[cfg(feature = "semantic-policy")]
             saved_model_binding: None,
             observation: None,
             prefill_observation: None,
             native: None,
             initial_prefill: None,
+            model_context: None,
+            model_context_capacity: 0,
+            model_context_request_bound: false,
+            #[cfg(feature = "semantic-policy")]
+            model_context_custody: None,
             task: None,
             config: None,
             output: None,

@@ -917,6 +917,8 @@ impl PySemanticLearningPhaseTransition {
                 capacity,
                 working_bytes,
                 Some(writer.clone_ref(py)),
+                // This private restored session owns no future model continuation.
+                None,
             )?
         };
         // Preserve the exact successful canonical return before verification.

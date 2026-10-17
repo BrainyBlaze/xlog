@@ -14,7 +14,8 @@ use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
 use crate::device_runtime::resource::{
     block_use_registry, Access, AllocationAccounting, AllocationRequest, BlockUseRegistry,
-    DeviceAccessDependencies, MemoryStorageOwner, MemoryUse, MemoryUseGroup, RetainedStorageUse,
+    DeviceAccessDependencies, MemoryStorageOwner, MemoryUse, MemoryUseGroup, RetainedAllocation,
+    RetainedStorageUse,
 };
 use crate::device_runtime::{
     AllocTag, BlockId, BlockState, DeviceBlock, ResourceError, RuntimeMemoryReservation, StreamId,
@@ -45,22 +46,30 @@ pub struct GpuBackingRoot {
 /// events and deduplicates them in the same ledger as external allocator roots.
 pub trait GpuBackingObserver: Send + Sync {
     fn record(&self, root: &GpuBackingRoot) -> crate::device_runtime::ResourceResult<()>;
+
+    fn observe_module(
+        &self,
+        observation: &crate::module_backing::ModuleObservation,
+        original: Option<&mut crate::module_backing::ModuleOriginalView>,
+    ) -> crate::device_runtime::ResourceResult<()>;
 }
 
 struct BackingObservationRegistry {
     observer: Option<Arc<dyn GpuBackingObserver>>,
-    allocation_entered: bool,
+    native_owner_entered: bool,
     next_generation: u64,
+    module_failure: Option<Arc<ResourceError>>,
 }
 
 static BACKING_OBSERVATION: std::sync::Mutex<BackingObservationRegistry> =
     std::sync::Mutex::new(BackingObservationRegistry {
         observer: None,
-        allocation_entered: false,
+        native_owner_entered: false,
         next_generation: 1,
+        module_failure: None,
     });
 
-/// Attach the original process collector before the first native allocation.
+/// Attach the original process collector before native allocation or module loading.
 /// There is no reset, replacement or late baseline synthesized from live views.
 pub fn install_gpu_backing_observer(
     observer: Arc<dyn GpuBackingObserver>,
@@ -68,13 +77,44 @@ pub fn install_gpu_backing_observer(
     let mut registry = BACKING_OBSERVATION.lock().map_err(|_| {
         ResourceError::Driver("native backing observation registry poisoned".into())
     })?;
-    if registry.allocation_entered || registry.observer.is_some() {
+    if registry.native_owner_entered || registry.observer.is_some() {
         return Err(ResourceError::Driver(
-            "process backing observer must be installed once before native allocation".into(),
+            "process backing observer must be installed once before native allocation or module loading"
+                .into(),
         ));
     }
     registry.observer = Some(observer);
     Ok(())
+}
+
+/// Freeze collector custody and mint one identity before entering a native owner.
+/// Direct allocations and loaded modules share this one generation domain.
+pub(crate) fn begin_gpu_backing_observation(
+) -> crate::device_runtime::ResourceResult<(Option<Arc<dyn GpuBackingObserver>>, u64)> {
+    let mut registry = BACKING_OBSERVATION.lock().map_err(|_| {
+        ResourceError::Driver("native backing observation registry poisoned".into())
+    })?;
+    if let Some(cause) = &registry.module_failure {
+        return Err(ResourceError::Driver(format!(
+            "native backing admission retains an original module observation failure: {cause}"
+        )));
+    }
+    registry.native_owner_entered = true;
+    let generation = registry.next_generation;
+    registry.next_generation = generation
+        .checked_add(1)
+        .ok_or_else(|| ResourceError::Driver("native backing owner generation exhausted".into()))?;
+    Ok((registry.observer.clone(), generation))
+}
+
+/// The process has one continuous collector ledger. Share the actual capsule's
+/// first error and prohibit fresh allocation/load work after its uncertainty.
+/// A later acknowledgement never resets the original observation history.
+pub(crate) fn retain_gpu_module_observation_failure(cause: Arc<ResourceError>) {
+    let mut registry = BACKING_OBSERVATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.module_failure.get_or_insert(cause);
 }
 
 #[cfg(test)]
@@ -83,6 +123,9 @@ type AfterLocalReservationHook = std::sync::Mutex<Option<Arc<dyn Fn(u64) + Send 
 /// Budget-enforced device allocation. Every view retains actual storage.
 /// Runtime-backed managers use the canonical resource stack. Native allocations
 /// share its raw owner: post-malloc failures retain storage and budget together.
+/// If cleanup remains unresolved, the original context permit and first error
+/// stay with that owner. Other allocation/release callers receive the same
+/// retained failure instead of waiting for an owner that is no longer executing.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations
     device: Arc<CudaDevice>,
@@ -752,8 +795,14 @@ struct RawAllocationPayload {
 /// Serialize only physical allocation/release address reuse within one CUDA
 /// context. Operation admission and device-resident execution never enter it.
 struct AllocationLifecycleExclusion {
-    active: std::sync::Mutex<bool>,
+    state: std::sync::Mutex<AllocationLifecycleState>,
     changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct AllocationLifecycleState {
+    active: bool,
+    retained_failure: Option<RetainedAllocation>,
 }
 
 struct AllocationLifecyclePermit {
@@ -762,30 +811,65 @@ struct AllocationLifecyclePermit {
 
 impl AllocationLifecycleExclusion {
     fn enter(self: &Arc<Self>) -> crate::device_runtime::ResourceResult<AllocationLifecyclePermit> {
-        let mut active = self.active.lock().map_err(|_| {
+        let mut state = self.state.lock().map_err(|_| {
             ResourceError::Driver("CUDA allocation lifecycle exclusion poisoned".into())
         })?;
-        while *active {
-            active = self.changed.wait(active).map_err(|_| {
+        loop {
+            if let Some(failure) = &state.retained_failure {
+                return Err(ResourceError::AllocationRetained(failure.share()));
+            }
+            if !state.active {
+                break;
+            }
+            state = self.changed.wait(state).map_err(|_| {
                 ResourceError::Driver("CUDA allocation lifecycle exclusion poisoned".into())
             })?;
         }
-        *active = true;
+        state.active = true;
         Ok(AllocationLifecyclePermit {
             exclusion: Arc::clone(self),
         })
     }
 }
 
-impl Drop for AllocationLifecyclePermit {
-    fn drop(&mut self) {
-        let mut active = self
+impl AllocationLifecyclePermit {
+    fn retain_failure(&self, failure: RetainedAllocation) -> RetainedAllocation {
+        let mut state = self
             .exclusion
-            .active
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        *active = false;
-        self.exclusion.changed.notify_one();
+        if let Some(original) = &state.retained_failure {
+            return original.share();
+        }
+        state.retained_failure = Some(failure.share());
+        self.exclusion.changed.notify_all();
+        failure
+    }
+
+    fn complete(&self) {
+        let mut state = self
+            .exclusion
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Only the original owner's completed reclamation permits retiring
+        // this uncertainty. A diagnostic or a rejected entrant cannot do so.
+        state.retained_failure = None;
+    }
+}
+
+impl Drop for AllocationLifecyclePermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .exclusion
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.retained_failure.is_none() {
+            state.active = false;
+            self.exclusion.changed.notify_one();
+        }
     }
 }
 
@@ -805,7 +889,7 @@ fn allocation_lifecycle_exclusion(
         return Ok(exclusion);
     }
     let exclusion = Arc::new(AllocationLifecycleExclusion {
-        active: std::sync::Mutex::new(false),
+        state: std::sync::Mutex::new(AllocationLifecycleState::default()),
         changed: std::sync::Condvar::new(),
     });
     exclusions.insert(context, Arc::downgrade(&exclusion));
@@ -821,6 +905,15 @@ enum DriverReleaseState {
 }
 
 impl DriverReleaseState {
+    fn require_known(&self) -> crate::device_runtime::ResourceResult<()> {
+        if *self == Self::OutcomeUnknown {
+            return Err(ResourceError::Driver(
+                "previous resource release outcome is unknown; refusing a second release".into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn confirm_async(
         &self,
@@ -844,15 +937,9 @@ impl DriverReleaseState {
         &mut self,
         free: impl FnOnce() -> crate::device_runtime::ResourceResult<()>,
     ) -> crate::device_runtime::ResourceResult<()> {
-        match self {
-            Self::Submitted => return Ok(()),
-            Self::OutcomeUnknown => {
-                return Err(ResourceError::Driver(
-                    "previous resource release outcome is unknown; refusing a second release"
-                        .into(),
-                ))
-            }
-            Self::Owned => {}
+        self.require_known()?;
+        if *self == Self::Submitted {
+            return Ok(());
         }
         *self = Self::OutcomeUnknown;
         free()?;
@@ -869,22 +956,17 @@ impl RawDeviceAllocation {
         manager: Option<Arc<GpuMemoryManager>>,
         reclamation: Arc<AllocationReclamation>,
     ) -> crate::device_runtime::ResourceResult<Arc<Self>> {
+        // Reject an already retained uncertainty before capture queries,
+        // stream waits or any other CUDA entry. Ordinary active owners still
+        // serialize through this same context gate.
+        let lifecycle_exclusion =
+            allocation_lifecycle_exclusion(stream.context().cu_ctx() as usize)?.enter()?;
         let _capture_exclusion = crate::cuda_graph::reserve_uncaptured_stream(&stream)?;
         stream.context().bind_to_thread()?;
         // Preserve the caller-prefix ordering previously carried by a private
         // ready event without retaining an event per allocation.
         stream.synchronize()?;
-        let (backing_observer, generation) = {
-            let mut registry = BACKING_OBSERVATION.lock().map_err(|_| {
-                ResourceError::Driver("native backing observation registry poisoned".into())
-            })?;
-            registry.allocation_entered = true;
-            let generation = registry.next_generation;
-            registry.next_generation = generation.checked_add(1).ok_or_else(|| {
-                ResourceError::Driver("native backing owner generation exhausted".into())
-            })?;
-            (registry.observer.clone(), generation)
-        };
+        let (backing_observer, generation) = begin_gpu_backing_observation()?;
         let mut backing_root = GpuBackingRoot {
             struct_size: std::mem::size_of::<GpuBackingRoot>() as u32,
             kind: 3,
@@ -926,92 +1008,88 @@ impl RawDeviceAllocation {
                     backing_root,
                     backing_release: DriverReleaseState::Owned,
                     manager,
-                    lifecycle_exclusion: None,
+                    lifecycle_exclusion: Some(lifecycle_exclusion),
                 }),
             },
             bytes,
             Arc::clone(&reclamation),
             |allocation| {
-                let payload = allocation
-                    .payload
-                    .as_mut()
-                    .expect("allocation owner present");
-                // Keep the permit in the armed owner so a fallible
-                // post-malloc step transfers it to the cold reaper.
-                payload.lifecycle_exclusion = Some(
-                    allocation_lifecycle_exclusion(payload.stream.context().cu_ctx() as usize)?
-                        .enter()?,
-                );
-                let ptr = if bytes == 0 {
-                    0
-                } else {
-                    // SAFETY: capture is excluded and lifecycle address reuse
-                    // is serialized. A direct root has its own confirmed extent
-                    // and release, unlike an async pool's suballocation/cache.
-                    unsafe { cudarc::driver::result::malloc_sync(bytes)? }
-                };
-                payload.ptr = ptr;
-                payload.acquired = true;
-                payload.reclamation.acquired()?;
-                if let Some(observer) = &payload.backing_observer {
-                    if bytes != 0 {
-                        payload.backing_root.base = ptr;
-                        let mut base = 0;
-                        let mut extent = 0;
-                        // SAFETY: the armed original owner retains this direct
-                        // allocation. Query cold outside producer callbacks;
-                        // never substitute requested bytes for a failed query.
-                        let query = unsafe {
-                            cudarc::driver::sys::cuMemGetAddressRange_v2(
-                                &mut base,
-                                &mut extent,
-                                ptr,
-                            )
-                            .result()
-                        };
-                        if query.is_err() || base != ptr || extent < bytes {
+                allocation.with_lifecycle_failure(|allocation| {
+                    let payload = allocation
+                        .payload
+                        .as_mut()
+                        .expect("allocation owner present");
+                    let ptr = if bytes == 0 {
+                        0
+                    } else {
+                        // SAFETY: capture is excluded and lifecycle address reuse
+                        // is serialized. A direct root has its own confirmed extent
+                        // and release, unlike an async pool's suballocation/cache.
+                        unsafe { cudarc::driver::result::malloc_sync(bytes)? }
+                    };
+                    payload.ptr = ptr;
+                    payload.acquired = true;
+                    payload.reclamation.acquired()?;
+                    if let Some(observer) = &payload.backing_observer {
+                        if bytes != 0 {
+                            payload.backing_root.base = ptr;
+                            let mut base = 0;
+                            let mut extent = 0;
+                            // SAFETY: the armed original owner retains this direct
+                            // allocation. Query cold outside producer callbacks;
+                            // never substitute requested bytes for a failed query.
+                            let query = unsafe {
+                                cudarc::driver::sys::cuMemGetAddressRange_v2(
+                                    &mut base,
+                                    &mut extent,
+                                    ptr,
+                                )
+                                .result()
+                            };
+                            if query.is_err() || base != ptr || extent < bytes {
+                                observer.record(&payload.backing_root)?;
+                                return Err(ResourceError::Driver(
+                                    "original native backing extent is unconfirmed".into(),
+                                ));
+                            }
+                            payload.backing_root.kind = 1;
+                            payload.backing_root.bytes = u64::try_from(extent).map_err(|_| {
+                                ResourceError::Driver("native backing extent exceeds u64".into())
+                            })?;
                             observer.record(&payload.backing_root)?;
-                            return Err(ResourceError::Driver(
-                                "original native backing extent is unconfirmed".into(),
-                            ));
                         }
-                        payload.backing_root.kind = 1;
-                        payload.backing_root.bytes = u64::try_from(extent).map_err(|_| {
-                            ResourceError::Driver("native backing extent exceeds u64".into())
-                        })?;
-                        observer.record(&payload.backing_root)?;
                     }
-                }
-                let poison = payload.manager.is_some() && bytes != 0 && poison_alloc_enabled();
-                if payload.manager.is_some() {
-                    alloc_guard_insert(payload.ptr, bytes as u64);
+                    let poison = payload.manager.is_some() && bytes != 0 && poison_alloc_enabled();
+                    if payload.manager.is_some() {
+                        alloc_guard_insert(payload.ptr, bytes as u64);
+                        if poison {
+                            // SAFETY: initialized only by this armed allocation owner.
+                            unsafe {
+                                cudarc::driver::sys::cuMemsetD8Async(
+                                    payload.ptr,
+                                    0xDD,
+                                    bytes,
+                                    payload.allocation_stream.cu_stream(),
+                                )
+                                .result()?;
+                            }
+                        }
+                    }
                     if poison {
-                        // SAFETY: initialized only by this armed allocation owner.
+                        // SAFETY: the lifecycle permit excludes any other user of
+                        // this device-owned allocation stream until publication.
                         unsafe {
-                            cudarc::driver::sys::cuMemsetD8Async(
-                                payload.ptr,
-                                0xDD,
-                                bytes,
+                            cudarc::driver::result::stream::synchronize(
                                 payload.allocation_stream.cu_stream(),
-                            )
-                            .result()?;
+                            )?;
                         }
                     }
-                }
-                if poison {
-                    // SAFETY: the lifecycle permit excludes any other user of
-                    // this device-owned allocation stream until publication.
-                    unsafe {
-                        cudarc::driver::result::stream::synchronize(
-                            payload.allocation_stream.cu_stream(),
-                        )?;
-                    }
-                }
-                payload.dependencies = Some(Arc::new(DeviceAccessDependencies::after_ready(
-                    Arc::clone(payload.stream.context()),
-                    Arc::clone(&reclamation),
-                )));
-                Ok(())
+                    payload.dependencies = Some(Arc::new(DeviceAccessDependencies::after_ready(
+                        Arc::clone(payload.stream.context()),
+                        Arc::clone(&reclamation),
+                    )));
+                    Ok(())
+                })
             },
         )?;
         // Take the permit while the plain owner is still uniquely mutable.
@@ -1078,96 +1156,137 @@ impl RawDeviceAllocation {
     /// Cold physical reclamation. A successful direct free is never submitted a
     /// second time, even if its following completion check fails.
     pub(crate) fn release(&mut self) -> crate::device_runtime::ResourceResult<()> {
-        let admission = &mut self.reclamation_admission;
-        reclaim_allocation(&mut self.payload, |payload| {
-            // No memory was acquired; the device owns the shared allocation
-            // stream and the calling frame restores its provisional budget.
-            if !payload.acquired {
-                return Ok(());
-            }
-            if payload.lifecycle_exclusion.is_none() {
-                // A failed or unknown release keeps this permit in the
-                // retryable payload until physical release is proven.
-                payload.lifecycle_exclusion = Some(
-                    allocation_lifecycle_exclusion(payload.stream.context().cu_ctx() as usize)?
-                        .enter()?,
-                );
-            }
-            crate::device_runtime::resource::with_reclamation_admission(
-                block_use_registry(),
-                payload.stream.context().cu_ctx() as usize,
-                MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite)?,
-                payload.reclamation.release_proof(),
-                admission,
-                || {
-                    // The device-owned stream is serialized by the lifecycle
-                    // permit and is never exposed as an execution dependency.
-                    let _capture_exclusion = crate::cuda_graph::reserve_capture_exclusion()?;
-                    payload.stream.context().bind_to_thread()?;
-                    if payload.free_state != DriverReleaseState::Submitted {
-                        if payload.free_state == DriverReleaseState::OutcomeUnknown {
-                            return Err(ResourceError::Driver(
-                                "previous allocation free outcome is unknown".into(),
-                            ));
-                        }
-                        if let Some(dependencies) = &payload.dependencies {
-                            dependencies.synchronize()?;
-                        }
+        self.with_lifecycle_failure(|allocation| {
+            let admission = &mut allocation.reclamation_admission;
+            reclaim_allocation(&mut allocation.payload, |payload| {
+                // No memory was acquired; the device owns the shared allocation
+                // stream and the calling frame restores its provisional budget.
+                if !payload.acquired {
+                    return Ok(());
+                }
+                if payload.lifecycle_exclusion.is_none() {
+                    // A failed or unknown release keeps this permit in the
+                    // retryable payload until physical release is proven.
+                    payload.lifecycle_exclusion = Some(
+                        allocation_lifecycle_exclusion(payload.stream.context().cu_ctx() as usize)?
+                            .enter()?,
+                    );
+                }
+                // An entered free or release observation with an unknown outcome
+                // cannot be resubmitted, including context/capture setup on retry.
+                payload.free_state.require_known()?;
+                payload.backing_release.require_known()?;
+                crate::device_runtime::resource::with_reclamation_admission(
+                    block_use_registry(),
+                    payload.stream.context().cu_ctx() as usize,
+                    MemoryUse::new(payload.ptr, payload.bytes, Access::ReadWrite)?,
+                    payload.reclamation.release_proof(),
+                    admission,
+                    || {
+                        // The device-owned stream is serialized by the lifecycle
+                        // permit and is never exposed as an execution dependency.
+                        let _capture_exclusion = crate::cuda_graph::reserve_capture_exclusion()?;
                         payload.stream.context().bind_to_thread()?;
-                        let poison = payload.manager.is_some()
-                            && payload.bytes != 0
-                            && poison_free_enabled();
-                        if poison {
-                            // SAFETY: all users completed and no free was attempted.
-                            // A failed poison wait may retry on the same serialized
-                            // device-owned stream, where earlier poison is ordered.
-                            unsafe {
-                                cudarc::driver::sys::cuMemsetD8Async(
-                                    payload.ptr,
-                                    0xDD,
-                                    payload.bytes,
-                                    payload.allocation_stream.cu_stream(),
-                                )
-                                .result()?;
+                        if payload.free_state != DriverReleaseState::Submitted {
+                            if let Some(dependencies) = &payload.dependencies {
+                                dependencies.synchronize()?;
                             }
-                            // SAFETY: the lifecycle permit owns the stream prefix.
-                            unsafe {
-                                cudarc::driver::result::stream::synchronize(
-                                    payload.allocation_stream.cu_stream(),
-                                )?;
-                            }
-                        }
-                        payload.free_state.submit(|| {
-                            if payload.bytes != 0 {
-                                // Stop advertising a logically live range before the driver
-                                // can reuse its address for another allocation. The armed
-                                // owner still retains storage/budget on an unknown outcome.
-                                if payload.manager.is_some() {
-                                    alloc_guard_remove(payload.ptr);
-                                }
-                                // SAFETY: all actual-use fences completed; direct free
-                                // matches the original root and allocation context.
+                            payload.stream.context().bind_to_thread()?;
+                            let poison = payload.manager.is_some()
+                                && payload.bytes != 0
+                                && poison_free_enabled();
+                            if poison {
+                                // SAFETY: all users completed and no free was attempted.
+                                // A failed poison wait may retry on the same serialized
+                                // device-owned stream, where earlier poison is ordered.
                                 unsafe {
-                                    cudarc::driver::result::free_sync(payload.ptr)?;
+                                    cudarc::driver::sys::cuMemsetD8Async(
+                                        payload.ptr,
+                                        0xDD,
+                                        payload.bytes,
+                                        payload.allocation_stream.cu_stream(),
+                                    )
+                                    .result()?;
+                                }
+                                // SAFETY: the lifecycle permit owns the stream prefix.
+                                unsafe {
+                                    cudarc::driver::result::stream::synchronize(
+                                        payload.allocation_stream.cu_stream(),
+                                    )?;
                                 }
                             }
-                            Ok(())
-                        })?;
-                    }
-                    if let Some(observer) = &payload.backing_observer {
-                        if payload.bytes != 0 {
-                            payload.backing_release.submit(|| {
-                                let mut root = payload.backing_root;
-                                root.kind = if root.kind == 1 { 2 } else { 3 };
-                                observer.record(&root)
+                            payload.free_state.submit(|| {
+                                if payload.bytes != 0 {
+                                    // Stop advertising a logically live range before the driver
+                                    // can reuse its address for another allocation. The armed
+                                    // owner still retains storage/budget on an unknown outcome.
+                                    if payload.manager.is_some() {
+                                        alloc_guard_remove(payload.ptr);
+                                    }
+                                    // SAFETY: all actual-use fences completed; direct free
+                                    // matches the original root and allocation context.
+                                    unsafe {
+                                        cudarc::driver::result::free_sync(payload.ptr)?;
+                                    }
+                                }
+                                Ok(())
                             })?;
                         }
-                    }
-                    payload.reclamation.complete()?;
-                    Ok(())
-                },
-            )
+                        if let Some(observer) = &payload.backing_observer {
+                            if payload.bytes != 0 {
+                                payload.backing_release.submit(|| {
+                                    let mut root = payload.backing_root;
+                                    root.kind = if root.kind == 1 { 2 } else { 3 };
+                                    observer.record(&root)
+                                })?;
+                            }
+                        }
+                        payload.reclamation.complete()?;
+                        if let Some(permit) = &payload.lifecycle_exclusion {
+                            permit.complete();
+                        }
+                        Ok(())
+                    },
+                )
+            })
         })
+    }
+
+    fn retain_lifecycle_failure(&self, error: ResourceError) -> ResourceError {
+        let Some(payload) = &self.payload else {
+            return error;
+        };
+        // A rejected foreign entrant must preserve the original context's
+        // failure, not replace its ticket with an unentered allocation.
+        let Some(permit) = &payload.lifecycle_exclusion else {
+            return error;
+        };
+        if !payload.acquired {
+            return error;
+        }
+        let ResourceError::AllocationRetained(failure) =
+            error.retaining(payload.bytes, Arc::clone(&payload.reclamation))
+        else {
+            unreachable!("retained allocation error preserves its owner")
+        };
+        ResourceError::AllocationRetained(permit.retain_failure(failure))
+    }
+
+    fn with_lifecycle_failure<T>(
+        &mut self,
+        work: impl FnOnce(&mut Self) -> crate::device_runtime::ResourceResult<T>,
+    ) -> crate::device_runtime::ResourceResult<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&mut *self))) {
+            Ok(result) => result.map_err(|error| self.retain_lifecycle_failure(error)),
+            Err(original_unwind) => {
+                // Publish the retained uncertainty before the original unwind
+                // can synchronously enqueue or drain another owner's Drop.
+                self.retain_lifecycle_failure(ResourceError::Driver(
+                    "native allocation lifecycle unwound; retain its original owner".into(),
+                ));
+                std::panic::resume_unwind(original_unwind)
+            }
+        }
     }
 }
 

@@ -25,6 +25,7 @@ struct MaterialOutputLedger {
     model_begin: usize,
     model_capacity: usize,
     suffix_extent: usize,
+    declared_suffix_extent: Option<usize>,
     framed: bool,
     prefix_begin: Option<usize>,
     prefix_cursor: usize,
@@ -438,6 +439,7 @@ impl SemanticReplayMaterialBudget {
                     model_begin: 0,
                     model_capacity: original.as_bytes().len(),
                     suffix_extent: 0,
+                    declared_suffix_extent: None,
                     framed: false,
                     prefix_begin: Some(0),
                     prefix_cursor: 0,
@@ -502,6 +504,7 @@ impl SemanticReplayMaterialBudget {
                         model_begin,
                         model_capacity,
                         suffix_extent,
+                        declared_suffix_extent: None,
                         framed,
                         prefix_begin: (!framed).then_some(0),
                         prefix_cursor: 0,
@@ -779,6 +782,47 @@ impl SemanticReplayMaterialOutput {
         Ok(())
     }
 
+    /// Freeze the actual initialized suffix within its original finite backing
+    /// capacity. Reserved trailing capacity is never a checkpoint payload.
+    /// This may run only before the first suffix write; retries retain exactly
+    /// the same extent, including after the frame has become immutable.
+    pub fn declare_frame_suffix(&self, extent: usize) -> Result<(), SemanticTransitionError> {
+        self.require_produced_frame()?;
+        let mut ledger = self
+            .allocation()
+            .ledger
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if !ledger.framed || extent > ledger.suffix_extent {
+            return Err(publication_input_error(
+                "checkpoint suffix exceeds its original capacity",
+            ));
+        }
+        if let Some(original) = ledger.declared_suffix_extent {
+            return if original == extent {
+                Ok(())
+            } else {
+                Err(publication_input_error(
+                    "checkpoint suffix changed its original extent",
+                ))
+            };
+        }
+        let declaration = ledger.declaration.as_ref().ok_or_else(|| {
+            publication_input_error("checkpoint suffix requires its original model extent")
+        })?;
+        let begin = ledger
+            .model_begin
+            .checked_add(declaration.extent)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        if ledger.full_published || declaration.suffix_cursor != begin {
+            return Err(publication_input_error(
+                "checkpoint suffix is already initialized or published",
+            ));
+        }
+        ledger.declared_suffix_extent = Some(extent);
+        Ok(())
+    }
+
     pub fn write_frame(&self, offset: usize, bytes: &[u8]) -> Result<(), SemanticTransitionError> {
         self.require_produced_frame()?;
         let allocation = self.allocation();
@@ -805,7 +849,9 @@ impl SemanticReplayMaterialOutput {
             return Ok(());
         }
         let model_begin = ledger.model_begin;
-        let suffix_extent = ledger.suffix_extent;
+        let suffix_extent = ledger
+            .declared_suffix_extent
+            .unwrap_or(ledger.suffix_extent);
         let declaration = ledger.declaration.as_mut().ok_or_else(|| {
             publication_input_error("material suffix requires the original model extent")
         })?;
@@ -958,10 +1004,13 @@ impl SemanticReplayMaterialOutput {
         let declaration = ledger.declaration.as_ref().ok_or_else(|| {
             publication_input_error("material output has not declared its original spans")
         })?;
+        let suffix_extent = ledger
+            .declared_suffix_extent
+            .unwrap_or(ledger.suffix_extent);
         let end = ledger
             .model_begin
             .checked_add(declaration.extent)
-            .and_then(|size| size.checked_add(ledger.suffix_extent))
+            .and_then(|size| size.checked_add(suffix_extent))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         if !ledger.model_published
             || ledger.prefix_begin.is_none()
@@ -969,11 +1018,7 @@ impl SemanticReplayMaterialOutput {
             || declaration.suffix_cursor
                 != ledger.model_begin
                     + declaration.extent
-                    + if ledger.framed {
-                        ledger.suffix_extent
-                    } else {
-                        0
-                    }
+                    + if ledger.framed { suffix_extent } else { 0 }
         {
             return Err(publication_input_error(
                 "material output has not initialized its entire original frame",

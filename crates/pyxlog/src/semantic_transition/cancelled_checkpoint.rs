@@ -46,7 +46,7 @@ fn material_digest(bytes: &[u8]) -> Identity256 {
     Identity256::from_bytes(Sha256::digest(bytes).into())
 }
 
-fn initial_index(admission: &OriginalActorRefreshAdmission) -> PyResult<Identity256> {
+pub(super) fn initial_index(admission: &OriginalActorRefreshAdmission) -> PyResult<Identity256> {
     let kit = admission.initial_kit.fields(2)?;
     let ColdValue::Bytes(index) = &kit[0] else {
         return Err(invalid("original replay index bytes are absent"));
@@ -365,6 +365,7 @@ impl OriginalCancelledCheckpointCustody {
             task: &task_bytes,
             session: manifest.session,
             initial_prefill: manifest.initial_prefill,
+            model_context: manifest.model_context,
             phase_seal: &[],
         };
         let terminal = terminal_checkpoint(

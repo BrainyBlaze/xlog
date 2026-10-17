@@ -63,6 +63,7 @@ pub(super) struct OriginalContentBatch {
     pub(super) verify: bool,
     pub(super) retirement: bool,
     pub(super) cursor: usize,
+    pub(super) context_prefill_occurrence: Option<usize>,
     pub(super) commands: Vec<OriginalNativeCommand>,
     // The original report and child graph retain the strong owner. Keeping
     // only its issued identity here avoids a cohort -> batch -> cohort cycle.
@@ -85,6 +86,7 @@ impl OriginalContentBatch {
             verify,
             retirement: false,
             cursor: 0,
+            context_prefill_occurrence: None,
             commands,
             allowance: None,
             source_occurrence: None,
@@ -393,6 +395,207 @@ pub(crate) struct ColdNativeAllowance {
         Option<std::sync::Weak<prepared_source_content::OriginalModelInputGenerations>>,
     model_scratch_ceiling: Option<[u64; 9]>,
     prepared_scratch_initialization: [u64; 9],
+    model_context_ceiling: Option<[u64; 9]>,
+    model_context_prefill: Option<FrozenModelContextPrefillRoster>,
+    model_context_prefill_recording: bool,
+    model_context_activation_ceiling: Option<[u64; 9]>,
+    model_context_activation_claimed: bool,
+    model_context_publication_dma: Option<(
+        std::sync::Weak<state_restoration::OriginalPublicationPreparation>,
+        [u64; 9],
+    )>,
+    model_context_preparation: Option<FrozenModelContextPreparation>,
+    model_context_source_budget: Option<[u64; 3]>,
+}
+
+/// Ordered producer geometry frozen before the imported context's first model
+/// effect. Actual tensor owners are attached only by that original producer.
+pub(super) struct FrozenModelContextPrefillRoster {
+    owner: std::sync::Weak<model_context_continuation::ModelContextContinuationOwner>,
+    scope: Option<Arc<()>>,
+    occurrences: Vec<(Vec<ModelContextPrefillTensorGeometry>, bool, [u64; 9])>,
+    cursor: usize,
+    input_tokens: usize,
+    input_guard_claimed: bool,
+    _reservation: SemanticReplayMaterialReservation,
+}
+
+#[derive(Clone, Copy)]
+pub struct ModelContextPrefillTensorGeometry {
+    pub layout: SemanticTensorLayout,
+    pub logical_begin: u64,
+    pub logical_end: u64,
+    pub physical_bytes: usize,
+}
+
+pub struct ModelContextPrefillContentGeometry {
+    pub tensors: Vec<ModelContextPrefillTensorGeometry>,
+    pub verify: bool,
+}
+
+/// Structural inference preparation has two original model-roster uploads and
+/// one canonical step-input initializer, not an early resident execution.
+pub(super) struct FrozenModelContextPreparation {
+    pub(super) ceiling: [u64; 9],
+    dma: [u64; 9],
+    model_roster_bytes: usize,
+    model_roster_claimed: u8,
+    step_input: Option<([u64; 9], [u64; 9])>,
+}
+
+impl FrozenModelContextPreparation {
+    pub(super) fn new(
+        target: &SemanticTransitionSession,
+        step: &SemanticPreparedStep,
+    ) -> Result<Self, SemanticTransitionError> {
+        let owner = target.checked_prepared_step(step, false)?;
+        let storage = target.prepared_publication()?;
+        let directory = &storage.bank_templates[0];
+        let models = directory
+            .iter()
+            .filter(|range| matches!(range.role, 18..=20))
+            .count();
+        let model_roster_bytes = models
+            .checked_mul(2 * size_of::<u64>())
+            .filter(|bytes| *bytes != 0)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let mut dma = [
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u64::try_from(
+                model_roster_bytes
+                    .checked_mul(2)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        ];
+        let input_pending = match &owner.inputs {
+            None => true,
+            Some(inputs) => inputs
+                .original_preparation
+                .lock()
+                .map_err(|_| {
+                    publication_input_error(
+                        "prepared context input initialization custody is poisoned",
+                    )
+                })?
+                .is_none(),
+        };
+        let step_input = if input_pending {
+            let plans = step_input_plans(storage, directory)?;
+            Some((
+                step_input_producer_native_work_ceiling(storage, &plans, directory)?,
+                step_input_dma_ceiling(plans.len())?,
+            ))
+        } else {
+            None
+        };
+        let mut ceiling = dma;
+        if let Some((native, uploads)) = step_input {
+            add_native_work_ceiling(&mut ceiling, native)?;
+            add_native_work_ceiling(&mut ceiling, uploads)?;
+            add_native_work_ceiling(&mut dma, uploads)?;
+        }
+        native_work_ceiling_units(ceiling)?;
+        Ok(Self {
+            ceiling,
+            dma,
+            model_roster_bytes,
+            model_roster_claimed: 0,
+            step_input,
+        })
+    }
+}
+
+impl FrozenModelContextPrefillRoster {
+    pub(super) fn new(
+        context: &SemanticModelContextContinuation,
+        budget: &SemanticReplayMaterialBudget,
+        declarations: &[ModelContextPrefillContentGeometry],
+        input_tokens: usize,
+    ) -> Result<Self, SemanticTransitionError> {
+        let layouts = declarations.iter().try_fold(0usize, |count, declaration| {
+            if declaration.tensors.is_empty() {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            for tensor in &declaration.tensors {
+                canonical_tensor_layout(tensor.layout)?;
+            }
+            count
+                .checked_add(declaration.tensors.len())
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
+        let bytes = declarations
+            .len()
+            .checked_mul(size_of::<(
+                Vec<ModelContextPrefillTensorGeometry>,
+                bool,
+                [u64; 9],
+            )>())
+            .and_then(|bytes| {
+                layouts
+                    .checked_mul(size_of::<ModelContextPrefillTensorGeometry>())
+                    .and_then(|layouts| bytes.checked_add(layouts))
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<Self>()))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = budget.reserve_auxiliary(bytes)?;
+        let mut occurrences = Vec::new();
+        occurrences
+            .try_reserve_exact(declarations.len())
+            .map_err(|error| runtime_error("context prefill roster allocation", error))?;
+        for declaration in declarations {
+            let mut ceiling = [0; 9];
+            let mut layouts = Vec::new();
+            layouts
+                .try_reserve_exact(declaration.tensors.len())
+                .map_err(|error| {
+                    runtime_error("context prefill tensor geometry allocation", error)
+                })?;
+            for tensor in &declaration.tensors {
+                let geometry = ModelContextPrefillTensorGeometry {
+                    layout: canonical_tensor_layout(tensor.layout)?,
+                    ..*tensor
+                };
+                add_native_work_ceiling(
+                    &mut ceiling,
+                    tensor_layout_native_work_ceiling(
+                        &geometry.layout,
+                        geometry.logical_begin,
+                        geometry.logical_end,
+                        geometry.physical_bytes,
+                        declaration.verify,
+                    )?,
+                )?;
+                layouts.push(geometry);
+            }
+            occurrences.push((layouts, declaration.verify, ceiling));
+        }
+        Ok(Self {
+            owner: Arc::downgrade(&context.inner),
+            scope: None,
+            occurrences,
+            cursor: 0,
+            input_tokens,
+            input_guard_claimed: false,
+            _reservation: reservation,
+        })
+    }
+
+    fn ceiling(&self) -> Result<[u64; 9], SemanticTransitionError> {
+        let mut total = [0; 9];
+        for (_, _, ceiling) in &self.occurrences {
+            add_native_work_ceiling(&mut total, *ceiling)?;
+        }
+        Ok(total)
+    }
 }
 
 /// Exact original read occurrences, ordered by their enclosing report regions.
@@ -710,7 +913,379 @@ impl ColdNativeAllowance {
             model_input_generations: None,
             model_scratch_ceiling: None,
             prepared_scratch_initialization: [0; 9],
+            model_context_ceiling: None,
+            model_context_prefill: None,
+            model_context_prefill_recording: false,
+            model_context_activation_ceiling: None,
+            model_context_activation_claimed: false,
+            model_context_publication_dma: None,
+            model_context_preparation: None,
+            model_context_source_budget: None,
         }
+    }
+
+    pub(super) fn freeze_model_context_native_work(
+        &mut self,
+        ceiling: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.model_context_ceiling.is_some()
+            || self.model_scratch_ceiling.is_some()
+            || self.native_initialization_claimed
+        {
+            return Err(publication_input_error(
+                "model context native work requires its sole original frozen preparation roster",
+            ));
+        }
+        native_work_ceiling_units(ceiling)?;
+        self.model_context_ceiling = Some(ceiling);
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_preparation(
+        &mut self,
+        roster: FrozenModelContextPreparation,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.purpose != SemanticColdModelWorkPurpose::PreparedActorRefresh
+            || self.model_context_ceiling != Some(roster.ceiling)
+            || self.model_context_preparation.is_some()
+            || self.native_initialization_claimed
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, roster.dma)?;
+        self.model_context_preparation = Some(roster);
+        Ok(())
+    }
+
+    pub(super) fn claim_model_context_prepared_model_roster(
+        &mut self,
+        bank: usize,
+        bytes: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let roster = self
+            .model_context_preparation
+            .as_mut()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if bank > 1
+            || bytes != roster.model_roster_bytes
+            || roster.model_roster_claimed & (1 << bank) != 0
+        {
+            return Err(publication_input_error(
+                "prepared context model roster changed or repeated its original bank upload",
+            ));
+        }
+        roster.model_roster_claimed |= 1 << bank;
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_report_dma(
+        &mut self,
+        events: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.model_context_ceiling.is_none() || self.model_scratch_ceiling.is_some() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let bytes = events
+            .checked_mul(size_of::<ModelWorkEvent>())
+            .ok_or_else(native_work_ceiling_overflow)?;
+        let dma = [
+            1 + u64::from(events != 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            ceiling_sum([
+                u64::try_from(bytes).map_err(|_| native_work_ceiling_overflow())?,
+                15 * size_of::<u64>() as u64,
+            ])?,
+        ];
+        let mut ceiling = self
+            .model_context_ceiling
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        add_native_work_ceiling(&mut ceiling, dma)?;
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)?;
+        self.model_context_ceiling = Some(ceiling);
+        Ok(())
+    }
+
+    pub(super) fn is_model_context_report(&self) -> bool {
+        self.model_context_ceiling.is_some()
+            || self.model_context_prefill.is_some()
+            || self.model_context_preparation.is_some()
+            || self.model_context_activation_ceiling.is_some()
+    }
+
+    pub(super) fn require_model_context_source_budget(
+        &self,
+        model: [u64; 3],
+    ) -> Result<(), SemanticTransitionError> {
+        if let Some(budget) = self.model_context_source_budget {
+            let total = native_work_ceiling_units(self.content_ceiling()?)?
+                .checked_add(model[0])
+                .ok_or_else(native_work_ceiling_overflow)?;
+            if total > budget[0] || model[2] > budget[2] {
+                return Err(publication_input_error(
+                    "context prefill exceeds its original complete SOURCE instruction allowance",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_activation_dma(
+        &mut self,
+        kernel: [u64; 9],
+        dma: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.purpose != SemanticColdModelWorkPurpose::PrivateModelPreparation
+            || self.model_context_ceiling != Some(kernel)
+            || self.native_initialization_claimed
+            || self.model_context_activation_ceiling.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut total = kernel;
+        add_native_work_ceiling(&mut total, dma)?;
+        native_work_ceiling_units(total)?;
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)?;
+        self.model_context_ceiling = Some(total);
+        self.model_context_activation_ceiling = Some(kernel);
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_material_dma(
+        &mut self,
+        dma: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if !matches!(
+            self.purpose,
+            SemanticColdModelWorkPurpose::PrivateCheckpoint
+                | SemanticColdModelWorkPurpose::PrivateRestore
+        ) || self.model_context_ceiling.is_none()
+            || self.native_initialization_claimed
+            || self.model_scratch_ceiling.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        native_work_ceiling_units(dma)?;
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)
+    }
+
+    pub(super) fn claim_model_context_activation(
+        &mut self,
+        kernel: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.model_context_activation_ceiling != Some(kernel)
+            || !self.native_initialization_claimed
+            || self.model_context_activation_claimed
+        {
+            return Err(publication_input_error(
+                "context activation changed or repeated its original native seal occurrence",
+            ));
+        }
+        self.model_context_activation_claimed = true;
+        Ok(())
+    }
+
+    pub(super) fn admit_model_context_publication_dma(
+        &mut self,
+        context: &SemanticModelContextContinuation,
+        preparer: &Arc<state_restoration::OriginalPublicationPreparation>,
+        dma: [u64; 9],
+        model: [u64; 3],
+        budget: [u64; 3],
+    ) -> Result<(), SemanticTransitionError> {
+        let roster = self
+            .model_context_prefill
+            .as_ref()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if self.purpose != SemanticColdModelWorkPurpose::PrivatePrefix
+            || !self.model_context_prefill_recording
+            || !roster.owner.ptr_eq(&Arc::downgrade(&context.inner))
+            || self.model_context_source_budget != Some(budget)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if let Some((original, geometry)) = &self.model_context_publication_dma {
+            return if original.ptr_eq(&Arc::downgrade(preparer)) && *geometry == dma {
+                Ok(())
+            } else {
+                Err(SemanticTransitionError::ObservationMismatch)
+            };
+        }
+        let mut ceiling = self.content_ceiling()?;
+        add_native_work_ceiling(&mut ceiling, dma)?;
+        let work = native_work_ceiling_units(ceiling)?
+            .checked_add(model[0])
+            .ok_or_else(native_work_ceiling_overflow)?;
+        if work > budget[0] || model[2] > budget[2] {
+            return Err(publication_input_error(
+                "imported publication preparation exceeds its original SOURCE instruction budget",
+            ));
+        }
+        let mut context_ceiling = self
+            .model_context_ceiling
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        add_native_work_ceiling(&mut context_ceiling, dma)?;
+        let mut dma_ceiling = self.submitted_dma_ceiling;
+        add_native_work_ceiling(&mut dma_ceiling, dma)?;
+        self.model_context_ceiling = Some(context_ceiling);
+        self.submitted_dma_ceiling = dma_ceiling;
+        self.model_context_publication_dma = Some((Arc::downgrade(preparer), dma));
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_prefill(
+        &mut self,
+        roster: FrozenModelContextPrefillRoster,
+        dma: [u64; 9],
+        input_guard: [u64; 9],
+        budget: [u64; 3],
+    ) -> Result<(), SemanticTransitionError> {
+        if self.purpose != SemanticColdModelWorkPurpose::PrivatePrefix
+            || self.model_context_prefill.is_some()
+            || self.model_scratch_ceiling.is_some()
+            || self.native_initialization_claimed
+        {
+            return Err(publication_input_error(
+                "context prefill requires its unopened original SOURCE preparation allowance",
+            ));
+        }
+        let mut ceiling = roster.ceiling()?;
+        add_native_work_ceiling(&mut ceiling, dma)?;
+        add_native_work_ceiling(&mut ceiling, input_guard)?;
+        self.freeze_model_context_native_work(ceiling)?;
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)?;
+        self.model_context_prefill = Some(roster);
+        self.model_context_source_budget = Some(budget);
+        Ok(())
+    }
+
+    pub(super) fn freeze_model_context_activation_prefill(
+        &mut self,
+        roster: FrozenModelContextPrefillRoster,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.purpose != SemanticColdModelWorkPurpose::PrivateModelPreparation
+            || self.model_context_activation_ceiling.is_none()
+            || self.native_initialization_claimed
+            || self.model_context_prefill.is_some()
+        {
+            return Err(publication_input_error(
+                "activation content must precede the original complete plan admission",
+            ));
+        }
+        let mut ceiling = self
+            .model_context_ceiling
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        add_native_work_ceiling(&mut ceiling, roster.ceiling()?)?;
+        native_work_ceiling_units(ceiling)?;
+        self.model_context_ceiling = Some(ceiling);
+        self.model_context_prefill = Some(roster);
+        Ok(())
+    }
+
+    pub(super) fn require_model_context_activation_prefill(
+        &self,
+    ) -> Result<(), SemanticTransitionError> {
+        if self.model_context_prefill.is_none() {
+            return Err(publication_input_error(
+                "activation requires its complete original prefill verification roster",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn claim_model_context_prefill_content(
+        &mut self,
+        context: &SemanticModelContextContinuation,
+        scope: &Arc<()>,
+        occurrence: usize,
+        tensors: &TensorContentBuffers,
+        verify: bool,
+    ) -> Result<(), SemanticTransitionError> {
+        if !self.model_context_prefill_recording {
+            return Err(publication_input_error(
+                "context prefill content requires its initialized original SOURCE recording report",
+            ));
+        }
+        let roster = self.model_context_prefill.as_mut().ok_or_else(|| {
+            publication_input_error("context prefill precedes its original frozen producer roster")
+        })?;
+        let (layouts, original_verify, ceiling) =
+            roster.occurrences.get(roster.cursor).ok_or_else(|| {
+                publication_input_error("context prefill exceeded its original producer order")
+            })?;
+        if occurrence != roster.cursor
+            || !roster.owner.ptr_eq(&Arc::downgrade(&context.inner))
+            || roster
+                .scope
+                .as_ref()
+                .is_some_and(|original| !Arc::ptr_eq(original, scope))
+            || *original_verify != verify
+            || matches!(tensors.seals, TensorContentSeals::Model(_))
+            || layouts.len() != tensors.tensors.len()
+            || layouts
+                .iter()
+                .zip(&tensors.tensors)
+                .any(|(geometry, tensor)| {
+                    geometry.layout != tensor.layout
+                        || geometry.logical_begin != tensor.logical_begin
+                        || geometry.logical_end != tensor.logical_end
+                        || geometry.physical_bytes
+                            != tensor.source.as_ref().map_or(0, DeviceMemoryView::len)
+                })
+            || tensors
+                .native_work_ceiling(verify)?
+                .iter()
+                .zip(*ceiling)
+                .any(|(actual, upper)| *actual > upper)
+        {
+            return Err(publication_input_error(
+                "context prefill changed its original scope, layout, order or native ceiling",
+            ));
+        }
+        if roster.scope.is_none() {
+            roster.scope = Some(Arc::clone(scope));
+        }
+        roster.cursor += 1;
+        Ok(())
+    }
+
+    pub(super) fn set_model_context_prefill_recording(&mut self, recording: bool) {
+        self.model_context_prefill_recording = recording && self.model_context_prefill.is_some();
+    }
+
+    pub(super) fn claim_model_context_prefill_input_guard(
+        &mut self,
+        context: &SemanticModelContextContinuation,
+        scope: &Arc<()>,
+        input_tokens: usize,
+    ) -> Result<(), SemanticTransitionError> {
+        let roster = self
+            .model_context_prefill
+            .as_mut()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !self.model_context_prefill_recording
+            || !roster.owner.ptr_eq(&Arc::downgrade(&context.inner))
+            || roster
+                .scope
+                .as_ref()
+                .is_some_and(|original| !Arc::ptr_eq(original, scope))
+            || input_tokens != roster.input_tokens
+            || roster.input_guard_claimed
+        {
+            return Err(publication_input_error(
+                "context prefill input guard requires its same initialized original report, scope and single occurrence",
+            ));
+        }
+        if roster.scope.is_none() {
+            roster.scope = Some(Arc::clone(scope));
+        }
+        roster.input_guard_claimed = true;
+        Ok(())
     }
 
     pub(super) fn is_evaluation(&self) -> bool {
@@ -949,6 +1524,28 @@ impl ColdNativeAllowance {
     }
 
     pub(super) fn require_resident_reads_complete(&self) -> Result<(), SemanticTransitionError> {
+        if self
+            .model_context_preparation
+            .as_ref()
+            .is_some_and(|roster| roster.model_roster_claimed != 3 || roster.step_input.is_some())
+        {
+            return Err(publication_input_error(
+                "prepared context has not consumed its original structural native producer roster",
+            ));
+        }
+        if self.model_context_activation_ceiling.is_some() && !self.model_context_activation_claimed
+        {
+            return Err(publication_input_error(
+                "context activation has not entered its original native seal occurrence",
+            ));
+        }
+        if self.model_context_prefill.as_ref().is_some_and(|roster| {
+            roster.cursor != roster.occurrences.len() || !roster.input_guard_claimed
+        }) {
+            return Err(publication_input_error(
+                "context prefill has not completed its original frozen producer roster",
+            ));
+        }
         self.resident_reads
             .as_ref()
             .ok_or_else(|| {
@@ -1071,6 +1668,9 @@ impl ColdNativeAllowance {
             add_native_work_ceiling(&mut ceiling, scratch)?;
         }
         add_native_work_ceiling(&mut ceiling, self.prepared_scratch_initialization)?;
+        if let Some(context) = self.model_context_ceiling {
+            add_native_work_ceiling(&mut ceiling, context)?;
+        }
         native_work_ceiling_units(ceiling)?;
         Ok(ceiling)
     }
@@ -1273,6 +1873,15 @@ impl ColdNativeAllowance {
         dma: [u64; 9],
         inputs: &PreparedStepInputs,
     ) -> Result<bool, SemanticTransitionError> {
+        if let Some(roster) = &mut self.model_context_preparation {
+            if roster.step_input != Some((ceiling, dma)) {
+                return Err(publication_input_error(
+                    "prepared context step input changed or repeated its original immutable geometry",
+                ));
+            }
+            roster.step_input = None;
+            return Ok(true);
+        }
         if self.purpose == SemanticColdModelWorkPurpose::PrivatePrefix {
             let source = self.source.as_mut().ok_or_else(|| {
                 publication_input_error(
@@ -1412,6 +2021,16 @@ impl ColdNativeAllowance {
         }
         let mut events = result.native_events;
         add_native_work_ceiling(&mut events, self.submitted_dma)?;
+        if self.model_context_ceiling.is_some()
+            && events
+                .iter()
+                .zip(self.content_ceiling()?)
+                .any(|(actual, upper)| *actual > upper)
+        {
+            return Err(publication_input_error(
+                "model context native work exceeded its original frozen producer roster",
+            ));
+        }
         let units = native_work_ceiling_units(events)?;
         result
             .model_work
@@ -1945,6 +2564,401 @@ fn ceiling_product(a: u64, b: u64) -> Result<u64, SemanticTransitionError> {
     a.checked_mul(b).ok_or_else(native_work_ceiling_overflow)
 }
 
+/// Finite producer geometry of the original native model-context seal. The
+/// acquired SOURCE supplies immutable extents, not observed execution counts.
+pub(super) fn model_context_activation_native_work_ceiling(
+    source: &SemanticTransitionSession,
+    current: &SemanticPublishedLease,
+    target: &SemanticTransitionSession,
+) -> Result<[u64; 9], SemanticTransitionError> {
+    source.checked_reader(current)?;
+    let source_storage = source
+        .publication
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?;
+    let target_storage = target
+        .publication
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?;
+    let source_directory = &current.directory;
+    let target_directory = &target_storage.bank_templates[0];
+    let range = |directory: &[PublicationRange], role| {
+        directory
+            .iter()
+            .find(|range| range.role == role && range.index == 0)
+            .copied()
+            .ok_or(SemanticTransitionError::ObservationMismatch)
+    };
+    let count = |value: usize| u64::try_from(value).map_err(|_| native_work_ceiling_overflow());
+    let ns = count(source_directory.len())?;
+    let nt = count(target_directory.len())?;
+    let ss = count(source_storage.allocations.len())?;
+    let ts = count(source_storage.layouts.len())?;
+    let tt = count(target_storage.layouts.len())?;
+    let pairs = |value: u64| ceiling_product(value, value.saturating_sub(1)).map(|value| value / 2);
+    let hash = |bytes: u64| -> Result<[u64; 9], SemanticTransitionError> {
+        Ok([0, 0, 0, 0, 0, 0, 0, ceiling_sum([bytes, 72])? / 64, 32])
+    };
+    let digest = |bytes| -> Result<[u64; 9], SemanticTransitionError> {
+        let mut result = content_digest_ceiling(bytes, 21, false)?;
+        result[0] = 0;
+        Ok(result)
+    };
+    let fold = [0, 0, 0, 0, 0, 0, 0, 2, 112];
+    let mut ceiling = super::actor_refresh::actor_initialize_native_work_ceiling(target)?;
+    let prefix_position = target_directory
+        .iter()
+        .position(|range| {
+            range.role == SemanticStateRole::PrefixIdentity as u64 && range.index == 0
+        })
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let prefix_range = target_directory[prefix_position];
+    if prefix_range.length_bytes != 32 {
+        return Err(SemanticTransitionError::ObservationMismatch);
+    }
+    add_native_work_ceiling(
+        &mut ceiling,
+        content_digest_ceiling(prefix_range.length_bytes, 21, false)?,
+    )?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [0, count(prefix_position + 1)?, 0, 0, 0, 0, 0, 0, 0],
+    )?;
+    // The same report encloses acquiring the sole TARGET reader and releasing
+    // the original SOURCE reader after the known seal. Their fixed commands
+    // do not re-run model work or initialization.
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            2,
+            12,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            size_of::<PublicationLease>() as u64 + 184,
+        ],
+    )?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        model_contract_guard_geometry_native_work_ceiling(
+            &source_storage.contract_value,
+            source_directory,
+        )?,
+    )?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [0, ceiling_sum([ss, pairs(ss)?])?, 0, 0, 0, 0, 0, 0, 0],
+    )?;
+    for directory in &target_storage.bank_templates {
+        add_native_work_ceiling(
+            &mut ceiling,
+            step_input_producer_native_work_ceiling(target_storage, &[], directory)?,
+        )?;
+    }
+    let models = count(
+        target_directory
+            .iter()
+            .filter(|item| matches!(item.role, 18..=25))
+            .count(),
+    )?;
+    let mutable = target_storage
+        .bank_templates
+        .iter()
+        .try_fold(0u64, |total, directory| {
+            ceiling_sum([
+                total,
+                count(
+                    directory
+                        .iter()
+                        .filter(|item| {
+                            (publication_mutable_role(item.role) && !matches!(item.role, 18..=25))
+                                || item.role == 17
+                        })
+                        .count(),
+                )?,
+            ])
+        })?;
+    // The frozen frame is checked as a subspan of each original codebook.
+    let frame_bytes = range(source_directory, 48)?
+        .length_bytes
+        .min(range(target_directory, 48)?.length_bytes);
+    let model_contract_bytes = range(source_directory, 44)?.length_bytes;
+    let mut visits = ceiling_sum([
+        44,
+        2,
+        count(target_storage.bank_templates[0].len())?,
+        count(target_storage.bank_templates[1].len())?,
+        ceiling_product(
+            models,
+            ceiling_sum([ceiling_product(2, ns)?, ts, nt, tt, 14])?,
+        )?,
+        ceiling_product(mutable, ss)?,
+        ceiling_sum([ns, nt, 15, frame_bytes])?,
+        ceiling_sum([ns, nt, 4, model_contract_bytes])?,
+    ])?;
+    for role in [42, 45, 46, 47, 50] {
+        let bytes = range(source_directory, role)?.length_bytes;
+        visits = ceiling_sum([visits, 1, ns, nt, 4, bytes])?;
+        add_native_work_ceiling(&mut ceiling, digest(bytes)?)?;
+    }
+    add_native_work_ceiling(
+        &mut ceiling,
+        digest(range(source_directory, 48)?.length_bytes)?,
+    )?;
+    add_native_work_ceiling(&mut ceiling, digest(model_contract_bytes)?)?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            visits,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            ceiling_sum([400, size_of::<DeviceState>() as u64, 24])?,
+        ],
+    )?;
+
+    // Fresh queries enter the same bounded resident closure. The restored
+    // initializer already encloses noneditable truth calls and feedback reset.
+    let (task, _) = target
+        .task
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?;
+    let queries = count(task.spec.statement_records.len())?;
+    if task.spec.program.editable_program().is_some() {
+        let attainment = attainment_native_work_ceiling(&task.spec)?;
+        add_native_work_ceiling(
+            &mut ceiling,
+            [
+                0,
+                ceiling_sum([1_000_000, attainment[1]])?,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ceiling_product(
+                    queries,
+                    size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64,
+                )?,
+            ],
+        )?;
+    }
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            ceiling_product(queries, size_of::<RawFeedbackRecord>() as u64)?,
+        ],
+    )?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        digest(range(target_directory, 1)?.length_bytes)?,
+    )?;
+    // The initializer's raw typed-hash prefix bound omits these tensor words.
+    let tensor_prefix = target_storage
+        .layouts
+        .values()
+        .try_fold(0u64, |bytes, layout| {
+            ceiling_sum([bytes, ceiling_product(8, ceiling_sum([4, layout.rank])?)?])
+        })?;
+    add_native_work_ceiling(&mut ceiling, [0, 0, 0, 0, 0, 0, 0, 0, tensor_prefix])?;
+    let coverage_count = target_directory
+        .iter()
+        .filter(|item| matches!(item.role, 1 | 4..=13))
+        .count();
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            ceiling_sum([
+                ceiling_product(3, nt)?,
+                ceiling_product(count(coverage_count)?, ceiling_sum([nt, tt])?)?,
+            ])?,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            528,
+        ],
+    )?;
+    for item in target_directory
+        .iter()
+        .filter(|item| matches!(item.role, 1 | 4..=13))
+    {
+        let layout = target_storage
+            .layouts
+            .get(&(item.role, item.index))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let allocation = target_storage
+            .allocations
+            .get(item.storage_slot as usize)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let mut typed = tensor_layout_native_work_ceiling(
+            layout,
+            item.logical_begin,
+            item.logical_end,
+            allocation.len(),
+            true,
+        )?;
+        typed[0] = 0;
+        add_native_work_ceiling(&mut ceiling, typed)?;
+        add_native_work_ceiling(&mut ceiling, fold)?;
+    }
+    add_native_work_ceiling(&mut ceiling, digest(360)?)?;
+
+    // Canonical fresh queue construction uses one original entry capacity for
+    // intents and acknowledgments. Payload partitions retain their own spans.
+    let intents = range(source_directory, 30)?
+        .length_bytes
+        .checked_sub(size_of::<IntentQueueHeader>() as u64)
+        .filter(|bytes| bytes % size_of::<IntentEntry>() as u64 == 0)
+        .map(|bytes| bytes / size_of::<IntentEntry>() as u64)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let acknowledgments = intents;
+    let intent_payload = range(source_directory, 31)?.length_bytes;
+    let ack_payload = range(source_directory, 32)?
+        .length_bytes
+        .checked_sub(ceiling_sum([
+            size_of::<AcknowledgementQueueHeader>() as u64,
+            ceiling_product(intents, size_of::<AcknowledgementEntry>() as u64)?,
+        ])?)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    let ack_backing =
+        source_storage
+            .bank_templates
+            .iter()
+            .try_fold(0u64, |maximum, directory| {
+                let item = range(directory, 32)?;
+                let allocation = source_storage
+                    .allocations
+                    .get(item.storage_slot as usize)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                Ok::<_, SemanticTransitionError>(maximum.max(count(allocation.len())?))
+            })?;
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            ceiling_sum([
+                ceiling_product(5, ns)?,
+                ceiling_product(2, nt)?,
+                ceiling_product(21, intents)?,
+                ceiling_product(13, acknowledgments)?,
+                ceiling_product(5, ceiling_product(acknowledgments, intents)?)?,
+                ceiling_product(5, pairs(acknowledgments)?)?,
+                16,
+            ])?,
+            acknowledgments,
+            0,
+            0,
+            0,
+            0,
+            ceiling_sum([
+                ceiling_sum([
+                    intent_payload,
+                    ceiling_product(72, ceiling_sum([intents, 1])?)?,
+                ])? / 64,
+                ceiling_product(6, intents)?,
+                ceiling_sum([ack_payload, ceiling_product(72, acknowledgments)?])? / 64,
+                ceiling_product(4, acknowledgments)?,
+            ])?,
+            ceiling_sum([
+                ceiling_product(32, ceiling_sum([intents, 1])?)?,
+                ceiling_product(344, intents)?,
+                ceiling_product(32, acknowledgments)?,
+                ceiling_product(224, acknowledgments)?,
+            ])?,
+        ],
+    )?;
+    add_native_work_ceiling(&mut ceiling, digest(ack_backing)?)?;
+
+    // The final logical and descriptor reseals are distinct from initialization.
+    add_native_work_ceiling(
+        &mut ceiling,
+        [
+            0,
+            ceiling_product(2, nt)?,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            ceiling_sum([size_of::<PublicationHeader>() as u64, (1 + 8 + 19) * 8])?,
+        ],
+    )?;
+    for bytes in [
+        size_of::<PublicationHeader>() as u64,
+        (32 * size_of::<SourceSlot>()) as u64,
+        (COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()) as u64,
+    ] {
+        add_native_work_ceiling(&mut ceiling, hash(bytes)?)?;
+    }
+    let book_prefix = b"xlog.semantic.logical-codebooks.v1\0".len() as u64 + 32 + 8;
+    for _ in 0..2 {
+        add_native_work_ceiling(
+            &mut ceiling,
+            hash(ceiling_sum([
+                book_prefix,
+                range(target_directory, 48)?.length_bytes,
+            ])?)?,
+        )?;
+        add_native_work_ceiling(&mut ceiling, [0, 0, 0, 0, 0, 0, 0, 0, book_prefix])?;
+        add_native_work_ceiling(&mut ceiling, fold)?;
+    }
+    for item in target_directory
+        .iter()
+        .filter(|item| !matches!(item.role, 27 | 28 | 30 | 31 | 32 | 33))
+    {
+        add_native_work_ceiling(&mut ceiling, fold)?;
+        if matches!(item.role, 18..=25) {
+            add_native_work_ceiling(&mut ceiling, fold)?;
+        }
+        if matches!(item.role, 2 | 14 | 15) {
+            add_native_work_ceiling(&mut ceiling, digest(item.length_bytes)?)?;
+        } else if item.role != 48 {
+            add_native_work_ceiling(&mut ceiling, [0, 0, 0, 0, 0, 0, 0, 0, 32])?;
+        }
+    }
+    add_native_work_ceiling(
+        &mut ceiling,
+        [0, ceiling_product(2, nt)?, 0, 0, 0, 0, 0, 0, 32],
+    )?;
+    for item in target_directory
+        .iter()
+        .filter(|item| matches!(item.role, 27 | 28 | 30 | 31 | 32 | 33))
+    {
+        add_native_work_ceiling(&mut ceiling, digest(item.length_bytes)?)?;
+        add_native_work_ceiling(&mut ceiling, fold)?;
+    }
+    add_native_work_ceiling(&mut ceiling, hash(size_of::<PublicationBank>() as u64)?)?;
+    for _ in target_directory {
+        add_native_work_ceiling(&mut ceiling, hash(size_of::<PublicationRange>() as u64)?)?;
+        add_native_work_ceiling(&mut ceiling, fold)?;
+    }
+    repeat_native_ceiling(&mut ceiling, digest(360)?, 2)?;
+    add_native_work_ceiling(&mut ceiling, [0, nt, 0, 0, 0, 0, 0, 0, 0])?;
+    native_work_ceiling_units(ceiling)?;
+    Ok(ceiling)
+}
+
 fn repeat_native_ceiling(
     total: &mut [u64; 9],
     occurrence: [u64; 9],
@@ -1992,51 +3006,18 @@ fn policy_viability_category_ceiling(
 fn rule_prefix_native_work_ceiling(
     predicate_bound: u64,
 ) -> Result<[u64; 9], SemanticTransitionError> {
-    // prefix_completes admits seven trailing nulls and examines three predicate
-    // positions. Owned-range checks add two slots in admission and two in the
-    // typed decoder, independently of external support. The prefix also reads
-    // its own two structural range endpoints instead of the global table end.
-    let predicate_categories = ceiling_product(3, ceiling_product(2, predicate_bound)?.max(3))?;
-    let predicate_slots = ceiling_sum([
-        3,
-        ceiling_product(16, predicate_bound)?.max(15),
-        ceiling_product(2, ceiling_product(12, predicate_bound)?.max(11))?,
-    ])?;
-    // Every first/second pair can visit four positions, sixteen covering masks
-    // per position, four variable candidates per mask, and sixteen final masks.
-    // available_variable includes its rejected candidate, admitted coordinate,
-    // and the context-bound operand decoder: Category 3 and TableSlot 11 at most.
-    let pairs = ceiling_product(4, 4)?;
-    let covering_visits = ceiling_product(pairs, ceiling_product(4, 16)?)?;
-    let final_visits = ceiling_product(pairs, 16)?;
-    let variable_calls = ceiling_sum([4, pairs, ceiling_product(covering_visits, 4)?])?;
-    let loop_slots = ceiling_sum([
-        4,
-        pairs,
-        ceiling_product(pairs, 4)?,
-        covering_visits,
-        final_visits,
-    ])?;
+    // The arity-aware prefix scans at most three predicate ranges: one head
+    // descriptor (17 TableSlot events) and two body descriptors (13 each)
+    // per predicate, including admission and context checks.
+    // Constant work covers seven trailing NULLs, three optional unary NULLs,
+    // 24 variable probes (11 TableSlot / 3 Category each), three 4-by-4
+    // atom-mask constructions, and two 15-by-15 coverage scans. Fixed
+    // predicates and the three outer position visits fit these same bounds.
     let ceiling = [
         0,
-        ceiling_sum([
-            7,
-            2, // Original context structural range endpoints.
-            predicate_slots,
-            11, // Optional fixed-variable validation.
-            ceiling_product(variable_calls, 11)?,
-            loop_slots,
-        ])?,
+        ceiling_sum([ceiling_product(43, predicate_bound)?, 834])?,
         0,
-        ceiling_sum([
-            1,
-            7,
-            predicate_categories,
-            3, // Optional fixed-variable validation.
-            ceiling_product(variable_calls, 3)?,
-            covering_visits,
-            final_visits,
-        ])?,
+        ceiling_sum([ceiling_product(6, predicate_bound)?, 566])?,
         0,
         0,
         0,
@@ -2636,7 +3617,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                     0,
                     0,
                     0,
-                    2 * 40 + 8,
+                    2 * std::mem::size_of::<crate::SemanticProgramRule>() as u64 + 8,
                 ],
             )?;
         } else {
