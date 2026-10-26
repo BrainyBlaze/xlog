@@ -1,0 +1,245 @@
+---
+title: "Structured Neural Integration"
+description: "Contributor work scope for typed graph batches, shared model ownership, composable gradients, and source-backed neural reasoning integration."
+---
+
+Structured models can help an application find relevant facts and rules before
+expensive logical evaluation. This work connects those models to XLOG while
+preserving variable bindings, logical conditions, and the evidence needed to
+check an answer.
+
+<Note>
+For contributors. This is a proposed delivery scope dated 2026-10-21, not a new
+usable API or a runtime qualification report. Existing public methods retain
+their documented support boundaries until their implementation and consumers
+are delivered together.
+</Note>
+
+## Ownership and consumer
+
+XLOG owns native program structure, exact execution, neural model invocation,
+tensor lifetime, gradient delivery, and reusable rule-induction mechanisms.
+The consuming application owns source interpretation, candidate relevance,
+authority/context policy, result aggregation, and domain review.
+
+XLOG owns the native model-resource identity and parameter lifetime. The
+application owns its ranking/index/calibration manifest and references that
+native identity when it invokes an engine model. It cannot reconstruct or
+replace the native owner from application metadata.
+
+The companion application scope is
+`docs/neural-reasoning-work-scope.md` in the
+[Mistaber repository](https://github.com/BrainyBlaze/mistaber-xlog). It identifies
+the production frontier and evidence consumers. Paired pull requests carry
+their review links. This engine work remains reusable: model names and
+application-specific decision rules do not become language operators.
+
+An application-side PyTorch ranker can consume native extraction without adding
+a neural predicate to the logical program. Engine neural execution is needed
+when the model participates in a declared neural call or training through a
+native probabilistic query. The first application ranking integration does not
+depend on completing every engine learning extension.
+
+## Inspected starting point
+
+The baseline is `2f4454d86219740a9cde8bfe509ebd7347a40712`. The preceding research
+used `58a4eebb6ee1597970ba047d2649bfff814ce63f`; the intervening changes retain
+semantic binding guards and do not change the interfaces listed below.
+These are source observations, not fresh hardware measurements.
+
+| Existing path | Reusable behavior | Work required |
+| --- | --- | --- |
+| `crates/xlog-logic/src/resolver/extraction.rs` | Native resolved program structure | Expose the required typed model view without dropping comparisons, negative literals, shared variables, or provenance. Reuse extraction rather than parsing a second query language. |
+| `crates/pyxlog/src/neural.rs::register_network` | Registration of a Python model and its optimizer | Establish shared parameter ownership and support structured inputs through the existing invocation path. |
+| `add_tensor_source` and batched neural forward | Samples have shape `[N, ...]`; the batched path stacks equal-shaped samples | Add production support for multiple typed tensors and variable-length graph samples. |
+| Embedding registration and lookup | Embedding-table and frozen-tensor lookup | Separate payload kind from trainability; unify lifecycle and metadata; make dimensions, ID bounds, dtype, device, and version explicit. |
+| `forward_backward_*`, native probability gradients | Existing native evaluation and gradient delivery | Compose with external tensor losses and deliver gradients to the original parameter owner with one intended update. |
+| `pyxlog.ilp` and native induction | Existing candidate generation, rule masks, credit, and promotion paths | Extend the authentic supported path for the required shapes, retain assignments and provenance, and qualify complete training/promotion behavior. |
+
+Fixed-shape attention can already live inside a registered Python model. That
+does not establish structured batching, complete query support, or measured
+performance. Semantic-session attention storage and ownership also do not by
+themselves implement a graph-attention operator.
+
+## Shared structure and numerical boundary
+
+The application and engine scopes share these meanings. Exact public method
+signatures are delivered with their production callers; this document adds no
+placeholder API.
+
+### Logical identity and model input
+
+Preserve relation and argument types, ordered argument ports, atom occurrences,
+scoped variable IDs, constants, polarity, comparisons, and source/module identity.
+Repeated occurrences of a variable must remain the same binding. Multiple free
+variables produce joint tuples, not independent marginal rankings.
+
+Keep application statement edges distinguishable from executable dependencies.
+An attention mask restricts model interactions and sample isolation; it does
+not determine whether a logical condition applies.
+
+Represent variable-length samples with typed tensors and explicit offsets or
+lengths. Specify input/output layout, dtype, device, index bounds, ownership,
+aliasing, stream ordering, and lifetime through asynchronous execution. Reject
+invalid input before invoking the model or mutating protected state. Match
+outputs and gradients back to the original binding rows without changing order.
+
+Logical relations keep their symbolic/scalar identity. Embedding resources
+reference those IDs; vector similarity is not equality for a join.
+
+### Model and representation ownership
+
+One model owner holds shared parameters, optimizer/scheduler state, and random
+state. Multiple heads reference it. A parameter set receives the intended
+zeroing, accumulation, clipping, and optimizer step once per training step.
+Restore the same state needed for the next genuine transition.
+
+Registration distinguishes an embedding-table payload from a tensor payload
+independently of whether gradients are enabled. A frozen parameter is not
+automatically immutable storage: aliasing and mutation must participate in
+artifact validity. Fix the source-observed frozen-module lookup branch and the
+direct-negative tensor attribute path through their actual public callers.
+
+Representation metadata includes shape/dimension, dtype/device, geometry,
+metric and its direction, ID mapping, graph/extractor version, and model
+artifact identity. A dense point and distribution parameters are different
+representations. Do not normalize or index them under an unrelated metric.
+
+### Result meaning and supported queries
+
+Return binding identity and a declared numerical meaning. Ranking utility,
+calibrated candidate relevance, and native query probability remain distinct.
+A context-dependent ranking score is not a context-free fact probability.
+If context affects a neural probabilistic fact, that identity must be explicit
+in the declared model and probabilistic semantics.
+
+Declare and implement the supported neural query fragment through the real
+compiler and evaluator. Preserve shared witnesses, repeated atoms, negation,
+recursion, and multiple outputs where supported. An unsupported neural
+representation must not silently flatten or approximate the logical query.
+Native symbolic capability and neural scoring capability have separate bounds.
+An explicit unsupported result identifies missing work; it does not complete it.
+
+## Delivery work
+
+### Establish structured batches and model lifecycle
+
+Extend the existing neural registration, tensor-source, forward, registry, and
+metadata paths. Wire authentic native extraction to a real consuming model and
+carry results through the public binding. Preserve the current scalar and
+fixed-shape behavior through an explicit versioned migration of affected
+interfaces and consumers.
+
+Acceptance covers variable-length and padded input agreement, binding order,
+alpha-renaming, argument-role sensitivity, sample isolation, empty and fully
+masked samples, invalid IDs, device/dtype failures, frozen/trainable payloads,
+shared heads, and restoration. Ownership and stream behavior require actual
+production-path hardware evidence when exercised on a device.
+
+### Compose native and model gradients
+
+Reuse the native probability evaluator and its existing derivatives. A loss
+used alongside retrieval or ranking losses must remain connected to the
+original model output. Wrapping a host scalar in a tensor does not provide
+that connection. Preserve incoming gradient scaling when the caller combines
+losses, batches, or shared heads.
+
+Define who performs backward and who owns the optimizer step. Retain required
+buffers and stream ownership until backward completes. Qualification must show
+that the final loss reaches each advertised trainable component and updates
+the original physical parameters exactly as intended.
+
+Report intentionally truncated gradients as a different training method. A
+reference model's detach between projections cannot be silently removed or
+described as full-chain training. Compare numerical gradients and actual
+parameter updates through the admitted production route; source inspection
+alone is insufficient.
+
+### Implement attention through the model adapter
+
+Begin with attention within statements or small query/candidate structures.
+Carry roles, qualifiers, shared-variable identity, and allowed interactions
+explicitly. Preserve the difference between unordered qualifier sets and
+ordered predicate arguments. Add count/sum information where normalized
+attention would lose multiplicity relevant to the task.
+
+Qualify a correct baseline backend before selecting a faster kernel. Check
+mask convention, all-masked rows, evaluation dropout, numerical finiteness,
+and gradients for query/key/value projections and learned biases. An additive
+score bias does not reproduce pair-specific value contributions; changed
+equations are an architectural variant, not kernel parity.
+
+The selected backend must support every required gradient. Fused attention
+support depends on the pinned library version and input shape. Measure model,
+data movement, synchronization, and evidence overhead; a fast kernel alone
+does not establish a faster reasoning pipeline.
+
+### Preserve snapshot, cache, and restoration semantics
+
+Inference freezes graph, weights, ID mapping, model mode, and randomness for a
+logical evaluation. Cache keys bind all inputs that can affect a result,
+including query/context and a random realization when the model uses one.
+Evaluation mode alone does not guarantee deterministic models.
+
+Separate query-independent vectors suitable for an index from query-conditioned
+representations. Keep approximate retrieval coverage explicit. An index cannot
+prove the absence of a symbolic answer or authorize deletion of a required
+dependency.
+
+Define canonical numerical serialization and tie handling with the consumer.
+Promotion as a deterministic ranker requires reproducible ordering on the
+declared backend. Persisted outputs prove the decision used; model replay and
+hardware execution remain separate evidence.
+
+### Connect induction to native execution and review
+
+Reuse the current induction/template and promotion owners. Candidate clauses
+retain typed bindings, source context, and the intended logical semantics.
+Extend native and Python consumers together when the required arity or query
+shape exceeds the existing path. Do not claim arbitrary recursive induction
+from a two-body-atom or single-neural-atom implementation.
+
+Training produces a selected clause or program proposal with candidate identity,
+loss/credit meaning, data split, exact consequences, and reproducible state.
+Ambiguous selection remains visible. Promotion must check both loss of required
+answers and creation of forbidden answers, including affected dependencies.
+Domain source/authority approval belongs to the consuming application. Accepted
+changes create a new program version and never mutate an in-flight inference
+snapshot.
+
+## Sequencing and acceptance boundary
+
+| Delivery | Depends on | Complete when |
+| --- | --- | --- |
+| Shared model/input meaning | Inspected extraction and the concrete application consumer | Both scopes agree on data meaning, ownership, numerical identity, and migration; no competing schema is introduced. |
+| Structured invocation and lifecycle | Shared meaning | The real public neural path carries authentic structured inputs and results with correct lifecycle and restoration. |
+| Composable training | Lifecycle and native probability derivatives | Combined losses update original shared parameters correctly through the supported query fragment. |
+| Attention optimization | Correct structured invocation and gradients | The selected backend preserves required forward/backward behavior and has measured end-to-end benefit. |
+| Induction integration | Authentic candidate execution and training | The supported candidate family reaches exact evaluation, proposal evidence, and checked promotion through one production path. |
+| Joint qualification | Delivered engine path and application scheduling/evidence consumers | Exact outcomes, coverage, provenance, numerical behavior, and resource use are checked at pinned revisions of both repositories. |
+
+Application-side frontier wiring and baseline measurement can proceed before
+engine training extensions. GPU runtime qualification uses the separately
+authorized production execution environment. Source integration, compilation,
+hardware execution, and complete-design acceptance are separate facts.
+
+Each implementation pull request delivers its producer, consumers, error
+behavior, relevant documentation, and required evidence together. The scope
+does not authorize a new resource purchase, merge, release, or corpus verdict.
+
+## Research choices and references
+
+HYPER is an initial structural challenger for ordered n-ary data. Its
+query-conditioned link predictor is not a ready-made application relevance
+head. Local role-aware attention is a proposed adaptation, evaluated against
+the underlying model without it. Model family, dimensions, geometry, index,
+and kernel backend remain measured choices.
+
+- [HYPER](https://arxiv.org/html/2506.12362) motivates the ordered n-ary representation.
+- [HAHE](https://aclanthology.org/2023.acl-long.450/) motivates role-aware attention;
+  its interaction terms must be preserved when comparing implementations.
+- [PyTorch attention backend limitations](https://pytorch.org/blog/flexattention-flashattention-4-fast-and-flexible/#limitations)
+  motivate explicit qualification of learned-bias gradients.
+- [Rule learning](/neural/rule-learning), [exact induction](/neural/exact-induction),
+  and [dILP internals](/architecture/dilp-training) describe existing paths.
+- [Python reference](/reference/python) remains the current public API authority.
