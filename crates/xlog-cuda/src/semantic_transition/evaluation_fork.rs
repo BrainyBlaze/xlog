@@ -2,6 +2,54 @@
 use super::*;
 
 impl SemanticTransitionSession {
+    /// Release the donor carrier after its complete native and model handoff.
+    /// Immutable origin clones share this one retirement and retain the durable
+    /// resolver reference. No decoder or pending upload is bypassed.
+    pub fn release_evaluation_fork_source_archive(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.checked_reader(lease)?;
+        let origin = self
+            .evaluation_fork
+            .clone()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if self.evaluation_fork_model_handoff != Some(lease.identity)
+            || self.task_evaluation_identity()
+                != self
+                    .publication
+                    .as_ref()
+                    .map(|publication| publication.contract_value.task_identity)
+        {
+            return Err(publication_input_error(
+                "evaluation archive release requires its actual same-task model handoff",
+            ));
+        }
+        let mut archive = origin
+            .archive
+            .state
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        match &*archive {
+            EvaluationForkArchiveState::Released(publication) if *publication == lease.identity => {
+                return Ok(())
+            }
+            EvaluationForkArchiveState::Retained(_) => {}
+            _ => return Err(SemanticTransitionError::ObservationMismatch),
+        }
+        if self.evaluation_fork_archive_release_blocked
+            || self.prepared_segment.is_some()
+            || self.admitted_transition.is_some()
+            || self.continuation_base.is_some()
+        {
+            return Err(publication_input_error("evaluation archive must retire at its original completed restoration before another transition"));
+        }
+        self.retire_completed_evaluation_restore_custody(lease)?;
+        *archive = EvaluationForkArchiveState::Released(lease.identity);
+        Ok(())
+    }
+
     pub fn evaluation_fork_origin(
         &self,
     ) -> Result<Option<SemanticEvaluationForkOrigin>, SemanticTransitionError> {
@@ -315,6 +363,7 @@ impl SemanticTransitionSession {
             .insert(consumer_stream);
         self.order_content_inputs(lease, consumer_stream)?;
         self.order_content_consumers(consumer_stream)?;
+        self.evaluation_fork_model_handoff = Some(lease.identity);
         Ok(SemanticGradientDeliveryBinding {
             _tensors: imported,
             _reservation: Some(reservation),
@@ -423,14 +472,13 @@ impl SemanticTransitionSession {
             || self.evaluation_fork.as_ref().is_none_or(|origin| {
                 origin.source != preparation.origin.source
                     || origin.member != preparation.origin.member
-                    || !origin
-                        .material
-                        .as_ref()
-                        .zip(preparation.origin.material.as_ref())
-                        .is_some_and(|(left, right)| Arc::ptr_eq(&left.owner, &right.owner))
+                    || !Arc::ptr_eq(&origin.archive, &preparation.origin.archive)
             })
         {
             return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if let Some(publication) = preparation.origin.released_publication()? {
+            return Ok(Some(publication));
         }
         self.resolve_state_material_restore()
     }
@@ -659,7 +707,10 @@ impl SemanticTransitionSession {
             member: member.member,
             native_digest: Identity256::from_bytes(Sha256::digest(&archive).into()),
             native_extent: archive.len() as u64,
-            material: Some(archive),
+            archive: SemanticEvaluationForkOrigin::archive_owner(
+                Some(budget),
+                EvaluationForkArchiveState::Retained(archive),
+            )?,
         };
         material.graph = material
             .graph
@@ -1193,6 +1244,7 @@ impl SemanticEvaluationForkOrigin {
 
     pub(super) fn decode(
         reader: &mut SemanticMaterialReader<'_>,
+        budget: Option<&SemanticReplayMaterialBudget>,
     ) -> Result<Option<Self>, SemanticTransitionError> {
         match reader.u32().map_err(SemanticTransitionError::Semantic)? {
             0 => return Ok(None),
@@ -1242,7 +1294,7 @@ impl SemanticEvaluationForkOrigin {
             member,
             native_digest,
             native_extent,
-            material: None,
+            archive: Self::archive_owner(budget, EvaluationForkArchiveState::Unresolved)?,
         }))
     }
 }
@@ -1332,13 +1384,22 @@ impl SemanticReplayLoadedMaterial {
                 "evaluation source is not the original selected training context",
             ));
         }
-        self.decoded
-            .as_mut()
-            .ok_or(SemanticTransitionError::NotBound)?
-            .evaluation_fork
-            .as_mut()
-            .ok_or(SemanticTransitionError::NotBound)?
-            .material = Some(archive);
+        let mut original = origin
+            .archive
+            .state
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        match &*original {
+            EvaluationForkArchiveState::Unresolved => {
+                *original = EvaluationForkArchiveState::Retained(archive)
+            }
+            EvaluationForkArchiveState::Retained(_) => {}
+            EvaluationForkArchiveState::Released(_) => {
+                return Err(publication_input_error(
+                    "released evaluation archive cannot replace its original authenticated custody",
+                ))
+            }
+        }
         Ok(())
     }
 }
@@ -1365,10 +1426,57 @@ pub struct SemanticEvaluationForkOrigin {
     pub(super) member: usize,
     pub(super) native_digest: Identity256,
     pub(super) native_extent: u64,
-    pub(super) material: Option<PublicationMaterialBytes>,
+    archive: Arc<EvaluationForkArchiveOwner>,
+}
+
+enum EvaluationForkArchiveState {
+    Unresolved,
+    Retained(PublicationMaterialBytes),
+    Released(SemanticPublishedIdentity),
+}
+
+struct EvaluationForkArchiveOwner {
+    state: Mutex<EvaluationForkArchiveState>,
+    _reservation: Option<Arc<SemanticReplayMaterialReservation>>,
 }
 
 impl SemanticEvaluationForkOrigin {
+    fn archive_owner(
+        budget: Option<&SemanticReplayMaterialBudget>,
+        state: EvaluationForkArchiveState,
+    ) -> Result<Arc<EvaluationForkArchiveOwner>, SemanticTransitionError> {
+        let bytes = size_of::<EvaluationForkArchiveOwner>()
+            + size_of::<SemanticReplayMaterialReservation>()
+            + 4 * size_of::<usize>();
+        let reservation = budget
+            .map(|budget| budget.reserve_auxiliary(bytes as u64).map(Arc::new))
+            .transpose()?;
+        Ok(Arc::new(EvaluationForkArchiveOwner {
+            state: Mutex::new(state),
+            _reservation: reservation,
+        }))
+    }
+
+    fn released_publication(
+        &self,
+    ) -> Result<Option<SemanticPublishedIdentity>, SemanticTransitionError> {
+        let state = self
+            .archive
+            .state
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        Ok(match &*state {
+            EvaluationForkArchiveState::Released(publication) => Some(*publication),
+            _ => None,
+        })
+    }
+
+    pub fn source_archive_released(&self) -> bool {
+        self.archive
+            .state
+            .lock()
+            .is_ok_and(|state| matches!(*state, EvaluationForkArchiveState::Released(_)))
+    }
     pub fn source_identity(&self) -> SemanticPublishedIdentity {
         self.source
     }
@@ -1382,14 +1490,22 @@ impl SemanticEvaluationForkOrigin {
         (self.native_digest, self.native_extent)
     }
     pub fn is_resolved(&self) -> bool {
-        self.material.is_some()
+        self.archive
+            .state
+            .lock()
+            .is_ok_and(|state| !matches!(*state, EvaluationForkArchiveState::Unresolved))
     }
     pub fn source_material(&self) -> Result<SemanticReplayLoadedMaterial, SemanticTransitionError> {
-        let material = self.material.as_ref().ok_or_else(|| {
-            publication_input_error(
-                "resolve the original guarded evaluation source before restoration",
-            )
-        })?;
+        let state = self
+            .archive
+            .state
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        let material = match &*state {
+            EvaluationForkArchiveState::Retained(material) => material,
+            EvaluationForkArchiveState::Unresolved => return Err(publication_input_error("resolve the original guarded evaluation source before restoration")),
+            EvaluationForkArchiveState::Released(_) => return Err(publication_input_error("evaluation source archive was released after its completed native and model handoff")),
+        };
         let budget = material.budget().ok_or(SemanticTransitionError::NotBound)?;
         let metadata = Arc::new(budget.reserve_auxiliary(
             (size_of::<SemanticReplayLoadedMaterial>() + 4 * size_of::<usize>()) as u64,
