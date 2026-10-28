@@ -90,6 +90,38 @@ impl SemanticTransitionSession {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let records = catalogue.member_observation_records(SELECTED_TRAINING_CONTEXT)?;
+        let binding = &self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0;
+        if binding.spec.evaluation_intervention != Some(origin.intervention)
+            || binding
+                .spec
+                .rule_library
+                .as_ref()
+                .map(|library| library.binding())
+                != Some(origin.library)
+        {
+            return Err(publication_input_error("restored evaluation intervention differs from its original task and frozen rule library"));
+        }
+        if layout.library_count
+            != binding
+                .spec
+                .rule_library
+                .as_ref()
+                .map_or(0, |library| library.rules().len())
+            || (origin.intervention != SemanticEvaluationIntervention::FixedRuleActivation
+                && (0..3).any(|slot| {
+                    layout
+                        .rule_activity(&ground.bytes, slot)
+                        .is_ok_and(|mask| mask != 0)
+                }))
+        {
+            return Err(publication_input_error(
+                "restored rule activity differs from its original invocation control",
+            ));
+        }
         let source = origin.source_material()?.into_complete()?;
         let source_ground = source
             .ranges
@@ -436,6 +468,9 @@ impl SemanticTransitionSession {
         preparation: &mut SemanticEvaluationForkPreparation,
         restoration: Option<&SemanticPreparedResidentModelRestoration>,
     ) -> Result<Option<SemanticPublishedIdentity>, SemanticTransitionError> {
+        if !preparation.intervention.active.load(Ordering::Acquire) {
+            return Err(SemanticTransitionError::NotBound);
+        }
         if !Arc::ptr_eq(&preparation.issuer, &self.publication_issuer)
             || self.task_evaluation_identity() != Some(preparation.target_task)
         {
@@ -561,6 +596,7 @@ impl SemanticTransitionSession {
         loaded: SemanticReplayLoadedMaterial,
         member: &SemanticFrozenModelContext,
         target_records: SemanticEvaluationForkTargetRecords,
+        intervention: Arc<SemanticEvaluationInterventionPreparation>,
     ) -> Result<SemanticEvaluationForkPreparation, SemanticTransitionError> {
         self.ensure_rebindable()?;
         member.require_budget(
@@ -592,9 +628,16 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .0;
-        let target_task = task.identity();
+        if !Arc::ptr_eq(&intervention.issuer, &self.publication_issuer)
+            || intervention.original != task.identity()
+            || intervention.identity != task.identity_with_intervention(Some(intervention.mode))
+            || intervention.active.load(Ordering::Acquire)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let target_task = intervention.identity;
         if !Arc::ptr_eq(&target_records.issuer, &self.publication_issuer)
-            || target_records.task != target_task
+            || target_records.task != intervention.original
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -707,6 +750,13 @@ impl SemanticTransitionSession {
             member: member.member,
             native_digest: Identity256::from_bytes(Sha256::digest(&archive).into()),
             native_extent: archive.len() as u64,
+            intervention: intervention.mode,
+            library: task
+                .spec
+                .rule_library
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .binding(),
             archive: SemanticEvaluationForkOrigin::archive_owner(
                 Some(budget),
                 EvaluationForkArchiveState::Retained(archive),
@@ -762,8 +812,23 @@ impl SemanticTransitionSession {
                 .source_program_admission
                 .as_ref()
                 .map(|program| program.initial_rules.len()),
+        )?
+        .with_rule_library(
+            catalogue
+                .member_rule_library(SELECTED_TRAINING_CONTEXT)
+                .as_ref()
+                .map_or(0, |library| library.rules().len()),
         )?;
         source_layout.validate(&old_ground.bytes)?;
+        if (0..3).any(|slot| {
+            source_layout
+                .rule_activity(&old_ground.bytes, slot)
+                .is_ok_and(|mask| mask != 0)
+        }) {
+            return Err(publication_input_error(
+                "ordinary training donor cannot carry an evaluation rule activity mask",
+            ));
+        }
         let source_rule_offset = source_layout.rule_offset;
         let rule_bytes = usize::try_from(source_rule_count)
             .ok()
@@ -773,6 +838,17 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "inherited selected program exceeds the frozen evaluation context",
             ));
+        }
+        let reserve_rules = match intervention.mode {
+            SemanticEvaluationIntervention::NoEdit => 0,
+            SemanticEvaluationIntervention::FixedRuleActivation => rule_control::RULE_LIBRARY_COUNT,
+            SemanticEvaluationIntervention::Structural => 2,
+        };
+        if source_rule_count
+            .checked_add(reserve_rules as u64)
+            .is_none_or(|count| count > ground_layout.rule_capacity as u64)
+        {
+            return Err(publication_input_error("selected source and frozen intervention exceed the existing resident rule capacity"));
         }
         let selected_rules = old_ground
             .bytes
@@ -1008,6 +1084,7 @@ impl SemanticTransitionSession {
             material: Some(material),
             started: false,
             _reservation: reservation,
+            intervention,
         })
     }
 }
@@ -1221,7 +1298,7 @@ impl SemanticTransitionSession {
 
 impl SemanticEvaluationForkOrigin {
     pub(super) fn encoded_bytes(&self) -> Result<usize, SemanticTransitionError> {
-        Ok(188)
+        Ok(228)
     }
 
     pub(super) fn write(
@@ -1239,7 +1316,9 @@ impl SemanticEvaluationForkOrigin {
         write(origin.catalogue.as_bytes())?;
         write(&(origin.member as u64).to_le_bytes())?;
         write(origin.native_digest.as_bytes())?;
-        write(&origin.native_extent.to_le_bytes())
+        write(&origin.native_extent.to_le_bytes())?;
+        write(&(origin.intervention as u64).to_le_bytes())?;
+        write(origin.library.as_bytes())
     }
 
     pub(super) fn decode(
@@ -1277,6 +1356,16 @@ impl SemanticEvaluationForkOrigin {
                 .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
         );
         let native_extent = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        let intervention = SemanticEvaluationIntervention::from_code(
+            reader.u64().map_err(SemanticTransitionError::Semantic)?,
+        )?;
+        let library = Identity256::from_bytes(
+            reader
+                .take(32)
+                .map_err(SemanticTransitionError::Semantic)?
+                .try_into()
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+        );
         if member < 2
             || native_digest == Identity256::default()
             || native_extent == 0
@@ -1294,6 +1383,8 @@ impl SemanticEvaluationForkOrigin {
             member,
             native_digest,
             native_extent,
+            intervention,
+            library,
             archive: Self::archive_owner(budget, EvaluationForkArchiveState::Unresolved)?,
         }))
     }
@@ -1426,6 +1517,8 @@ pub struct SemanticEvaluationForkOrigin {
     pub(super) member: usize,
     pub(super) native_digest: Identity256,
     pub(super) native_extent: u64,
+    intervention: SemanticEvaluationIntervention,
+    library: Identity256,
     archive: Arc<EvaluationForkArchiveOwner>,
 }
 
@@ -1441,6 +1534,12 @@ struct EvaluationForkArchiveOwner {
 }
 
 impl SemanticEvaluationForkOrigin {
+    pub fn intervention(&self) -> SemanticEvaluationIntervention {
+        self.intervention
+    }
+    pub fn rule_library_binding(&self) -> Identity256 {
+        self.library
+    }
     fn archive_owner(
         budget: Option<&SemanticReplayMaterialBudget>,
         state: EvaluationForkArchiveState,
@@ -1521,6 +1620,7 @@ impl SemanticEvaluationForkOrigin {
 /// One bound target and its original complete derivation, retained across unknown
 /// completion. It does not issue a second TaskUse or a partial runnable session.
 pub struct SemanticEvaluationForkPreparation {
+    pub(super) intervention: Arc<SemanticEvaluationInterventionPreparation>,
     issuer: Arc<()>,
     target_task: Identity256,
     pub(super) origin: SemanticEvaluationForkOrigin,
@@ -1530,6 +1630,9 @@ pub struct SemanticEvaluationForkPreparation {
 }
 
 impl SemanticEvaluationForkPreparation {
+    pub fn target_task_identity(&self) -> Identity256 {
+        self.target_task
+    }
     pub fn origin(&self) -> &SemanticEvaluationForkOrigin {
         &self.origin
     }
@@ -1732,6 +1835,18 @@ impl SemanticTransitionSession {
             Some(&program),
             budget,
         )?;
+        let rule_library = self
+            .rule_library
+            .as_ref()
+            .map(|library| {
+                library.rebase(
+                    source_program.map_or(0, |program| program.predicate_count),
+                    &codebooks,
+                    budget,
+                )
+            })
+            .transpose()?;
+        self.rule_library = rule_library;
         let context = Arc::new(ColdEvaluationContext {
             source_issuer: Arc::clone(&source.publication_issuer),
             source_program: source_program.map(ActionCodebooks::program_binding),

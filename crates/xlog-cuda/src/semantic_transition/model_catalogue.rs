@@ -4,6 +4,7 @@ use super::*;
 // remaining header binds model rows, owned category ranges and the cold frame.
 pub(super) const HEADER_WORDS: usize = 44;
 const FRAME_MAGIC: u64 = 0x584c4f474d4f444c;
+pub(super) const FRAME_MEMBER_WORDS: usize = 29;
 const ROW_WIDTHS: [usize; 4] = [10, 6, 3, 18];
 
 /// Process-local authority derived only from a completed native cold domain.
@@ -15,6 +16,9 @@ pub struct SemanticFrozenModelContext {
 }
 
 impl SemanticFrozenModelContext {
+    pub fn rule_library(&self) -> Option<Arc<SemanticEvaluationRuleLibrary>> {
+        self.catalogue.member_rule_library(self.member)
+    }
     pub fn require_budget(
         &self,
         budget: &SemanticReplayMaterialBudget,
@@ -54,6 +58,7 @@ struct CatalogueMember {
     // The cold theory identity already commits the complete original ground
     // roster. Retain its observation order without allocating learned rows.
     original_observation_records: Vec<u32>,
+    rule_library: Option<Arc<SemanticEvaluationRuleLibrary>>,
 }
 
 /// One original finite roster, claimed before any cold composition effect.
@@ -103,6 +108,14 @@ fn normalized(words: &[u64]) -> impl Iterator<Item = u64> + '_ {
 }
 
 impl FrozenModelCatalogue {
+    pub(super) fn member_rule_library(
+        &self,
+        member: usize,
+    ) -> Option<Arc<SemanticEvaluationRuleLibrary>> {
+        self.members
+            .get(member)
+            .and_then(|member| member.rule_library.clone())
+    }
     pub(super) fn member_count(&self) -> usize {
         self.members.len()
     }
@@ -214,8 +227,13 @@ impl FrozenModelCatalogue {
                 .map_err(|error| runtime_error("model context recipe allocation", error))?;
             words.extend(normalized(&session.codebooks.words));
             frame_words = frame_words
-                .checked_add(18)
+                .checked_add(FRAME_MEMBER_WORDS)
                 .and_then(|size| size.checked_add(words.len()))
+                .and_then(|size| {
+                    size.checked_add(session.rule_library.as_ref().map_or(0, |library| {
+                        library.declaration().len().div_ceil(8) + 25 * library.rules().len()
+                    }))
+                })
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
             let mut original_observation_records = Vec::new();
             original_observation_records
@@ -237,13 +255,14 @@ impl FrozenModelCatalogue {
                 words,
                 program: session.codebooks.program_binding,
                 original_observation_records,
+                rule_library: session.rule_library.clone(),
             });
         }
         let mut frame = Vec::new();
         frame
             .try_reserve_exact(frame_words)
             .map_err(|error| runtime_error("model context frame allocation", error))?;
-        frame.extend([FRAME_MAGIC, 2, statement_bytes as u64, members.len() as u64]);
+        frame.extend([FRAME_MAGIC, 3, statement_bytes as u64, members.len() as u64]);
         for member in &members {
             for identity in [
                 member.content.query,
@@ -259,10 +278,45 @@ impl FrozenModelCatalogue {
                     .map_or([0; 32], |identity| *identity.as_bytes()),
             ));
             frame.push(member.words.len() as u64);
+            frame.push(u64::from(member.rule_library.is_some()));
+            frame.extend(identity_words(
+                member
+                    .rule_library
+                    .as_ref()
+                    .map_or([0; 32], |library| *library.digest().as_bytes()),
+            ));
+            frame.extend(identity_words(
+                member
+                    .rule_library
+                    .as_ref()
+                    .map_or([0; 32], |library| *library.binding().as_bytes()),
+            ));
+            frame.push(
+                member
+                    .rule_library
+                    .as_ref()
+                    .map_or(0, |library| library.declaration().len()) as u64,
+            );
+            frame.push(
+                member
+                    .rule_library
+                    .as_ref()
+                    .map_or(0, |library| library.rules().len()) as u64,
+            );
             frame.extend_from_slice(&member.words);
+            if let Some(library) = &member.rule_library {
+                for chunk in library.declaration().chunks(8) {
+                    let mut bytes = [0; 8];
+                    bytes[..chunk.len()].copy_from_slice(chunk);
+                    frame.push(u64::from_le_bytes(bytes));
+                }
+                for &rule in library.rules() {
+                    frame.extend(semantic_program_rule_words(rule));
+                }
+            }
         }
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.immutable-model-catalogue.v2\0");
+        hash.update(b"xlog.semantic.immutable-model-catalogue.v3\0");
         hash.update(CATALOGUE_DIGEST);
         for &word in &frame {
             hash.update(word.to_le_bytes());
@@ -1202,6 +1256,25 @@ impl SemanticTransitionSession {
         let budget = Self::require_cold_model_contexts(contexts)?;
         for context in contexts.iter().skip(2) {
             context.require_prepared_evaluation_model_context(contexts[1])?;
+            if context.rule_library.is_none() {
+                return Err(publication_input_error(
+                    "evaluation model context requires its complete frozen rule library",
+                ));
+            }
+        }
+        let common_library = contexts
+            .iter()
+            .filter_map(|context| context.rule_library.as_ref())
+            .next()
+            .map(|library| library.digest());
+        if contexts
+            .iter()
+            .filter_map(|context| context.rule_library.as_ref())
+            .any(|library| Some(library.digest()) != common_library)
+        {
+            return Err(publication_input_error(
+                "frozen model contexts change the common ordered rule library",
+            ));
         }
         for count_word in [1, 3, 5, 7] {
             contexts.iter().try_fold(1u64, |total, context| {
@@ -1222,9 +1295,16 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let frame_words = contexts
             .len()
-            .checked_mul(18)
+            .checked_mul(FRAME_MEMBER_WORDS)
             .and_then(|count| count.checked_add(4))
             .and_then(|count| count.checked_add(word_count))
+            .and_then(|count| {
+                contexts.iter().try_fold(count, |count, context| {
+                    count.checked_add(context.rule_library.as_ref().map_or(0, |library| {
+                        library.declaration().len().div_ceil(8) + 25 * library.rules().len()
+                    }))
+                })
+            })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let projection_words = frame_words
             .checked_add(word_count)

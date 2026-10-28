@@ -11,6 +11,11 @@ constexpr uint64_t kQueryWords = 44;
 constexpr uint64_t kObservationWords = 18;
 constexpr uint64_t kBindingWords = 36;
 constexpr uint64_t kInheritedMagic = 0x584c4f47494e484fULL;
+constexpr uint64_t kRuleControlMagic = 0x584c4f4752435452ULL;
+constexpr uint64_t kRuleActivityMagic = 0x584c4f4752414354ULL;
+constexpr uint32_t kUnchangedRules = 0;
+constexpr uint32_t kFixedRuleActivation = 1;
+constexpr uint32_t kStructuralRules = 3;
 
 struct Task {
     const uint64_t* words;
@@ -22,6 +27,8 @@ struct Task {
     uint64_t actor_eligible;
     semantic_program::Bank program;
     bool editable;
+    uint32_t rule_control, library_count;
+    const uint64_t *library_digest, *library_rules, *library_actions;
     __device__ const uint64_t* query(uint32_t index) const { return query_rows + uint64_t(index)*7; }
     __device__ const uint64_t* binding(uint32_t index) const { return binding_rows + uint64_t(index)*kBindingWords; }
     __device__ const uint64_t* observation(uint32_t index) const { return observation_rows + uint64_t(index)*8; }
@@ -44,7 +51,7 @@ struct Task {
 // One exact decoder for the native owner's variable-length task bank. No
 // consumer derives an extent from a public pointer or an unbounded sentinel.
 __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
-    if(!words || !output || count<39 || words[0]!=9 || !words[1] ||
+    if(!words || !output || count<47 || words[0]!=10 || !words[1] ||
        !words[6] || words[6]>UINT32_MAX || words[7]>UINT32_MAX || words[8]>1 ||
        (words[8]==0 ? words[7]!=0 : words[7]==0) || words[10]>words[6] ||
        words[11]>words[6] || words[37]>1)return false;
@@ -101,11 +108,36 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
         }
     } else if(requirement_words)return false;
     offset+=requirement_words;
-    if(words[12]!=count-offset)return false;
+    if(words[12]>count-offset)return false;
     task.editable=words[12]!=0;
     if(task.editable && (!semantic_program::decode_bank(words+offset,words[12],&task.program) ||
        task.program.query_count!=task.queries || task.program.rule_count>semantic_program::kRuleCapacity))return false;
     if(task.coding && !task.editable)return false;
+    offset+=words[12];
+    if(count-offset<8 || words[offset]!=kRuleControlMagic || words[offset+1]!=1 ||
+       (words[offset+2]!=kUnchangedRules && words[offset+2]!=kFixedRuleActivation &&
+        words[offset+2]!=kStructuralRules) || words[offset+3]>64 ||
+       (!words[offset+3] && words[offset+2]!=kStructuralRules) ||
+       (words[offset+3] && !task.editable))return false;
+    task.rule_control=uint32_t(words[offset+2]);
+    task.library_count=uint32_t(words[offset+3]);
+    task.library_digest=words+offset+4;
+    if(task.library_count && !(task.library_digest[0]|task.library_digest[1]|
+       task.library_digest[2]|task.library_digest[3]))return false;
+    offset+=8;
+    if(count-offset!=uint64_t(task.library_count)*(semantic_program::kRuleWords+18))return false;
+    task.library_rules=words+offset;
+    task.library_actions=task.library_rules+uint64_t(task.library_count)*semantic_program::kRuleWords;
+    for(uint32_t member=0;member<task.library_count;++member) {
+        const auto* rule=task.library_rules+uint64_t(member)*semantic_program::kRuleWords;
+        for(uint32_t field=0;field<semantic_program::kRuleWords;++field)
+            if(rule[field]>UINT32_MAX)return false;
+        if(rule[0]!=2 || !semantic_program::valid_rule(semantic_program::rule_words(rule),task.program))return false;
+        const auto* action=task.library_actions+uint64_t(member)*18;
+        if(action[0]!=1 || action[1]!=2)return false;
+        for(uint32_t field=2;field<18;++field)
+            if(action[field]>UINT32_MAX || (field>=11 && action[field]))return false;
+    }
     for(uint32_t query=0;query<task.queries;++query) {
         const uint64_t* row=task.query(query);
         if(!(row[0]|row[1]|row[2]|row[3]) || row[4]>UINT32_MAX || row[5]>3 || !row[6] || row[6]>15)return false;
@@ -153,6 +185,7 @@ struct Plane {
     semantic_program::Rule* selected_rules;
     const InheritedObservation* inherited;
     uint32_t inherited_capacity;
+    uint64_t* rule_activity;
     __device__ Query& query(uint32_t candidate,uint32_t query) const {
         return query_rows[uint64_t(candidate)*header[2]+query];
     }
@@ -164,18 +197,27 @@ __device__ bool decode_plane(uint64_t address,uint64_t bytes,const Task& task,Pl
     const uint64_t capacity=task.editable ? semantic_program::kRuleCapacity-uint64_t(task.program.rule_count) : 0;
     const uint64_t query_offset=64+uint64_t(task.bindings)*sizeof(Observation);
     const uint64_t rule_offset=query_offset+3*uint64_t(task.queries)*sizeof(Query);
-    if(header[0]!=kMagic || header[1]!=4 || header[2]!=task.queries || header[3]!=task.bindings ||
+    if(header[0]!=kMagic || header[1]!=5 || header[2]!=task.queries || header[3]!=task.bindings ||
        header[4]!=kQueryWords || header[5]!=kObservationWords || header[6]>capacity || header[7]!=capacity ||
-       bytes<rule_offset+capacity*sizeof(semantic_program::Rule)+16)return false;
+       bytes<rule_offset+capacity*sizeof(semantic_program::Rule)+56)return false;
     const uint64_t inherited_offset=((rule_offset+capacity*sizeof(semantic_program::Rule)+7)&~uint64_t(7))+16;
-    if(bytes<inherited_offset)return false;
+    if(bytes<inherited_offset+40)return false;
     const auto* inherited_header=reinterpret_cast<const uint64_t*>(address+inherited_offset-16);
     if(inherited_header[0]!=kInheritedMagic || inherited_header[1]>UINT32_MAX-task.bindings ||
-       inherited_header[1]>(bytes-inherited_offset)/sizeof(InheritedObservation) ||
-       bytes!=inherited_offset+inherited_header[1]*sizeof(InheritedObservation))return false;
+       inherited_header[1]>(bytes-inherited_offset-40)/sizeof(InheritedObservation) ||
+       bytes!=inherited_offset+inherited_header[1]*sizeof(InheritedObservation)+40)return false;
+    auto* activity=reinterpret_cast<uint64_t*>(address+bytes-40);
+    if(activity[0]!=kRuleActivityMagic || activity[1]!=task.library_count)return false;
+    if(task.rule_control==kFixedRuleActivation &&
+       uint64_t(task.program.rule_count)+header[6]+task.library_count>semantic_program::kRuleCapacity)return false;
+    const uint64_t permitted=task.library_count==64 ? UINT64_MAX :
+        (uint64_t(1)<<task.library_count)-1;
+    for(uint32_t candidate=0;candidate<3;++candidate)
+        if((activity[2+candidate]&~permitted) ||
+           (task.rule_control!=kFixedRuleActivation && activity[2+candidate]))return false;
     Plane plane{header,reinterpret_cast<Observation*>(address+64),
         reinterpret_cast<Query*>(address+query_offset),reinterpret_cast<semantic_program::Rule*>(address+rule_offset),
-        reinterpret_cast<const InheritedObservation*>(address+inherited_offset),uint32_t(inherited_header[1])};
+        reinterpret_cast<const InheritedObservation*>(address+inherited_offset),uint32_t(inherited_header[1]),activity+2};
     for(uint32_t index=0;index<task.bindings+plane.inherited_capacity;++index) {
         const bool inherited=index>=task.bindings;
         if(inherited) {

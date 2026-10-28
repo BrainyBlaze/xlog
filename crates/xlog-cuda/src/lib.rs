@@ -23,8 +23,9 @@ mod semantic_work;
 pub use semantic_transition::{
     SemanticDetachedColdTaskContext, SemanticEvaluationForkOrigin,
     SemanticEvaluationForkPreparation, SemanticEvaluationForkTarget,
-    SemanticEvaluationForkTargetRecords, SemanticSelectedTaskFacts,
-    SemanticSelectedTaskFactsObservation,
+    SemanticEvaluationForkTargetRecords, SemanticEvaluationIntervention,
+    SemanticEvaluationInterventionPreparation, SemanticEvaluationRuleLibrary,
+    SemanticSelectedTaskFacts, SemanticSelectedTaskFactsObservation,
 };
 pub mod type_seam;
 pub mod wcoj_metadata;

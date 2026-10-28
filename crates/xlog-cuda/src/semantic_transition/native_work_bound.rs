@@ -1940,6 +1940,7 @@ fn policy_viability_category_ceiling(
 }
 
 fn rule_prefix_native_work_ceiling(
+    source: &SemanticTransitionSession,
     predicate_bound: u64,
 ) -> Result<[u64; 9], SemanticTransitionError> {
     // The arity-aware prefix scans at most three predicate ranges: one head
@@ -1949,7 +1950,7 @@ fn rule_prefix_native_work_ceiling(
     // 24 variable probes (11 TableSlot / 3 Category each), three 4-by-4
     // atom-mask constructions, and two 15-by-15 coverage scans. Fixed
     // predicates and the three outer position visits fit these same bounds.
-    let ceiling = [
+    let mut ceiling = [
         0,
         ceiling_sum([ceiling_product(43, predicate_bound)?, 834])?,
         0,
@@ -1960,6 +1961,27 @@ fn rule_prefix_native_work_ceiling(
         0,
         0,
     ];
+    if let Some((binding, _)) = &source.task {
+        if binding.spec.evaluation_intervention
+            == Some(SemanticEvaluationIntervention::FixedRuleActivation)
+        {
+            let library = binding
+                .spec
+                .rule_library
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let positions = ceiling_product(
+                u64::try_from(library.rules().len()).map_err(|_| native_work_ceiling_overflow())?,
+                18,
+            )?;
+            // A complete library-prefix scan visits every member and all
+            // eighteen fields: tuple, component and support slots plus the
+            // two context bounds, and one category event per field.
+            // The structural envelope still covers the shared hard decoder.
+            ceiling[1] = ceiling[1].max(ceiling_product(5, positions)?);
+            ceiling[3] = ceiling[3].max(positions);
+        }
+    }
     native_work_ceiling_units(ceiling)?;
     Ok(ceiling)
 }
@@ -2084,7 +2106,7 @@ pub(super) fn policy_vjp_native_work_ceiling(
         let prefix_calls = ceiling_sum([4, ceiling_product(2, edit_cells)?, edit_components])?;
         repeat_native_ceiling(
             &mut ceiling,
-            rule_prefix_native_work_ceiling(targets)?,
+            rule_prefix_native_work_ceiling(source, targets)?,
             prefix_calls,
         )?;
     }
@@ -2680,7 +2702,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
     // its successful non-Proposal early return. Enclose both actual branches.
     let viability = policy_viability_category_ceiling(child)?;
     let prefix = if editable {
-        Some(rule_prefix_native_work_ceiling(targets)?)
+        Some(rule_prefix_native_work_ceiling(child, targets)?)
     } else {
         None
     };
