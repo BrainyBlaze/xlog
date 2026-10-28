@@ -4185,14 +4185,15 @@ __device__ void task_cost(State* state,uint32_t slot,const semantic_task_ground:
     facts.v=int64_t(task.scoring[0]*facts.g+task.scoring[1]*facts.p)-int64_t(task.scoring[2]*facts.c);
 }
 
-__device__ bool selected_task_cost_matches(const State* state,uint64_t cap) {
+__device__ bool selected_task_cost_matches(const State* state,uint64_t cap,
+        const TaskProgramBank& program) {
     if(!state || state->task_evaluation.winner>=3)return false;
     const uint64_t winner=state->task_evaluation.winner;
     uint64_t measured=0;
     if(winner) {
         const auto& work=state->work[winner-1];
         if(work.edit_commands>2 || work.added_supports>cap ||
-           work.defined_truth_changes>3)return false;
+           work.defined_truth_changes>(program.editable ? program.task.queries : 3))return false;
         measured=work.edit_commands+work.added_supports+work.defined_truth_changes;
     }
     return measured<=cap && state->task_evaluation.facts[winner].c==measured;
@@ -4922,7 +4923,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                 if(apply_actor && !*status) {
                     if(!state || state->status ||
                        !isfinite(state->importance_weight) || state->importance_weight<=0.0 ||
-                       !selected_task_cost_matches(state,objective.cost_cap)) {
+                       !selected_task_cost_matches(state,objective.cost_cap,backward_program_bank)) {
                         *status=1;
                     } else {
                         bounded_reward=policy_int64_bound((int64_t)state->task_evaluation.return_value);
@@ -7879,7 +7880,8 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 failed=1;state->status=7;
             } else if(program_bank.editable &&
                 (program_bank.program.initial_count>PROGRAM_FACT_CAPACITY ||
-                 program_bank.program.rule_count>PROGRAM_RULE_CAPACITY-2)) {
+                 (program_bank.task.rule_control==semantic_task_ground::kStructuralRules &&
+                  program_bank.program.rule_count>PROGRAM_RULE_CAPACITY-2))) {
                 failed=1;state->status=7;
             }
         } else program_bank=TaskProgramBank{};
