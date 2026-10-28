@@ -92,15 +92,140 @@ pub(super) fn editable_source_from_admission_bound(
     editable_source_from_admission_owned(admission, Some(&budget))
 }
 
+fn evaluation_scope_record(
+    admission: &SemanticAdmissionRecords,
+    budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
+) -> PyResult<Option<usize>> {
+    if admission.predicates.len() != 3 {
+        return Ok(None);
+    }
+    let Some(scope) = admission.records.last() else {
+        return Ok(None);
+    };
+    if scope.predicate != RelId(2)
+        || !matches!(
+            scope.arguments.first(),
+            Some(SemanticArgument::U32(u32::MAX))
+        )
+    {
+        return Ok(None);
+    }
+    let [SemanticArgument::U32(u32::MAX), SemanticArgument::Symbol(symbol)] =
+        scope.arguments.as_slice()
+    else {
+        return Err(invalid(
+            "evaluation context changed its original typed scope",
+        ));
+    };
+    if !scope.qualifiers.is_empty() {
+        return Err(invalid(
+            "evaluation context changed its original typed scope",
+        ));
+    }
+    let (symbols, _owner) = if let Some(budget) = budget {
+        let (symbols, owner) = xlog_core::symbol::snapshot_checked_with_allocation_owner(
+            &[*symbol],
+            1,
+            64,
+            &mut |count, utf8| {
+                let bytes = count
+                    .checked_mul(std::mem::size_of::<(u32, Box<str>)>())
+                    .and_then(|bytes| bytes.checked_mul(2))
+                    .and_then(|bytes| utf8.checked_mul(2).and_then(|text| bytes.checked_add(text)))
+                    .ok_or_else(
+                        || xlog_core::symbol::SymbolSnapshotError::AllocationRejected {
+                            detail: "evaluation scope allocation extent overflow".into(),
+                        },
+                    )?;
+                let owner = budget.reserve_auxiliary(bytes as u64).map_err(|error| {
+                    xlog_core::symbol::SymbolSnapshotError::AllocationRejected {
+                        detail: error.to_string(),
+                    }
+                })?;
+                Ok(Arc::new(owner) as Arc<dyn Send + Sync>)
+            },
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        (symbols, Some(owner))
+    } else {
+        (
+            xlog_core::symbol::snapshot_checked(&[*symbol], 1, 64)
+                .map_err(|error| invalid(&error.to_string()))?,
+            None,
+        )
+    };
+    let scope = symbols
+        .entries()
+        .first()
+        .map(|(_, text)| text.as_ref())
+        .ok_or_else(|| invalid("evaluation context scope symbol is unavailable"))?;
+    if scope.len() != 64
+        || !scope
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid(
+            "evaluation context scope is not its canonical lowercase digest",
+        ));
+    }
+    Ok(Some(admission.records.len() - 1))
+}
+
 fn editable_source_from_admission_owned(
     admission: &SemanticAdmissionRecords,
     budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
 ) -> PyResult<Option<EditableTaskSource>> {
-    let record_end = admission
-        .records
-        .len()
-        .saturating_sub(usize::from(admission.predicates.len() == 4));
+    if admission.predicates.len() != 3
+        || admission.predicates[0].predicate != RelId(1)
+        || admission.predicates[0].role != SemanticRecordRole::Statement
+        || admission.predicates[1].predicate != RelId(2)
+        || admission.predicates[1].role != SemanticRecordRole::Qualifier
+        || admission.predicates[2].predicate != RelId(3)
+        || admission.predicates[2].role != SemanticRecordRole::Qualifier
+        || admission.predicates[0].schema.sort_labels()
+            != [
+                "task-statement-ordinal",
+                "task-statement-text",
+                "truth4-admissibility-mask",
+            ]
+        || admission.predicates[1].schema.sort_labels() != ["task-input-kind", "task-input-text"]
+        || admission.predicates[2].schema.sort_labels()
+            != ["task-query-ordinal", "task-statement-record"]
+        || admission.predicates[0].schema.key_columns != [0]
+        || admission.predicates[1].schema.key_columns != [0]
+        || admission.predicates[2].schema.key_columns != [0]
+        || !admission.predicates[0]
+            .schema
+            .columns
+            .iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([
+                ("ordinal", ScalarType::U32),
+                ("statement", ScalarType::Symbol),
+                ("truth_mask", ScalarType::U32),
+            ])
+        || !admission.predicates[1]
+            .schema
+            .columns
+            .iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([("kind", ScalarType::U32), ("content", ScalarType::Symbol)])
+        || !admission.predicates[2]
+            .schema
+            .columns
+            .iter()
+            .map(|(name, scalar)| (name.as_str(), *scalar))
+            .eq([
+                ("ordinal", ScalarType::U32),
+                ("statement_record", ScalarType::U32),
+            ])
+    {
+        return Ok(None);
+    }
+    let scope_record = evaluation_scope_record(admission, budget)?;
+    let record_end = scope_record.unwrap_or(admission.records.len());
     let mut begin = 0;
+    let mut segments = 0;
     let mut source: Option<EditableTaskSource> = None;
     while begin < record_end {
         let statement_end = begin
@@ -119,9 +244,17 @@ fn editable_source_from_admission_owned(
                 .take_while(|record| record.predicate == RelId(3))
                 .count();
         if end == begin {
-            return editable_source_segment(admission, begin, record_end, budget);
+            return editable_source_segment(admission, begin, record_end, scope_record, budget);
         }
-        let Some(mut target) = editable_source_segment(admission, begin, end, budget)? else {
+        segments += 1;
+        if segments > 2 || (segments > 1 && scope_record.is_none()) {
+            return Err(invalid(
+                "editable task admission changed its original context segments",
+            ));
+        }
+        let Some(mut target) =
+            editable_source_segment(admission, begin, end, scope_record, budget)?
+        else {
             return Ok(None);
         };
         if let Some(prefix) = source {
@@ -174,8 +307,13 @@ fn editable_source_from_admission_owned(
         source = Some(target);
         begin = end;
     }
+    if scope_record.is_some() && segments != 2 {
+        return Err(invalid(
+            "evaluation scope requires its original donor and target segments",
+        ));
+    }
     if source.is_none() {
-        return editable_source_segment(admission, 0, 0, budget);
+        return editable_source_segment(admission, 0, 0, scope_record, budget);
     }
     Ok(source)
 }
@@ -184,84 +322,9 @@ fn editable_source_segment(
     admission: &SemanticAdmissionRecords,
     record_begin: usize,
     record_end: usize,
+    scope_record: Option<usize>,
     budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
 ) -> PyResult<Option<EditableTaskSource>> {
-    let scoped = admission.predicates.len() == 4;
-    if !(3..=4).contains(&admission.predicates.len())
-        || admission.predicates[0].predicate != RelId(1)
-        || admission.predicates[0].role != SemanticRecordRole::Statement
-        || admission.predicates[1].predicate != RelId(2)
-        || admission.predicates[1].role != SemanticRecordRole::Qualifier
-        || admission.predicates[2].predicate != RelId(3)
-        || admission.predicates[2].role != SemanticRecordRole::Qualifier
-        || admission.predicates[0].schema.sort_labels()
-            != [
-                "task-statement-ordinal",
-                "task-statement-text",
-                "truth4-admissibility-mask",
-            ]
-        || admission.predicates[1].schema.sort_labels() != ["task-input-kind", "task-input-text"]
-        || admission.predicates[2].schema.sort_labels()
-            != ["task-query-ordinal", "task-statement-record"]
-        || admission.predicates[0].schema.key_columns != [0]
-        || admission.predicates[1].schema.key_columns != [0]
-        || admission.predicates[2].schema.key_columns != [0]
-        || !admission.predicates[0]
-            .schema
-            .columns
-            .iter()
-            .map(|(name, scalar)| (name.as_str(), *scalar))
-            .eq([
-                ("ordinal", ScalarType::U32),
-                ("statement", ScalarType::Symbol),
-                ("truth_mask", ScalarType::U32),
-            ])
-        || !admission.predicates[1]
-            .schema
-            .columns
-            .iter()
-            .map(|(name, scalar)| (name.as_str(), *scalar))
-            .eq([("kind", ScalarType::U32), ("content", ScalarType::Symbol)])
-        || !admission.predicates[2]
-            .schema
-            .columns
-            .iter()
-            .map(|(name, scalar)| (name.as_str(), *scalar))
-            .eq([
-                ("ordinal", ScalarType::U32),
-                ("statement_record", ScalarType::U32),
-            ])
-    {
-        return Ok(None);
-    }
-    let scope_record = if scoped {
-        let predicate = &admission.predicates[3];
-        let scope = admission
-            .records
-            .last()
-            .ok_or_else(|| invalid("evaluation context omitted its scope record"))?;
-        if predicate.predicate != RelId(4)
-            || predicate.role != SemanticRecordRole::Qualifier
-            || predicate.schema.sort_labels() != ["evaluation-context"]
-            || predicate.schema.key_columns != [0]
-            || !predicate
-                .schema
-                .columns
-                .iter()
-                .map(|(name, scalar)| (name.as_str(), *scalar))
-                .eq([("context", ScalarType::Symbol)])
-            || scope.predicate != RelId(4)
-            || !matches!(scope.arguments.as_slice(), [SemanticArgument::Symbol(_)])
-            || !scope.qualifiers.is_empty()
-        {
-            return Err(invalid(
-                "evaluation context changed its original typed scope",
-            ));
-        }
-        Some(admission.records.len() - 1)
-    } else {
-        None
-    };
     let records = &admission.records[record_begin..record_end];
     let statement_count = records
         .iter()

@@ -497,6 +497,7 @@ impl PySemanticLearningPhaseTransition {
                     total_limit.as_ref().map(|value| value.bind(py)), Some(self.refresh_snapshot.bind(py)),
                     Some(&task.checkpoint.proposal_expense), Some(&task.checkpoint.checkpoint_sources), Some(&task.checkpoint.material_sources), Some(pending), None, None,
                     task.checkpoint.native_model_context.as_ref(),
+                    None,
                 );
                 let mut retained = self.trajectory_start()?;
                 let operation = retained.as_mut().expect("retained original trajectory");

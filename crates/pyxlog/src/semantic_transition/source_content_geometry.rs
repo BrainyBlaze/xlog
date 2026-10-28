@@ -1693,7 +1693,7 @@ pub(super) fn source_content_geometry_seed(
         let task = task_evaluation_spec_with_allocation_owner(
             &source.seed.evaluation,
             task_priority_levels(priorities)?,
-            Some(Arc::clone(&cold.program)),
+            Some(cold.program_owner()),
             &source.seed.training_domain,
             Some(&cold.initial_source),
             &source.seed.material_sources,

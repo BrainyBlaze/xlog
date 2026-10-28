@@ -1734,7 +1734,7 @@ impl ActorRefreshCustody {
                 original.canary.clone(),
             )
         };
-        let mut wrapper = PySemanticTransitionSession::from_shared_native(
+        let wrapper = PySemanticTransitionSession::from_shared_native(
             storage,
             None,
             device,
@@ -1746,9 +1746,12 @@ impl ActorRefreshCustody {
             Arc::clone(&self.update.borrow(py).session.borrow(py).material_sources),
             original_canary,
         );
-        wrapper.editable_program = editable_program;
-        wrapper.editable_initial_source = editable_initial_source;
-        wrapper.editable_observer_source = editable_observer_source;
+        {
+            let mut editable = wrapper.editable_source()?;
+            editable.program = editable_program;
+            editable.initial_source = editable_initial_source;
+            editable.observer_source = editable_observer_source;
+        }
         let session = Py::new(py, wrapper)?;
         self.retain_session(py, bank, &session)?;
         Ok((session, original_parent))

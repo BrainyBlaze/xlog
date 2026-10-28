@@ -53,6 +53,10 @@ pub(crate) mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod cancelled_checkpoint;
 pub(crate) mod cold_task;
+mod evaluation_authority;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod evaluation_fork;
+mod evaluation_source_checkpoint;
 mod feedback_projection;
 #[cfg(feature = "semantic-policy")]
 mod initial_prefill;
@@ -75,6 +79,8 @@ pub(crate) mod model_work_port;
 pub(crate) mod prepared_import;
 pub(crate) mod publication_material;
 pub(crate) mod resident_model_memory;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod selected_task_facts;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod source_content_geometry;
 #[cfg(feature = "semantic-policy")]
@@ -523,12 +529,17 @@ fn task_content_read(
 /// Transferable native ownership does not make arbitrary Python finalizers safe
 /// on workers. Native completion retains serialized access without running
 /// arbitrary Python finalizers.
+#[derive(Default)]
+struct EditableSessionSource {
+    program: Option<Arc<cold_task::EditableProgramOwner>>,
+    observer_source: Option<String>,
+    initial_source: Option<String>,
+}
+
 #[pyclass(name = "SemanticTransitionSession", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionSession {
     inner: Arc<Mutex<Option<SemanticTransitionSession>>>,
-    editable_observer_source: Option<String>,
-    editable_initial_source: Option<String>,
-    editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
+    editable_source: Mutex<EditableSessionSource>,
     importing: Arc<AtomicBool>,
     recording: AtomicBool,
     retiring: AtomicBool,
@@ -562,11 +573,111 @@ pub(crate) struct PySemanticTransitionSession {
     // Retain the actual cold source before the first dependent allocation,
     // including the interval before a TaskCheckpointSeed exists.
     training_canary_owner: Mutex<Option<TrainingCanaryOwner>>,
+    detached_cold_context: Mutex<Option<Arc<xlog_cuda::SemanticDetachedColdTaskContext>>>,
+    evaluation_source_registry: Mutex<Option<Arc<material_source::MaterialSourceRegistry>>>,
     owner_thread: ThreadId,
     device_ordinal: usize,
     capacities: (u32, u32, u32, u32),
     admission_limits: (u32, u32, u32, usize),
     memory_bytes: u64,
+}
+
+impl PySemanticTransitionSession {
+    fn evaluation_source_registry(&self) -> PyResult<Arc<material_source::MaterialSourceRegistry>> {
+        self.require_creator()?;
+        self.evaluation_source_registry
+            .lock()
+            .map_err(|_| invalid("evaluation source material owner is poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| invalid("evaluation context has no original source material owner"))
+    }
+
+    fn retain_evaluation_source_registry(
+        &self,
+        source: Arc<material_source::MaterialSourceRegistry>,
+    ) -> PyResult<()> {
+        self.require_creator()?;
+        if self.issuance.load(Ordering::Acquire) != 0
+            || self.importing.load(Ordering::Acquire)
+            || self.recording.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "evaluation source custody must precede task import",
+            ));
+        }
+        let mut retained = self
+            .evaluation_source_registry
+            .lock()
+            .map_err(|_| invalid("evaluation source material owner is poisoned"))?;
+        if let Some(original) = retained.as_ref() {
+            if !Arc::ptr_eq(original, &source) {
+                return Err(invalid(
+                    "evaluation context changed its original source material owner",
+                ));
+            }
+        } else {
+            *retained = Some(source);
+        }
+        Ok(())
+    }
+
+    fn detached_training_canary_source(
+        &self,
+    ) -> PyResult<Option<Arc<xlog_cuda::SemanticTrainingCanarySource>>> {
+        self.require_creator()?;
+        Ok(self
+            .detached_cold_context
+            .lock()
+            .map_err(|_| invalid("detached cold context owner is poisoned"))?
+            .as_ref()
+            .map(|context| context.training_canary_source()))
+    }
+
+    fn detached_allocation_domain(&self) -> PyResult<Option<CheckpointAllocationDomain>> {
+        self.require_creator()?;
+        Ok(self
+            .detached_cold_context
+            .lock()
+            .map_err(|_| invalid("detached cold context owner is poisoned"))?
+            .as_ref()
+            .map(|context| {
+                let (provider, domain) = context.allocation_domain();
+                CheckpointAllocationDomain {
+                    provider,
+                    domain,
+                    #[cfg(feature = "semantic-policy")]
+                    cold_work: None,
+                }
+            }))
+    }
+
+    fn editable_source(&self) -> PyResult<MutexGuard<'_, EditableSessionSource>> {
+        self.require_creator()?;
+        self.editable_source
+            .lock()
+            .map_err(|_| invalid("editable task source owner is poisoned"))
+    }
+
+    fn install_editable_source(&self, source: &cold_task::EditableTaskSource) -> PyResult<()> {
+        self.require_creator()?;
+        if self.issuance.load(Ordering::Acquire) != 0
+            || self.importing.load(Ordering::Acquire)
+            || self.recording.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "editable task source must be prepared before task import or recording",
+            ));
+        }
+        *self.editable_source()? = EditableSessionSource {
+            program: Some(source.program_owner()),
+            observer_source: source.observer_source.clone(),
+            initial_source: Some(source.initial_source.clone()),
+        };
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1215,6 +1326,17 @@ impl PySemanticTransitionSession {
             let live = guard
                 .as_mut()
                 .ok_or_else(|| invalid("private native Session was already released"))?;
+            let mut cold = self
+                .detached_cold_context
+                .lock()
+                .map_err(|_| invalid("detached cold context owner is poisoned"))?;
+            if cold.is_none() {
+                *cold = live
+                    .detach_cold_task_context()
+                    .map_err(xlog_err)?
+                    .map(Arc::new);
+            }
+            drop(cold);
             live.join_retired_publication_release(&*parent.lease()?)
                 .map_err(xlog_err)?;
             // Invalidate original task aliases before any released Python
@@ -1383,14 +1505,15 @@ impl PySemanticTransitionSession {
     ) -> Self {
         Self {
             inner,
-            editable_program: editable_source
-                .as_ref()
-                .map(|source| source.program_owner()),
-            editable_initial_source: editable_source
-                .as_ref()
-                .map(|source| source.initial_source.clone()),
-            editable_observer_source: editable_source
-                .and_then(|source| source.observer_source.clone()),
+            editable_source: Mutex::new(EditableSessionSource {
+                program: editable_source
+                    .as_ref()
+                    .map(|source| source.program_owner()),
+                initial_source: editable_source
+                    .as_ref()
+                    .map(|source| source.initial_source.clone()),
+                observer_source: editable_source.and_then(|source| source.observer_source.clone()),
+            }),
             importing: Arc::new(AtomicBool::new(false)),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
@@ -1422,6 +1545,8 @@ impl PySemanticTransitionSession {
             checkpoint_sources,
             material_sources,
             training_canary_owner: Mutex::new(training_canary_owner),
+            detached_cold_context: Mutex::new(None),
+            evaluation_source_registry: Mutex::new(None),
             owner_thread: std::thread::current().id(),
             device_ordinal,
             capacities,
@@ -2476,47 +2601,13 @@ fn resolve_replay_checkpoint_referents(
                     {
                         return Err(invalid("checkpoint source exceeds its original item cap"));
                     }
-                    let budget = material_sources.native_budget()?;
-                    let callback_extent = python_metadata_tuple_extent(py, 3)?
-                        .checked_add(material_bytes::python_instance_extent::<PyBytes>(py)?)
-                        .and_then(|n| n.checked_add(referent.checkpoint_digest.len() + 1))
-                        .and_then(|n| {
-                            n.checked_add(material_bytes::python_instance_extent::<PyInt>(py).ok()?)
-                        })
-                        .and_then(|n| {
-                            n.checked_add(std::mem::size_of::<u64>() * std::mem::size_of::<u32>())
-                        })
-                        .ok_or_else(|| {
-                            invalid("checkpoint loader callback metadata extent overflow")
-                        })?;
-                    let _callback_metadata = budget
-                        .reserve_auxiliary(u64::try_from(callback_extent).map_err(|_| {
-                            invalid("checkpoint loader callback metadata exceeds u64")
-                        })?)
-                        .map_err(xlog_err)?;
-                    let writer = material_bytes::PySemanticMaterialWriter::prepare(
+                    let source = evaluation_source_checkpoint::load_checkpoint_source(
                         py,
-                        &budget,
-                        usize::try_from(referent.checkpoint_bytes)
-                            .map_err(|_| invalid("checkpoint source extent exceeds this host"))?,
-                        0,
+                        referent,
+                        &material_sources,
+                        resolver,
+                        limits,
                     )?;
-                    let source = resolver.call1((
-                        PyBytes::new(py, &referent.checkpoint_digest),
-                        referent.checkpoint_bytes,
-                        writer.clone_ref(py),
-                    ))?;
-                    let source = writer.borrow(py).require_sealed_material(py, &source)?;
-                    if source.as_bytes().len() > item_limit
-                        || u64::try_from(source.as_bytes().len()).ok()
-                            != Some(referent.checkpoint_bytes)
-                    {
-                        return Err(invalid(
-                            "resolved checkpoint differs from its sealed extent or item cap",
-                        ));
-                    }
-                    referent.verify_source_identity(source.as_bytes())?;
-                    writer.borrow(py).complete_producer()?;
                     let source = checkpoint_sources
                         .lock()
                         .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?
@@ -3123,9 +3214,41 @@ impl PySemanticTransitionSession {
         let mut native_state = original_loaded
             .slice_payload(checkpoint_section_range(raw, manifest.native)?)
             .map_err(xlog_err)?;
+        let evaluation_source_registry = if seed.dormant_evaluation_source.is_some() {
+            Some(original_task_use.as_ref()
+                .ok_or_else(|| invalid("evaluation checkpoint requires its freshly imported original cold context"))?
+                .borrow(py).session.borrow(py).evaluation_source_registry()?)
+        } else {
+            None
+        };
+        let evaluation_snapshots = if let Some(dormant) = &seed.dormant_evaluation_source {
+            Some(evaluation_source_checkpoint::bind_dormant_source(
+                py,
+                &mut native_state,
+                dormant,
+                evaluation_source_registry
+                    .as_ref()
+                    .expect("checked original source registry"),
+                snapshot,
+                resolve_checkpoint,
+                max_checkpoint_bytes,
+                max_total_checkpoint_bytes,
+                refresh_snapshot,
+            )?)
+        } else {
+            None
+        };
+        let snapshot = evaluation_snapshots
+            .as_ref()
+            .map_or(snapshot, |pair| pair.bind(py));
+        let checkpoint_target_snapshot = if seed.dormant_evaluation_source.is_some() {
+            Some(evaluation_authority_snapshots(snapshot)?.1)
+        } else {
+            None
+        };
         let closure = learning_phase::cold_restore::read_checkpoint_restore_closure_bound(
             raw,
-            Some(snapshot),
+            Some(checkpoint_target_snapshot.as_ref().unwrap_or(snapshot)),
             learning_phase_issuer,
             learning_phase_records,
             learning_phase_record_limits,
@@ -3216,6 +3339,7 @@ impl PySemanticTransitionSession {
             None,
             Some(native_state),
             model_context.as_ref(),
+            evaluation_source_registry.as_ref(),
         )?;
         let origin = Sha256::digest(raw).into();
         let restored_owner = restored.borrow(py);
@@ -3827,6 +3951,7 @@ impl PySemanticTransitionSession {
         >,
         loaded_native: Option<xlog_cuda::SemanticReplayLoadedMaterial>,
         model_context: Option<&xlog_cuda::SemanticFrozenModelContext>,
+        evaluation_source_registry: Option<&Arc<material_source::MaterialSourceRegistry>>,
     ) -> PyResult<Py<PySemanticTransitionRestoredCheckpoint>> {
         if learning_transition.is_some() && learning_owner.is_none() {
             return Err(invalid(
@@ -3880,6 +4005,15 @@ impl PySemanticTransitionSession {
         })?;
         let (mut seed, saved_snapshot, phase, saved_binding) =
             TaskCheckpointSeed::decode_bound(manifest.task, original)?;
+        let evaluation_fork = seed.dormant_evaluation_source.is_some();
+        let fork_snapshots = seed
+            .dormant_evaluation_source
+            .as_ref()
+            .map(|_| evaluation_authority_snapshots(snapshot))
+            .transpose()?;
+        let snapshot = fork_snapshots
+            .as_ref()
+            .map_or(snapshot, |(_, target)| target);
         let mut native_state = match loaded_native {
             Some(original) => {
                 original
@@ -3897,6 +4031,60 @@ impl PySemanticTransitionSession {
                 .slice_payload(checkpoint_section_range(checkpoint, manifest.native)?)
                 .map_err(xlog_err)?,
         };
+        let native_proof = native_state.checkpoint_proof().map_err(xlog_err)?;
+        let evaluation_refresh = match (
+            &seed.dormant_evaluation_source,
+            native_proof.evaluation_fork_origin(),
+        ) {
+            (None, None) => None,
+            (Some(source), Some(origin)) => {
+                let registry = evaluation_source_registry.ok_or_else(|| {
+                    invalid("evaluation restore requires its original source material owner")
+                })?;
+                let source_snapshot = &fork_snapshots.as_ref().expect("checked source snapshots").0;
+                source.require_native(Some(origin), source_snapshot, registry)?;
+                refresh_snapshot
+                    .map(|callback| {
+                        let bytes = u64::try_from(source_snapshot.canonical.len())
+                            .ok()
+                            .and_then(|bytes| bytes.checked_mul(4))
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    std::mem::size_of::<EvaluationAuthorityRefresh>() as u64
+                                )
+                            })
+                            .ok_or_else(|| {
+                                invalid("evaluation authority refresh metadata extent overflow")
+                            })?;
+                        let metadata = registry
+                            .native_budget()?
+                            .reserve_auxiliary(bytes)
+                            .map_err(xlog_err)?;
+                        Py::new(
+                            py,
+                            EvaluationAuthorityRefresh {
+                                callback: callback.clone().unbind(),
+                                source: Arc::clone(source),
+                                origin: Arc::new(origin.clone()),
+                                registry: Arc::clone(registry),
+                                last_snapshot: Mutex::new(source_snapshot.clone()),
+                                owner_thread: std::thread::current().id(),
+                                _metadata: metadata,
+                            },
+                        )
+                    })
+                    .transpose()?
+            }
+            _ => {
+                return Err(invalid(
+                    "evaluation source metadata and native archive differ in presence",
+                ))
+            }
+        };
+        let refresh_snapshot = evaluation_refresh
+            .as_ref()
+            .map(|callback| callback.bind(py).as_any())
+            .or(refresh_snapshot);
         let (canary_source, canary_owner, canary_projection) =
             read_training_canary_source(py, training_canary_source)?;
         if canary_projection != seed.training_canary_source {
@@ -3997,7 +4185,7 @@ impl PySemanticTransitionSession {
             .map(|source| source.initial_source.as_str());
         let editable_program = editable_source
             .as_ref()
-            .map(|source| Arc::clone(&source.program));
+            .map(|source| source.program_owner());
         let spec = task_evaluation_spec_with_allocation_owner(
             &seed.evaluation,
             authority.priority_levels.clone(),
@@ -4136,6 +4324,9 @@ impl PySemanticTransitionSession {
             canary_source.clone().zip(canary_owner.clone()),
             seed.native_model_context.as_ref(),
         )?;
+        if let Some(registry) = evaluation_source_registry {
+            restored_session.retain_evaluation_source_registry(Arc::clone(registry))?;
+        }
         let session = Py::new(py, restored_session)?;
         session
             .borrow(py)
@@ -4274,7 +4465,7 @@ impl PySemanticTransitionSession {
                 #[cfg(feature = "semantic-policy")]
                 frozen_model_context: AtomicBool::new(false),
                 state: Mutex::new(TaskUseState {
-                    phase: if learning_owner.is_some() {
+                    phase: if learning_owner.is_some() || evaluation_fork {
                         TaskUsePhase::ArenaPreparing(Box::new(task_phase))
                     } else {
                         task_phase
@@ -4391,7 +4582,7 @@ impl PySemanticTransitionSession {
         };
         #[cfg(feature = "semantic-policy")]
         let model_context_return = (|| -> PyResult<_> {
-            if manifest.model_context.is_empty() {
+            if manifest.model_context.is_empty() && !evaluation_fork {
                 return Ok((model, None));
             }
             let returned = model.bind(py);
@@ -4417,6 +4608,53 @@ impl PySemanticTransitionSession {
                 return Err(invalid(
                     "restored model context requires immutable complete typed and backing rosters",
                 ));
+            }
+            if evaluation_fork {
+                let stream = session
+                    .borrow(py)
+                    .owner()?
+                    .evaluation_fork_consumer_stream()
+                    .map_err(xlog_err)?;
+                let check = || -> PyResult<()> {
+                    let restored = session.borrow(py);
+                    restored.require_creator()?;
+                    let issued = task_use.borrow(py);
+                    issued.require_current(&restored.owner()?)?;
+                    parent.borrow(py).require_task(py, &issued)
+                };
+                let mut budget = 16 * 1024 * 1024;
+                let typed = parse_tensor_inputs_guarded(
+                    &tensors,
+                    &mut budget,
+                    device_ordinal,
+                    stream,
+                    &check,
+                )?;
+                let backing = parse_tensor_inputs_guarded(
+                    &allocations,
+                    &mut budget,
+                    device_ordinal,
+                    stream,
+                    &check,
+                )?;
+                let mut inputs = typed.handoff.into_native();
+                inputs.extend(backing.handoff.into_native());
+                let mut producers = typed.producers;
+                producers.extend(backing.producers);
+                check()?;
+                let restored = session.borrow(py);
+                let acquired = parent.borrow(py);
+                restored
+                    .owner()?
+                    .require_evaluation_fork_model_roster(&*acquired.lease()?, inputs, stream)
+                    .map_err(xlog_err)?;
+                *parent
+                    .borrow(py)
+                    .continuation_producers
+                    .lock()
+                    .map_err(|_| {
+                        invalid("restored evaluation model producer custody is poisoned")
+                    })? = producers;
             }
             Ok((selected, Some((tensors.unbind(), allocations.unbind()))))
         })();
@@ -4507,6 +4745,11 @@ impl PySemanticTransitionSession {
                     )
                     .map_err(xlog_err)?;
             }
+            if evaluation_fork {
+                owner
+                    .release_evaluation_fork_source_archive(&*acquired.lease()?)
+                    .map_err(xlog_err)?;
+            }
             Ok(())
         })();
         if let Err(error) = verified {
@@ -4531,6 +4774,14 @@ impl PySemanticTransitionSession {
                 .lock()
                 .map_err(|_| invalid("restored model context roster custody is poisoned"))? =
                 model_context_rosters;
+        }
+        if evaluation_fork {
+            restored
+                .borrow(py)
+                .task_use
+                .borrow(py)
+                .state()?
+                .finish_arena_preparation()?;
         }
         Ok(restored)
     }
@@ -5136,7 +5387,8 @@ struct SegmentInstructionCustody {
     transitions: Vec<SemanticTransitionKind>,
     cold_capacity: SemanticSegmentColdCapacity,
     replay_model_backings: Arc<xlog_cuda::SemanticReplayModelBackings>,
-    cancelled_checkpoint: Option<Arc<cancelled_checkpoint::OriginalCancelledCheckpointCustody>>,
+    cancelled_checkpoint:
+        Mutex<Option<Arc<cancelled_checkpoint::OriginalCancelledCheckpointCustody>>>,
     preparation: Mutex<SegmentInstructionPreparation>,
 }
 
@@ -5194,6 +5446,17 @@ impl SegmentInstructionCustody {
         self.preparation
             .lock()
             .map_err(|_| invalid("original instruction custody mutex is poisoned"))
+    }
+
+    fn checkpoint_source(
+        &self,
+    ) -> PyResult<Option<Arc<cancelled_checkpoint::OriginalCancelledCheckpointCustody>>> {
+        Ok(self
+            .cancelled_checkpoint
+            .lock()
+            .map_err(|_| invalid("original checkpoint custody mutex is poisoned"))?
+            .as_ref()
+            .map(Arc::clone))
     }
 
     fn freeze_original_imports(&self, py: Python<'_>, has_callback: bool) -> PyResult<()> {
@@ -5425,8 +5688,7 @@ impl SegmentInstructionCustody {
         let session = self.session.borrow(py);
         let task = self.task_use.borrow(py);
         let checkpoint = self
-            .cancelled_checkpoint
-            .as_ref()
+            .checkpoint_source()?
             .ok_or_else(|| invalid("ordinary cancelled instruction lost its source checkpoint"))?;
         checkpoint.seal(&session, &task, &mut *session.owner()?, &self.inner)?;
         // Cache the positive terminal bytes before either the public task state
@@ -5506,7 +5768,7 @@ impl PySemanticSegmentInstructionAdmission {
     ) -> PyResult<Option<Py<material_bytes::PySemanticMaterialBytes>>> {
         self.inner.session.borrow(py).require_creator()?;
         self.inner
-            .cancelled_checkpoint
+            .checkpoint_source()?
             .as_ref()
             .map(|original| original.sealed_bytes(py))
             .transpose()
@@ -10580,7 +10842,7 @@ fn task_ground_value(value: &ColdValue) -> PyResult<xlog_cuda::SemanticTaskGroun
 fn task_evaluation_spec(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
-    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
@@ -10597,7 +10859,7 @@ fn task_evaluation_spec(
 fn task_evaluation_spec_with_allocation_owner(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
-    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
     material_sources: &material_source::MaterialSourceRegistry,
@@ -10615,7 +10877,7 @@ fn task_evaluation_spec_with_allocation_owner(
 fn task_evaluation_spec_owned(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
-    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
     material_sources: Option<&material_source::MaterialSourceRegistry>,
@@ -10649,7 +10911,7 @@ fn task_evaluation_spec_owned(
 fn task_evaluation_spec_core(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
-    editable_program: Option<Arc<SemanticProgramAdmission>>,
+    editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
     material_budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
@@ -10800,7 +11062,7 @@ fn task_evaluation_spec_core(
                 .enumerate()
                 .all(|(index, ordinal)| *ordinal == index),
         };
-        if editable.query_records != statement_records || !original_queries {
+        if editable.program.query_records != statement_records || !original_queries {
             return Err(invalid("editable task requires its original admitted query selection and source query order"));
         }
     }
@@ -10833,6 +11095,16 @@ fn task_evaluation_spec_core(
         admissible_truth_masks.push(mask(original_mask)?);
     }
     let actor_eligible = values[6].boolean()?;
+    if matches!(task_ground, xlog_cuda::SemanticTaskGround::Logical) {
+        let offset = editable_program
+            .as_ref()
+            .map_or(0, |owner| owner.observer_record_offset as usize);
+        for ordinal in &mut query_ordinals {
+            *ordinal = ordinal.checked_sub(offset).ok_or_else(|| {
+                invalid("task observer query precedes its original context record range")
+            })?;
+        }
+    }
     let mut program = match material_budget {
         Some(budget) => {
             let sources = material_sources.expect("owned compiler retains its original registry");
@@ -10877,7 +11149,7 @@ fn task_evaluation_spec_core(
         program = program.retain_allocation_owner(owner);
     }
     if let Some(editable) = editable_program {
-        program = program.with_editable_program(editable);
+        program = program.with_editable_program(Arc::clone(&editable.program));
     }
     let program = Arc::new(program);
     Ok(xlog_cuda::SemanticTaskEvaluationSpec {
@@ -12475,6 +12747,311 @@ struct TaskCheckpointSeed {
     checkpoint_sources: Arc<Mutex<CheckpointSources>>,
     material_sources: Arc<material_source::MaterialSourceRegistry>,
     material_metadata: Option<Arc<xlog_cuda::SemanticReplayMaterialReservation>>,
+    dormant_evaluation_source: Option<Arc<DormantEvaluationSource>>,
+}
+
+struct DormantEvaluationSource {
+    value: ColdValue,
+    source_material_sources: Option<Arc<material_source::MaterialSourceRegistry>>,
+    last_snapshot: Mutex<Option<SourceUseSnapshot>>,
+    validating: AtomicBool,
+    authenticated: Mutex<Option<Arc<evaluation_authority::AuthenticatedSourceAuthority>>>,
+    _metadata: Option<Arc<xlog_cuda::SemanticReplayMaterialReservation>>,
+}
+
+#[derive(Clone)]
+struct SourceUseSnapshot {
+    canonical: Arc<[u8]>,
+    _metadata: Option<Arc<xlog_cuda::SemanticReplayMaterialReservation>>,
+}
+
+fn evaluation_authority_snapshots<'py>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<(AuthoritySnapshot, Bound<'py, PyAny>)> {
+    if !value.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid(
+            "evaluation authority requires the original source and target snapshot tuple",
+        ));
+    }
+    let pair = value.cast::<PyTuple>()?;
+    if pair.len() != 2 {
+        return Err(invalid(
+            "evaluation authority requires exactly source and target snapshots",
+        ));
+    }
+    let source = AuthoritySnapshot::parse(&ColdValue::read(
+        &pair.get_item(0)?,
+        &mut (16 * 1024 * 1024),
+        0,
+    )?)?;
+    Ok((source, pair.get_item(1)?))
+}
+
+#[pyclass(frozen)]
+struct EvaluationAuthorityRefresh {
+    callback: Py<PyAny>,
+    source: Arc<DormantEvaluationSource>,
+    origin: Arc<xlog_cuda::SemanticEvaluationForkOrigin>,
+    registry: Arc<material_source::MaterialSourceRegistry>,
+    last_snapshot: Mutex<AuthoritySnapshot>,
+    owner_thread: ThreadId,
+    _metadata: xlog_cuda::SemanticReplayMaterialReservation,
+}
+
+#[pymethods]
+impl EvaluationAuthorityRefresh {
+    fn __call__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.owner_thread != std::thread::current().id() {
+            return Err(invalid(
+                "evaluation authority refresh belongs to its original caller thread",
+            ));
+        }
+        let value = self.callback.bind(py).call0()?;
+        let (source, target) = evaluation_authority_snapshots(&value)?;
+        let previous = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?
+            .clone();
+        source.newer_than(&previous)?;
+        self.source
+            .require_native(Some(&self.origin), &source, &self.registry)?;
+        let mut retained = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?;
+        if retained.canonical != previous.canonical {
+            return Err(invalid(
+                "evaluation source authority changed during its original refresh",
+            ));
+        }
+        *retained = source;
+        Ok(target.unbind())
+    }
+}
+
+impl DormantEvaluationSource {
+    fn require_current_source_snapshot(
+        &self,
+        snapshot: &AuthoritySnapshot,
+        budget: &xlog_cuda::SemanticReplayMaterialBudget,
+    ) -> PyResult<()> {
+        let previous = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?
+            .clone();
+        if let Some(previous) = previous {
+            if previous.canonical.as_ref() == snapshot.canonical.as_slice() {
+                return Ok(());
+            }
+            let (_, bytes, nodes) = ColdValue::checked_canonical_bytes(&previous.canonical, false)?;
+            let extent = nodes
+                .checked_mul(std::mem::size_of::<ColdValue>())
+                .and_then(|n| n.checked_add(bytes))
+                .and_then(|n| n.checked_add(previous.canonical.len()))
+                .and_then(|n| n.checked_mul(3))
+                .ok_or_else(|| invalid("source authority parse extent overflow"))?;
+            let _metadata = budget
+                .reserve_auxiliary(
+                    u64::try_from(extent)
+                        .map_err(|_| invalid("source authority parse exceeds u64"))?,
+                )
+                .map_err(xlog_err)?;
+            let prior =
+                AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(&previous.canonical)?)?;
+            snapshot.newer_than(&prior)?;
+        }
+        Ok(())
+    }
+
+    fn from_checkpoint(
+        checkpoint: &[u8],
+        source: &VerifiedCheckpointSource,
+    ) -> PyResult<Arc<Self>> {
+        source.referent.verify_source_identity(checkpoint)?;
+        if source.seed.dormant_evaluation_source.is_some() {
+            return Err(invalid(
+                "an evaluation fork cannot become another evaluation source",
+            ));
+        }
+        let manifest = SemanticCheckpointManifest::decode_borrowed(checkpoint)?;
+        let sections = [
+            manifest.model,
+            manifest.task,
+            manifest.session,
+            manifest.initial_prefill,
+            manifest.model_context,
+            manifest.phase_seal,
+        ];
+        let referent = source.referent.encode();
+        let bytes = sections
+            .iter()
+            .try_fold(referent.len(), |total, section| {
+                total.checked_add(section.len())
+            })
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    std::mem::size_of::<Self>()
+                        + 7 * (std::mem::size_of::<ColdValue>() + 2 * std::mem::size_of::<usize>()),
+                )
+            })
+            .ok_or_else(|| invalid("evaluation source metadata extent overflow"))?;
+        let reservation = source
+            .seed
+            .material_sources
+            .native_budget()?
+            .reserve_auxiliary(
+                u64::try_from(bytes)
+                    .map_err(|_| invalid("evaluation source metadata exceeds u64"))?,
+            )
+            .map_err(xlog_err)?;
+        let mut fields = Vec::with_capacity(7);
+        fields.push(ColdValue::Bytes(Arc::from(referent)));
+        for section in sections {
+            fields.push(ColdValue::Bytes(Arc::from(section)));
+        }
+        Ok(Arc::new(Self {
+            value: ColdValue::Sequence(fields),
+            source_material_sources: Some(Arc::clone(&source.seed.material_sources)),
+            last_snapshot: Mutex::new(None),
+            validating: AtomicBool::new(false),
+            authenticated: Mutex::new(None),
+            _metadata: Some(Arc::new(reservation)),
+        }))
+    }
+
+    fn from_value(value: &ColdValue) -> PyResult<Option<Arc<Self>>> {
+        if *value == ColdValue::None {
+            return Ok(None);
+        }
+        let fields = value.fields(8)?;
+        for field in &fields[..7] {
+            if !matches!(field, ColdValue::Bytes(_)) {
+                return Err(invalid(
+                    "dormant evaluation source requires its original checkpoint sections",
+                ));
+            }
+        }
+        let ColdValue::Bytes(referent) = &fields[0] else {
+            unreachable!()
+        };
+        CheckpointReferent::decode(referent)?;
+        let ColdValue::Bytes(latest) = &fields[7] else {
+            return Err(invalid(
+                "evaluation checkpoint lost its latest source authority snapshot",
+            ));
+        };
+        ColdValue::checked_canonical_bytes(latest, false)?;
+        Ok(Some(Arc::new(Self {
+            value: ColdValue::Sequence(fields[..7].to_vec()),
+            source_material_sources: None,
+            last_snapshot: Mutex::new(Some(SourceUseSnapshot {
+                canonical: Arc::clone(latest),
+                _metadata: None,
+            })),
+            validating: AtomicBool::new(false),
+            authenticated: Mutex::new(None),
+            _metadata: None,
+        })))
+    }
+
+    fn write_checkpoint(&self, out: &mut CheckpointColdWriter) -> PyResult<()> {
+        let latest = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                invalid("evaluation checkpoint requires its accepted source authority snapshot")
+            })?;
+        out.sequence(8)?;
+        for field in self.value.fields(7)? {
+            out.value(field)?;
+        }
+        out.scalar(5, &latest.canonical)
+    }
+
+    fn require_native(
+        &self,
+        origin: Option<&xlog_cuda::SemanticEvaluationForkOrigin>,
+        snapshot: &AuthoritySnapshot,
+        source_registry: &Arc<material_source::MaterialSourceRegistry>,
+    ) -> PyResult<Arc<TaskAuthority>> {
+        self.validating
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid("evaluation source authority validation cannot be nested"))?;
+        let _validation = PreparedRetirementGuard(&self.validating);
+        let previous = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?
+            .clone();
+        let pool = source_registry.native_budget()?;
+        let _snapshot_parse = previous
+            .as_ref()
+            .map(|previous| {
+                let (_, bytes, nodes) =
+                    ColdValue::checked_canonical_bytes(&previous.canonical, false)?;
+                let extent = nodes
+                    .checked_mul(std::mem::size_of::<ColdValue>())
+                    .and_then(|n| n.checked_add(bytes))
+                    .and_then(|n| n.checked_add(previous.canonical.len()))
+                    .and_then(|n| n.checked_mul(3))
+                    .ok_or_else(|| invalid("source authority parse extent overflow"))?;
+                pool.reserve_auxiliary(
+                    u64::try_from(extent)
+                        .map_err(|_| invalid("source authority parse exceeds u64"))?,
+                )
+                .map_err(xlog_err)
+            })
+            .transpose()?;
+        if let Some(previous) = &previous {
+            let prior =
+                AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(&previous.canonical)?)?;
+            if snapshot.canonical != prior.canonical {
+                snapshot.newer_than(&prior)?;
+            }
+        }
+        let origin = origin
+            .ok_or_else(|| invalid("evaluation checkpoint lost its native source archive"))?;
+        let authenticated = evaluation_authority::authenticate(self, origin, source_registry)?;
+        let saved = &authenticated.saved_snapshot;
+        let authority = Arc::clone(&authenticated.authority);
+        snapshot.newer_than(&saved)?;
+        authority.check_use("inference", &saved, false)?;
+        authority.check_use("inference", snapshot, false)?;
+        let bytes = snapshot
+            .canonical
+            .len()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .ok_or_else(|| invalid("source authority snapshot extent overflow"))?;
+        let metadata = pool
+            .reserve_auxiliary(
+                u64::try_from(bytes)
+                    .map_err(|_| invalid("source authority snapshot exceeds u64"))?,
+            )
+            .map_err(xlog_err)?;
+        let current = SourceUseSnapshot {
+            canonical: Arc::from(snapshot.canonical.as_slice()),
+            _metadata: Some(Arc::new(metadata)),
+        };
+        let mut retained = self
+            .last_snapshot
+            .lock()
+            .map_err(|_| invalid("evaluation source snapshot owner is poisoned"))?;
+        if retained.as_ref().map(|last| last.canonical.as_ref())
+            != previous.as_ref().map(|last| last.canonical.as_ref())
+        {
+            return Err(invalid(
+                "evaluation source authority changed during its original validation",
+            ));
+        }
+        *retained = Some(current);
+        Ok(authority)
+    }
 }
 
 struct EncodedTaskCheckpoint {
@@ -12511,6 +13088,46 @@ impl TrainingArenaObservation {
         self.state
             .lock()
             .map_err(|_| invalid("original training arena observation is poisoned"))
+    }
+}
+
+impl PySemanticTransitionTaskUse {
+    fn read_authority_snapshot(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        budget: &mut usize,
+    ) -> PyResult<AuthoritySnapshot> {
+        let Some(source) = &self.checkpoint.dormant_evaluation_source else {
+            return AuthoritySnapshot::parse(&ColdValue::read(value, budget, 0)?);
+        };
+        let (source_snapshot, target) = evaluation_authority_snapshots(value)?;
+        let target = AuthoritySnapshot::parse(&ColdValue::read(&target, budget, 0)?)?;
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let registry = session.evaluation_source_registry()?;
+        let origin = {
+            let owner = session.owner()?;
+            self.require_current(&owner)?;
+            owner.evaluation_fork_origin().map_err(xlog_err)?
+        };
+        let authority = source.require_native(origin.as_ref(), &source_snapshot, &registry)?;
+        let horizon = target
+            .segment_end
+            .micros
+            .max(source_snapshot.observed_at.micros);
+        if authority
+            .live
+            .iter()
+            .any(|live| live.retention_micros <= horizon)
+        {
+            return Err(invalid(
+                "retained source authority expires before the target segment boundary",
+            ));
+        }
+        authority.check_grants(&authority.publication, &source_snapshot, horizon)?;
+        authority.check_grants(&authority.inference, &source_snapshot, horizon)?;
+        Ok(target)
     }
 }
 
@@ -12649,6 +13266,12 @@ fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> 
 }
 
 impl TaskCheckpointSeed {
+    fn with_dormant_evaluation_source(&self, source: Arc<DormantEvaluationSource>) -> Self {
+        let mut seed = self.clone();
+        seed.dormant_evaluation_source = Some(source);
+        seed
+    }
+
     fn bind_material_payloads(&mut self) -> PyResult<()> {
         self.authority[3] = self.material_sources.bind_values(&self.authority[3])?;
         {
@@ -12822,7 +13445,7 @@ impl TaskCheckpointSeed {
             self.material_sources.checkpoint_value()?;
         let write = |out: &mut CheckpointColdWriter| -> PyResult<()> {
             out.header()?;
-            out.sequence(20)?;
+            out.sequence(21)?;
             for values in [&self.authority, &self.evaluation] {
                 out.sequence(values.len())?;
                 for value in values {
@@ -12883,7 +13506,11 @@ impl TaskCheckpointSeed {
             } else {
                 out.append(&[0])?;
             }
-            out.value(&material_sources)
+            out.value(&material_sources)?;
+            match &self.dormant_evaluation_source {
+                Some(source) => source.write_checkpoint(out),
+                None => out.value(&ColdValue::None),
+            }
         };
         let mut count = CheckpointColdWriter::default();
         write(&mut count)?;
@@ -12943,7 +13570,7 @@ impl TaskCheckpointSeed {
         TaskCheckpointBinding,
     )> {
         let value = checkpoint_cold_value(bytes, bytes.len())?;
-        let fields = value.fields(20)?;
+        let fields = value.fields(21)?;
         let actor_refresh_assignments = match &fields[18] {
             ColdValue::None => None,
             ColdValue::Bytes(bytes) => Some(Arc::clone(bytes)),
@@ -13021,6 +13648,7 @@ impl TaskCheckpointSeed {
                     &fields[19],
                 )?),
                 material_metadata: None,
+                dormant_evaluation_source: DormantEvaluationSource::from_value(&fields[20])?,
             },
             AuthoritySnapshot::parse(&fields[6])?,
             phase,
@@ -13411,6 +14039,31 @@ struct TaskIssuance {
 }
 
 impl TaskIssuance {
+    fn prepare(counter: Arc<AtomicU64>) -> PyResult<Self> {
+        let generation = counter
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| invalid("native task issuance generation is exhausted"))?;
+        Ok(Self {
+            counter,
+            generation,
+        })
+    }
+
+    fn activate(&self) -> PyResult<()> {
+        self.counter
+            .compare_exchange(
+                self.generation - 1,
+                self.generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| {
+                invalid("prepared native task issuance changed before its original handoff")
+            })
+    }
+
     fn issue(counter: Arc<AtomicU64>) -> PyResult<Self> {
         let previous = counter
             .try_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
@@ -15396,6 +16049,8 @@ impl PySemanticCompletedTheoryDelta {
 pub(crate) struct PySemanticCompletedTaskFacts {
     slot: usize,
     inner: xlog_cuda::SemanticTaskFacts,
+    _metadata: Option<xlog_cuda::SemanticReplayMaterialReservation>,
+    _selected_owner: Option<Arc<xlog_cuda::SemanticSelectedTaskFacts>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -15712,7 +16367,17 @@ impl PySemanticCompletedTaskGround {
             .iter()
             .cloned()
             .enumerate()
-            .map(|(slot, inner)| Py::new(py, PySemanticCompletedTaskFacts { slot, inner }))
+            .map(|(slot, inner)| {
+                Py::new(
+                    py,
+                    PySemanticCompletedTaskFacts {
+                        slot,
+                        inner,
+                        _metadata: None,
+                        _selected_owner: None,
+                    },
+                )
+            })
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, facts).map(Bound::unbind)
     }
@@ -20972,14 +21637,13 @@ impl PySemanticTransitionController {
     fn structural_cost_descriptor(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);
         session.require_creator()?;
-        let query_count = session.editable_program.as_ref().map_or(Ok(0), |program| {
+        let editable = session.editable_source()?;
+        let query_count = editable.program.as_ref().map_or(Ok(0), |program| {
             u32::try_from(program.program.query_records.len())
                 .map_err(|_| invalid("original editable query roster exceeds u32"))
         })?;
-        let descriptor = xlog_cuda::semantic_structural_cost_descriptor(
-            session.editable_program.is_some(),
-            query_count,
-        );
+        let descriptor =
+            xlog_cuda::semantic_structural_cost_descriptor(editable.program.is_some(), query_count);
         Ok(
             (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
                 .into_pyobject(py)?
@@ -21069,14 +21733,14 @@ impl PySemanticTransitionController {
             transitions,
             cold_capacity,
             replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
-            cancelled_checkpoint,
+            cancelled_checkpoint: Mutex::new(cancelled_checkpoint),
             preparation: Mutex::new(SegmentInstructionPreparation::default()),
         });
         // Retention precedes Python allocation/return; losing that handoff never
         // grants a second native admission or a new attempt.
         *retained = Some(Arc::clone(&custody));
         drop(retained);
-        if let Some(checkpoint) = &custody.cancelled_checkpoint {
+        if let Some(checkpoint) = custody.checkpoint_source()? {
             checkpoint.bind_source(
                 &mut *session.owner()?,
                 &custody.inner,
@@ -21943,7 +22607,7 @@ impl PySemanticTransitionController {
         let operation = ColdValue::read(operation, &mut budget, 0)?
             .text()?
             .to_owned();
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let snapshot = issued.read_authority_snapshot(py, snapshot, &mut budget)?;
         let (scope, steps, checkpoint_phase) = {
             let stored = session
                 .prepared_segment
@@ -22383,8 +23047,7 @@ impl PySemanticTransitionController {
             matches!(issued.state()?.phase, TaskUsePhase::CompletedPending { .. });
         let delivery = (|| -> PyResult<Py<PyTuple>> {
             let fresh = recording_callback(check, || refresh_snapshot.call0())?;
-            let fresh =
-                AuthoritySnapshot::parse(&ColdValue::read(&fresh, &mut (16 * 1024 * 1024), 0)?)?;
+            let fresh = issued.read_authority_snapshot(py, &fresh, &mut (16 * 1024 * 1024))?;
             check()?;
             let mut state = issued.state()?;
             fresh.newer_than(&state.snapshot)?;
@@ -22903,6 +23566,17 @@ impl PySemanticTransitionController {
                     .lock()
                     .map_err(|_| invalid("original instruction owner mutex is poisoned"))?
                     .take();
+                if let Some(instruction) = &instruction {
+                    // All native and producer final-use joins above are known.
+                    // Retained admission/actor aliases must not pin this obsolete
+                    // full checkpoint while the successor checkpoint is saved.
+                    let checkpoint = instruction
+                        .cancelled_checkpoint
+                        .lock()
+                        .map_err(|_| invalid("original checkpoint custody mutex is poisoned"))?
+                        .take();
+                    drop(checkpoint);
+                }
                 drop(instruction);
             }
         }
@@ -23165,11 +23839,12 @@ impl PySemanticTransitionController {
             task_ground,
             &mut budget,
         )?;
-        if let Some(source) = &session.editable_observer_source {
+        let editable = session.editable_source()?;
+        if let Some(source) = &editable.observer_source {
             if evaluation[2].text()? != source {
                 return Err(invalid("task observer source differs from its admission"));
             }
-        } else if session.editable_program.is_some() && evaluation[2] != ColdValue::None {
+        } else if editable.program.is_some() && evaluation[2] != ColdValue::None {
             return Err(invalid("coding task has no independent observer reference"));
         }
         bind_material_source(
@@ -23183,14 +23858,12 @@ impl PySemanticTransitionController {
         let spec = task_evaluation_spec_with_allocation_owner(
             &evaluation,
             Vec::new(),
-            session
-                .editable_program
-                .as_ref()
-                .map(|owner| Arc::clone(&owner.program)),
+            editable.program.as_ref().cloned(),
             &ColdValue::None,
-            session.editable_initial_source.as_deref(),
+            editable.initial_source.as_deref(),
             &session.material_sources,
         )?;
+        drop(editable);
         let rows = read_replay_rows(
             replay_rows,
             &mut budget,
@@ -23640,24 +24313,23 @@ impl PySemanticTransitionController {
                 return Err(invalid("private replay import changed its retained original source checkpoint projection"));
             }
         }
-        if let Some(source) = &session.editable_observer_source {
+        let editable = session.editable_source()?;
+        if let Some(source) = &editable.observer_source {
             if evaluation[2].text()? != source {
                 return Err(invalid("task observer source differs from its admission"));
             }
-        } else if session.editable_program.is_some() && evaluation[2] != ColdValue::None {
+        } else if editable.program.is_some() && evaluation[2] != ColdValue::None {
             return Err(invalid("coding task has no independent observer reference"));
         }
         let spec = task_evaluation_spec_with_allocation_owner(
             &evaluation,
             authority.priority_levels.clone(),
-            session
-                .editable_program
-                .as_ref()
-                .map(|owner| Arc::clone(&owner.program)),
+            editable.program.as_ref().cloned(),
             &training_domain_value,
-            session.editable_initial_source.as_deref(),
+            editable.initial_source.as_deref(),
             &session.material_sources,
         )?;
+        drop(editable);
         let inherited_checkpoint_registration = if source_checkpoint.is_some()
             && resolve_checkpoint.is_none()
             && max_checkpoint_bytes.is_none()
@@ -23938,6 +24610,7 @@ impl PySemanticTransitionController {
                 checkpoint_sources: Arc::clone(&session.checkpoint_sources),
                 material_sources: Arc::clone(&session.material_sources),
                 material_metadata: None,
+                dormant_evaluation_source: None,
             }
         };
         checkpoint.training_canary_owner = canary_owner;
@@ -24356,7 +25029,7 @@ impl PySemanticTransitionController {
         let pool = task_use.checkpoint.material_sources.native_budget()?;
         let mut parse_budget = 16 * 1024 * 1024;
         let streams = checkpoint_consumer_streams(consumer_streams, &mut parse_budget)?;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut parse_budget, 0)?)?;
+        let snapshot = task_use.read_authority_snapshot(py, snapshot, &mut parse_budget)?;
         let session = self.session.borrow(py);
         let mut initial = None;
         let pending = session.original_checkpoint_export(
@@ -24882,7 +25555,7 @@ impl PySemanticTransitionController {
         predecessor.require_task(py, task_use)?;
         successor.require_task(py, task_use)?;
         let mut budget = 16 * 1024 * 1024;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let snapshot = task_use.read_authority_snapshot(py, snapshot, &mut budget)?;
         let session = self.session.borrow(py);
         let mut owner = session.owner()?;
         task_use.require_current(&owner)?;
@@ -24953,14 +25626,14 @@ impl PySemanticTransitionController {
         if session.learning_preparing.load(Ordering::Acquire) {
             return Err(invalid("private numerical execution uses only its original complete prepared roster, not a separate transition"));
         }
-        let mut owner = session.owner()?;
-        task_use.require_current(&owner)?;
         let mut budget = 16 * 1024 * 1024;
         let kind = transition_kind(&ColdValue::read(transition, &mut budget, 0)?)?;
         let operation = ColdValue::read(operation, &mut budget, 0)?
             .text()?
             .to_owned();
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let snapshot = task_use.read_authority_snapshot(py, snapshot, &mut budget)?;
+        let mut owner = session.owner()?;
+        task_use.require_current(&owner)?;
         task_use.require_learning_operation(&owner, &operation)?;
         if kind == SemanticTransitionKind::Update {
             task_use.checkpoint.proposal_expense()?.require_learning()?;
@@ -25878,10 +26551,10 @@ impl PySemanticTransitionController {
         self.require_issued(task_use)?;
         parent.require_task(py, task_use)?;
         let session = self.session.borrow(py);
+        let mut budget = 16 * 1024 * 1024;
+        let snapshot = task_use.read_authority_snapshot(py, snapshot, &mut budget)?;
         let mut owner = session.owner()?;
         task_use.require_current(&owner)?;
-        let mut budget = 16 * 1024 * 1024;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         task_use
             .state()?
             .revalidate_activation(&task_use.authority, snapshot)?;
@@ -26223,7 +26896,27 @@ impl PySemanticTransitionController {
         }
         let binding = task_use.delivery_binding()?;
         let mut budget = 16 * 1024 * 1024;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let joining_original = {
+            let session = controller.session.borrow(py);
+            let owner = session.owner()?;
+            owner
+                .delivery_acknowledgement_has_original(&*acquired.lease()?)
+                .map_err(xlog_err)?
+        };
+        let snapshot = if joining_original {
+            let target = if task_use.checkpoint.dormant_evaluation_source.is_some() {
+                Some(evaluation_authority_snapshots(snapshot)?.1)
+            } else {
+                None
+            };
+            AuthoritySnapshot::parse(&ColdValue::read(
+                target.as_ref().unwrap_or(snapshot),
+                &mut budget,
+                0,
+            )?)?
+        } else {
+            task_use.read_authority_snapshot(py, snapshot, &mut budget)?
+        };
         // Establish both execution and result-emission custody before native
         // entry. A known result never becomes another execution attempt.
         let prepare_pending = |completion_known: bool,
@@ -26557,7 +27250,7 @@ impl PySemanticTransitionController {
         let _input_metadata = pool
             .reserve_auxiliary(metadata_limit as u64)
             .map_err(xlog_err)?;
-        let snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
+        let snapshot = task_use.read_authority_snapshot(py, snapshot, &mut budget)?;
         bind_inherited_material_source(
             py,
             &controller.session.borrow(py),

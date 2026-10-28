@@ -51,6 +51,9 @@ struct CatalogueMember {
     content: SemanticTaskContentIdentity,
     words: Vec<u64>,
     program: Option<Identity256>,
+    // The cold theory identity already commits the complete original ground
+    // roster. Retain its observation order without allocating learned rows.
+    original_observation_records: Vec<u32>,
 }
 
 /// One original finite roster, claimed before any cold composition effect.
@@ -58,6 +61,14 @@ pub(super) struct ModelContextPreseal {
     issuers: Vec<Arc<()>>,
     pending: AtomicBool,
     _reservation: SemanticReplayMaterialReservation,
+}
+
+impl ModelContextPreseal {
+    pub(super) fn member_ordinal(&self, issuer: &Arc<()>) -> Option<usize> {
+        self.issuers
+            .iter()
+            .position(|original| Arc::ptr_eq(original, issuer))
+    }
 }
 
 impl ModelContextPreseal {
@@ -100,6 +111,16 @@ impl FrozenModelCatalogue {
         self.members
             .get(member)
             .map(|member| member.words.as_slice())
+            .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    pub(super) fn member_observation_records(
+        &self,
+        member: usize,
+    ) -> Result<&[u32], SemanticTransitionError> {
+        self.members
+            .get(member)
+            .map(|member| member.original_observation_records.as_slice())
             .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 
@@ -196,6 +217,16 @@ impl FrozenModelCatalogue {
                 .checked_add(18)
                 .and_then(|size| size.checked_add(words.len()))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            let mut original_observation_records = Vec::new();
+            original_observation_records
+                .try_reserve_exact(session.cold_observation_records.len())
+                .map_err(|error| runtime_error("frozen observation roster allocation", error))?;
+            if original_observation_records.capacity() != session.cold_observation_records.len() {
+                return Err(publication_input_error(
+                    "frozen observation roster exceeds its original host reservation",
+                ));
+            }
+            original_observation_records.extend_from_slice(&session.cold_observation_records);
             members.push(CatalogueMember {
                 issuer: Arc::clone(&session.publication_issuer),
                 content: session
@@ -205,6 +236,7 @@ impl FrozenModelCatalogue {
                     .0,
                 words,
                 program: session.codebooks.program_binding,
+                original_observation_records,
             });
         }
         let mut frame = Vec::new();
@@ -1232,6 +1264,14 @@ impl SemanticTransitionSession {
                 )
             })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let bytes = contexts.iter().try_fold(bytes, |bytes, context| {
+            context
+                .cold_observation_records
+                .len()
+                .checked_mul(size_of::<u32>())
+                .and_then(|extent| bytes.checked_add(extent))
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
         let reservation = budget.reserve_auxiliary(bytes as u64)?;
         // Reserve the canonical encoder's largest temporary before copying any
         // learned payload. Repeated qualifier occurrences remain real bytes.
