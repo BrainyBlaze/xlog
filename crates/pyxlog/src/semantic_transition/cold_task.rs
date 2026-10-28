@@ -1164,7 +1164,7 @@ impl PySemanticTransitionColdTask {
         }
         // Live freeze derives its authenticated scope from the presealed roster.
         // This separate input digest is used only for cold record geometry.
-        let context = xlog_core::Identity256::from_bytes(digest.finalize().into());
+        let context = xlog_cuda::Identity256::from_bytes(digest.finalize().into());
         let limits = xlog_cuda::SemanticAdmissionLimits {
             max_records: admission_limits.0,
             max_terms: admission_limits.1,
