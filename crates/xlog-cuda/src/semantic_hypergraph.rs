@@ -4517,27 +4517,18 @@ impl SemanticHypergraph {
             }
             records.records.push(record);
         }
-        let context_predicate = RelId(
-            records
-                .predicates
-                .iter()
-                .map(|predicate| predicate.predicate.0)
-                .max()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(size_overflow)?,
-        );
-        records.predicates.push(SemanticPredicateRecord {
-            predicate: context_predicate,
-            role: SemanticRecordRole::Qualifier,
-            schema: {
-                let mut schema = Schema::new(vec![("context".to_owned(), ScalarType::Symbol)])
-                    .with_sort_labels(vec!["evaluation-context".to_owned()])
-                    .map_err(admission_error)?;
-                schema.key_columns = vec![0];
-                schema
-            },
-        });
+        // Reuse the admitted input qualifier schema. Extending the predicate
+        // roster would change the whole schema generation and therefore every
+        // inherited source statement, support and version identity.
+        let context_predicate = records
+            .predicates
+            .iter()
+            .find(|predicate| {
+                predicate.role == SemanticRecordRole::Qualifier
+                    && predicate.schema.sort_labels() == ["task-input-kind", "task-input-text"]
+            })
+            .ok_or_else(|| admission_error("evaluation scope requires its original input schema"))?
+            .predicate;
         let text = context
             .as_bytes()
             .iter()
@@ -4561,7 +4552,10 @@ impl SemanticHypergraph {
         }
         records.records.push(SemanticTypedRecord {
             predicate: context_predicate,
-            arguments: vec![SemanticArgument::Symbol(context)],
+            arguments: vec![
+                SemanticArgument::U32(u32::MAX),
+                SemanticArgument::Symbol(context),
+            ],
             qualifiers: Vec::new(),
         });
         let (admission, symbols) =
