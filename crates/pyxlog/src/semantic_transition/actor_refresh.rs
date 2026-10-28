@@ -1716,13 +1716,18 @@ impl ActorRefreshCustody {
                     .bind_training_canary_source(Arc::clone(source))
                     .map_err(xlog_err)?;
             }
+            let rule_library = storage
+                .lock()
+                .map_err(|_| invalid("original constructed Session mutex is poisoned"))?
+                .as_ref()
+                .ok_or_else(|| invalid("original constructed Session was released"))?
+                .evaluation_rule_library();
             (
                 storage,
                 original.parent.clone_ref(py),
-                original
-                    .editable
-                    .as_ref()
-                    .map(|source| source.actor_program_owner(Arc::clone(&original.metadata))),
+                original.editable.as_ref().map(|source| {
+                    source.actor_program_owner(Arc::clone(&original.metadata), rule_library.clone())
+                }),
                 original
                     .editable
                     .as_ref()

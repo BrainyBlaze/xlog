@@ -56,6 +56,7 @@ pub(crate) mod cold_task;
 mod evaluation_authority;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod evaluation_fork;
+mod evaluation_rule_library;
 mod evaluation_source_checkpoint;
 mod feedback_projection;
 #[cfg(feature = "semantic-policy")]
@@ -660,7 +661,11 @@ impl PySemanticTransitionSession {
             .map_err(|_| invalid("editable task source owner is poisoned"))
     }
 
-    fn install_editable_source(&self, source: &cold_task::EditableTaskSource) -> PyResult<()> {
+    fn install_editable_source(
+        &self,
+        source: &cold_task::EditableTaskSource,
+        rule_library: Option<Arc<xlog_cuda::SemanticEvaluationRuleLibrary>>,
+    ) -> PyResult<()> {
         self.require_creator()?;
         if self.issuance.load(Ordering::Acquire) != 0
             || self.importing.load(Ordering::Acquire)
@@ -672,7 +677,7 @@ impl PySemanticTransitionSession {
             ));
         }
         *self.editable_source()? = EditableSessionSource {
-            program: Some(source.program_owner()),
+            program: Some(source.program_owner_with_library(rule_library)),
             observer_source: source.observer_source.clone(),
             initial_source: Some(source.initial_source.clone()),
         };
@@ -4183,10 +4188,10 @@ impl PySemanticTransitionSession {
         let initial_program_source = editable_source
             .as_ref()
             .map(|source| source.initial_source.as_str());
-        let editable_program = editable_source
-            .as_ref()
-            .map(|source| source.program_owner());
-        let spec = task_evaluation_spec_with_allocation_owner(
+        let editable_program = editable_source.as_ref().map(|source| {
+            source.program_owner_with_library(native_proof.evaluation_rule_library())
+        });
+        let mut spec = task_evaluation_spec_with_allocation_owner(
             &seed.evaluation,
             authority.priority_levels.clone(),
             editable_program.clone(),
@@ -4194,6 +4199,9 @@ impl PySemanticTransitionSession {
             initial_program_source,
             &seed.material_sources,
         )?;
+        spec.evaluation_intervention = native_proof
+            .evaluation_fork_origin()
+            .map(|origin| origin.intervention());
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
         let retained_roster = seed.original_training_roster()?;
@@ -4327,6 +4335,7 @@ impl PySemanticTransitionSession {
         if let Some(registry) = evaluation_source_registry {
             restored_session.retain_evaluation_source_registry(Arc::clone(registry))?;
         }
+        restored_session.editable_source()?.program = editable_program;
         let session = Py::new(py, restored_session)?;
         session
             .borrow(py)
@@ -11148,11 +11157,16 @@ fn task_evaluation_spec_core(
     if let Some(owner) = input_owner {
         program = program.retain_allocation_owner(owner);
     }
+    let rule_library = editable_program
+        .as_ref()
+        .and_then(|owner| owner.rule_library.clone());
     if let Some(editable) = editable_program {
         program = program.with_editable_program(Arc::clone(&editable.program));
     }
     let program = Arc::new(program);
     Ok(xlog_cuda::SemanticTaskEvaluationSpec {
+        rule_library,
+        evaluation_intervention: None,
         statement_records,
         task_ground,
         allowed_support_records,
@@ -13133,6 +13147,27 @@ impl PySemanticTransitionTaskUse {
 
 #[pymethods]
 impl PySemanticTransitionTaskUse {
+    /// Immutable fork restriction: one mode byte (0, 1 or 3), followed by the
+    /// original 32-byte library digest. The result owns its actual byte budget.
+    #[cfg(feature = "semantic-policy")]
+    fn evaluation_intervention(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<material_bytes::PySemanticMaterialBytes>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let restriction = {
+            let owner = session.owner()?;
+            self.require_current(&owner)?;
+            owner.evaluation_intervention()
+        };
+        let Some((mode, digest)) = restriction else {
+            return Ok(None);
+        };
+        let budget = session.material_sources.native_budget()?;
+        evaluation_rule_library::intervention_material(py, mode, digest, &budget).map(Some)
+    }
+
     #[getter]
     fn training_arena_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.session.borrow(py).require_creator()?;

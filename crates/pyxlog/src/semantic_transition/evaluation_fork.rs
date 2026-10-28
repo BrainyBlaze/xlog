@@ -10,7 +10,6 @@ pyo3::create_exception!(
 struct EvaluationForkState {
     preparation: xlog_cuda::SemanticEvaluationForkPreparation,
     native_complete: bool,
-    model_verified: bool,
     parent: Option<Py<PySemanticPublishedParent>>,
     before_model: Option<xlog_cuda::SemanticReplayStateMaterialProof>,
     callback_entered: bool,
@@ -320,11 +319,7 @@ impl PySemanticEvaluationFork {
         // Joining an entered command is mandatory even if later authority was
         // revoked. Only subsequent reads and model wrapping require a fresh use.
         self.refresh_authority(py)?;
-        let needs_proof = {
-            let state = self.state()?;
-            !state.model_verified && state.before_model.is_none()
-        };
-        if needs_proof {
+        if self.state()?.before_model.is_none() {
             let proof = {
                 let session = self.session.borrow(py);
                 let acquired = parent.borrow(py);
@@ -340,19 +335,16 @@ impl PySemanticEvaluationFork {
         {
             let session = self.session.borrow(py);
             let acquired = parent.borrow(py);
-            let mut state = self.state()?;
-            if !state.model_verified {
-                session
-                    .owner()?
-                    .verify_published_loaded_state_material(
-                        &*acquired.lease()?,
-                        state.before_model.as_ref().ok_or_else(|| {
-                            invalid("evaluation wrapper lost its original full publication proof")
-                        })?,
-                    )
-                    .map_err(xlog_err)?;
-                state.model_verified = true;
-            }
+            let state = self.state()?;
+            session
+                .owner()?
+                .verify_published_loaded_state_material(
+                    &*acquired.lease()?,
+                    state.before_model.as_ref().ok_or_else(|| {
+                        invalid("evaluation wrapper lost its original full publication proof")
+                    })?,
+                )
+                .map_err(xlog_err)?;
         }
         {
             let session = self.session.borrow(py);
@@ -365,8 +357,6 @@ impl PySemanticEvaluationFork {
         // Native has joined the original restoration and accepted this exact
         // model publication. Retained fork capsules keep only its durable
         // source reference and authenticated authority, not another full archive.
-        let proof = self.state()?.before_model.take();
-        drop(proof);
         let source = self
             .source_custody
             .lock()
@@ -522,7 +512,7 @@ impl PySemanticEvaluationFork {
 
 #[pymethods]
 impl PySemanticTransitionController {
-    #[pyo3(signature = (task_use, checkpoint, *, member, snapshot, restore_model, resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes, refresh_snapshot))]
+    #[pyo3(signature = (task_use, checkpoint, *, member, intervention, snapshot, restore_model, resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes, refresh_snapshot))]
     #[expect(
         clippy::too_many_arguments,
         reason = "a fork retains separate scoped authority, a bounded source resolver and its actual model wrapper"
@@ -533,6 +523,7 @@ impl PySemanticTransitionController {
         task_use: Py<PySemanticTransitionTaskUse>,
         checkpoint: Py<material_bytes::PySemanticMaterialBytes>,
         member: &Bound<'_, PyAny>,
+        intervention: &Bound<'_, PyAny>,
         snapshot: &Bound<'_, PyAny>,
         restore_model: Py<PyAny>,
         resolve_checkpoint: Py<PyAny>,
@@ -581,6 +572,12 @@ impl PySemanticTransitionController {
         let source_registry = session.evaluation_source_registry()?;
         let source_budget = source_registry.native_budget()?;
         let target_budget = task.checkpoint.material_sources.native_budget()?;
+        let library = session
+            .owner()?
+            .evaluation_rule_library()
+            .ok_or_else(|| invalid("evaluation fork requires its original frozen rule library"))?;
+        let intervention =
+            super::evaluation_rule_library::intervention(intervention, &library, &target_budget)?;
         let mut scalar_budget = 256;
         let limits = CheckpointSourceLimits::new(
             ColdValue::read(max_checkpoint_bytes, &mut scalar_budget, 0)?.unsigned()?,
@@ -701,6 +698,9 @@ impl PySemanticTransitionController {
             .ok_or_else(|| invalid("evaluation member lost its original frozen model catalogue"))?;
         let preparation = {
             let owner = session.owner()?;
+            let restriction = owner
+                .prepare_evaluation_intervention(intervention)
+                .map_err(xlog_err)?;
             let records = owner
                 .evaluation_fork_target_records(
                     &task.authority.canonical,
@@ -708,9 +708,10 @@ impl PySemanticTransitionController {
                 )
                 .map_err(xlog_err)?;
             owner
-                .prepare_evaluation_fork(native, &context, records)
+                .prepare_evaluation_fork(native, &context, records, restriction)
                 .map_err(xlog_err)?
         };
+        let target_task_identity = *preparation.target_task_identity().as_bytes();
         if preparation.origin().member() != member {
             return Err(invalid(
                 "evaluation member differs from the original imported catalogue member",
@@ -756,7 +757,7 @@ impl PySemanticTransitionController {
                 controller: Arc::clone(&controlled.identity),
                 issuance,
                 importing: Arc::clone(&session.importing),
-                task_identity: task.task_identity,
+                task_identity: target_task_identity,
                 task_epoch: task.task_epoch,
                 authority,
                 checkpoint: task
@@ -794,7 +795,6 @@ impl PySemanticTransitionController {
                 state: Mutex::new(EvaluationForkState {
                     preparation,
                     native_complete: false,
-                    model_verified: false,
                     parent: None,
                     before_model: None,
                     callback_entered: false,
@@ -811,10 +811,8 @@ impl PySemanticTransitionController {
                 _metadata: metadata,
             },
         )?;
-        {
-            let owner = session.owner()?;
-            task.require_current(&owner)?;
-        }
+        let mut owner = session.owner()?;
+        task.require_current(&owner)?;
         let mut original_state = task.state()?;
         if !matches!(&original_state.phase, TaskUsePhase::ArenaPreparing(original)
             if matches!(original.as_ref(), TaskUsePhase::Imported))
@@ -823,9 +821,16 @@ impl PySemanticTransitionController {
                 "evaluation preparation changed its original task phase",
             ));
         }
+        let fork_ref = fork.borrow(py);
+        let mut fork_state = fork_ref.state()?;
+        owner
+            .activate_evaluation_intervention(&mut fork_state.preparation)
+            .map_err(xlog_err)?;
         activation.activate()?;
         original_state.phase = TaskUsePhase::Refused;
         preparation_scope.completed = true;
+        drop(fork_state);
+        drop(fork_ref);
         Ok(fork)
     }
 }

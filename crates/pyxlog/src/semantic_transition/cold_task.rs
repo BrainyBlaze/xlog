@@ -45,16 +45,45 @@ struct EditableTaskAllocations {
 pub(super) struct EditableProgramOwner {
     pub(super) program: Arc<xlog_cuda::SemanticProgramAdmission>,
     pub(super) observer_record_offset: u32,
+    pub(super) rule_library: Option<Arc<xlog_cuda::SemanticEvaluationRuleLibrary>>,
+    pub(super) _library_metadata: Option<Arc<xlog_cuda::SemanticReplayMaterialReservation>>,
     _allocations: Option<Arc<EditableTaskAllocations>>,
     #[cfg(feature = "semantic-policy")]
     _actor_metadata: Option<Arc<super::actor_refresh::ActorConstructionMetadata>>,
 }
 
+impl EditableProgramOwner {
+    pub(super) fn with_rule_library(
+        &self,
+        library: Arc<xlog_cuda::SemanticEvaluationRuleLibrary>,
+        metadata: Arc<xlog_cuda::SemanticReplayMaterialReservation>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            program: Arc::clone(&self.program),
+            observer_record_offset: self.observer_record_offset,
+            rule_library: Some(library),
+            _library_metadata: Some(metadata),
+            _allocations: self._allocations.clone(),
+            #[cfg(feature = "semantic-policy")]
+            _actor_metadata: self._actor_metadata.clone(),
+        })
+    }
+}
+
 impl EditableTaskSource {
     pub(super) fn program_owner(&self) -> Arc<EditableProgramOwner> {
+        self.program_owner_with_library(None)
+    }
+
+    pub(super) fn program_owner_with_library(
+        &self,
+        rule_library: Option<Arc<xlog_cuda::SemanticEvaluationRuleLibrary>>,
+    ) -> Arc<EditableProgramOwner> {
         Arc::new(EditableProgramOwner {
             program: Arc::clone(&self.program),
             observer_record_offset: self.observer_record_offset,
+            rule_library,
+            _library_metadata: None,
             _allocations: self.allocations.as_ref().map(Arc::clone),
             #[cfg(feature = "semantic-policy")]
             _actor_metadata: None,
@@ -65,10 +94,13 @@ impl EditableTaskSource {
     pub(super) fn actor_program_owner(
         &self,
         metadata: Arc<super::actor_refresh::ActorConstructionMetadata>,
+        rule_library: Option<Arc<xlog_cuda::SemanticEvaluationRuleLibrary>>,
     ) -> Arc<EditableProgramOwner> {
         Arc::new(EditableProgramOwner {
             program: Arc::clone(&self.program),
             observer_record_offset: self.observer_record_offset,
+            rule_library,
+            _library_metadata: None,
             _allocations: self.allocations.as_ref().map(Arc::clone),
             _actor_metadata: Some(metadata),
         })
@@ -928,7 +960,7 @@ impl PySemanticTransitionSession {
             }
             Err(error) => return Err(xlog_err(error)),
         };
-        self.install_editable_source(&parsed)?;
+        self.install_editable_source(&parsed, target_owner.evaluation_rule_library())?;
         Ok(ColdTaskContent {
             observation,
             statement_records: parsed.query_records,
@@ -996,7 +1028,7 @@ impl PySemanticTransitionColdTask {
 #[pymethods]
 impl PySemanticTransitionColdTask {
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -1034,7 +1066,15 @@ impl PySemanticTransitionColdTask {
         private_replay_child: Option<&Bound<'_, PyAny>>,
         prepared_actor_refresh: Option<&Bound<'_, PyAny>>,
         actor_refresh_bank: Option<usize>,
+        rule_library: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        if rule_library.is_some()
+            && (private_replay_child.is_some() || prepared_actor_refresh.is_some())
+        {
+            return Err(invalid(
+                "rule library must be declared on its original cold task",
+            ));
+        }
         if private_replay_child.is_some() && prepared_actor_refresh.is_some()
             || prepared_actor_refresh.is_some() != actor_refresh_bank.is_some()
             || actor_refresh_bank.is_some_and(|bank| bank > 1)
@@ -1335,6 +1375,16 @@ impl PySemanticTransitionColdTask {
             .flatten();
         #[cfg(not(feature = "semantic-policy"))]
         let cached_content = None;
+        if let Some(library) = rule_library {
+            super::evaluation_rule_library::bind_cold_library(
+                &session.borrow(py),
+                library,
+                &initial_theory,
+                &input_facts,
+                &statements,
+                &statement_records,
+            )?;
+        }
         let content = match cached_content {
             Some(content) => content,
             None => {

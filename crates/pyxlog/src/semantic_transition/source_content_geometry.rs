@@ -1690,14 +1690,18 @@ pub(super) fn source_content_geometry_seed(
                 "original source observer differs from its canonical admission",
             ));
         }
-        let task = task_evaluation_spec_with_allocation_owner(
+        let mut task = task_evaluation_spec_with_allocation_owner(
             &source.seed.evaluation,
             task_priority_levels(priorities)?,
-            Some(cold.program_owner()),
+            Some(cold.program_owner_with_library(source.proof.evaluation_rule_library())),
             &source.seed.training_domain,
             Some(&cold.initial_source),
             &source.seed.material_sources,
         )?;
+        task.evaluation_intervention = source
+            .proof
+            .evaluation_fork_origin()
+            .map(|origin| origin.intervention());
         *cached = Some(SourceTaskGeometry {
             task: Arc::new(task),
             metadata,

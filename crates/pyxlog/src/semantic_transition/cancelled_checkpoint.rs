@@ -46,6 +46,8 @@ pub(super) struct CancelledCheckpointTerminal {
     pub(super) proposal_spent: u64,
     pub(super) task_identity: [u8; 32],
     source_checkpoint_digest: Identity256,
+    evaluation_intervention: Option<(xlog_cuda::SemanticEvaluationIntervention, Identity256)>,
+    budget: xlog_cuda::SemanticReplayMaterialBudget,
 }
 
 fn material_digest(bytes: &[u8]) -> Identity256 {
@@ -597,6 +599,16 @@ pub(super) fn terminal_checkpoint(
     SemanticTransitionSession::state_material_loaded_projection(native).map_err(xlog_err)?;
     SemanticCheckpointSessionConfig::decode(&manifest.session)?;
     require_initial_prefill_source(&manifest, phase, binding, native)?;
+    let proof = native.checkpoint_proof().map_err(xlog_err)?;
+    let evaluation_intervention = proof
+        .evaluation_fork_origin()
+        .map(|origin| {
+            let library = proof
+                .evaluation_rule_library()
+                .ok_or_else(|| invalid("cancelled evaluation lost its original rule library"))?;
+            Ok::<_, PyErr>((origin.intervention(), library.digest()))
+        })
+        .transpose()?;
     Ok(Some(CancelledCheckpointTerminal {
         first_program_ordinal: first,
         end_program_ordinal: end,
@@ -604,6 +616,8 @@ pub(super) fn terminal_checkpoint(
         proposal_spent,
         task_identity: binding.identity,
         source_checkpoint_digest,
+        evaluation_intervention,
+        budget: seed.material_sources.native_budget()?,
     }))
 }
 
@@ -621,6 +635,15 @@ pub(super) fn terminal_error(
     value.setattr("first_program_ordinal", terminal.first_program_ordinal)?;
     value.setattr("end_program_ordinal", terminal.end_program_ordinal)?;
     value.setattr("proposal_spent", terminal.proposal_spent)?;
+    let intervention = terminal
+        .evaluation_intervention
+        .map(|(mode, digest)| {
+            evaluation_rule_library::intervention_material(py, mode, digest, &terminal.budget)
+                .map(|material| material.into_any())
+        })
+        .transpose()?
+        .unwrap_or_else(|| py.None());
+    value.setattr("evaluation_intervention", intervention)?;
     value.setattr(
         "parent_identity",
         (
