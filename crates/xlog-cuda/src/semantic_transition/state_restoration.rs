@@ -405,6 +405,11 @@ impl SemanticTransitionSession {
         &self,
         transition: Option<&SemanticLearningPhaseTransition>,
     ) -> Result<(), SemanticTransitionError> {
+        if self.evaluation_fork.is_some() && transition.is_some() {
+            return Err(publication_input_error(
+                "evaluation forks cannot consolidate or change learning phase",
+            ));
+        }
         if let Some(transition) = transition {
             let admission = transition.admission.as_ref().ok_or_else(|| {
                 publication_input_error(
@@ -502,6 +507,7 @@ impl SemanticTransitionSession {
             restoration,
             #[cfg(feature = "semantic-policy")]
             None,
+            false,
         )
     }
 
@@ -521,6 +527,7 @@ impl SemanticTransitionSession {
             None,
             #[cfg(feature = "semantic-policy")]
             None,
+            false,
         )
     }
 
@@ -561,6 +568,7 @@ impl SemanticTransitionSession {
                 work: work.clone(),
                 allowance,
             }),
+            false,
         )?;
         if result.is_some() {
             return Err(SemanticTransitionError::ObservationMismatch);
@@ -756,7 +764,7 @@ impl SemanticTransitionSession {
         ))
     }
 
-    fn restore_decoded_state_material_original(
+    pub(super) fn restore_decoded_state_material_original(
         &mut self,
         material: OwnedPublicationMaterial,
         source_digest: Identity256,
@@ -766,12 +774,44 @@ impl SemanticTransitionSession {
             SemanticPreparedResidentModelRestoration,
         >,
         #[cfg(feature = "semantic-policy")] dormant_context: Option<DormantStateRestoreCustody>,
+        evaluation_derivation: bool,
     ) -> Result<Option<SemanticPublishedIdentity>, SemanticTransitionError> {
         // Keep the outside-array receipt alive through every local material
         // error drop, then transfer it behind the retained material's data.
         let mut phase_metadata: Option<Arc<SemanticReplayMaterialReservation>> = None;
         let mut coverage_metadata: Option<Arc<SemanticReplayMaterialReservation>> = None;
         let mut material = material;
+        if material
+            .evaluation_fork
+            .as_ref()
+            .is_some_and(|origin| !origin.is_resolved())
+        {
+            return Err(publication_input_error(
+                "evaluation restoration requires its resolved original guarded source checkpoint",
+            ));
+        }
+        if material.evaluation_fork.is_some() && transition.is_some() {
+            return Err(publication_input_error(
+                "evaluation forks cannot consolidate or change learning phase",
+            ));
+        }
+        if material.evaluation_fork.is_some()
+            && (self.task_training_domain().is_some()
+                || self.training_views.is_some()
+                || immutable_models.is_some())
+        {
+            return Err(publication_input_error("restored evaluation forks cannot activate inherited training state or alias model allocations"));
+        }
+        if evaluation_derivation
+            && (transition.is_some()
+                || immutable_models.is_some()
+                || material.evaluation_fork.is_none()
+                || self.task_training_domain().is_some())
+        {
+            return Err(publication_input_error(
+                "evaluation derivation cannot alias models or admit learning",
+            ));
+        }
         if self.state_material_restore.is_some() {
             return Err(publication_input_error(
                 "original state restoration is already retained; resolve that owner",
@@ -1039,6 +1079,7 @@ impl SemanticTransitionSession {
                     .map(Arc::new)
             })
             .transpose()?;
+        let evaluation_fork = material.evaluation_fork.clone();
         let owner = Arc::new(OriginalStateMaterialRestore {
             issuer: Arc::clone(&self.publication_issuer),
             issuance,
@@ -1059,6 +1100,7 @@ impl SemanticTransitionSession {
                 rng,
                 fold,
                 transitioned: transition.is_some(),
+                evaluation_derivation,
                 immutable_models: immutable_models.map(OwnedRestoredModelOwners::retain),
                 plans: None,
                 model_payloads: Vec::new(),
@@ -1100,6 +1142,7 @@ impl SemanticTransitionSession {
             self.task_observations_authenticated = false;
         }
         self.state_material_restore = Some(owner);
+        self.evaluation_fork = evaluation_fork;
         self.resolve_state_material_restore()
     }
 
@@ -1562,6 +1605,8 @@ impl SemanticTransitionSession {
                     }
                     let operation = if original.fold.is_some() {
                         7
+                    } else if original.evaluation_derivation {
+                        1
                     } else if original.transitioned {
                         5
                     } else {
@@ -1651,6 +1696,7 @@ impl SemanticTransitionSession {
                         logical_digest: header.logical_digest,
                     });
                     if !original.transitioned
+                        && !original.evaluation_derivation
                         && original.result.is_some_and(|restored| {
                             restored.logical_digest != original.header.logical_digest
                         })
@@ -2309,6 +2355,7 @@ struct StateMaterialRestore {
     rng: SemanticRngBinding,
     fold: Option<learning_phase::LearningFoldPlan>,
     transitioned: bool,
+    evaluation_derivation: bool,
     immutable_models: Option<OwnedRestoredModelOwners>,
     plans: Option<Vec<PublicationAllocationPlan>>,
     model_payloads: Vec<PublicationPayload>,

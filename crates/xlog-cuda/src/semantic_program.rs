@@ -107,6 +107,225 @@ pub struct SemanticProgramAdmission {
 }
 
 impl SemanticProgramAdmission {
+    pub fn evaluation_context_allocation_bytes_from_optional_source(
+        source: Option<&Self>,
+        target: &Self,
+    ) -> Result<usize, &'static str> {
+        // The target-only case has overlapping old/new query and observation
+        // vectors. Count two actual target carriers; create no source program.
+        Self::evaluation_context_allocation_bytes(source.unwrap_or(target), target)
+    }
+
+    /// Lower an evaluation task next to the actual selected training world.
+    /// A non-positive source world remains a hypergraph; no empty positive
+    /// program is invented for it.
+    pub fn evaluation_context_from_optional_source(
+        source: Option<&Self>,
+        target: &Self,
+        target_record_offset: u32,
+    ) -> Result<Self, &'static str> {
+        if let Some(source) = source {
+            return Self::evaluation_context(source, target, target_record_offset);
+        }
+        target.validate()?;
+        let mut result = target.clone();
+        for record in &mut result.query_records {
+            *record = record
+                .checked_add(target_record_offset)
+                .ok_or("evaluation statement context exceeds the native domain")?;
+        }
+        for (record, _) in &mut result.observation_facts {
+            *record = record
+                .checked_add(target_record_offset)
+                .ok_or("evaluation statement context exceeds the native domain")?;
+        }
+        result.validate()?;
+        Ok(result)
+    }
+
+    /// Simultaneous output vectors and ordered constant-map allocations used by
+    /// evaluation_context. The caller reserves this from its original pool.
+    pub fn evaluation_context_allocation_bytes(
+        source: &Self,
+        target: &Self,
+    ) -> Result<usize, &'static str> {
+        let overflow = || "evaluation context allocation exceeds the native domain";
+        let mut bytes = std::mem::size_of::<Self>();
+        for program in [source, target] {
+            for (count, width) in [
+                (program.predicate_arities.len(), std::mem::size_of::<u32>()),
+                (
+                    program.initial_facts.len() + program.queries.len(),
+                    std::mem::size_of::<SemanticProgramFact>(),
+                ),
+                (
+                    program.initial_rules.len(),
+                    std::mem::size_of::<SemanticProgramRule>(),
+                ),
+                (program.query_records.len(), std::mem::size_of::<u32>()),
+                (
+                    program.observation_facts.len(),
+                    std::mem::size_of::<(u32, SemanticProgramFact)>(),
+                ),
+            ] {
+                bytes = count
+                    .checked_mul(width)
+                    .and_then(|extent| bytes.checked_add(extent.checked_mul(2)?))
+                    .ok_or_else(overflow)?;
+            }
+            let constants = program
+                .initial_facts
+                .len()
+                .checked_add(program.queries.len())
+                .and_then(|count| count.checked_add(program.observation_facts.len()))
+                .and_then(|count| count.checked_mul(2))
+                .and_then(|count| count.checked_add(program.initial_rules.len().checked_mul(8)?))
+                .ok_or_else(overflow)?;
+            // BTree nodes, map entries, minimum leaves and the two context sets
+            // overlap. Every actual constant occurrence encloses a distinct node.
+            bytes = constants
+                .checked_add(4)
+                .and_then(|count| count.checked_mul(512))
+                .and_then(|extent| bytes.checked_add(extent))
+                .ok_or_else(overflow)?;
+        }
+        Ok(bytes)
+    }
+
+    /// Preserve the complete source program and append an independent target
+    /// context before the model catalogue is frozen. Only the target's own
+    /// predicates and constants are lowered into disjoint native identities.
+    /// Learned source rules therefore retain every original word.
+    pub fn evaluation_context(
+        source: &Self,
+        target: &Self,
+        target_record_offset: u32,
+    ) -> Result<Self, &'static str> {
+        source.validate()?;
+        target.validate()?;
+        let predicate_count = source
+            .predicate_count
+            .checked_add(target.predicate_count)
+            .ok_or("evaluation predicate context exceeds the native domain")?;
+        let mut source_constants = std::collections::BTreeSet::new();
+        let mut target_constants = std::collections::BTreeSet::new();
+        for (program, constants) in [
+            (source, &mut source_constants),
+            (target, &mut target_constants),
+        ] {
+            for fact in program
+                .initial_facts
+                .iter()
+                .chain(&program.queries)
+                .chain(program.observation_facts.iter().map(|(_, fact)| fact))
+            {
+                constants.insert(fact.first);
+                if fact.arity == 2 {
+                    constants.insert(fact.second);
+                }
+            }
+            for rule in &program.initial_rules {
+                for atom in
+                    std::iter::once(&rule.head).chain(&rule.body[..rule.body_count as usize])
+                {
+                    for term in &atom.terms[..atom.arity as usize] {
+                        if term.kind == 1 {
+                            constants.insert(term.value);
+                        }
+                    }
+                }
+            }
+        }
+        let mut mapping = std::collections::BTreeMap::new();
+        let mut next = 0u32;
+        for original in target_constants {
+            while source_constants.contains(&next) {
+                next = next
+                    .checked_add(1)
+                    .ok_or("evaluation constant context exceeds the native domain")?;
+            }
+            mapping.insert(original, next);
+            source_constants.insert(next);
+        }
+        let fact = |mut fact: SemanticProgramFact| -> Result<SemanticProgramFact, &'static str> {
+            fact.predicate = fact
+                .predicate
+                .checked_add(source.predicate_count)
+                .ok_or("evaluation predicate context exceeds the native domain")?;
+            fact.first = *mapping
+                .get(&fact.first)
+                .ok_or("evaluation constant was not frozen")?;
+            if fact.arity == 2 {
+                fact.second = *mapping
+                    .get(&fact.second)
+                    .ok_or("evaluation constant was not frozen")?;
+            }
+            Ok(fact)
+        };
+        let mut result = Self {
+            predicate_count,
+            predicate_arities: source.predicate_arities.clone(),
+            initial_facts: source.initial_facts.clone(),
+            initial_rules: source.initial_rules.clone(),
+            queries: target
+                .queries
+                .iter()
+                .copied()
+                .map(&fact)
+                .collect::<Result<_, _>>()?,
+            query_records: target
+                .query_records
+                .iter()
+                .map(|record| {
+                    record
+                        .checked_add(target_record_offset)
+                        .ok_or("evaluation statement context exceeds the native domain")
+                })
+                .collect::<Result<_, _>>()?,
+            observation_facts: source.observation_facts.clone(),
+        };
+        result
+            .predicate_arities
+            .extend_from_slice(&target.predicate_arities);
+        result.initial_facts.extend(
+            target
+                .initial_facts
+                .iter()
+                .copied()
+                .map(&fact)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        for original in &target.initial_rules {
+            let mut rule = *original;
+            for atom in
+                std::iter::once(&mut rule.head).chain(&mut rule.body[..rule.body_count as usize])
+            {
+                atom.predicate = atom
+                    .predicate
+                    .checked_add(source.predicate_count)
+                    .ok_or("evaluation predicate context exceeds the native domain")?;
+                for term in &mut atom.terms[..atom.arity as usize] {
+                    if term.kind == 1 {
+                        term.value = *mapping
+                            .get(&term.value)
+                            .ok_or("evaluation constant was not frozen")?;
+                    }
+                }
+            }
+            result.initial_rules.push(rule);
+        }
+        for (record, tuple) in &target.observation_facts {
+            result.observation_facts.push((
+                record
+                    .checked_add(target_record_offset)
+                    .ok_or("evaluation statement context exceeds the native domain")?,
+                fact(*tuple)?,
+            ));
+        }
+        result.validate()?;
+        Ok(result)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         let valid_fact = |fact: &SemanticProgramFact| {
             (1..=2).contains(&fact.arity)
