@@ -597,6 +597,7 @@ impl SemanticTransitionSession {
         member: &SemanticFrozenModelContext,
         target_records: SemanticEvaluationForkTargetRecords,
         intervention: Arc<SemanticEvaluationInterventionPreparation>,
+        source_assignments: Option<&[u8]>,
     ) -> Result<SemanticEvaluationForkPreparation, SemanticTransitionError> {
         self.ensure_rebindable()?;
         member.require_budget(
@@ -694,6 +695,12 @@ impl SemanticTransitionSession {
                 "evaluation source archive does not name the frozen source member",
             ));
         }
+        // The complete checkpoint owner authenticates these external assignment
+        // bytes against its canonical outer manifest before activation. This
+        // stages their native programme/index, prefix and donor cursor proof.
+        let source_rng = material.bank.header.rng_binding()?;
+        let program_assignments =
+            self.prepare_evaluation_program_assignments(source_assignments, source_rng)?;
         let graph = self
             .graph
             .admission()
@@ -750,6 +757,9 @@ impl SemanticTransitionSession {
             member: member.member,
             native_digest: Identity256::from_bytes(Sha256::digest(&archive).into()),
             native_extent: archive.len() as u64,
+            rng: source_rng,
+            source_assignments: source_assignments
+                .map(|bytes| Identity256::from_bytes(Sha256::digest(bytes).into())),
             intervention: intervention.mode,
             library: task
                 .spec
@@ -1041,12 +1051,22 @@ impl SemanticTransitionSession {
         material.bank.header.terminal = 0;
         material.bank.header.terminal_position = 0;
         material.bank.header.fuel = target.fuel;
-        material.bank.header.proposal = u64::from(target.rng.proposal);
-        material.bank.header.stream_serial = target.rng.stream_serial;
-        material.bank.header.family_id = u64::from(target.rng.family_id);
-        material.bank.header.training_cursor = 0;
-        material.bank.header.training_rng = [0; 4];
-        material.bank.state = DeviceState::default();
+        // Physical proposal, training and random coordinates remain those of
+        // the selected complete donor. Evaluation offsets are local to that
+        // immutable basis; target policy grants no training continuation.
+        let physical = material.bank.state;
+        let catalogue = self.binding();
+        material.bank.state = DeviceState {
+            model_generation: physical.model_generation,
+            family_id: physical.family_id,
+            stream_serial: physical.stream_serial,
+            proposal: physical.proposal,
+            next_proposal: physical.next_proposal,
+            catalogue_generation: catalogue.generation,
+            catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),
+            binding_digest: catalogue.digest,
+            ..DeviceState::default()
+        };
         material.bank.receipts = [SemanticTransitionReceipt::default(); COMPONENT_COUNT];
         material
             .ranges
@@ -1085,6 +1105,7 @@ impl SemanticTransitionSession {
             started: false,
             _reservation: reservation,
             intervention,
+            program_assignments: Mutex::new(program_assignments),
         })
     }
 }
@@ -1298,7 +1319,7 @@ impl SemanticTransitionSession {
 
 impl SemanticEvaluationForkOrigin {
     pub(super) fn encoded_bytes(&self) -> Result<usize, SemanticTransitionError> {
-        Ok(228)
+        Ok(300)
     }
 
     pub(super) fn write(
@@ -1318,7 +1339,17 @@ impl SemanticEvaluationForkOrigin {
         write(origin.native_digest.as_bytes())?;
         write(&origin.native_extent.to_le_bytes())?;
         write(&(origin.intervention as u64).to_le_bytes())?;
-        write(origin.library.as_bytes())
+        write(origin.library.as_bytes())?;
+        for word in [
+            origin.rng.stream_serial,
+            u64::from(origin.rng.family_id),
+            u64::from(origin.rng.proposal),
+            u64::from(origin.rng.model_generation),
+        ] {
+            write(&word.to_le_bytes())?;
+        }
+        write(&u64::from(origin.source_assignments.is_some()).to_le_bytes())?;
+        write(origin.source_assignments.unwrap_or_default().as_bytes())
     }
 
     pub(super) fn decode(
@@ -1366,7 +1397,35 @@ impl SemanticEvaluationForkOrigin {
                 .try_into()
                 .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
         );
-        if member < 2
+        let stream_serial = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        let family_id = u8::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let proposal = u32::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let model_generation =
+            u32::try_from(reader.u64().map_err(SemanticTransitionError::Semantic)?)
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let rng = SemanticRngBinding {
+            model_generation,
+            stream_serial,
+            family_id,
+            proposal,
+        };
+        let has_assignments = reader.u64().map_err(SemanticTransitionError::Semantic)?;
+        let assignments = Identity256::from_bytes(
+            reader
+                .take(32)
+                .map_err(SemanticTransitionError::Semantic)?
+                .try_into()
+                .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+        );
+        let source_assignments = match has_assignments {
+            0 if assignments == Identity256::default() => None,
+            1 if assignments != Identity256::default() => Some(assignments),
+            _ => return Err(SemanticTransitionError::ObservationMismatch),
+        };
+        if stream_serial >= 1u64 << 56
+            || member < 2
             || native_digest == Identity256::default()
             || native_extent == 0
             || source_task == Identity256::default()
@@ -1385,6 +1444,8 @@ impl SemanticEvaluationForkOrigin {
             native_extent,
             intervention,
             library,
+            rng,
+            source_assignments,
             archive: Self::archive_owner(budget, EvaluationForkArchiveState::Unresolved)?,
         }))
     }
@@ -1427,6 +1488,13 @@ impl SemanticReplayLoadedMaterial {
             logical_digest: donor.bank.header.logical_digest,
         };
         if donor.evaluation_fork.is_some()
+            || donor.bank.header.model_generation != u64::from(origin.rng.model_generation)
+            || donor.bank.header.stream_serial != origin.rng.stream_serial
+            || donor.bank.header.family_id != u64::from(origin.rng.family_id)
+            || donor.bank.header.proposal != u64::from(origin.rng.proposal)
+            || current.bank.header.training_cursor != donor.bank.header.training_cursor
+            || current.bank.header.training_rng != donor.bank.header.training_rng
+            || current.bank.header.model_generation != donor.bank.header.model_generation
             || identity != origin.source
             || donor.contract.task_identity != origin.source_task
             || !current
@@ -1517,6 +1585,8 @@ pub struct SemanticEvaluationForkOrigin {
     pub(super) member: usize,
     pub(super) native_digest: Identity256,
     pub(super) native_extent: u64,
+    rng: SemanticRngBinding,
+    source_assignments: Option<Identity256>,
     intervention: SemanticEvaluationIntervention,
     library: Identity256,
     archive: Arc<EvaluationForkArchiveOwner>,
@@ -1534,6 +1604,14 @@ struct EvaluationForkArchiveOwner {
 }
 
 impl SemanticEvaluationForkOrigin {
+    pub(super) fn rng_basis(&self) -> SemanticRngBinding {
+        self.rng
+    }
+
+    pub fn source_program_assignments_digest(&self) -> Option<Identity256> {
+        self.source_assignments
+    }
+
     pub fn intervention(&self) -> SemanticEvaluationIntervention {
         self.intervention
     }
@@ -1621,6 +1699,9 @@ impl SemanticEvaluationForkOrigin {
 /// completion. It does not issue a second TaskUse or a partial runnable session.
 pub struct SemanticEvaluationForkPreparation {
     pub(super) intervention: Arc<SemanticEvaluationInterventionPreparation>,
+    #[cfg(feature = "semantic-policy")]
+    pub(super) program_assignments:
+        Mutex<Option<actor_refresh_program::PreparedEvaluationProgramAssignments>>,
     issuer: Arc<()>,
     target_task: Identity256,
     pub(super) origin: SemanticEvaluationForkOrigin,

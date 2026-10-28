@@ -2838,6 +2838,7 @@ impl SemanticTransitionSession {
                 model_generation: rng.model_generation,
                 family_id: u32::from(rng.family_id),
                 stream_serial: rng.stream_serial,
+                proposal: bank.state.proposal,
                 next_proposal: u64::from(rng.proposal),
                 catalogue_generation: binding.generation,
                 catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),

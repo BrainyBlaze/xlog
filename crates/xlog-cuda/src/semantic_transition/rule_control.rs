@@ -401,6 +401,11 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
+        #[cfg(feature = "semantic-policy")]
+        let mut staged = preparation
+            .program_assignments
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
         let binding = &mut self
             .task
             .as_mut()
@@ -416,7 +421,20 @@ impl SemanticTransitionSession {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        binding.spec.evaluation_intervention = Some(control.mode);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(source) = staged.as_ref() {
+            source.require_target(self)?;
+        }
+        self.task
+            .as_mut()
+            .expect("validated original task")
+            .0
+            .spec
+            .evaluation_intervention = Some(control.mode);
+        #[cfg(feature = "semantic-policy")]
+        if let Some(source) = staged.take() {
+            source.install(self);
+        }
         control.active.store(true, Ordering::Release);
         Ok(())
     }

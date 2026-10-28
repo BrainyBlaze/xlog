@@ -121,6 +121,7 @@ pub(super) struct ProgramStep {
     pub(super) budget: [u64; 3],
     request: u64,
     branch: Option<String>,
+    evaluation: Option<(usize, SemanticEvaluationIntervention)>,
 }
 
 /// One original instruction, admitted while its actual publication reader is
@@ -199,6 +200,52 @@ pub(super) struct ActorRefreshProgram {
     pub(super) original_rng: Option<SemanticRngBinding>,
     pub(super) main_origins: Vec<MainActorAssignment>,
     admissions: Vec<InstructionAdmission>,
+    _evaluation_source_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
+}
+
+pub(super) struct PreparedEvaluationProgramAssignments {
+    program: Arc<()>,
+    initial_index: Identity256,
+    rng: Option<SemanticRngBinding>,
+    admissions: Vec<InstructionAdmission>,
+    assignments: Vec<MainActorAssignment>,
+    _reservation: Arc<SemanticReplayMaterialReservation>,
+}
+
+impl PreparedEvaluationProgramAssignments {
+    pub(super) fn require_target(
+        &self,
+        session: &SemanticTransitionSession,
+    ) -> Result<(), SemanticTransitionError> {
+        let program = session
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let initial = session
+            .actor_refresh_initial
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if !Arc::ptr_eq(&self.program, &program.owner)
+            || initial.index != self.initial_index
+            || !program.admissions.is_empty()
+            || !program.main_origins.is_empty()
+            || program.original_rng.is_some()
+        {
+            return Err(invalid_program());
+        }
+        Ok(())
+    }
+
+    pub(super) fn install(self, session: &mut SemanticTransitionSession) {
+        let program = session
+            .actor_refresh_program
+            .as_mut()
+            .expect("validated original program");
+        program.original_rng = self.rng;
+        program.admissions = self.admissions;
+        program.main_origins = self.assignments;
+        program._evaluation_source_reservation = Some(self._reservation);
+    }
 }
 
 pub(super) struct InitialPrefillProgramAuthority {
@@ -446,6 +493,9 @@ fn require_completed_instruction_prefix(
     }
     for previous in &program.steps[..start] {
         if previous.kind.is_none()
+            || (original.evaluation.is_some()
+                && previous.evaluation.is_some()
+                && previous.evaluation != original.evaluation)
             || (previous.branch.as_deref() == Some("control")
                 && (previous.request != original.request
                     || original.branch.as_deref() != Some("control")))
@@ -468,19 +518,42 @@ fn require_completed_instruction_prefix(
     Ok(())
 }
 
+fn evaluation_instruction_scope(
+    value: &Value,
+) -> Result<Option<(usize, SemanticEvaluationIntervention)>, SemanticTransitionError> {
+    let Some(sealed) = value.as_object().ok_or_else(invalid_program)?.get("sealed") else {
+        return Ok(None);
+    };
+    let sealed = array(sealed)?;
+    if sealed.len() != 2 {
+        return Err(invalid_program());
+    }
+    let member = usize::try_from(integer(&sealed[0])?)
+        .ok()
+        .and_then(|member| member.checked_add(2))
+        .ok_or_else(invalid_program)?;
+    let mode = match operation(&sealed[1])? {
+        "v0" => SemanticEvaluationIntervention::NoEdit,
+        "v1" => SemanticEvaluationIntervention::FixedRuleActivation,
+        "v3" => SemanticEvaluationIntervention::Structural,
+        _ => return Err(invalid_program()),
+    };
+    Ok(Some((member, mode)))
+}
+
 fn validate_segment(value: &Value) -> Result<(), SemanticTransitionError> {
-    let segment = object(
-        value,
-        &[
-            "operation",
-            "transitions",
-            "capacity_bytes",
-            "other_external_cuda_bytes",
-            "entropy_threshold",
-            "distance_weight",
-            "proposal_views",
-        ],
-    )?;
+    let evaluation = evaluation_instruction_scope(value)?;
+    let fields = [
+        "operation",
+        "transitions",
+        "capacity_bytes",
+        "other_external_cuda_bytes",
+        "entropy_threshold",
+        "distance_weight",
+        "proposal_views",
+        "sealed",
+    ];
+    let segment = object(value, &fields[..if evaluation.is_some() { 8 } else { 7 }])?;
     let mode = operation(&segment["operation"])?;
     if !matches!(mode, "inference" | "training") {
         return Err(invalid_program());
@@ -500,6 +573,18 @@ fn validate_segment(value: &Value) -> Result<(), SemanticTransitionError> {
         }
     }
     if mode == "training" && updates == 0 {
+        return Err(invalid_program());
+    }
+    if evaluation.is_some()
+        && (mode != "inference"
+            || proposals == 0
+            || updates != 0
+            || transitions.len() != proposals + 1
+            || operation(transitions.last().ok_or_else(invalid_program)?)? != "recompute"
+            || transitions[..proposals]
+                .iter()
+                .any(|step| step.as_str() != Some("proposal")))
+    {
         return Err(invalid_program());
     }
     if integer(&segment["capacity_bytes"])? <= 512 {
@@ -715,8 +800,27 @@ impl ActorRefreshProgram {
             .collect::<Result<_, SemanticTransitionError>>()?;
         let schedule = object(&root["schedule"], &["requests", "updates"])?;
         let requests = array(&schedule["requests"])?;
-        if requests.is_empty() || integer(&root["fresh_restore_before"])? >= requests.len() as u64 {
+        if requests.is_empty() {
             return Err(invalid_program());
+        }
+        match &root["fresh_restore_before"] {
+            Value::Array(points) => {
+                let mut previous = None;
+                if points.is_empty() {
+                    return Err(invalid_program());
+                }
+                for point in points {
+                    let point = integer(point)?;
+                    if point >= requests.len() as u64
+                        || previous.is_some_and(|previous| previous >= point)
+                    {
+                        return Err(invalid_program());
+                    }
+                    previous = Some(point);
+                }
+            }
+            point if integer(point)? < requests.len() as u64 => {}
+            _ => return Err(invalid_program()),
         }
         let mut steps = Vec::new();
         let mut expected_updates = Vec::new();
@@ -724,6 +828,7 @@ impl ActorRefreshProgram {
         let mut updates = 0u64;
         let mut logical_updates = 0u64;
         let mut actor_slots = 0u64;
+        let mut evaluation_requests = BTreeSet::new();
         for (request_ordinal, request) in requests.iter().enumerate() {
             let request_object = request.as_object().ok_or_else(invalid_program)?;
             let request_kind = operation(
@@ -864,6 +969,11 @@ impl ActorRefreshProgram {
                     .remove("budgets")
                     .ok_or_else(invalid_program)?;
                 validate_segment(&instruction)?;
+                if let Some((member, mode)) = evaluation_instruction_scope(&instruction)? {
+                    if !evaluation_requests.insert((member, mode as u64)) {
+                        return Err(invalid_program());
+                    }
+                }
                 let ordinary_budgets =
                     array(request_object.get("budgets").ok_or_else(invalid_program)?)?;
                 if ordinary_budgets.len()
@@ -905,6 +1015,7 @@ impl ActorRefreshProgram {
             for (instruction, branch, step_ordinal, operation_name, budget) in entries {
                 let instruction_object = instruction.as_object().ok_or_else(invalid_program)?;
                 let instruction_bytes = structural_bytes(&instruction)?;
+                let evaluation = evaluation_instruction_scope(&instruction)?;
                 let transition = kind(&operation_name);
                 let mut segment_end = steps.len() as u64 + 1;
                 if transition.is_some() {
@@ -1084,7 +1195,9 @@ impl ActorRefreshProgram {
                     actor_slot = Some(index);
                     proposals = proposals.checked_add(1).ok_or_else(invalid_program)?;
                 }
-                let before_proposals = if paired {
+                let before_proposals = if evaluation.is_some() {
+                    step_ordinal
+                } else if paired {
                     request_actor_start + branch_proposals.get(&branch_name).copied().unwrap_or(0)
                         - u64::from(transition == Some(SemanticTransitionKind::Proposal))
                 } else {
@@ -1103,6 +1216,7 @@ impl ActorRefreshProgram {
                     budget,
                     request: request_ordinal as u64,
                     branch,
+                    evaluation,
                 });
             }
             if active_segment.is_some() {
@@ -1132,6 +1246,7 @@ impl ActorRefreshProgram {
             original_rng: None,
             main_origins: Vec::new(),
             admissions: Vec::new(),
+            _evaluation_source_reservation: None,
         })
     }
 }
@@ -1163,6 +1278,49 @@ fn require_cancelled_instruction_material(
         return Err(invalid_program());
     }
     Ok(())
+}
+
+fn instruction_evaluation(
+    program: &ActorRefreshProgram,
+    claim: &InstructionAdmission,
+) -> Option<(usize, SemanticEvaluationIntervention)> {
+    program.steps[claim.first as usize].evaluation
+}
+
+fn evaluation_proposal_capacity(
+    program: &ActorRefreshProgram,
+    member: usize,
+) -> Result<u64, SemanticTransitionError> {
+    program
+        .steps
+        .iter()
+        .filter(|step| {
+            step.evaluation
+                .is_some_and(|(original, _)| original == member)
+                && step.kind == Some(SemanticTransitionKind::Proposal)
+        })
+        .try_fold(0u64, |count, _| {
+            count.checked_add(1).ok_or_else(invalid_program)
+        })
+}
+
+fn same_instruction_expense_scope(
+    program: &ActorRefreshProgram,
+    current: &InstructionAdmission,
+    previous: &InstructionAdmission,
+) -> bool {
+    instruction_evaluation(program, current)
+        .is_none_or(|scope| instruction_evaluation(program, previous) == Some(scope))
+}
+
+fn instruction_expense_capacity(
+    program: &ActorRefreshProgram,
+    claim: &InstructionAdmission,
+) -> Result<u64, SemanticTransitionError> {
+    match instruction_evaluation(program, claim) {
+        Some((member, _)) => evaluation_proposal_capacity(program, member),
+        None => Ok(program.proposals),
+    }
 }
 
 fn instruction_proposals(program: &ActorRefreshProgram, claim: &InstructionAdmission) -> u64 {
@@ -1334,12 +1492,17 @@ fn require_cancelled_assignment_prefix(
             "cancelled instruction changed its original assignment prefix",
         ));
     }
-    let previous_proposals = previous.iter().try_fold(0u64, |spent, original| {
-        spent
-            .checked_add(instruction_proposals(program, original))
-            .ok_or(SemanticTransitionError::GenerationExhausted)
-    })?;
-    if source.proposal_spent < previous_proposals || source.proposal_spent > program.proposals {
+    let previous_proposals = previous
+        .iter()
+        .filter(|original| same_instruction_expense_scope(program, claim, original))
+        .try_fold(0u64, |spent, original| {
+            spent
+                .checked_add(instruction_proposals(program, original))
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
+    if source.proposal_spent < previous_proposals
+        || source.proposal_spent > instruction_expense_capacity(program, claim)?
+    {
         return Err(publication_input_error(
             "cancelled instruction changed its original cumulative Proposal expense",
         ));
@@ -2411,6 +2574,135 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
+    pub(super) fn prepare_evaluation_program_assignments(
+        &self,
+        source: Option<&[u8]>,
+        source_rng: SemanticRngBinding,
+    ) -> Result<Option<PreparedEvaluationProgramAssignments>, SemanticTransitionError> {
+        let Some(program) = self.actor_refresh_program.as_ref() else {
+            if source.is_some() {
+                return Err(invalid_program());
+            }
+            return Ok(None);
+        };
+        let source = source.ok_or_else(invalid_program)?;
+        let initial = self
+            .actor_refresh_initial
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        if !program.admissions.is_empty()
+            || !program.main_origins.is_empty()
+            || program.original_rng.is_some()
+        {
+            return Err(invalid_program());
+        }
+        let bytes = source
+            .len()
+            .checked_mul(8)
+            .and_then(|bytes| {
+                bytes.checked_add(size_of::<PreparedEvaluationProgramAssignments>() + 64)
+            })
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = Arc::new(
+            self.replay_material_budget
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .reserve_auxiliary(bytes)?,
+        );
+        let (rng, admissions, assignments) =
+            decode_assignment_material(program, initial.index, source)?;
+        if admissions.is_empty()
+            || admissions.iter().any(|claim| {
+                claim.state != InstructionState::Completed
+                    || instruction_evaluation(program, claim).is_some()
+            })
+        {
+            return Err(invalid_program());
+        }
+        let evaluation_start = program
+            .steps
+            .iter()
+            .find(|step| step.evaluation.is_some())
+            .ok_or_else(invalid_program)?
+            .ordinal as usize;
+        require_completed_instruction_prefix(program, evaluation_start, &admissions)?;
+        let last = admissions.last().ok_or_else(invalid_program)?;
+        let last_step = program
+            .steps
+            .get(last.end as usize - 1)
+            .ok_or_else(invalid_program)?;
+        let original_rng = rng.ok_or_else(invalid_program)?;
+        if last_step.kind != Some(SemanticTransitionKind::Recompute)
+            || original_rng.stream_serial != source_rng.stream_serial
+            || original_rng.family_id != source_rng.family_id
+            || u64::from(original_rng.proposal).checked_add(last_step.before_proposals)
+                != Some(u64::from(source_rng.proposal))
+        {
+            return Err(publication_input_error(
+                "evaluation source assignments differ from their selected donor cursor",
+            ));
+        }
+        Ok(Some(PreparedEvaluationProgramAssignments {
+            program: Arc::clone(&program.owner),
+            initial_index: initial.index,
+            rng,
+            admissions,
+            assignments,
+            _reservation: reservation,
+        }))
+    }
+
+    fn evaluation_program_member(&self) -> Option<usize> {
+        self.codebooks
+            .model_catalogue
+            .as_ref()
+            .and_then(|(_, member)| (*member >= 2).then_some(*member))
+    }
+
+    fn program_quantities(
+        &self,
+        program: &ActorRefreshProgram,
+    ) -> Result<[u64; 2], SemanticTransitionError> {
+        if let Some(member) = self.evaluation_program_member() {
+            if self.evaluation_rule_library().is_none() {
+                return Err(invalid_program());
+            }
+            let proposals = evaluation_proposal_capacity(program, member)?;
+            if proposals == 0 {
+                return Err(invalid_program());
+            }
+            Ok([proposals, 0])
+        } else {
+            Ok([program.proposals, program.updates])
+        }
+    }
+
+    fn require_program_evaluation_scope(
+        &self,
+        step: &ProgramStep,
+    ) -> Result<(), SemanticTransitionError> {
+        match self.evaluation_program_member() {
+            Some(member) => {
+                let mode = self
+                    .task
+                    .as_ref()
+                    .and_then(|task| task.0.spec.evaluation_intervention)
+                    .ok_or_else(invalid_program)?;
+                if step.evaluation != Some((member, mode))
+                    || self.evaluation_fork.as_ref().is_none_or(|origin| {
+                        origin.member != member || origin.intervention() != mode
+                    })
+                {
+                    return Err(invalid_program());
+                }
+            }
+            None if step.evaluation.is_some() => return Err(invalid_program()),
+            None => {}
+        }
+        Ok(())
+    }
+
     pub fn bind_actor_refresh_program(
         &mut self,
         program_bytes: &[u8],
@@ -2420,13 +2712,13 @@ impl SemanticTransitionSession {
             if program.bytes != program_bytes {
                 return Err(invalid_program());
             }
-            return Ok([program.proposals, program.updates]);
+            return self.program_quantities(program);
         }
         if self.prepared_segment.is_some() {
             return Err(invalid_program());
         }
         let program = ActorRefreshProgram::decode(program_bytes)?;
-        let quantities = [program.proposals, program.updates];
+        let quantities = self.program_quantities(&program)?;
         self.actor_refresh_program = Some(program);
         Ok(quantities)
     }
@@ -2548,6 +2840,7 @@ impl SemanticTransitionSession {
             .ok_or_else(invalid_program)?;
         let start = usize::try_from(first_program_ordinal).map_err(|_| invalid_program())?;
         let original = program.steps.get(start).ok_or_else(invalid_program)?;
+        self.require_program_evaluation_scope(original)?;
         if instruction_projection(instruction_bytes)? != original.instruction {
             return Err(invalid_program());
         }
@@ -2579,16 +2872,29 @@ impl SemanticTransitionSession {
                 .ok_or_else(invalid_program)?,
         )
         .map_err(|_| invalid_program())?;
-        if let Some(previous) = program.original_rng {
+        let expected_rng = if original.evaluation.is_some() {
+            Some(
+                self.evaluation_fork
+                    .as_ref()
+                    .ok_or_else(invalid_program)?
+                    .rng_basis(),
+            )
+        } else {
+            program.original_rng
+        };
+        if let Some(previous) = expected_rng {
             if previous.family_id != rng.family_id
                 || previous.stream_serial != rng.stream_serial
                 || previous.proposal != rng.proposal
+                || (original.evaluation.is_some()
+                    && previous.model_generation != rng.model_generation)
             {
                 return Err(invalid_program());
             }
         } else if original.before_proposals != 0 {
             return Err(invalid_program());
         }
+        let evaluation = original.evaluation;
         // Freeze the actual source prefix before the first admission installs
         // its RNG binding or any admission changes the canonical assignment map.
         let (assignment_bytes, _assignment_reservation) = self.actor_refresh_assignment_bytes()?;
@@ -2637,7 +2943,9 @@ impl SemanticTransitionSession {
             .admissions
             .try_reserve(1)
             .map_err(|error| runtime_error("original instruction custody", error))?;
-        program.original_rng = Some(rng);
+        if evaluation.is_none() {
+            program.original_rng = Some(rng);
+        }
         program.admissions.push(claim);
         Ok(admission)
     }
@@ -2736,10 +3044,13 @@ impl SemanticTransitionSession {
             .actor_refresh_program
             .as_ref()
             .ok_or_else(invalid_program)?;
+        let current = self.instruction_admission(admission)?;
+        let capacity = instruction_expense_capacity(program, current)?;
         let spent = program
             .admissions
             .iter()
             .take_while(|claim| !Arc::ptr_eq(&claim.issuance, &admission.issuance))
+            .filter(|claim| same_instruction_expense_scope(program, current, claim))
             .try_fold(0u64, |spent, claim| {
                 // Every serialized report and retirement bit in the retained
                 // prefix is final before this source can authorize a charge.
@@ -2748,7 +3059,7 @@ impl SemanticTransitionSession {
                     .checked_add(instruction_proposals(program, claim))
                     .ok_or(SemanticTransitionError::GenerationExhausted)
             })?;
-        if source_proposal_spent < spent || source_proposal_spent > program.proposals {
+        if source_proposal_spent < spent || source_proposal_spent > capacity {
             return Err(invalid_program());
         }
         let source = InstructionCheckpointSource {
@@ -3297,7 +3608,10 @@ impl SemanticTransitionSession {
         let charged = source
             .proposal_spent
             .checked_add(instruction_proposals(&program, claim))
-            .filter(|charged| *charged <= program.proposals)
+            .filter(|charged| {
+                instruction_expense_capacity(&program, claim)
+                    .is_ok_and(|capacity| *charged <= capacity)
+            })
             .ok_or_else(invalid_program)?;
         Ok(Some((
             claim.first,
@@ -3350,6 +3664,115 @@ impl SemanticTransitionSession {
 
     /// Authenticate attachment presence from the native instruction lifecycle,
     /// complete current publication and sealed delivery queues, never an ordinal.
+    fn verify_evaluation_program_checkpoint_presence(
+        native: &mut SemanticReplayLoadedMaterial,
+        origin: &SemanticEvaluationForkOrigin,
+        initial_index: Identity256,
+        assignments: Option<&[u8]>,
+        original_program: &[u8],
+        attachment_present: bool,
+    ) -> Result<(), SemanticTransitionError> {
+        if attachment_present {
+            return Err(invalid_program());
+        }
+        let assignments = assignments.ok_or_else(invalid_program)?;
+        let budget = native
+            .bytes
+            .budget()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .clone();
+        let bytes = original_program
+            .len()
+            .checked_mul(12)
+            .and_then(|bytes| bytes.checked_add(assignments.len().checked_mul(12)?))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let _scratch = budget.reserve_auxiliary(bytes)?;
+        let _parse = budget.reserve_json_parse(original_program)?;
+        let program = ActorRefreshProgram::decode(original_program)?;
+        let (rng, admissions, actor_assignments) =
+            decode_assignment_material(&program, initial_index, assignments)?;
+        let scope = (origin.member, origin.intervention());
+        if admissions.is_empty()
+            || admissions.iter().any(|claim| {
+                let evaluation = instruction_evaluation(&program, claim);
+                evaluation.is_some_and(|original| original != scope)
+                    || (evaluation.is_none() && claim.state != InstructionState::Completed)
+            })
+        {
+            return Err(invalid_program());
+        }
+        let original_count = admissions
+            .iter()
+            .take_while(|claim| instruction_evaluation(&program, claim).is_none())
+            .count();
+        if original_count == 0
+            || admissions[original_count..]
+                .iter()
+                .any(|claim| instruction_evaluation(&program, claim).is_none())
+        {
+            return Err(invalid_program());
+        }
+        let original_assignments: Vec<_> = actor_assignments
+            .iter()
+            .filter(|assignment| {
+                program.steps[assignment.ordinal as usize]
+                    .evaluation
+                    .is_none()
+            })
+            .collect();
+        let prefix = assignment_material(
+            program.identity,
+            initial_index,
+            rng,
+            &admissions[..original_count],
+            &original_assignments,
+        );
+        if origin.source_program_assignments_digest()
+            != Some(Identity256::from_bytes(Sha256::digest(&prefix).into()))
+        {
+            return Err(publication_input_error(
+                "evaluation checkpoint changed its original donor assignment history",
+            ));
+        }
+        let evaluation_start = program
+            .steps
+            .iter()
+            .find(|step| step.evaluation == Some(scope))
+            .ok_or_else(invalid_program)?
+            .ordinal as usize;
+        require_completed_instruction_prefix(
+            &program,
+            evaluation_start,
+            &admissions[..original_count],
+        )?;
+        let current = &admissions[original_count..];
+        if current.len() > 1 {
+            return Err(invalid_program());
+        }
+        let completed = current
+            .first()
+            .filter(|claim| claim.state == InstructionState::Completed)
+            .map_or(0, |claim| instruction_proposals(&program, claim));
+        let material = native.complete()?;
+        let header = material.bank.header;
+        let basis = origin.rng_basis();
+        if header.abi != 1
+            || header.model_generation != u64::from(material.bank.state.model_generation)
+            || header.stream_serial != material.bank.state.stream_serial
+            || header.family_id != u64::from(material.bank.state.family_id)
+            || header.model_generation != u64::from(basis.model_generation)
+            || header.stream_serial != basis.stream_serial
+            || header.family_id != u64::from(basis.family_id)
+            || u64::from(basis.proposal).checked_add(completed) != Some(header.proposal)
+        {
+            return Err(publication_input_error(
+                "evaluation checkpoint changed its original local random cursor",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn verify_model_context_checkpoint_presence(
         native: &mut SemanticReplayLoadedMaterial,
         model_context: Option<&SemanticFrozenModelContext>,
@@ -3394,7 +3817,23 @@ impl SemanticTransitionSession {
                             Ok(())
                         };
                     }
-                    _ => return Err(SemanticTransitionError::ObservationMismatch),
+                    member => {
+                        let origin = state
+                            .evaluation_fork_origin()
+                            .ok_or(SemanticTransitionError::ObservationMismatch)?
+                            .clone();
+                        if origin.member != member {
+                            return Err(SemanticTransitionError::ObservationMismatch);
+                        }
+                        return Self::verify_evaluation_program_checkpoint_presence(
+                            native,
+                            &origin,
+                            initial_index,
+                            assignments,
+                            original_program,
+                            attachment_present,
+                        );
+                    }
                 }
             }
         }

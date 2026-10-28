@@ -12766,6 +12766,7 @@ struct TaskCheckpointSeed {
 
 struct DormantEvaluationSource {
     value: ColdValue,
+    program_assignments: Option<Arc<[u8]>>,
     source_material_sources: Option<Arc<material_source::MaterialSourceRegistry>>,
     last_snapshot: Mutex<Option<SourceUseSnapshot>>,
     validating: AtomicBool,
@@ -12907,6 +12908,15 @@ impl DormantEvaluationSource {
             .and_then(|bytes| bytes.checked_mul(2))
             .and_then(|bytes| {
                 bytes.checked_add(
+                    source
+                        .seed
+                        .actor_refresh_assignments
+                        .as_ref()
+                        .map_or(0, |value| value.len() + 2 * std::mem::size_of::<usize>()),
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
                     std::mem::size_of::<Self>()
                         + 7 * (std::mem::size_of::<ColdValue>() + 2 * std::mem::size_of::<usize>()),
                 )
@@ -12928,6 +12938,11 @@ impl DormantEvaluationSource {
         }
         Ok(Arc::new(Self {
             value: ColdValue::Sequence(fields),
+            program_assignments: source
+                .seed
+                .actor_refresh_assignments
+                .as_ref()
+                .map(|bytes| Arc::from(bytes.as_ref())),
             source_material_sources: Some(Arc::clone(&source.seed.material_sources)),
             last_snapshot: Mutex::new(None),
             validating: AtomicBool::new(false),
@@ -12960,6 +12975,7 @@ impl DormantEvaluationSource {
         ColdValue::checked_canonical_bytes(latest, false)?;
         Ok(Some(Arc::new(Self {
             value: ColdValue::Sequence(fields[..7].to_vec()),
+            program_assignments: None,
             source_material_sources: None,
             last_snapshot: Mutex::new(Some(SourceUseSnapshot {
                 canonical: Arc::clone(latest),
@@ -13303,6 +13319,7 @@ fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> 
 impl TaskCheckpointSeed {
     fn with_dormant_evaluation_source(&self, source: Arc<DormantEvaluationSource>) -> Self {
         let mut seed = self.clone();
+        seed.actor_refresh_assignments = source.program_assignments.clone();
         seed.dormant_evaluation_source = Some(source);
         seed
     }

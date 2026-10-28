@@ -690,6 +690,20 @@ impl PySemanticTransitionController {
             snapshot_bytes(&snapshots.1)?
         };
         task.require_current(&session.owner()?)?;
+        let source_admission = source.seed.proposal_expense()?.original_admission;
+        let target_admission = task.checkpoint.proposal_expense()?.original_admission;
+        match (source_admission.as_ref(), target_admission.as_ref()) {
+            (Some(source), Some(target))
+                if source.program == target.program
+                    && cancelled_checkpoint::initial_index(source)?
+                        == cancelled_checkpoint::initial_index(target)? => {}
+            (None, None) if source.seed.actor_refresh_assignments.is_none() => {}
+            _ => {
+                return Err(invalid(
+                    "evaluation donor changed the original program or initial replay index",
+                ))
+            }
+        }
         let dormant = DormantEvaluationSource::from_checkpoint(bytes, &source)?;
         let context = task
             .checkpoint
@@ -708,7 +722,13 @@ impl PySemanticTransitionController {
                 )
                 .map_err(xlog_err)?;
             owner
-                .prepare_evaluation_fork(native, &context, records, restriction)
+                .prepare_evaluation_fork(
+                    native,
+                    &context,
+                    records,
+                    restriction,
+                    dormant.program_assignments.as_deref(),
+                )
                 .map_err(xlog_err)?
         };
         let target_task_identity = *preparation.target_task_identity().as_bytes();

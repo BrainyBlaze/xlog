@@ -11683,7 +11683,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         graph: &SemanticRootMaterial,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 7);
+        material_u32(&mut bytes, 8);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -11922,7 +11922,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             0 => {}
             1 => {
                 reader
-                    .take(72 + 32 + 32 + 8 + 32 + 8 + 8 + 32)
+                    .take(72 + 32 + 32 + 8 + 32 + 8 + 8 + 32 + 4 * 8 + 8 + 32)
                     .map_err(SemanticTransitionError::Semantic)?;
                 add(1, size_of::<SemanticEvaluationForkOrigin>())?;
             }
@@ -11955,7 +11955,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 7
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 8
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {

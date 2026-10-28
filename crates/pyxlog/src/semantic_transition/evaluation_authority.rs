@@ -22,6 +22,8 @@ impl AuthenticatedSourceAuthority {
             || self.origin.source_identity() != origin.source_identity()
             || self.origin.source_task_identity() != origin.source_task_identity()
             || self.origin.member() != origin.member()
+            || self.origin.source_program_assignments_digest()
+                != origin.source_program_assignments_digest()
         {
             return Err(invalid(
                 "retained source authority changed its authenticated native owner",
@@ -117,6 +119,15 @@ pub(super) fn authenticate(
     if seed.dormant_evaluation_source.is_some() || binding != referent.task {
         return Err(invalid(
             "evaluation source task differs from its original checkpoint binding",
+        ));
+    }
+    let assignments_digest = seed
+        .actor_refresh_assignments
+        .as_deref()
+        .map(|bytes| Identity256::from_bytes(Sha256::digest(bytes).into()));
+    if assignments_digest != origin.source_program_assignments_digest() {
+        return Err(invalid(
+            "evaluation program history differs from its complete donor checkpoint",
         ));
     }
     let mut authority = TaskAuthority::parse(&seed.authority)?;
