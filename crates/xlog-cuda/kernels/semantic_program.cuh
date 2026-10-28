@@ -162,12 +162,15 @@ __device__ Atom bank_atom(const uint64_t* values) {
              {uint32_t(values[4]), uint32_t(values[5])}}};
 }
 
-__device__ Rule bank_rule(const Bank& bank, uint32_t index) {
-    const uint64_t* values = bank.words + 5 + bank.predicate_count +
-        4 * (uint64_t(bank.query_count) + bank.initial_count) + kRuleWords * uint64_t(index);
+__device__ Rule rule_words(const uint64_t* values) {
     return {bank_atom(values + 1),
             {bank_atom(values + 7), bank_atom(values + 13), bank_atom(values + 19)},
             uint32_t(values[0])};
+}
+
+__device__ Rule bank_rule(const Bank& bank, uint32_t index) {
+    return rule_words(bank.words + 5 + bank.predicate_count +
+        4 * (uint64_t(bank.query_count) + bank.initial_count) + kRuleWords * uint64_t(index));
 }
 
 // Decode only the exact versioned canonical word bank emitted by the cold compiler.
@@ -388,8 +391,15 @@ __device__ Result materialize_bank(const Bank& bank, const Rule* inserted,
                                    uint32_t rule_capacity, Fact* output,
                                    uint32_t output_capacity, uint64_t fuel,
                                    const Rule* selected,uint32_t selected_count,
-                                   DualSupport* support,const Observations& observations) {
-    const uint64_t total_rules = uint64_t(bank.rule_count) + selected_count + inserted_count;
+                                   DualSupport* support,const Observations& observations,
+                                   const uint64_t* library,uint32_t library_count,
+                                   uint64_t active_mask) {
+    const uint64_t permitted = library_count == 64 ? UINT64_MAX :
+        library_count < 64 ? (uint64_t(1) << library_count) - 1 : 0;
+    if (library_count > 64 || (library_count && !library) || (active_mask & ~permitted))
+        return {Status::InvalidProgram, 0, 0, 0};
+    const uint32_t active_count = __popcll(active_mask);
+    const uint64_t total_rules = uint64_t(bank.rule_count) + selected_count + inserted_count + active_count;
     if (!bank.words || !bank.predicate_arities || (inserted_count && !inserted) ||
         (selected_count && !selected) || (bank.initial_count && !input) ||
         (total_rules && !rules)) return {Status::InvalidProgram, 0, 0, 0};
@@ -403,15 +413,27 @@ __device__ Result materialize_bank(const Bank& bank, const Rule* inserted,
         rules[bank.rule_count + index] = selected[index];
     for (uint32_t index = 0; index < inserted_count; ++index)
         rules[bank.rule_count + selected_count + index] = inserted[index];
-    return materialize(input, bank.initial_count, rules, uint32_t(total_rules), bank,
-                       output, output_capacity, fuel,support,observations,bank.rule_count);
+    uint64_t charged = 0;
+    uint32_t active = bank.rule_count + selected_count + inserted_count;
+    for (uint32_t index = 0; index < library_count; ++index) {
+        if (charged == fuel) return {Status::FuelExhausted, 0, 0, charged};
+        ++charged;
+        if (!(active_mask & (uint64_t(1) << index))) continue;
+        if (kRuleWords > fuel - charged) return {Status::FuelExhausted, 0, 0, charged};
+        charged += kRuleWords;
+        rules[active++] = rule_words(library + kRuleWords * uint64_t(index));
+    }
+    auto result = materialize(input, bank.initial_count, rules, uint32_t(total_rules), bank,
+                              output, output_capacity, fuel - charged,support,observations,bank.rule_count);
+    result.charged_pairs += charged;
+    return result;
 }
 
 __device__ Result materialize_bank(const Bank& bank,const Rule* inserted,uint32_t inserted_count,
         Fact* input,uint32_t input_capacity,Rule* rules,uint32_t rule_capacity,
         Fact* output,uint32_t output_capacity,uint64_t fuel) {
     return materialize_bank(bank,inserted,inserted_count,input,input_capacity,rules,
-        rule_capacity,output,output_capacity,fuel,nullptr,0,nullptr,NoObservations{});
+        rule_capacity,output,output_capacity,fuel,nullptr,0,nullptr,NoObservations{},nullptr,0,0);
 }
 
 }  // namespace semantic_program
