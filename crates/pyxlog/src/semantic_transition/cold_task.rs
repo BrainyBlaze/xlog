@@ -28,6 +28,7 @@ pub(super) struct EditableTaskSource {
     pub input_facts: String,
     pub statements: Vec<(String, u8)>,
     pub query_records: Vec<u32>,
+    pub observer_record_offset: u32,
     allocations: Option<Arc<EditableTaskAllocations>>,
 }
 
@@ -35,10 +36,15 @@ struct EditableTaskAllocations {
     _vectors: xlog_cuda::SemanticReplayMaterialReservation,
     _text: xlog_cuda::SemanticReplayMaterialReservation,
     _program: xlog_gpu::logic::PositiveTaskAllocations,
+    _context: Option<(
+        Arc<EditableTaskAllocations>,
+        xlog_cuda::SemanticReplayMaterialReservation,
+    )>,
 }
 
 pub(super) struct EditableProgramOwner {
     pub(super) program: Arc<xlog_cuda::SemanticProgramAdmission>,
+    pub(super) observer_record_offset: u32,
     _allocations: Option<Arc<EditableTaskAllocations>>,
     #[cfg(feature = "semantic-policy")]
     _actor_metadata: Option<Arc<super::actor_refresh::ActorConstructionMetadata>>,
@@ -48,6 +54,7 @@ impl EditableTaskSource {
     pub(super) fn program_owner(&self) -> Arc<EditableProgramOwner> {
         Arc::new(EditableProgramOwner {
             program: Arc::clone(&self.program),
+            observer_record_offset: self.observer_record_offset,
             _allocations: self.allocations.as_ref().map(Arc::clone),
             #[cfg(feature = "semantic-policy")]
             _actor_metadata: None,
@@ -61,6 +68,7 @@ impl EditableTaskSource {
     ) -> Arc<EditableProgramOwner> {
         Arc::new(EditableProgramOwner {
             program: Arc::clone(&self.program),
+            observer_record_offset: self.observer_record_offset,
             _allocations: self.allocations.as_ref().map(Arc::clone),
             _actor_metadata: Some(metadata),
         })
@@ -88,7 +96,98 @@ fn editable_source_from_admission_owned(
     admission: &SemanticAdmissionRecords,
     budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
 ) -> PyResult<Option<EditableTaskSource>> {
-    if admission.predicates.len() != 3
+    let record_end = admission
+        .records
+        .len()
+        .saturating_sub(usize::from(admission.predicates.len() == 4));
+    let mut begin = 0;
+    let mut source: Option<EditableTaskSource> = None;
+    while begin < record_end {
+        let statement_end = begin
+            + admission.records[begin..record_end]
+                .iter()
+                .take_while(|record| record.predicate == RelId(1))
+                .count();
+        let input_end = statement_end
+            + admission.records[statement_end..record_end]
+                .iter()
+                .take_while(|record| record.predicate == RelId(2))
+                .count();
+        let end = input_end
+            + admission.records[input_end..record_end]
+                .iter()
+                .take_while(|record| record.predicate == RelId(3))
+                .count();
+        if end == begin {
+            return editable_source_segment(admission, begin, record_end, budget);
+        }
+        let Some(mut target) = editable_source_segment(admission, begin, end, budget)? else {
+            return Ok(None);
+        };
+        if let Some(prefix) = source {
+            let reservation = budget
+                .map(|budget| {
+                    let bytes =
+                        xlog_cuda::SemanticProgramAdmission::evaluation_context_allocation_bytes(
+                            &prefix.program,
+                            &target.program,
+                        )
+                        .map_err(invalid)?;
+                    budget.reserve_auxiliary(bytes as u64).map_err(xlog_err)
+                })
+                .transpose()?;
+            target.program = Arc::new(
+                xlog_cuda::SemanticProgramAdmission::evaluation_context(
+                    &prefix.program,
+                    &target.program,
+                    u32::try_from(begin)
+                        .map_err(|_| invalid("evaluation context record offset overflow"))?,
+                )
+                .map_err(invalid)?,
+            );
+            if let Some(reservation) = reservation {
+                let allocations = target
+                    .allocations
+                    .as_mut()
+                    .and_then(Arc::get_mut)
+                    .ok_or_else(|| {
+                        invalid("evaluation context lost its original compile allocation owner")
+                    })?;
+                allocations._context = Some((
+                    prefix.allocations.ok_or_else(|| {
+                        invalid("evaluation prefix lost its original compile allocation owner")
+                    })?,
+                    reservation,
+                ));
+            }
+        }
+        for record in &mut target.query_records {
+            *record = record
+                .checked_add(
+                    u32::try_from(begin)
+                        .map_err(|_| invalid("evaluation context record offset overflow"))?,
+                )
+                .ok_or_else(|| invalid("evaluation query record offset overflow"))?;
+        }
+        target.observer_record_offset = u32::try_from(begin)
+            .map_err(|_| invalid("evaluation observer record offset overflow"))?;
+        source = Some(target);
+        begin = end;
+    }
+    if source.is_none() {
+        return editable_source_segment(admission, 0, 0, budget);
+    }
+    Ok(source)
+}
+
+fn editable_source_segment(
+    admission: &SemanticAdmissionRecords,
+    record_begin: usize,
+    record_end: usize,
+    budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
+) -> PyResult<Option<EditableTaskSource>> {
+    let scoped = admission.predicates.len() == 4;
+    if !(3..=4).contains(&admission.predicates.len())
         || admission.predicates[0].predicate != RelId(1)
         || admission.predicates[0].role != SemanticRecordRole::Statement
         || admission.predicates[1].predicate != RelId(2)
@@ -135,19 +234,47 @@ fn editable_source_from_admission_owned(
     {
         return Ok(None);
     }
-    let statement_count = admission
-        .records
+    let scope_record = if scoped {
+        let predicate = &admission.predicates[3];
+        let scope = admission
+            .records
+            .last()
+            .ok_or_else(|| invalid("evaluation context omitted its scope record"))?;
+        if predicate.predicate != RelId(4)
+            || predicate.role != SemanticRecordRole::Qualifier
+            || predicate.schema.sort_labels() != ["evaluation-context"]
+            || predicate.schema.key_columns != [0]
+            || !predicate
+                .schema
+                .columns
+                .iter()
+                .map(|(name, scalar)| (name.as_str(), *scalar))
+                .eq([("context", ScalarType::Symbol)])
+            || scope.predicate != RelId(4)
+            || !matches!(scope.arguments.as_slice(), [SemanticArgument::Symbol(_)])
+            || !scope.qualifiers.is_empty()
+        {
+            return Err(invalid(
+                "evaluation context changed its original typed scope",
+            ));
+        }
+        Some(admission.records.len() - 1)
+    } else {
+        None
+    };
+    let records = &admission.records[record_begin..record_end];
+    let statement_count = records
         .iter()
         .take_while(|record| record.predicate == RelId(1))
         .count();
-    let source_count = admission.records[statement_count..]
+    let source_count = records[statement_count..]
         .iter()
         .take_while(|record| record.predicate == RelId(2))
         .count();
     let selector_begin = statement_count
         .checked_add(source_count)
         .ok_or_else(|| invalid("editable task record geometry overflow"))?;
-    let query_count = admission.records.len().saturating_sub(selector_begin);
+    let query_count = records.len().saturating_sub(selector_begin);
     if statement_count == 0
         || statement_count > u32::MAX as usize - 3
         || !(2..=3).contains(&source_count)
@@ -162,8 +289,7 @@ fn editable_source_from_admission_owned(
     let overflow = || invalid("editable source allocation extent overflow");
     let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(overflow);
     let mul = |a: usize, b: usize| a.checked_mul(b).ok_or_else(overflow);
-    let symbol_count = admission
-        .records
+    let symbol_count = records
         .iter()
         .flat_map(|record| &record.arguments)
         .filter(|argument| matches!(argument, SemanticArgument::Symbol(_)))
@@ -198,13 +324,15 @@ fn editable_source_from_admission_owned(
     let vectors = budget
         .map(|budget| {
             budget
-                .reserve_auxiliary(vector_bytes as u64)
+                .reserve_auxiliary(add(
+                    vector_bytes,
+                    usize::from(record_begin != 0) * std::mem::size_of::<u32>(),
+                )? as u64)
                 .map_err(xlog_err)
         })
         .transpose()?;
     let symbol_ids = budget.map(|_| {
-        admission
-            .records
+        records
             .iter()
             .flat_map(|record| &record.arguments)
             .filter_map(|argument| match argument {
@@ -258,7 +386,7 @@ fn editable_source_from_admission_owned(
     };
     let text_owner = if let Some(budget) = budget {
         let mut text = 0usize;
-        for record in &admission.records[..selector_begin] {
+        for record in &records[..selector_begin] {
             let argument = record
                 .arguments
                 .get(1)
@@ -266,7 +394,7 @@ fn editable_source_from_admission_owned(
             text = add(text, symbol_text(argument)?.len())?;
         }
         let source_text = |index: usize| {
-            admission.records[statement_count + index]
+            records[statement_count + index]
                 .arguments
                 .get(1)
                 .ok_or_else(|| invalid("editable task input has invalid typed arguments"))
@@ -276,16 +404,16 @@ fn editable_source_from_admission_owned(
         // three copies of each original text. The selected initial source has
         // its real ordered selector multiplicity, not all-history bytes.
         let mut initial = add(add(source_text(0)?.len(), source_text(1)?.len())?, 2)?;
-        for record in &admission.records[selector_begin..] {
+        for record in &records[selector_begin..] {
             let Some(SemanticArgument::U32(statement)) = record.arguments.get(1) else {
                 return Err(invalid(
                     "editable task query selector has invalid typed arguments",
                 ));
             };
-            let statement = admission
-                .records
-                .get(*statement as usize)
-                .filter(|_| (*statement as usize) < statement_count)
+            let statement = (*statement as usize)
+                .checked_sub(record_begin)
+                .filter(|&statement| statement < statement_count)
+                .and_then(|statement| records.get(statement))
                 .and_then(|record| record.arguments.get(1))
                 .ok_or_else(|| {
                     invalid("editable task query selection differs from its admission")
@@ -310,12 +438,20 @@ fn editable_source_from_admission_owned(
         xlog_core::symbol::resolve_checked(*id)
             .ok_or_else(|| invalid("editable task source symbol is unavailable"))
     };
-    let qualifiers = (statement_count..selector_begin)
+    let scope_index = if record_begin != 0 {
+        let scope = scope_record
+            .ok_or_else(|| invalid("evaluation context has no original typed scope"))?;
+        Some(u32::try_from(scope).map_err(|_| invalid("evaluation scope record offset overflow"))?)
+    } else {
+        None
+    };
+    let qualifiers = (record_begin + statement_count..record_begin + selector_begin)
         .map(|index| index as u32)
+        .chain(scope_index)
         .collect::<Vec<_>>();
     let mut statements = Vec::with_capacity(statement_count);
     let mut masks = Vec::with_capacity(statement_count);
-    for (index, record) in admission.records[..statement_count].iter().enumerate() {
+    for (index, record) in records[..statement_count].iter().enumerate() {
         let [SemanticArgument::U32(ordinal), content, SemanticArgument::U32(mask)] =
             record.arguments.as_slice()
         else {
@@ -336,10 +472,7 @@ fn editable_source_from_admission_owned(
         masks.push(*mask as u8);
     }
     let mut sources = Vec::with_capacity(source_count);
-    for (index, record) in admission.records[statement_count..selector_begin]
-        .iter()
-        .enumerate()
-    {
+    for (index, record) in records[statement_count..selector_begin].iter().enumerate() {
         let [SemanticArgument::U32(kind), content] = record.arguments.as_slice() else {
             return Err(invalid("editable task input has invalid typed arguments"));
         };
@@ -351,7 +484,7 @@ fn editable_source_from_admission_owned(
         sources.push(symbol(content)?);
     }
     let mut query_records = Vec::with_capacity(query_count);
-    for (index, record) in admission.records[selector_begin..].iter().enumerate() {
+    for (index, record) in records[selector_begin..].iter().enumerate() {
         let [SemanticArgument::U32(ordinal), SemanticArgument::U32(statement)] =
             record.arguments.as_slice()
         else {
@@ -361,14 +494,16 @@ fn editable_source_from_admission_owned(
         };
         if record.predicate != RelId(3)
             || *ordinal != index as u32
-            || *statement as usize >= statement_count
+            || (*statement as usize)
+                .checked_sub(record_begin)
+                .is_none_or(|statement| statement >= statement_count)
             || !record.qualifiers.is_empty()
         {
             return Err(invalid(
                 "editable task query selection differs from its admission",
             ));
         }
-        query_records.push(*statement);
+        query_records.push((*statement as usize - record_begin) as u32);
     }
     let statement_texts = statements.iter().map(String::as_str).collect::<Vec<_>>();
     let (program, allocations) = match budget {
@@ -392,6 +527,7 @@ fn editable_source_from_admission_owned(
                     _vectors: vectors.expect("original source vector allocation owner"),
                     _text: text_owner.expect("original source text allocation owner"),
                     _program: native,
+                    _context: None,
                 })),
             )
         }
@@ -421,6 +557,7 @@ fn editable_source_from_admission_owned(
         input_facts: sources[1].clone(),
         statements: statements.into_iter().zip(masks).collect(),
         query_records,
+        observer_record_offset: 0,
         allocations,
     }))
 }
@@ -575,24 +712,167 @@ impl PySemanticTransitionFreshParent {
     }
 }
 
-/// Canonical cold producer for the fixed three-statement semantic task contract.
+struct ColdTaskContent {
+    observation: (
+        xlog_cuda::SemanticTaskContentIdentity,
+        Vec<xlog_cuda::SemanticTruth>,
+    ),
+    statement_records: Vec<u32>,
+    _reservation: Option<xlog_cuda::SemanticReplayMaterialReservation>,
+}
+
+impl PySemanticTransitionSession {
+    fn prepare_evaluation_model_context(
+        &self,
+        source: &Self,
+        source_owner: &xlog_cuda::SemanticTransitionSession,
+        target_owner: &mut xlog_cuda::SemanticTransitionSession,
+        ground: &super::ColdValue,
+        parent: &PySemanticTransitionFreshParent,
+    ) -> PyResult<ColdTaskContent> {
+        let source_program = source
+            .editable_source()?
+            .program
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| invalid("evaluation source requires its original native program"))?;
+        let target_program = self
+            .editable_source()?
+            .program
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| invalid("evaluation context requires its original native program"))?;
+        let (program, record_offset) = target_owner
+            .prepare_evaluation_model_context(
+                source_owner,
+                &source_program.program,
+                &target_program.program,
+                xlog_cuda::SemanticAdmissionLimits {
+                    max_records: self.admission_limits.0,
+                    max_terms: self.admission_limits.1,
+                    max_references: self.admission_limits.2,
+                    max_utf8_bytes: self.admission_limits.3,
+                },
+            )
+            .map_err(xlog_err)?;
+        if !target_owner
+            .evaluation_fork_target_bound()
+            .map_err(xlog_err)?
+        {
+            let bytes = parent
+                .terminal_tokens
+                .len()
+                .checked_mul(std::mem::size_of::<u64>())
+                .and_then(|bytes| bytes.checked_add(parent.intent_effect.len()))
+                .and_then(|bytes| {
+                    bytes
+                        .checked_add(std::mem::size_of::<xlog_cuda::SemanticEvaluationForkTarget>())
+                })
+                .ok_or_else(|| invalid("evaluation target envelope capacity overflow"))?;
+            let _transfer_reservation = self
+                .material_sources
+                .native_budget()?
+                .reserve_auxiliary(bytes as u64)
+                .map_err(xlog_err)?;
+            target_owner
+                .bind_evaluation_fork_target(xlog_cuda::SemanticEvaluationForkTarget {
+                    prefix_capacity: parent.prefix_capacity,
+                    feedback_capacity: parent.feedback_capacity,
+                    max_position: MAX_POSITION,
+                    pad_token: parent.pad_token,
+                    terminal_tokens: parent.terminal_tokens.clone(),
+                    final_intent_payload_bytes: parent.final_intent_payload_bytes,
+                    nonterminal_intent: None,
+                    intent_effect: parent.intent_effect.clone(),
+                    intent_entry_capacity: parent.intent_entry_capacity,
+                    intent_payload_capacity_bytes: parent.intent_payload_capacity_bytes,
+                    acknowledgement_payload_capacity_bytes: parent
+                        .acknowledgement_payload_capacity_bytes,
+                    fuel: parent.fuel,
+                    rng: xlog_cuda::SemanticRngBinding {
+                        model_generation: parent.rng.0,
+                        stream_serial: parent.rng.1,
+                        family_id: parent.rng.2,
+                        proposal: parent.rng.3,
+                    },
+                })
+                .map_err(xlog_err)?;
+        }
+        let parsed = editable_source_from_admission_bound(
+            target_owner.cold_admission_records().map_err(xlog_err)?,
+            &self.material_sources,
+        )?
+        .ok_or_else(|| invalid("evaluation context lost its canonical segmented source"))?;
+        if parsed.program.as_ref() != program.as_ref() {
+            return Err(invalid(
+                "evaluation context source changed its original native program",
+            ));
+        }
+        let bytes = parsed
+            .query_records
+            .len()
+            .checked_mul(
+                std::mem::size_of::<u32>()
+                    + std::mem::size_of::<xlog_cuda::SemanticTruth>()
+                    + std::mem::size_of::<usize>(),
+            )
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ColdTaskContent>()))
+            .ok_or_else(|| invalid("evaluation content cache capacity overflow"))?;
+        let budget = self.material_sources.native_budget()?;
+        let reservation = budget.reserve_auxiliary(bytes as u64).map_err(xlog_err)?;
+        let observation = match target_owner.observed_cold_task_content() {
+            Ok(content) => content,
+            Err(xlog_cuda::SemanticTransitionError::NotBound) => {
+                let native_ground = super::task_ground_value(ground)?;
+                let observer = xlog_gpu::logic::SemanticLogicTaskProgram::compile_with_allocation_owner(
+                    parsed.observer_source.clone().unwrap_or_else(|| parsed.initial_source.clone()),
+                    if parsed.observer_source.is_some() {
+                        parsed.query_records.iter().map(|record| {
+                            record.checked_sub(record_offset).map(|record| record as usize)
+                                .ok_or_else(|| invalid("evaluation observer selection precedes its original segment"))
+                        }).collect::<PyResult<Vec<_>>>()?
+                    } else {
+                        (0..parsed.query_records.len()).collect()
+                    },
+                    &mut |bytes| {
+                        budget.reserve_auxiliary(bytes)
+                            .map(|owner| Arc::new(owner) as Arc<dyn Send + Sync>)
+                            .map_err(|error| xlog_core::XlogError::Compilation(error.to_string()))
+                    },
+                ).map_err(xlog_err)?.with_editable_program(Arc::clone(&program));
+                target_owner
+                    .observe_cold_task_content(
+                        &parsed.query_records,
+                        &[],
+                        &observer,
+                        &native_ground,
+                    )
+                    .map_err(xlog_err)?
+            }
+            Err(error) => return Err(xlog_err(error)),
+        };
+        self.install_editable_source(&parsed)?;
+        Ok(ColdTaskContent {
+            observation,
+            statement_records: parsed.query_records,
+            _reservation: Some(reservation),
+        })
+    }
+}
+
+/// Canonical cold producer for one finite ordered semantic task.
 ///
 /// Construction parses the complete observer and admits the exact initial
-/// theory, input facts and ordered task statements,
-/// allocates one CUDA Session, creates its sole Controller and retains the one
-/// typed fresh-parent input set. No object is returned when any parse,
-/// admission, geometry or resource-budget check fails.
+/// theory, input facts and ordered task statements, allocates one CUDA Session,
+/// creates its sole Controller and retains the typed fresh-parent input set.
 #[pyclass(name = "SemanticTransitionColdTask", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionColdTask {
     session: Py<PySemanticTransitionSession>,
     controller: Py<PySemanticTransitionController>,
     parent: Py<PySemanticTransitionFreshParent>,
-    content: (
-        xlog_cuda::SemanticTaskContentIdentity,
-        Vec<xlog_cuda::SemanticTruth>,
-    ),
+    content: Mutex<ColdTaskContent>,
     task_ground: super::ColdValue,
-    statement_records: Vec<u32>,
+    pending_model_contexts: Mutex<Option<Py<PyTuple>>>,
 }
 
 impl PySemanticTransitionColdTask {
@@ -974,7 +1254,7 @@ impl PySemanticTransitionColdTask {
             None => {
                 let content = (|| {
                     let native_session = session.borrow(py);
-                    if let Some(editable) = native_session.editable_program.as_ref() {
+                    if let Some(editable) = native_session.editable_source()?.program.as_ref() {
                         program = program.with_editable_program(Arc::clone(&editable.program));
                     }
                     #[cfg(feature = "semantic-policy")]
@@ -1045,9 +1325,13 @@ impl PySemanticTransitionColdTask {
             session,
             controller,
             parent,
-            content,
+            content: Mutex::new(ColdTaskContent {
+                observation: content,
+                statement_records,
+                _reservation: None,
+            }),
             task_ground,
-            statement_records,
+            pending_model_contexts: Mutex::new(None),
         })
     }
 
@@ -1069,51 +1353,198 @@ impl PySemanticTransitionColdTask {
         Ok(self.parent.clone_ref(py))
     }
 
-    /// Freeze both genuine cold rosters before importing tasks or loading the
-    /// model. Calling again after Unknown resolves the same native operation.
+    /// Freeze the exact ordered tuple of genuine cold tasks before importing
+    /// tasks or loading the model. Unknown retains this same tuple for retry.
     /// The common model identity is then available through Session.policy_layout;
     /// TaskUse.feedback_schema retains the shared shape and each own payload.
-    fn freeze_model_contexts(
-        slf: Bound<'_, Self>,
-        py: Python<'_>,
-        next: Bound<'_, Self>,
-    ) -> PyResult<()> {
-        let source_cold = slf.borrow();
-        let target_cold = next.borrow();
-        let left = source_cold.session.borrow(py);
-        let right = target_cold.session.borrow(py);
-        left.require_creator()?;
-        right.require_creator()?;
-        if Arc::ptr_eq(&left.inner, &right.inner) {
+    #[staticmethod]
+    fn freeze_model_contexts(py: Python<'_>, contexts: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !contexts.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("model contexts require an exact builtin tuple"));
+        }
+        let contexts = contexts.cast::<PyTuple>()?;
+        if contexts.len() < 2 {
             return Err(invalid(
-                "model context domain requires two original cold owners",
+                "model contexts require ordered source, target and optional evaluation cold tasks",
             ));
         }
-        let left_parent = source_cold.parent.borrow(py);
-        let right_parent = target_cold.parent.borrow(py);
-        if left.device_ordinal != right.device_ordinal
-            || left.memory_bytes != right.memory_bytes
-            || left_parent.prefix_capacity != right_parent.prefix_capacity
-            || left_parent.feedback_capacity != right_parent.feedback_capacity
-            || left_parent.pad_token != right_parent.pad_token
-            || left_parent.terminal_tokens != right_parent.terminal_tokens
-        {
+        let first = contexts.get_item(0)?;
+        if !first.is_exact_instance_of::<Self>() {
             return Err(invalid(
-                "model contexts require the same original device and finite model input envelope",
+                "model contexts require exact original ColdTask owners",
             ));
+        }
+        let first_cold = first.extract::<PyRef<'_, Self>>()?;
+        let first_session = first_cold.session.borrow(py);
+        first_session.require_creator()?;
+        let budget = first_session.material_sources.native_budget()?;
+        let roster_bytes = contexts
+            .len()
+            .checked_mul(
+                std::mem::size_of::<PyRef<'_, Self>>()
+                    + std::mem::size_of::<PyRef<'_, PySemanticTransitionSession>>()
+                    + std::mem::size_of::<super::SemanticSessionGuard<'_>>()
+                    + 3 * std::mem::size_of::<&xlog_cuda::SemanticTransitionSession>(),
+            )
+            .ok_or_else(|| invalid("model context roster capacity overflow"))?;
+        let _roster_reservation = budget
+            .reserve_auxiliary(roster_bytes as u64)
+            .map_err(xlog_err)?;
+        drop(first_session);
+        drop(first_cold);
+        let mut cold_tasks = Vec::new();
+        cold_tasks
+            .try_reserve_exact(contexts.len())
+            .map_err(|_| invalid("model context owner roster allocation failed"))?;
+        let mut sessions = Vec::new();
+        sessions
+            .try_reserve_exact(contexts.len())
+            .map_err(|_| invalid("model context session roster allocation failed"))?;
+        for context in contexts.iter() {
+            if !context.is_exact_instance_of::<Self>() {
+                return Err(invalid(
+                    "model contexts require exact original ColdTask owners",
+                ));
+            }
+            cold_tasks.push(context.extract::<PyRef<'_, Self>>()?);
+        }
+        for (member, cold) in cold_tasks.iter().enumerate() {
+            let session = cold.session.borrow(py);
+            session.require_creator()?;
+            if sessions
+                .iter()
+                .any(|prior: &PyRef<'_, PySemanticTransitionSession>| {
+                    Arc::ptr_eq(&prior.inner, &session.inner)
+                })
+            {
+                return Err(invalid(
+                    "model contexts require distinct original cold owners",
+                ));
+            }
+            let pending = cold
+                .pending_model_contexts
+                .try_lock()
+                .map_err(|_| invalid("model context tuple custody is already in use"))?;
+            if pending
+                .as_ref()
+                .is_some_and(|original| !original.bind(py).is(contexts))
+            {
+                return Err(invalid(
+                    "pending model contexts require the same original tuple object",
+                ));
+            }
+            let original = cold_tasks[0].parent.borrow(py);
+            let parent = cold.parent.borrow(py);
+            if member != 0 {
+                let first = &sessions[0];
+                if session.device_ordinal != first.device_ordinal
+                    || session.memory_bytes != first.memory_bytes
+                    || session.capacities != first.capacities
+                    || session.admission_limits != first.admission_limits
+                    || !Arc::ptr_eq(&session.material_sources, &first.material_sources)
+                    || parent.provenance_capacity_records != original.provenance_capacity_records
+                    || parent.prefix_capacity != original.prefix_capacity
+                    || parent.feedback_capacity != original.feedback_capacity
+                    || parent.pad_token != original.pad_token
+                    || parent.terminal_tokens != original.terminal_tokens
+                    || parent.final_intent_payload_bytes != original.final_intent_payload_bytes
+                    || parent.intent_entry_capacity != original.intent_entry_capacity
+                    || parent.intent_payload_capacity_bytes
+                        != original.intent_payload_capacity_bytes
+                    || parent.acknowledgement_payload_capacity_bytes
+                        != original.acknowledgement_payload_capacity_bytes
+                    || parent.authority_decisions_capacity_bytes
+                        != original.authority_decisions_capacity_bytes
+                {
+                    return Err(invalid(
+                        "model contexts require one original material domain, device and finite model input and resource envelope",
+                    ));
+                }
+            }
+            sessions.push(session);
         }
         // Construct the recoverable Python custody before the first native
-        // effect, so a late error cannot lose either original cold owner.
+        // effect, so a late error cannot lose any original cold owner.
         let pending = super::SemanticModelContextFreezePending::new_err(
-            "retain source and target, then repeat source.freeze_model_contexts(target); do not import, replace or abort either pending owner",
+            "retain contexts and repeat SemanticTransitionColdTask.freeze_model_contexts(contexts) with that same tuple; do not import, replace, reorder, append, drop or abort pending owners",
         );
-        pending.value(py).setattr("source", &slf)?;
-        pending.value(py).setattr("target", &next)?;
-        let mut source = left.owner()?;
-        let mut target = right.owner()?;
-        if let Err(original) = source.freeze_model_contexts(&mut target) {
-            let original = xlog_err(original);
-            if source.model_contexts_pending(&target) {
+        pending.value(py).setattr("contexts", contexts)?;
+        let mut owners = Vec::new();
+        owners
+            .try_reserve_exact(sessions.len())
+            .map_err(|_| invalid("model context native owner roster allocation failed"))?;
+        for session in &sessions {
+            owners.push(session.owner()?);
+        }
+        let mut native_contexts = Vec::new();
+        native_contexts
+            .try_reserve_exact(owners.len())
+            .map_err(|_| invalid("model context native reference roster allocation failed"))?;
+        let mut preseal_contexts = Vec::new();
+        preseal_contexts
+            .try_reserve_exact(owners.len())
+            .map_err(|_| invalid("model context preseal reference roster allocation failed"))?;
+        let mut original_contexts = Vec::new();
+        original_contexts
+            .try_reserve_exact(owners.len())
+            .map_err(|_| invalid("model context retry reference roster allocation failed"))?;
+        for cold in &cold_tasks {
+            *cold
+                .pending_model_contexts
+                .try_lock()
+                .map_err(|_| invalid("model context tuple custody is already in use"))? =
+                Some(contexts.clone().unbind());
+        }
+        let result = (|| -> PyResult<()> {
+            for owner in &mut owners {
+                preseal_contexts.push(&mut **owner);
+            }
+            let projected =
+                xlog_cuda::SemanticTransitionSession::begin_model_contexts(&mut preseal_contexts)
+                    .map_err(xlog_err)?;
+            drop(preseal_contexts);
+            if !projected {
+                let (source, targets) =
+                    owners.split_first_mut().expect("source and target checked");
+                for (index, target) in targets.iter_mut().enumerate().skip(1) {
+                    let member = index + 1;
+                    let content = sessions[member].prepare_evaluation_model_context(
+                        &sessions[0],
+                        &*source,
+                        &mut *target,
+                        &cold_tasks[member].task_ground,
+                        &cold_tasks[member].parent.borrow(py),
+                    )?;
+                    *cold_tasks[member]
+                        .content
+                        .try_lock()
+                        .map_err(|_| invalid("evaluation cold content is already in use"))? =
+                        content;
+                }
+            }
+            for owner in &mut owners {
+                native_contexts.push(&mut **owner);
+            }
+            xlog_cuda::SemanticTransitionSession::freeze_model_contexts(&mut native_contexts)
+                .map_err(xlog_err)?;
+            drop(native_contexts);
+            Ok(())
+        })();
+        for owner in &owners {
+            original_contexts.push(&**owner);
+        }
+        let is_pending =
+            xlog_cuda::SemanticTransitionSession::model_contexts_pending(&original_contexts);
+        if !is_pending {
+            for cold in &cold_tasks {
+                cold.pending_model_contexts
+                    .try_lock()
+                    .map_err(|_| invalid("model context tuple custody is already in use"))?
+                    .take();
+            }
+        }
+        if let Err(original) = result {
+            if is_pending {
                 pending.set_cause(py, Some(original));
                 return Err(pending);
             }
@@ -1129,6 +1560,14 @@ impl PySemanticTransitionColdTask {
     /// fatal CUDA failure requires terminating the isolated task process.
     fn close(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
         let cold = slf.borrow();
+        if cold
+            .pending_model_contexts
+            .try_lock()
+            .map_err(|_| invalid("model context tuple custody is already in use"))?
+            .is_some()
+        {
+            return Err(invalid("pending model contexts must retain every original cold owner until the same tuple resolves"));
+        }
         let session = cold.session.borrow(py);
         session.release_observed_cold(py, slf)
     }
@@ -1138,13 +1577,21 @@ impl PySemanticTransitionColdTask {
     #[getter]
     fn task_content(&self, py: Python<'_>) -> PyResult<super::TaskContentRead> {
         self.session.borrow(py).require_creator()?;
-        super::task_content_read(py, self.content.clone())
+        let content = self
+            .content
+            .try_lock()
+            .map_err(|_| invalid("cold task content is already in use"))?;
+        super::task_content_read(py, content.observation.clone())
     }
 
     #[getter]
     fn statement_records(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         self.session.borrow(py).require_creator()?;
-        Ok(PyTuple::new(py, self.statement_records.iter().copied())?.unbind())
+        let content = self
+            .content
+            .try_lock()
+            .map_err(|_| invalid("cold task content is already in use"))?;
+        Ok(PyTuple::new(py, content.statement_records.iter().copied())?.unbind())
     }
 
     #[getter]
