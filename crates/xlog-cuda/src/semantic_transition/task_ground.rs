@@ -383,7 +383,7 @@ impl SemanticTaskVerificationBinding {
 }
 
 pub(super) const TASK_GROUND_MAGIC: u64 = 0x584c4f4754475244;
-pub(super) const TASK_GROUND_VERSION: u64 = 4;
+pub(super) const TASK_GROUND_VERSION: u64 = 5;
 pub(super) const INHERITED_OBSERVATIONS_MAGIC: u64 = 0x584c4f47494e484f;
 pub(super) const INHERITED_OBSERVATION_BYTES: usize = 176;
 
@@ -429,6 +429,8 @@ pub(super) struct TaskGroundLayout {
     pub rule_capacity: usize,
     pub inherited_capacity: usize,
     pub inherited_offset: usize,
+    pub activity_offset: usize,
+    pub library_count: usize,
     pub bytes: usize,
 }
 
@@ -455,6 +457,12 @@ impl TaskGroundLayout {
         let capacity = usize::try_from(u64::from_le_bytes(capacity.try_into().unwrap()))
             .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
         let layout = layout.with_inherited_observations(capacity)?;
+        let count = bytes
+            .get(layout.activity_offset + 8..layout.activity_offset + 16)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let count = usize::try_from(u64::from_le_bytes(count.try_into().unwrap()))
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let layout = layout.with_rule_library(count)?;
         layout.validate(bytes)?;
         Ok(layout)
     }
@@ -501,7 +509,9 @@ impl TaskGroundLayout {
             rule_capacity,
             inherited_capacity: 0,
             inherited_offset,
-            bytes: inherited_offset,
+            activity_offset: inherited_offset,
+            library_count: 0,
+            bytes: inherited_offset.checked_add(40).ok_or_else(overflow)?,
         })
     }
 
@@ -519,9 +529,13 @@ impl TaskGroundLayout {
                 "inherited observation roster exceeds its finite native domain",
             ));
         }
-        self.bytes = capacity
+        self.activity_offset = capacity
             .checked_mul(INHERITED_OBSERVATION_BYTES)
             .and_then(|bytes| self.inherited_offset.checked_add(bytes))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        self.bytes = self
+            .activity_offset
+            .checked_add(40)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         self.inherited_capacity = capacity;
         Ok(self)
@@ -529,6 +543,26 @@ impl TaskGroundLayout {
 
     pub fn support_binding_capacity(self) -> usize {
         self.bindings + self.inherited_capacity
+    }
+
+    pub fn with_rule_library(mut self, count: usize) -> Result<Self, SemanticTransitionError> {
+        if count != 0 && count != super::rule_control::RULE_LIBRARY_COUNT {
+            return Err(publication_input_error(
+                "rule activity changes the frozen library extent",
+            ));
+        }
+        self.library_count = count;
+        Ok(self)
+    }
+
+    pub fn rule_activity(self, bytes: &[u8], slot: usize) -> Result<u64, SemanticTransitionError> {
+        if bytes.len() != self.bytes || slot > 2 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let begin = self.activity_offset + 16 + slot * 8;
+        Ok(u64::from_le_bytes(
+            bytes[begin..begin + 8].try_into().unwrap(),
+        ))
     }
 
     pub fn inherited_row(
@@ -563,6 +597,10 @@ impl TaskGroundLayout {
             .copy_from_slice(&INHERITED_OBSERVATIONS_MAGIC.to_le_bytes());
         bytes[self.inherited_offset - 8..self.inherited_offset]
             .copy_from_slice(&(self.inherited_capacity as u64).to_le_bytes());
+        bytes[self.activity_offset..self.activity_offset + 8]
+            .copy_from_slice(&super::rule_control::RULE_ACTIVITY_MAGIC.to_le_bytes());
+        bytes[self.activity_offset + 8..self.activity_offset + 16]
+            .copy_from_slice(&(self.library_count as u64).to_le_bytes());
         bytes
     }
 
@@ -625,7 +663,28 @@ impl TaskGroundLayout {
                 "inherited observation storage changes its frozen capacity",
             ));
         }
-        for (binding, row) in bytes[self.inherited_offset..]
+        if bytes[self.activity_offset..self.activity_offset + 8]
+            != super::rule_control::RULE_ACTIVITY_MAGIC.to_le_bytes()
+            || bytes[self.activity_offset + 8..self.activity_offset + 16]
+                != (self.library_count as u64).to_le_bytes()
+        {
+            return Err(publication_input_error(
+                "rule activity changes its original immutable library binding",
+            ));
+        }
+        let allowed = if self.library_count == 0 {
+            0
+        } else {
+            (1u64 << self.library_count) - 1
+        };
+        for slot in 0..3 {
+            if self.rule_activity(bytes, slot)? & !allowed != 0 {
+                return Err(publication_input_error(
+                    "rule activity selects outside the frozen library",
+                ));
+            }
+        }
+        for (binding, row) in bytes[self.inherited_offset..self.activity_offset]
             .chunks_exact(INHERITED_OBSERVATION_BYTES)
             .enumerate()
         {
@@ -642,7 +701,7 @@ impl TaskGroundLayout {
             }
         }
         for observation in bytes[64..self.query_offset].chunks_exact(144).chain(
-            bytes[self.inherited_offset..]
+            bytes[self.inherited_offset..self.activity_offset]
                 .chunks_exact(INHERITED_OBSERVATION_BYTES)
                 .map(|row| &row[32..]),
         ) {
