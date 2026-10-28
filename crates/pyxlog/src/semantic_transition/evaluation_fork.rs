@@ -79,7 +79,7 @@ impl Drop for EvaluationPreparationScope {
                     {
                         let _ = state.finish_arena_preparation();
                     }
-                }
+                };
             });
         }
     }
@@ -98,7 +98,7 @@ impl PySemanticEvaluationFork {
         let controlled = self.controller.borrow(py);
         let task = self.task_use.borrow(py);
         controlled.require_read_issued(&task)?;
-        task.require_current(&session.owner()?)?;
+        task.require_current(&*session.owner()?)?;
         if controlled.session.as_ptr() != self.session.as_ptr()
             || task.session.as_ptr() != self.session.as_ptr()
         {
@@ -265,8 +265,9 @@ impl PySemanticEvaluationFork {
             let session = self.session.borrow(py);
             let acquired = parent.borrow(py);
             let mut owner = session.owner()?;
+            let lease = acquired.lease()?;
             owner
-                .require_evaluation_fork_model_roster(&*acquired.lease()?, inputs, stream)
+                .require_evaluation_fork_model_roster(&*lease, inputs, stream)
                 .map_err(xlog_err)?
         };
         let mut state = self.state()?;
@@ -324,8 +325,9 @@ impl PySemanticEvaluationFork {
                 let session = self.session.borrow(py);
                 let acquired = parent.borrow(py);
                 let mut owner = session.owner()?;
+                let lease = acquired.lease()?;
                 owner
-                    .observe_published_state_material_proof(&*acquired.lease()?)
+                    .observe_published_state_material_proof(&*lease)
                     .map_err(xlog_err)?
             };
             self.state()?.before_model = Some(proof);
@@ -536,7 +538,7 @@ impl PySemanticTransitionController {
         session.require_creator()?;
         let task = task_use.borrow(py);
         controlled.require_read_issued(&task)?;
-        task.require_current(&session.owner()?)?;
+        task.require_current(&*session.owner()?)?;
         let member = usize::try_from(ColdValue::read(member, &mut 128, 0)?.unsigned()?)
             .map_err(|_| invalid("evaluation catalogue member exceeds host address space"))?;
         if !checkpoint
@@ -664,7 +666,7 @@ impl PySemanticTransitionController {
                 let task = target.borrow(py);
                 let session = task.session.borrow(py);
                 session.require_creator()?;
-                task.require_current(&session.owner()?)?;
+                task.require_current(&*session.owner()?)?;
                 task.authority.check_use("inference", &current, false)?;
                 *snapshots
                     .lock()
@@ -689,7 +691,7 @@ impl PySemanticTransitionController {
                 .map_err(|_| invalid("evaluation authority pair custody is poisoned"))?;
             snapshot_bytes(&snapshots.1)?
         };
-        task.require_current(&session.owner()?)?;
+        task.require_current(&*session.owner()?)?;
         let source_admission = source.seed.proposal_expense()?.original_admission;
         let target_admission = task.checkpoint.proposal_expense()?.original_admission;
         match (source_admission.as_ref(), target_admission.as_ref()) {

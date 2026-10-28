@@ -4628,7 +4628,7 @@ impl PySemanticTransitionSession {
                     let restored = session.borrow(py);
                     restored.require_creator()?;
                     let issued = task_use.borrow(py);
-                    issued.require_current(&restored.owner()?)?;
+                    issued.require_current(&*restored.owner()?)?;
                     parent.borrow(py).require_task(py, &issued)
                 };
                 let mut budget = 16 * 1024 * 1024;

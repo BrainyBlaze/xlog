@@ -1604,14 +1604,6 @@ impl PySemanticTransitionColdTask {
         for session in sessions.iter().skip(2) {
             session.retain_evaluation_source_registry(Arc::clone(&sessions[1].material_sources))?;
         }
-        let mut native_contexts = Vec::new();
-        native_contexts
-            .try_reserve_exact(owners.len())
-            .map_err(|_| invalid("model context native reference roster allocation failed"))?;
-        let mut preseal_contexts = Vec::new();
-        preseal_contexts
-            .try_reserve_exact(owners.len())
-            .map_err(|_| invalid("model context preseal reference roster allocation failed"))?;
         let mut original_contexts = Vec::new();
         original_contexts
             .try_reserve_exact(owners.len())
@@ -1624,6 +1616,16 @@ impl PySemanticTransitionColdTask {
                 Some(contexts.clone().unbind());
         }
         let result = (|| -> PyResult<()> {
+            // Keep mutable reference rosters inside this invocation so their
+            // element borrows end before the next owner phase.
+            let mut native_contexts = Vec::new();
+            native_contexts
+                .try_reserve_exact(owners.len())
+                .map_err(|_| invalid("model context native reference roster allocation failed"))?;
+            let mut preseal_contexts = Vec::new();
+            preseal_contexts
+                .try_reserve_exact(owners.len())
+                .map_err(|_| invalid("model context preseal reference roster allocation failed"))?;
             for owner in &mut owners {
                 preseal_contexts.push(&mut **owner);
             }

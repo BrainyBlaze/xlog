@@ -2625,7 +2625,7 @@ impl PySemanticModelContextContinuation {
                 transitions,
                 cold_capacity,
                 replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
-                cancelled_checkpoint: Some(cancelled_checkpoint),
+                cancelled_checkpoint: Mutex::new(Some(cancelled_checkpoint)),
                 preparation: Mutex::new(SegmentInstructionPreparation {
                     scope: state.scope.as_ref().map(Arc::clone),
                     native_steps: state.steps.clone(),
@@ -2656,9 +2656,8 @@ impl PySemanticModelContextContinuation {
             .ok_or_else(|| invalid("activated target lost its original captured segment"))?
             .instruction = Some(Arc::clone(&custody));
         custody
-            .cancelled_checkpoint
-            .as_ref()
-            .expect("original target checkpoint custody retained")
+            .checkpoint_source()?
+            .ok_or_else(|| invalid("original target instruction lost its source checkpoint"))?
             .bind_source(
                 &mut *session.owner()?,
                 &custody.inner,
