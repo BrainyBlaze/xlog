@@ -2,6 +2,213 @@
 
 use super::*;
 
+/// Actual native-selected facts of one held publication, independent of cold
+/// admission labels and of a later publication on the same session.
+pub struct SemanticSelectedTaskFacts {
+    pub parent: SemanticPublishedIdentity,
+    pub task_identity: Identity256,
+    pub selected_slot: usize,
+    pub facts: SemanticTaskFacts,
+    _reservation: Arc<SemanticReplayMaterialReservation>,
+}
+
+/// Original small bank/ground readbacks, retained before either DMA can enter.
+pub struct SemanticSelectedTaskFactsObservation {
+    issuer: Arc<()>,
+    token: u64,
+    parent: SemanticPublishedIdentity,
+    task_identity: Identity256,
+    layout: task_ground::TaskGroundLayout,
+    bank: Option<PublicationRead<PublicationBank>>,
+    ground: Option<PublicationRead<u8>>,
+    result: Option<Arc<SemanticSelectedTaskFacts>>,
+    poisoned: bool,
+    _reservation: Arc<SemanticReplayMaterialReservation>,
+}
+
+impl SemanticTransitionSession {
+    pub fn prepare_selected_task_facts_observation(
+        &self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<SemanticSelectedTaskFactsObservation, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        self.checked_reader(lease)?;
+        let task_identity = self
+            .task_evaluation_identity()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let layout = self
+            .task_ground
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .layout;
+        let storage = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let range = lease
+            .directory
+            .iter()
+            .find(|range| (range.role, range.index) == (58, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if range.length_bytes != layout.bytes as u64 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let begin = usize::try_from(range.offset_bytes)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let end = begin
+            .checked_add(layout.bytes)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let ground = storage
+            .allocations
+            .get(
+                usize::try_from(range.storage_slot)
+                    .map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+            )
+            .ok_or(SemanticTransitionError::ObservationMismatch)?
+            .slice()?
+            .view()
+            .try_slice(begin..end)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let read_bytes = layout
+            .bytes
+            .checked_add(size_of::<PublicationBank>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let bytes = read_bytes
+            .checked_mul(3)
+            .and_then(|bytes| {
+                bytes.checked_add(layout.queries.checked_mul(
+                    3 * (size_of::<task_ground::TaskQueryRecord>() + 3 * size_of::<u64>()),
+                )?)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    size_of::<SemanticSelectedTaskFactsObservation>()
+                        + size_of::<SemanticSelectedTaskFacts>()
+                        + 2 * size_of::<PublicationRead<PublicationBank>>()
+                        + 8 * size_of::<usize>(),
+                )
+            })
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = Arc::new(
+            self.replay_material_budget
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .reserve_auxiliary(bytes as u64)?,
+        );
+        let bank = self.stage_publication_read_with_owner(
+            storage.banks[(lease.identity.word & 1) as usize].view(),
+            Some(Arc::clone(&reservation)),
+        )?;
+        let ground =
+            self.stage_publication_read_with_owner(ground, Some(Arc::clone(&reservation)))?;
+        Ok(SemanticSelectedTaskFactsObservation {
+            issuer: Arc::clone(&self.publication_issuer),
+            token: lease.token,
+            parent: lease.identity,
+            task_identity,
+            layout,
+            bank: Some(bank),
+            ground: Some(ground),
+            result: None,
+            poisoned: false,
+            _reservation: reservation,
+        })
+    }
+
+    pub fn selected_task_facts_pending(
+        &self,
+        original: &SemanticSelectedTaskFactsObservation,
+    ) -> bool {
+        Arc::ptr_eq(&original.issuer, &self.publication_issuer)
+            && original.result.is_none()
+            && (original
+                .bank
+                .as_ref()
+                .is_some_and(PublicationRead::completion_pending)
+                || original
+                    .ground
+                    .as_ref()
+                    .is_some_and(PublicationRead::completion_pending))
+    }
+
+    pub fn resolve_selected_task_facts(
+        &mut self,
+        lease: &SemanticPublishedLease,
+        original: &mut SemanticSelectedTaskFactsObservation,
+    ) -> Result<Arc<SemanticSelectedTaskFacts>, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        if !Arc::ptr_eq(&original.issuer, &self.publication_issuer)
+            || original.token != lease.token
+            || original.parent != lease.identity
+            || self.task_evaluation_identity() != Some(original.task_identity)
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        if let Some(result) = &original.result {
+            return Ok(Arc::clone(result));
+        }
+        let bank = self
+            .resolve_publication_read_with_poison(
+                original
+                    .bank
+                    .as_mut()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+                &mut original.poisoned,
+            )?
+            .first()
+            .copied()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if bank.header != lease.header || bank.state.task_evaluation.winner > 2 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let ground = self.resolve_publication_read_with_poison(
+            original
+                .ground
+                .as_mut()
+                .ok_or(SemanticTransitionError::NotBound)?,
+            &mut original.poisoned,
+        )?;
+        let binding = &self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0;
+        let facts = task_ground::decoded_task_facts(
+            original.layout,
+            &ground,
+            &bank.state.task_evaluation,
+            binding.expected_truth(),
+        )?;
+        let selected_slot = bank.state.task_evaluation.winner as usize;
+        let facts = facts
+            .into_iter()
+            .nth(selected_slot)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if facts.truth.len() != original.layout.queries
+            || facts.attained.len() != original.layout.queries
+            || facts.g > original.layout.queries as u64
+            || facts.p > 1
+            || facts.eligible > 1
+        {
+            return Err(publication_input_error(
+                "selected task facts omit the actual native query receipts",
+            ));
+        }
+        let result = Arc::new(SemanticSelectedTaskFacts {
+            parent: original.parent,
+            task_identity: original.task_identity,
+            selected_slot,
+            facts,
+            _reservation: Arc::clone(&original._reservation),
+        });
+        original.result = Some(Arc::clone(&result));
+        original.bank = None;
+        original.ground = None;
+        original.poisoned = false;
+        Ok(result)
+    }
+}
+
 #[cfg(feature = "semantic-policy")]
 #[derive(Clone, Copy)]
 pub(super) enum CheckpointReadbackOrigin {
@@ -633,6 +840,7 @@ impl SemanticTransitionSession {
                 ranges,
                 graph: metadata.graph,
                 learning_phases: original.learning_phases.clone(),
+                evaluation_fork: self.evaluation_fork.clone(),
             };
             material.validate()?;
             if original.control.is_some() {
@@ -654,6 +862,7 @@ impl SemanticTransitionSession {
                     .map(|range| (range.range, range.capacity, Some(range.bytes.as_ref()))),
                 material.ranges.len(),
                 &material.learning_phases,
+                material.evaluation_fork.as_ref(),
                 |part| {
                     let end = offset
                         .checked_add(part.len())

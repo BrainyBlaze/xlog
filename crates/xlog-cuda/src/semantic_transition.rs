@@ -27,6 +27,12 @@ mod late_replay;
 mod learning_phase;
 mod model_catalogue;
 pub use model_catalogue::SemanticFrozenModelContext;
+mod evaluation_fork;
+pub use evaluation_fork::{
+    SemanticDetachedColdTaskContext, SemanticEvaluationForkOrigin,
+    SemanticEvaluationForkPreparation, SemanticEvaluationForkTarget,
+    SemanticEvaluationForkTargetRecords,
+};
 #[cfg(feature = "semantic-policy")]
 mod model_context_continuation;
 #[cfg(feature = "semantic-policy")]
@@ -76,6 +82,7 @@ mod publication_readback;
 pub use material_output::{
     SemanticPublicationReadbackLoan, SemanticReplayMaterialOutput, SemanticReplayMaterialScratch,
 };
+pub use publication_readback::{SemanticSelectedTaskFacts, SemanticSelectedTaskFactsObservation};
 mod native_work_report;
 pub use native_work_report::SemanticColdModelWorkResult;
 mod training_arena_materialization;
@@ -1745,6 +1752,7 @@ struct ActionCodebooks {
     input_cells: usize,
     model_catalogue: Option<(Arc<model_catalogue::FrozenModelCatalogue>, usize)>,
     model_projection_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
+    derivation_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
 }
 
 impl ActionCodebooks {
@@ -2253,6 +2261,7 @@ impl ActionCodebooks {
             input_cells,
             model_catalogue: None,
             model_projection_reservation: None,
+            derivation_reservation: None,
         })
     }
 
@@ -2260,6 +2269,7 @@ impl ActionCodebooks {
         words: &[u64],
         has_program: bool,
     ) -> Result<([SemanticComponent; COMPONENT_COUNT], usize), SemanticTransitionError> {
+        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
         if words.len() < model_catalogue::HEADER_WORDS
             || words[39] != u64::from(has_program)
             || [1, 3, 5, 7]
@@ -2746,6 +2756,7 @@ pub struct SemanticTensorInput {
 /// Python-side delivery owner is retired; it grants no publication authority.
 pub struct SemanticGradientDeliveryBinding {
     _tensors: Vec<PreparedSemanticTensor>,
+    _reservation: Option<SemanticReplayMaterialReservation>,
 }
 
 #[derive(Clone, Copy)]
@@ -7271,6 +7282,7 @@ struct ReplayStateMaterialProofContents {
     directory: Vec<PublicationRange>,
     allocation_geometry: Vec<PublicationAllocationGeometry>,
     codebook_header: [u64; model_catalogue::HEADER_WORDS],
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
     continuation_blocks: Option<usize>,
     model_contract: SemanticReplayLoadedMaterial,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
@@ -7481,6 +7493,7 @@ impl SemanticReplayStateMaterialProof {
                     })
                     .collect(),
                 codebook_header,
+                evaluation_fork: material.evaluation_fork.clone(),
                 continuation_blocks,
                 model_contract,
                 learning_phases: material.learning_phases.clone(),
@@ -8435,6 +8448,128 @@ fn publication_action_receipts_digest<B: PublicationByteStorage>(
     publication_action_receipts_digest_bytes(&codebook.bytes, receipts)
 }
 
+fn validate_frozen_codebook_frame(
+    word_count: usize,
+    word: impl Fn(usize) -> u64,
+) -> Result<(), SemanticTransitionError> {
+    let invalid =
+        || publication_input_error("action codebook changed its complete frozen context frame");
+    if word_count < model_catalogue::HEADER_WORDS {
+        return Err(invalid());
+    }
+    if word(40) == 0 {
+        return if word(41) == 0 && word(42) == 0 && word(43) == 0 {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    }
+    let start = usize::try_from(word(40) / 8).map_err(|_| invalid())?;
+    let length = usize::try_from(word(41) / 8).map_err(|_| invalid())?;
+    if word(40) % 8 != 0
+        || word(41) % 8 != 0
+        || length < 4
+        || start.checked_add(length) != Some(word_count)
+        || start < model_catalogue::HEADER_WORDS
+        || word(start) != 0x584c4f474d4f444c
+        || word(start + 1) != 2
+        || word(start + 2) != word(37)
+        || word(start + 3) != word(43)
+    {
+        return Err(invalid());
+    }
+    let members = usize::try_from(word(43)).map_err(|_| invalid())?;
+    let selected = usize::try_from(word(42))
+        .map_err(|_| invalid())?
+        .checked_sub(1)
+        .ok_or_else(invalid)?;
+    if members < 2 || selected >= members || members > (length - 4) / 18 {
+        return Err(invalid());
+    }
+    let mut cursor = start + 4;
+    let mut counts = [1u64; 4];
+    let mut owned = [(0u64, 0u64); 4];
+    for member in 0..members {
+        if cursor.checked_add(18).is_none_or(|end| end > word_count) {
+            return Err(invalid());
+        }
+        let has_program = word(cursor + 12);
+        let recipe_words = usize::try_from(word(cursor + 17)).map_err(|_| invalid())?;
+        cursor += 18;
+        let end = cursor
+            .checked_add(recipe_words)
+            .filter(|end| *end <= word_count)
+            .ok_or_else(invalid)?;
+        if recipe_words < model_catalogue::HEADER_WORDS
+            || has_program > 1
+            || word(cursor + 39) != has_program
+            || (40..44).any(|index| word(cursor + index) != 0)
+            || [14, 15, 16, 21, 22, 23, 24]
+                .into_iter()
+                .any(|index| word(cursor + index) != 0)
+        {
+            return Err(invalid());
+        }
+        for (table, width) in [10usize, 6, 3, 18].into_iter().enumerate() {
+            let count = word(cursor + 2 * table + 1);
+            let table_start = usize::try_from(word(cursor + 2 * table)).map_err(|_| invalid())?;
+            if count == 0
+                || count > 65536
+                || table_start < model_catalogue::HEADER_WORDS
+                || usize::try_from(count)
+                    .ok()
+                    .and_then(|count| count.checked_mul(width))
+                    .and_then(|size| table_start.checked_add(size))
+                    .is_none_or(|end| end > recipe_words)
+            {
+                return Err(invalid());
+            }
+            let begin = counts[table];
+            counts[table] = begin
+                .checked_add(count - 1)
+                .filter(|count| *count <= 65536)
+                .ok_or_else(invalid)?;
+            if member == selected {
+                owned[table] = (begin, counts[table]);
+            }
+        }
+        let payload = word(cursor + 8);
+        if payload % 8 != 0
+            || payload / 8 > recipe_words as u64
+            || word(cursor + 9) != recipe_words as u64 * 8 - payload
+        {
+            return Err(invalid());
+        }
+        cursor = end;
+    }
+    if cursor != word_count {
+        return Err(invalid());
+    }
+    for table in 0..4 {
+        if word(2 * table + 1) != counts[table]
+            || word(29 + 2 * table) != owned[table].0
+            || word(30 + 2 * table) != owned[table].1
+        {
+            return Err(invalid());
+        }
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"xlog.semantic.immutable-model-catalogue.v2\0");
+    hash.update(CATALOGUE_DIGEST);
+    for index in start..word_count {
+        hash.update(word(index).to_le_bytes());
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    for index in 0..4 {
+        if word(25 + index)
+            != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap())
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 fn publication_action_receipts_digest_bytes(
     bytes: &[u8],
     receipts: &[SemanticTransitionReceipt],
@@ -8446,6 +8581,7 @@ fn publication_action_receipts_digest_bytes(
     }
     let word =
         |index: usize| u64::from_le_bytes(bytes[index * 8..(index + 1) * 8].try_into().unwrap());
+    validate_frozen_codebook_frame(bytes.len() / 8, word)?;
     let (offset, length) = (word(8), word(9));
     if offset % 8 != 0
         || offset > bytes.len() as u64
@@ -10382,6 +10518,7 @@ struct PublicationMaterialStorage<B> {
     ranges: Vec<PublicationMaterialRangeStorage<B>>,
     graph: SemanticRootMaterial,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
 }
 
 impl OwnedPublicationMaterial {
@@ -10816,6 +10953,7 @@ fn publication_material_runtime() -> [u8; 32] {
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("semantic_transition/model_catalogue.rs"));
+        hash.update(include_bytes!("semantic_transition/evaluation_fork.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         hash.update(include_bytes!("../kernels/semantic_conditional_policy.cuh"));
         hash.update(include_bytes!("../kernels/semantic_program.cuh"));
@@ -11193,6 +11331,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
                 .map(|range| (range.range, range.capacity, Some(range.bytes.as_ref()))),
             self.ranges.len(),
             &self.learning_phases,
+            self.evaluation_fork.as_ref(),
             write,
         )
     }
@@ -11211,7 +11350,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         graph: &SemanticRootMaterial,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 4);
+        material_u32(&mut bytes, 6);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -11243,6 +11382,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         ranges: impl Iterator<Item = (PublicationRange, usize, Option<&'a [u8]>)>,
         range_count: usize,
         learning_phases: &[SemanticLearningPhaseRecord],
+        evaluation_fork: Option<&SemanticEvaluationForkOrigin>,
         mut write: impl FnMut(&[u8]) -> Result<(), SemanticTransitionError>,
     ) -> Result<(), SemanticTransitionError> {
         let mut bytes = Vec::new();
@@ -11271,7 +11411,8 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         }
         bytes.clear();
         learning_phase::encode_history(learning_phases, &mut bytes)?;
-        write(&bytes)
+        write(&bytes)?;
+        SemanticEvaluationForkOrigin::write(evaluation_fork, write)
     }
 
     fn write_encoded_field(
@@ -11444,6 +11585,16 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             let admission = reader.bytes().map_err(SemanticTransitionError::Semantic)?;
             add(1, B::learning_admission_decode_bound(admission.len())?)?;
         }
+        match reader.u32().map_err(SemanticTransitionError::Semantic)? {
+            0 => {}
+            1 => {
+                reader
+                    .take(72 + 32 + 32 + 8 + 32 + 8)
+                    .map_err(SemanticTransitionError::Semantic)?;
+                add(1, size_of::<SemanticEvaluationForkOrigin>())?;
+            }
+            _ => return Err(publication_input_error("invalid evaluation fork origin")),
+        }
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         Ok(bound)
     }
@@ -11471,7 +11622,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 4
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 6
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {
@@ -11588,6 +11739,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let learning_phases = learning_phase::decode_history(&mut reader, |admission| {
             Self::decoded_byte_view(&owner, bytes, admission)?.into_learning_phase_admission()
         })?;
+        let evaluation_fork = SemanticEvaluationForkOrigin::decode(&mut reader)?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         let material = Self {
             bank,
@@ -11600,6 +11752,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             ranges,
             graph,
             learning_phases,
+            evaluation_fork,
         };
         material.validate_mode(mode)?;
 
@@ -11936,6 +12089,34 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             }
         }
         validate_replay_append_records(contract, &self.ranges)?;
+        let codebook = self
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (48, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !codebook.bytes.len().is_multiple_of(8) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        validate_frozen_codebook_frame(codebook.bytes.len() / 8, |index| {
+            u64::from_le_bytes(codebook.bytes[index * 8..index * 8 + 8].try_into().unwrap())
+        })?;
+        if let Some(origin) = &self.evaluation_fork {
+            let word = |index: usize| {
+                u64::from_le_bytes(codebook.bytes[index * 8..index * 8 + 8].try_into().unwrap())
+            };
+            if word(42)
+                != (origin.member as u64)
+                    .checked_add(1)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?
+                || word(43) <= origin.member as u64
+                || codebook.bytes[25 * 8..29 * 8] != *origin.catalogue.as_bytes()
+                || self.contract.task_identity == origin.source_task
+            {
+                return Err(publication_input_error(
+                    "evaluation origin differs from its original frozen target task",
+                ));
+            }
+        }
         self.model_numerical_mode()?;
         Ok(())
     }
@@ -19865,6 +20046,9 @@ pub struct SemanticTransitionSession {
     learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
     state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
+    evaluation_context: Option<Arc<evaluation_fork::ColdEvaluationContext>>,
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
+    model_context_preseal: Option<Arc<model_catalogue::ModelContextPreseal>>,
     replay_material_budget: Option<SemanticReplayMaterialBudget>,
     publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
     #[cfg(feature = "semantic-policy")]
@@ -23961,6 +24145,18 @@ impl SemanticTransitionSession {
         self.require_authenticated_task_observations()?;
         let external_floor = cold_capacity.external_floor()?;
         let transitions = transitions.collect::<Vec<_>>();
+        if self.evaluation_fork.is_some()
+            && transitions.iter().any(|kind| {
+                !matches!(
+                    kind,
+                    SemanticTransitionKind::Proposal | SemanticTransitionKind::Recompute
+                )
+            })
+        {
+            return Err(publication_input_error(
+                "evaluation forks admit only proposal and recompute transitions",
+            ));
+        }
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
                 "a prepared segment requires frozen proposal, recompute, or update steps",
@@ -29289,7 +29485,10 @@ impl SemanticTransitionSession {
             .expect("checked gradient-delivery step")
             .consumer_streams
             .insert(consumer_stream);
-        Ok(SemanticGradientDeliveryBinding { _tensors: imported })
+        Ok(SemanticGradientDeliveryBinding {
+            _tensors: imported,
+            _reservation: None,
+        })
     }
 
     /// Attach actual original output owners as they are born during recording.
@@ -35899,6 +36098,12 @@ impl SemanticTransitionSession {
             add(phase.recipe().len(), 5 * 8)?;
             add(phase.admission().len(), 1)?;
         }
+        add(
+            1,
+            self.evaluation_fork
+                .as_ref()
+                .map_or(Ok(4), SemanticEvaluationForkOrigin::encoded_bytes)?,
+        )?;
         Ok(extent)
     }
 
@@ -36637,6 +36842,7 @@ impl SemanticTransitionSession {
             ranges,
             graph,
             learning_phases: original.learning_phases.clone(),
+            evaluation_fork: self.evaluation_fork.clone(),
         };
         (|| {
             if original.control.is_some() {
@@ -38151,6 +38357,16 @@ impl SemanticTransitionSession {
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
         self.require_authenticated_task_observations()?;
+        if self.evaluation_fork.is_some()
+            && !matches!(
+                kind,
+                SemanticTransitionKind::Proposal | SemanticTransitionKind::Recompute
+            )
+        {
+            return Err(publication_input_error(
+                "evaluation forks admit only proposal and recompute transitions",
+            ));
+        }
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         self.checked_reader(lease)?;
@@ -38645,6 +38861,9 @@ impl SemanticTransitionSession {
             learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
             state_material_restore: None,
+            evaluation_context: None,
+            evaluation_fork: None,
+            model_context_preseal: None,
             publication_preparation: None,
             #[cfg(feature = "semantic-policy")]
             model_context_continuation: None,
@@ -39613,7 +39832,15 @@ impl SemanticTransitionSession {
         task_ground: &SemanticTaskGround,
     ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
-        self.ensure_rebindable()?;
+        if let Some(original) = self
+            .model_context_preseal
+            .as_ref()
+            .filter(|_| self.evaluation_context.is_some())
+        {
+            self.ensure_rebindable_except_model_context_preseal(original)?;
+        } else {
+            self.ensure_rebindable()?;
+        }
         if self.publication.is_some()
             || self.task.is_some()
             || self.cold_content.is_some()
@@ -44924,7 +45151,26 @@ impl SemanticTransitionSession {
     }
 
     fn ensure_quiescent(&self) -> Result<(), SemanticTransitionError> {
+        if self.has_pending_model_context_preseal() {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
         self.ensure_quiescent_except_cold_report(None)
+    }
+
+    fn ensure_rebindable_except_model_context_preseal(
+        &self,
+        original: &Arc<model_catalogue::ModelContextPreseal>,
+    ) -> Result<(), SemanticTransitionError> {
+        if self
+            .model_context_preseal
+            .as_ref()
+            .is_none_or(|owner| !Arc::ptr_eq(owner, original))
+            || self.initial_prefill.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.ensure_quiescent_except_cold_report(None)?;
+        self.ensure_rebinding_ownership()
     }
 
     fn ensure_quiescent_except_cold_report(
@@ -48759,6 +49005,7 @@ mod text_parent_tests {
                 admission_base_extents: [0; 3],
             },
             learning_phases: Vec::new(),
+            evaluation_fork: None,
         };
         publication_material_sample_runtime(&mut material);
         for range in &mut material.ranges {
