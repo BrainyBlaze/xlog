@@ -2318,7 +2318,7 @@ enum StateRestoreStage {
 }
 
 #[cfg(feature = "semantic-policy")]
-struct DormantStateRestoreCustody {
+pub(super) struct DormantStateRestoreCustody {
     continuation: SemanticModelContextContinuation,
     work: SemanticColdModelWork,
     allowance: Arc<Mutex<ColdNativeAllowance>>,
