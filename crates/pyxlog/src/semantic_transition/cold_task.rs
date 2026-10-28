@@ -759,11 +759,27 @@ impl PySemanticTransitionSession {
             .evaluation_fork_target_bound()
             .map_err(xlog_err)?
         {
+            let environment = &parent
+                .records
+                .iter()
+                .find(|record| record.role == 37)
+                .ok_or_else(|| invalid("evaluation target omitted its original environment"))?
+                .bytes;
+            let checkpoint_lineage = &parent
+                .records
+                .iter()
+                .find(|record| record.role == 40)
+                .ok_or_else(|| {
+                    invalid("evaluation target omitted its original checkpoint lineage")
+                })?
+                .bytes;
             let bytes = parent
                 .terminal_tokens
                 .len()
                 .checked_mul(std::mem::size_of::<u64>())
                 .and_then(|bytes| bytes.checked_add(parent.intent_effect.len()))
+                .and_then(|bytes| bytes.checked_add(environment.len()))
+                .and_then(|bytes| bytes.checked_add(checkpoint_lineage.len()))
                 .and_then(|bytes| {
                     bytes
                         .checked_add(std::mem::size_of::<xlog_cuda::SemanticEvaluationForkTarget>())
@@ -789,6 +805,9 @@ impl PySemanticTransitionSession {
                     acknowledgement_payload_capacity_bytes: parent
                         .acknowledgement_payload_capacity_bytes,
                     fuel: parent.fuel,
+                    environment: environment.clone(),
+                    checkpoint_lineage: checkpoint_lineage.clone(),
+                    authority_decisions_capacity_bytes: parent.authority_decisions_capacity_bytes,
                     rng: xlog_cuda::SemanticRngBinding {
                         model_generation: parent.rng.0,
                         stream_serial: parent.rng.1,
@@ -880,21 +899,30 @@ impl PySemanticTransitionColdTask {
         &self,
         py: Python<'_>,
     ) -> PyResult<Arc<xlog_cuda::SemanticTrainingCanarySource>> {
-        self.session
-            .borrow(py)
+        let session = self.session.borrow(py);
+        if let Some(source) = session.detached_training_canary_source()? {
+            return Ok(source);
+        }
+        let source = session
             .owner()?
             .training_canary_source()
-            .map_err(xlog_err)
+            .map_err(xlog_err)?;
+        Ok(source)
     }
 
     pub(super) fn canary_allocation_domain(
         &self,
         py: Python<'_>,
     ) -> PyResult<super::CheckpointAllocationDomain> {
-        self.canary_source(py)?;
-        let (provider, domain) = self
-            .session
-            .borrow(py)
+        let session = self.session.borrow(py);
+        if let Some(allocation) = session.detached_allocation_domain()? {
+            return Ok(allocation);
+        }
+        session
+            .owner()?
+            .training_canary_source()
+            .map_err(xlog_err)?;
+        let (provider, domain) = session
             .owner()?
             .checkpoint_allocation_domain()
             .map_err(xlog_err)?;
@@ -1475,6 +1503,9 @@ impl PySemanticTransitionColdTask {
             .map_err(|_| invalid("model context native owner roster allocation failed"))?;
         for session in &sessions {
             owners.push(session.owner()?);
+        }
+        for session in sessions.iter().skip(2) {
+            session.retain_evaluation_source_registry(Arc::clone(&sessions[0].material_sources))?;
         }
         let mut native_contexts = Vec::new();
         native_contexts

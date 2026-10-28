@@ -340,6 +340,248 @@ impl FrozenModelCatalogue {
 }
 
 impl ActionCodebooks {
+    /// Derive the canonical descriptors only after their original admitted
+    /// records and program have acquired the full host allocation envelope.
+    pub(super) fn derive_with_material_budget(
+        admission: &SemanticAdmission,
+        owner: u64,
+        program: Option<&crate::SemanticProgramAdmission>,
+        budget: &SemanticReplayMaterialBudget,
+    ) -> Result<Self, SemanticTransitionError> {
+        let bound = Self::derivation_allocation_bound(admission, program)?;
+        let mut reservation = budget.reserve_auxiliary(bound as u64)?;
+        let mut codebooks = Self::derive(admission, owner, program)?;
+        let retained = codebooks
+            .descriptor_allocation_bytes()?
+            .checked_add(
+                codebooks
+                    .words
+                    .capacity()
+                    .checked_mul(size_of::<u64>())
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            )
+            .and_then(|bytes| {
+                codebooks
+                    .components
+                    .capacity()
+                    .checked_mul(size_of::<SemanticComponent>())
+                    .and_then(|components| bytes.checked_add(components))
+            })
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        retain_codebook_allocation(&mut reservation, retained)?;
+        codebooks.derivation_reservation = Some(Arc::new(reservation));
+        Ok(codebooks)
+    }
+
+    fn descriptor_allocation_bytes(&self) -> Result<usize, SemanticTransitionError> {
+        let mut bytes = size_of::<SemanticReplayMaterialReservation>() + 2 * size_of::<usize>();
+        for descriptors in [
+            &self.targets,
+            &self.operands,
+            &self.qualifiers,
+            &self.leaves,
+        ] {
+            bytes = descriptors
+                .capacity()
+                .checked_mul(size_of::<SemanticActionDescriptor>())
+                .and_then(|capacity| bytes.checked_add(capacity))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            for descriptor in descriptors {
+                let payload = match descriptor {
+                    SemanticActionDescriptor::Operand {
+                        sort_label,
+                        encoded_value,
+                        ..
+                    } => sort_label.capacity().checked_add(encoded_value.capacity()),
+                    SemanticActionDescriptor::QualifierBundle { records } => {
+                        records.capacity().checked_mul(size_of::<u32>())
+                    }
+                    SemanticActionDescriptor::Target { .. }
+                    | SemanticActionDescriptor::SupportEvent { .. }
+                    | SemanticActionDescriptor::RulePredicate { .. }
+                    | SemanticActionDescriptor::RuleVariable { .. } => Some(0),
+                }
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                bytes = bytes
+                    .checked_add(payload)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn derivation_allocation_bound(
+        admission: &SemanticAdmission,
+        program: Option<&crate::SemanticProgramAdmission>,
+    ) -> Result<usize, SemanticTransitionError> {
+        let overflow = || SemanticTransitionError::GenerationExhausted;
+        let add = |left: usize, right: usize| left.checked_add(right).ok_or_else(overflow);
+        let mul = |left: usize, right: usize| left.checked_mul(right).ok_or_else(overflow);
+        // Vec growth can double its reached extent and has a small minimum.
+        let vector = |count: usize, width: usize| mul(add(mul(count, 2)?, 8)?, width);
+        let records = admission.records();
+        if records.records.len() != admission.encoded_records.len() {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let mut argument_count = 0usize;
+        let mut operand_bytes = 0usize;
+        let mut operand_sorts = 0usize;
+        let mut qualifier_rows = 1usize;
+        let mut qualifier_references = 0usize;
+        let mut qualifier_keys = 4usize;
+        for (record, encoded) in records.records.iter().zip(&admission.encoded_records) {
+            let predicate = records
+                .predicates
+                .iter()
+                .find(|predicate| predicate.predicate == record.predicate)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            argument_count = add(argument_count, encoded.arguments.len())?;
+            for (index, range) in encoded.arguments.iter().enumerate() {
+                let value = encoded
+                    .bytes
+                    .get(range.clone())
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                operand_bytes = add(operand_bytes, value.len())?;
+                operand_sorts = add(
+                    operand_sorts,
+                    predicate
+                        .schema
+                        .sort_labels()
+                        .get(index)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?
+                        .len(),
+                )?;
+            }
+            if predicate.role == SemanticRecordRole::Statement {
+                qualifier_rows = add(qualifier_rows, 1)?;
+                qualifier_references = add(qualifier_references, record.qualifiers.len())?;
+                qualifier_keys = add(qualifier_keys, 4)?;
+                for &index in &record.qualifiers {
+                    let atom = admission
+                        .encoded_records
+                        .get(index as usize)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                    qualifier_keys = add(qualifier_keys, add(8, atom.bytes.len())?)?;
+                }
+            }
+        }
+        let mut sort_count = 0usize;
+        let mut sort_bytes = 0usize;
+        for predicate in &records.predicates {
+            sort_count = add(sort_count, predicate.schema.sort_labels().len())?;
+            for sort in predicate.schema.sort_labels() {
+                sort_bytes = add(sort_bytes, sort.len())?;
+            }
+        }
+        let mut leaf_keys = 0usize;
+        for support in &records.supports {
+            leaf_keys = add(leaf_keys, 8 + 4 + 4 * 8)?;
+            for index in [
+                support.provenance,
+                support.source,
+                support.context,
+                support.scope,
+            ] {
+                let atom = admission
+                    .encoded_records
+                    .get(index as usize)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                leaf_keys = add(leaf_keys, atom.bytes.len())?;
+            }
+        }
+        let additional = program.map_or(0, |program| program.predicate_count as usize);
+        let targets = add(records.predicates.len(), additional)?;
+        let operands = add(
+            add(argument_count, additional)?,
+            if program.is_some() { 4 } else { 0 },
+        )?;
+        let leaves = records.supports.len();
+        let payload = add(
+            operand_bytes,
+            add(mul(qualifier_rows, 4)?, mul(qualifier_references, 32)?)?,
+        )?;
+        let mut words = HEADER_WORDS;
+        for (count, width) in [
+            (targets, 10),
+            (operands, 6),
+            (qualifier_rows, 3),
+            (leaves, 18),
+        ] {
+            words = add(words, mul(add(count, 1)?, width)?)?;
+        }
+        words = add(words, add(payload, 7)? / 8)?;
+        let mut bound = size_of::<SemanticReplayMaterialReservation>() + 2 * size_of::<usize>();
+        for count in [targets, operands, qualifier_rows, leaves] {
+            bound = add(bound, vector(count, size_of::<SemanticActionDescriptor>())?)?;
+        }
+        bound = add(
+            bound,
+            add(
+                add(operand_bytes, operand_sorts)?,
+                mul(qualifier_references, size_of::<u32>())?,
+            )?,
+        )?;
+        bound = add(bound, vector(words, size_of::<u64>())?)?;
+        bound = add(bound, mul(COMPONENT_COUNT, size_of::<SemanticComponent>())?)?;
+        // Bound every original ordered index before deduplication, together
+        // with its typed keys, temporary row vectors and encoded payloads.
+        let mut index =
+            |entries: usize, key: usize, value: usize| -> Result<(), SemanticTransitionError> {
+                bound = add(
+                    bound,
+                    mul(
+                        entries,
+                        OwnedPublicationMaterial::tree_node_bound(key, value)?,
+                    )?,
+                )?;
+                Ok(())
+            };
+        index(
+            records.predicates.len(),
+            size_of::<u64>(),
+            size_of::<&crate::SemanticPredicateRecord>(),
+        )?;
+        index(sort_count, size_of::<String>(), 0)?;
+        index(sort_count, size_of::<String>(), size_of::<u64>())?;
+        index(
+            records.predicates.len(),
+            size_of::<[u8; 8]>(),
+            size_of::<(Vec<u64>, SemanticActionDescriptor)>(),
+        )?;
+        index(
+            argument_count,
+            size_of::<Vec<u8>>(),
+            size_of::<(Vec<u8>, u64, u64, u64, u64, SemanticActionDescriptor)>(),
+        )?;
+        index(
+            qualifier_rows,
+            size_of::<Vec<u8>>(),
+            size_of::<(Vec<u32>, u32)>(),
+        )?;
+        index(
+            leaves,
+            size_of::<(Vec<u8>, usize)>(),
+            size_of::<(Vec<u64>, SemanticActionDescriptor)>(),
+        )?;
+        bound = add(bound, sort_bytes)?;
+        bound = add(
+            bound,
+            mul(records.predicates.len(), vector(10, size_of::<u64>())?)?,
+        )?;
+        bound = add(bound, mul(leaves, vector(18, size_of::<u64>())?)?)?;
+        bound = add(
+            bound,
+            add(
+                mul(operand_bytes, 4)?,
+                add(mul(operand_sorts, 2)?, mul(argument_count, 8)?)?,
+            )?,
+        )?;
+        bound = add(bound, vector(qualifier_keys, 1)?)?;
+        bound = add(bound, mul(qualifier_rows, 8)?)?;
+        bound = add(bound, add(mul(leaf_keys, 4)?, mul(leaves, 16)?)?)?;
+        add(bound, vector(add(payload, 7)?, 1)?)
+    }
+
     pub(super) fn bind_admission_words(
         admission: &SemanticAdmission,
         owner: u64,
@@ -465,6 +707,33 @@ impl ActionCodebooks {
     }
 }
 
+fn retain_codebook_allocation(
+    reservation: &mut SemanticReplayMaterialReservation,
+    bytes: usize,
+) -> Result<(), SemanticTransitionError> {
+    let bytes = u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+    let released = reservation
+        .charged_bytes
+        .checked_sub(bytes)
+        .ok_or_else(|| {
+            publication_input_error(
+                "derived action codebooks exceed their original host allocation envelope",
+            )
+        })?;
+    let mut used = reservation
+        .budget
+        .owner
+        .used
+        .lock()
+        .map_err(|_| SemanticTransitionError::Poisoned)?;
+    *used = used
+        .checked_sub(released)
+        .ok_or(SemanticTransitionError::ObservationMismatch)?;
+    reservation.payload_bytes = bytes;
+    reservation.charged_bytes = bytes;
+    Ok(())
+}
+
 fn words_identity(words: &[u64], begin: usize) -> [u8; 32] {
     let mut identity = [0; 32];
     for (bytes, word) in identity.chunks_exact_mut(8).zip(&words[begin..begin + 4]) {
@@ -570,8 +839,16 @@ pub(super) fn install_cold_action_codebooks(
 ) -> Result<(), SemanticTransitionError> {
     let bytes = codebooks
         .words
-        .len()
-        .checked_mul(2 * size_of::<u64>())
+        .capacity()
+        .checked_add(codebooks.words.len())
+        .and_then(|words| words.checked_mul(size_of::<u64>()))
+        .and_then(|bytes| {
+            codebooks
+                .components
+                .capacity()
+                .checked_mul(size_of::<SemanticComponent>())
+                .and_then(|components| bytes.checked_add(components))
+        })
         .and_then(|bytes| {
             bytes.checked_add(
                 2 * COMPONENT_COUNT * size_of::<SemanticComponent>()
@@ -592,6 +869,25 @@ pub(super) fn install_cold_action_codebooks(
             .ok_or(SemanticTransitionError::NotBound)?
             .reserve_auxiliary(bytes as u64)?,
     );
+    // The upload owner now covers the moved words and overlapping component
+    // arrays. Descriptor payloads retain their independent derivation claim.
+    let descriptor_bytes = codebooks.descriptor_allocation_bytes()?;
+    let derivation = codebooks.derivation_reservation.as_mut().ok_or_else(|| {
+        publication_input_error(
+            "cold context descriptors require their original preallocated host owner",
+        )
+    })?;
+    if !derivation.budget.same_pool(&reservation.budget) {
+        return Err(publication_input_error(
+            "cold context descriptor storage changed its original host pool",
+        ));
+    }
+    retain_codebook_allocation(
+        Arc::get_mut(derivation).ok_or_else(|| {
+            publication_input_error("cold context descriptor allocation is already shared")
+        })?,
+        descriptor_bytes,
+    )?;
     let buffers = ContextBuffers::allocate_words(
         session,
         std::mem::take(&mut codebooks.words),
