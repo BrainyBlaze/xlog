@@ -6648,6 +6648,9 @@ trait PublicationByteStorage:
     fn reserve_decode(&self, _bytes: usize) -> Result<(), SemanticTransitionError> {
         Ok(())
     }
+    fn evaluation_origin_budget(&self) -> Option<&SemanticReplayMaterialBudget> {
+        None
+    }
 }
 
 impl PublicationByteStorage for Vec<u8> {
@@ -7860,6 +7863,9 @@ impl PartialEq<[u8]> for PublicationMaterialBytes {
 }
 
 impl PublicationByteStorage for PublicationMaterialBytes {
+    fn evaluation_origin_budget(&self) -> Option<&SemanticReplayMaterialBudget> {
+        self.budget()
+    }
     fn from_owned(bytes: Vec<u8>) -> Self {
         bytes.into()
     }
@@ -11739,7 +11745,8 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let learning_phases = learning_phase::decode_history(&mut reader, |admission| {
             Self::decoded_byte_view(&owner, bytes, admission)?.into_learning_phase_admission()
         })?;
-        let evaluation_fork = SemanticEvaluationForkOrigin::decode(&mut reader)?;
+        let evaluation_fork =
+            SemanticEvaluationForkOrigin::decode(&mut reader, owner.evaluation_origin_budget())?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         let material = Self {
             bank,
@@ -20050,6 +20057,8 @@ pub struct SemanticTransitionSession {
     evaluation_context: Option<Arc<evaluation_fork::ColdEvaluationContext>>,
     evaluation_fork: Option<SemanticEvaluationForkOrigin>,
     model_context_preseal: Option<Arc<model_catalogue::ModelContextPreseal>>,
+    evaluation_fork_model_handoff: Option<SemanticPublishedIdentity>,
+    evaluation_fork_archive_release_blocked: bool,
     replay_material_budget: Option<SemanticReplayMaterialBudget>,
     publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
     #[cfg(feature = "semantic-policy")]
@@ -24146,6 +24155,9 @@ impl SemanticTransitionSession {
         self.require_authenticated_task_observations()?;
         let external_floor = cold_capacity.external_floor()?;
         let transitions = transitions.collect::<Vec<_>>();
+        if self.evaluation_fork.is_some() {
+            self.evaluation_fork_archive_release_blocked = true;
+        }
         if self.evaluation_fork.is_some()
             && transitions.iter().any(|kind| {
                 !matches!(
@@ -38358,6 +38370,9 @@ impl SemanticTransitionSession {
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
         self.require_authenticated_task_observations()?;
+        if self.evaluation_fork.is_some() {
+            self.evaluation_fork_archive_release_blocked = true;
+        }
         if self.evaluation_fork.is_some()
             && !matches!(
                 kind,
@@ -38866,6 +38881,8 @@ impl SemanticTransitionSession {
             evaluation_context: None,
             evaluation_fork: None,
             model_context_preseal: None,
+            evaluation_fork_model_handoff: None,
+            evaluation_fork_archive_release_blocked: false,
             publication_preparation: None,
             #[cfg(feature = "semantic-policy")]
             model_context_continuation: None,

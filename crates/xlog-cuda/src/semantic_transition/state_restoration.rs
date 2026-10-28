@@ -8,6 +8,75 @@ pub use model_context_checkpoint::{
 };
 
 impl SemanticTransitionSession {
+    pub(super) fn retire_completed_evaluation_restore_custody(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let owner = self
+            .state_material_restore
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&owner.issuer, &self.publication_issuer)
+            || owner.pending.load(Ordering::Acquire)
+            || !owner.initialized.load(Ordering::Acquire)
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        let mut original = owner
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if !matches!(original.stage, StateRestoreStage::Completed)
+            || original.result != Some(lease.identity)
+            || original.material.evaluation_fork.is_none()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let preparation = self
+            .publication_preparation
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if preparation.pending.load(Ordering::Acquire)
+            || preparation
+                .restoration
+                .as_ref()
+                .is_none_or(|issuance| !Arc::ptr_eq(issuance, &owner.issuance))
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        let mut prepared = preparation
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if prepared.poisoned
+            || prepared.storage.is_some()
+            || prepared.upload_write.is_some()
+            || !prepared.uploads.is_empty()
+            || !prepared.writes.is_empty()
+            || !prepared.memory.is_empty()
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        // Preserve exact historical admission bytes without retaining slices
+        // into the complete donor carrier after its actual native verification.
+        for phase in &mut self.learning_phases {
+            phase.detach_admission_carrier()?;
+        }
+        original.material.ranges = Vec::new();
+        original.material.model_allocations = Vec::new();
+        original.material.learning_phases = Vec::new();
+        original.model_payloads = Vec::new();
+        original.plans = None;
+        prepared.uploads = Vec::new();
+        prepared.writes = Vec::new();
+        prepared.upload_write = None;
+        drop(prepared);
+        drop(original);
+        self.publication_preparation = None;
+        self.state_material_restore = None;
+        Ok(())
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub(super) fn admit_original_model_context_preparation(
         &self,
@@ -1776,6 +1845,7 @@ impl SemanticTransitionSession {
                         .result
                         .ok_or(SemanticTransitionError::ObservationMismatch)?;
                     if !original.transitioned
+                        && !original.evaluation_derivation
                         && (restored.logical_digest != original.header.logical_digest)
                     {
                         return Err(SemanticTransitionError::ObservationMismatch);

@@ -91,6 +91,12 @@ pub struct SemanticLearningPhaseRecord {
 }
 
 impl SemanticLearningPhaseRecord {
+    pub(super) fn detach_admission_carrier(&mut self) -> Result<(), SemanticTransitionError> {
+        self.admission =
+            SemanticLearningPhaseAdmission::from_decoded(self.admission.bytes.copy_owned()?)?;
+        Ok(())
+    }
+
     pub fn recipe(&self) -> &[SemanticLearningCopyReset] {
         &self.recipe
     }
