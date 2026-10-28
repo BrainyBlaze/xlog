@@ -386,19 +386,27 @@ impl SemanticTransitionSession {
         preparation: &SemanticEvaluationForkPreparation,
     ) -> Result<(), SemanticTransitionError> {
         self.ensure_rebindable()?;
-        let control = &preparation.intervention;
-        if !Arc::ptr_eq(&control.issuer, &self.publication_issuer) {
+        if !Arc::ptr_eq(&preparation.issuer, &self.publication_issuer) {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let device = &self
-            .task
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?
-            .1;
-        if control.words.len() != device.len()
-            || control.words.get(2..6)
-                != Some(identity_words(*control.identity.as_bytes()).as_slice())
-        {
+        let mode = preparation.origin.intervention();
+        if let Some(control) = &preparation.intervention {
+            let device = &self
+                .task
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .1;
+            if !Arc::ptr_eq(&control.issuer, &self.publication_issuer)
+                || control.original != preparation.original_task
+                || control.identity != preparation.target_task
+                || Some(control.mode) != mode
+                || control.words.len() != device.len()
+                || control.words.get(2..6)
+                    != Some(identity_words(*control.identity.as_bytes()).as_slice())
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+        } else if mode.is_some() {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         #[cfg(feature = "semantic-policy")]
@@ -406,18 +414,31 @@ impl SemanticTransitionSession {
             .program_assignments
             .lock()
             .map_err(|_| SemanticTransitionError::Poisoned)?;
-        let binding = &mut self
+        let binding = &self
             .task
-            .as_mut()
+            .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .0;
-        if control.active.load(Ordering::Acquire) && binding.identity() == control.identity {
+        if preparation.active.load(Ordering::Acquire)
+            && binding.identity() == preparation.target_task
+            && binding.spec.evaluation_intervention == mode
+        {
             return Ok(());
         }
-        if control.active.load(Ordering::Acquire)
-            || binding.identity() != control.original
+        if preparation.active.load(Ordering::Acquire)
+            || preparation
+                .intervention
+                .as_ref()
+                .is_some_and(|control| control.active.load(Ordering::Acquire))
+            || binding.identity() != preparation.original_task
             || binding.spec.evaluation_intervention.is_some()
-            || binding.identity_with_intervention(Some(control.mode)) != control.identity
+            || binding.identity_with_intervention(mode) != preparation.target_task
+            || binding
+                .spec
+                .rule_library
+                .as_ref()
+                .map(|library| library.binding())
+                != preparation.origin.rule_library_binding()
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -430,12 +451,15 @@ impl SemanticTransitionSession {
             .expect("validated original task")
             .0
             .spec
-            .evaluation_intervention = Some(control.mode);
+            .evaluation_intervention = mode;
         #[cfg(feature = "semantic-policy")]
         if let Some(source) = staged.take() {
             source.install(self);
         }
-        control.active.store(true, Ordering::Release);
+        if let Some(control) = &preparation.intervention {
+            control.active.store(true, Ordering::Release);
+        }
+        preparation.active.store(true, Ordering::Release);
         Ok(())
     }
 

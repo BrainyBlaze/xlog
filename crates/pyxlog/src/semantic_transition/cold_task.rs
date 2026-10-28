@@ -683,6 +683,7 @@ pub(crate) struct PySemanticTransitionFreshParent {
     pad_token: u64,
     terminal_tokens: Vec<u64>,
     final_intent_payload_bytes: u64,
+    nonterminal_intent: Option<xlog_cuda::SemanticNonterminalIntentBinding>,
     intent_effect: Vec<u8>,
     intent_entry_capacity: u64,
     intent_payload_capacity_bytes: usize,
@@ -722,6 +723,16 @@ impl PySemanticTransitionFreshParent {
             "final_intent_payload_bytes",
             self.final_intent_payload_bytes,
         )?;
+        if let Some(binding) = self.nonterminal_intent {
+            let intent = PyDict::new(py);
+            intent.set_item(
+                "plan_digest",
+                PyBytes::new(py, binding.plan_digest.as_bytes()),
+            )?;
+            intent.set_item("candidate_prefix_begin", binding.candidate_prefix_begin)?;
+            intent.set_item("candidate_prefix_end", binding.candidate_prefix_end)?;
+            metadata.set_item("nonterminal_intent", intent)?;
+        }
         metadata.set_item("intent_effect", PyBytes::new(py, &self.intent_effect))?;
         metadata.set_item("intent_entry_capacity", self.intent_entry_capacity)?;
         metadata.set_item(
@@ -807,6 +818,110 @@ impl PySemanticTransitionFreshParent {
     }
 }
 
+struct ColdTaskSource {
+    initial_theory: String,
+    input_facts: String,
+    observer_program: Option<String>,
+    statements: Vec<(String, u8)>,
+    statement_records: Vec<u32>,
+}
+
+impl ColdTaskSource {
+    fn read(
+        initial_theory: &Bound<'_, PyAny>,
+        input_facts: &Bound<'_, PyAny>,
+        observer_program: &Bound<'_, PyAny>,
+        statements: &Bound<'_, PyAny>,
+        query_records: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let initial_theory = exact_text(initial_theory, "initial_theory")?;
+        let input_facts = exact_text(input_facts, "input_facts")?;
+        let observer_program = if observer_program.is_none() {
+            None
+        } else {
+            Some(exact_text(observer_program, "observer_program")?)
+        };
+        let statements = exact_statements(statements)?;
+        let statement_records = exact_unsigned_tuple(query_records, "query_records")?
+            .into_iter()
+            .map(|record| {
+                u32::try_from(record)
+                    .map_err(|_| invalid("query record exceeds its native index domain"))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        if statement_records.is_empty()
+            || statement_records.len() > u32::MAX as usize
+            || statement_records
+                .iter()
+                .any(|record| *record as usize >= statements.len())
+        {
+            return Err(invalid(
+                "query_records requires a finite nonempty selection of original Statements",
+            ));
+        }
+        Ok(Self {
+            initial_theory,
+            input_facts,
+            observer_program,
+            statements,
+            statement_records,
+        })
+    }
+
+    fn from_tuple(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if !value.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("cold source requires an exact builtin five-tuple"));
+        }
+        let fields = value.cast::<PyTuple>()?;
+        if fields.len() != 5 {
+            return Err(invalid(
+                "cold source requires its five original source fields",
+            ));
+        }
+        Self::read(
+            &fields.get_item(0)?,
+            &fields.get_item(1)?,
+            &fields.get_item(2)?,
+            &fields.get_item(3)?,
+            &fields.get_item(4)?,
+        )
+    }
+
+    fn update_digest(&self, digest: &mut Sha256) {
+        let text = |digest: &mut Sha256, value: &str| {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+        };
+        text(digest, &self.initial_theory);
+        text(digest, &self.input_facts);
+        if let Some(observer) = &self.observer_program {
+            digest.update([1]);
+            text(digest, observer);
+        } else {
+            digest.update([0]);
+        }
+        digest.update((self.statements.len() as u64).to_le_bytes());
+        for (statement, mask) in &self.statements {
+            text(digest, statement);
+            digest.update([*mask]);
+        }
+        digest.update((self.statement_records.len() as u64).to_le_bytes());
+        for record in &self.statement_records {
+            digest.update(record.to_le_bytes());
+        }
+    }
+
+    fn admission(&self) -> PyResult<SemanticAdmissionRecords> {
+        task_admission(
+            &self.initial_theory,
+            &self.input_facts,
+            self.observer_program.as_deref(),
+            &self.statements,
+            &self.statement_records,
+        )
+    }
+}
+
 struct ColdTaskContent {
     observation: (
         xlog_cuda::SemanticTaskContentIdentity,
@@ -888,7 +1003,7 @@ impl PySemanticTransitionSession {
                     pad_token: parent.pad_token,
                     terminal_tokens: parent.terminal_tokens.clone(),
                     final_intent_payload_bytes: parent.final_intent_payload_bytes,
-                    nonterminal_intent: None,
+                    nonterminal_intent: parent.nonterminal_intent,
                     intent_effect: parent.intent_effect.clone(),
                     intent_entry_capacity: parent.intent_entry_capacity,
                     intent_payload_capacity_bytes: parent.intent_payload_capacity_bytes,
@@ -974,6 +1089,8 @@ impl PySemanticTransitionSession {
 /// Construction parses the complete observer and admits the exact initial
 /// theory, input facts and ordered task statements, allocates one CUDA Session,
 /// creates its sole Controller and retains the typed fresh-parent input set.
+/// An issued nonterminal intent is retained in that same parent and its frozen
+/// evaluation target; dependent replay and actor children retain their own binding.
 #[pyclass(name = "SemanticTransitionColdTask", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticTransitionColdTask {
     session: Py<PySemanticTransitionSession>,
@@ -1027,8 +1144,48 @@ impl PySemanticTransitionColdTask {
 
 #[pymethods]
 impl PySemanticTransitionColdTask {
+    /// Return the target query record ordinals from the canonical cold composition.
+    /// Both sources use the same five arguments as fresh cold construction.
+    /// This metadata preparation does not construct a Session or load a model.
+    #[staticmethod]
+    #[pyo3(signature = (source_cold_source, target_cold_source, *, admission_limits))]
+    fn evaluation_statement_records(
+        py: Python<'_>,
+        source_cold_source: &Bound<'_, PyAny>,
+        target_cold_source: &Bound<'_, PyAny>,
+        admission_limits: (u32, u32, u32, usize),
+    ) -> PyResult<Py<PyTuple>> {
+        let source = ColdTaskSource::from_tuple(source_cold_source)?;
+        let target = ColdTaskSource::from_tuple(target_cold_source)?;
+        let mut digest = Sha256::new();
+        digest.update(b"xlog.semantic.evaluation-admission-metadata.v1\0");
+        for source in [&source, &target] {
+            source.update_digest(&mut digest);
+        }
+        // Live freeze derives its authenticated scope from the presealed roster.
+        // This separate input digest is used only for cold record geometry.
+        let context = xlog_core::Identity256::from_bytes(digest.finalize().into());
+        let limits = xlog_cuda::SemanticAdmissionLimits {
+            max_records: admission_limits.0,
+            max_terms: admission_limits.1,
+            max_references: admission_limits.2,
+            max_utf8_bytes: admission_limits.3,
+        };
+        let (records, _, _) = SemanticAdmissionRecords::evaluation_context(
+            &source.admission()?,
+            &target.admission()?,
+            context,
+            limits,
+            None,
+        )
+        .map_err(xlog_err)?;
+        let composed = editable_source_from_admission_owned(&records, None)?
+            .ok_or_else(|| invalid("evaluation composition lost its original cold source"))?;
+        Ok(PyTuple::new(py, composed.query_records.iter().copied())?.unbind())
+    }
+
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None, nonterminal_intent=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -1067,12 +1224,13 @@ impl PySemanticTransitionColdTask {
         prepared_actor_refresh: Option<&Bound<'_, PyAny>>,
         actor_refresh_bank: Option<usize>,
         rule_library: Option<&Bound<'_, PyAny>>,
+        nonterminal_intent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if rule_library.is_some()
+        if (rule_library.is_some() || nonterminal_intent.is_some())
             && (private_replay_child.is_some() || prepared_actor_refresh.is_some())
         {
             return Err(invalid(
-                "rule library must be declared on its original cold task",
+                "rule library and nonterminal intent must be declared on their original cold task",
             ));
         }
         if private_replay_child.is_some() && prepared_actor_refresh.is_some()
@@ -1168,39 +1326,37 @@ impl PySemanticTransitionColdTask {
             (Some(allocation), None) | (None, Some(allocation)) => Some(allocation),
             (None, None) => None,
         };
-        let initial_theory = exact_text(initial_theory, "initial_theory")?;
-        let input_facts = exact_text(input_facts, "input_facts")?;
         let task_ground = super::read_task_ground(task_ground, &mut (16 * 1024 * 1024))?;
         let native_ground = super::task_ground_value(&task_ground)?;
-        let observer_program = match &native_ground {
-            xlog_cuda::SemanticTaskGround::Logical => {
-                Some(exact_text(observer_program, "observer_program")?)
+        let ColdTaskSource {
+            initial_theory,
+            input_facts,
+            observer_program,
+            statements,
+            statement_records,
+        } = ColdTaskSource::read(
+            initial_theory,
+            input_facts,
+            observer_program,
+            statements,
+            query_records,
+        )?;
+        match (&native_ground, &observer_program) {
+            (xlog_cuda::SemanticTaskGround::Logical, None) => {
+                return Err(invalid(
+                    "logical task requires its independent observer program",
+                ));
             }
-            xlog_cuda::SemanticTaskGround::Coding { .. } if observer_program.is_none() => None,
-            xlog_cuda::SemanticTaskGround::Coding { .. } => {
-                return Err(invalid("coding task has no independent observer reference"))
+            (xlog_cuda::SemanticTaskGround::Coding { .. }, Some(_)) => {
+                return Err(invalid("coding task has no independent observer reference"));
             }
-        };
-        let statements = exact_statements(statements)?;
-        let statement_records = exact_unsigned_tuple(query_records, "query_records")?
-            .into_iter()
-            .map(|record| {
-                u32::try_from(record)
-                    .map_err(|_| invalid("query record exceeds its native index domain"))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        if statement_records.is_empty()
-            || statement_records.len() > u32::MAX as usize
-            || statement_records
-                .iter()
-                .any(|record| *record as usize >= statements.len())
-        {
-            return Err(invalid(
-                "query_records requires a finite nonempty selection of original Statements",
-            ));
+            _ => {}
         }
         let terminal_tokens = exact_unsigned_tuple(terminal_tokens, "terminal_tokens")?;
         let intent_effect = exact_bytes(intent_effect, "intent_effect")?;
+        let nonterminal_intent = nonterminal_intent
+            .map(|value| super::read_nonterminal_intent(value, &mut (16 * 1024 * 1024)))
+            .transpose()?;
         validate_parent_geometry(
             memory_bytes,
             provenance_capacity_records,
@@ -1278,6 +1434,7 @@ impl PySemanticTransitionColdTask {
                 pad_token,
                 terminal_tokens,
                 final_intent_payload_bytes,
+                nonterminal_intent,
                 intent_effect,
                 intent_entry_capacity,
                 intent_payload_capacity_bytes,

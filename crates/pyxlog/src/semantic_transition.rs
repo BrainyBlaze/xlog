@@ -4201,7 +4201,7 @@ impl PySemanticTransitionSession {
         )?;
         spec.evaluation_intervention = native_proof
             .evaluation_fork_origin()
-            .map(|origin| origin.intervention());
+            .and_then(|origin| origin.intervention());
         let (selection, selected_material) =
             decode_selected_replay(&authority.replay, &seed.replay_selection)?;
         let retained_roster = seed.original_training_roster()?;
@@ -7636,6 +7636,38 @@ fn parse_state_records(
     }).collect()
 }
 
+fn read_nonterminal_intent(
+    value: &Bound<'_, PyAny>,
+    budget: &mut usize,
+) -> PyResult<SemanticNonterminalIntentBinding> {
+    const FIELDS: &[&str] = &[
+        "plan_digest",
+        "candidate_prefix_begin",
+        "candidate_prefix_end",
+    ];
+    if !value.is_exact_instance_of::<PyDict>() {
+        return Err(invalid("nonterminal intent requires an exact builtin dict"));
+    }
+    let value = value.cast::<PyDict>()?;
+    if value.len() != FIELDS.len() {
+        return Err(invalid(
+            "nonterminal intent requires its complete operator binding",
+        ));
+    }
+    for key in value.keys().iter() {
+        if !key.is_exact_instance_of::<PyString>()
+            || !FIELDS.contains(&key.cast::<PyString>()?.to_str()?)
+        {
+            return Err(invalid("unknown nonterminal intent binding field"));
+        }
+    }
+    Ok(SemanticNonterminalIntentBinding {
+        plan_digest: identity_bytes(&metadata_item(value, "plan_digest")?)?,
+        candidate_prefix_begin: metadata_integer(value, "candidate_prefix_begin", budget)?,
+        candidate_prefix_end: metadata_integer(value, "candidate_prefix_end", budget)?,
+    })
+}
+
 fn metadata_item<'py>(metadata: &Bound<'py, PyDict>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     metadata
         .get_item(name)?
@@ -7894,38 +7926,7 @@ fn parse_parent(
     };
     let nonterminal_intent = metadata
         .get_item("nonterminal_intent")?
-        .map(|value| {
-            const FIELDS: &[&str] = &[
-                "plan_digest",
-                "candidate_prefix_begin",
-                "candidate_prefix_end",
-            ];
-            if !value.is_exact_instance_of::<PyDict>() {
-                return Err(invalid("nonterminal intent requires an exact builtin dict"));
-            }
-            let value = value.cast::<PyDict>()?;
-            if value.len() != FIELDS.len() {
-                return Err(invalid(
-                    "nonterminal intent requires its complete operator binding",
-                ));
-            }
-            for key in value.keys().iter() {
-                if !key.is_exact_instance_of::<PyString>()
-                    || !FIELDS.contains(&key.cast::<PyString>()?.to_str()?)
-                {
-                    return Err(invalid("unknown nonterminal intent binding field"));
-                }
-            }
-            Ok(SemanticNonterminalIntentBinding {
-                plan_digest: identity_bytes(&metadata_item(value, "plan_digest")?)?,
-                candidate_prefix_begin: metadata_integer(
-                    value,
-                    "candidate_prefix_begin",
-                    &mut budget,
-                )?,
-                candidate_prefix_end: metadata_integer(value, "candidate_prefix_end", &mut budget)?,
-            })
-        })
+        .map(|value| read_nonterminal_intent(&value, &mut budget))
         .transpose()?;
     let replay_append = metadata
         .get_item("replay_append")?

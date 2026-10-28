@@ -514,7 +514,10 @@ impl PySemanticEvaluationFork {
 
 #[pymethods]
 impl PySemanticTransitionController {
-    #[pyo3(signature = (task_use, checkpoint, *, member, intervention, snapshot, restore_model, resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes, refresh_snapshot))]
+    /// Prepare the original sealed member with its declared intervention.
+    /// None preserves unrestricted coding actions without a rule library.
+    /// The sealed member and complete donor restoration remain authenticated.
+    #[pyo3(signature = (task_use, checkpoint, *, member, intervention=None, snapshot, restore_model, resolve_checkpoint, max_checkpoint_bytes, max_total_checkpoint_bytes, refresh_snapshot))]
     #[expect(
         clippy::too_many_arguments,
         reason = "a fork retains separate scoped authority, a bounded source resolver and its actual model wrapper"
@@ -525,7 +528,7 @@ impl PySemanticTransitionController {
         task_use: Py<PySemanticTransitionTaskUse>,
         checkpoint: Py<material_bytes::PySemanticMaterialBytes>,
         member: &Bound<'_, PyAny>,
-        intervention: &Bound<'_, PyAny>,
+        intervention: Option<&Bound<'_, PyAny>>,
         snapshot: &Bound<'_, PyAny>,
         restore_model: Py<PyAny>,
         resolve_checkpoint: Py<PyAny>,
@@ -574,12 +577,14 @@ impl PySemanticTransitionController {
         let source_registry = session.evaluation_source_registry()?;
         let source_budget = source_registry.native_budget()?;
         let target_budget = task.checkpoint.material_sources.native_budget()?;
-        let library = session
-            .owner()?
-            .evaluation_rule_library()
-            .ok_or_else(|| invalid("evaluation fork requires its original frozen rule library"))?;
-        let intervention =
-            super::evaluation_rule_library::intervention(intervention, &library, &target_budget)?;
+        let intervention = intervention
+            .map(|value| {
+                let library = session.owner()?.evaluation_rule_library().ok_or_else(|| {
+                    invalid("evaluation fork requires its original frozen rule library")
+                })?;
+                super::evaluation_rule_library::intervention(value, &library, &target_budget)
+            })
+            .transpose()?;
         let mut scalar_budget = 256;
         let limits = CheckpointSourceLimits::new(
             ColdValue::read(max_checkpoint_bytes, &mut scalar_budget, 0)?.unsigned()?,
@@ -714,8 +719,9 @@ impl PySemanticTransitionController {
             .ok_or_else(|| invalid("evaluation member lost its original frozen model catalogue"))?;
         let preparation = {
             let owner = session.owner()?;
-            let restriction = owner
-                .prepare_evaluation_intervention(intervention)
+            let restriction = intervention
+                .map(|intervention| owner.prepare_evaluation_intervention(intervention))
+                .transpose()
                 .map_err(xlog_err)?;
             let records = owner
                 .evaluation_fork_target_records(

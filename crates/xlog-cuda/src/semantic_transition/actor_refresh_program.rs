@@ -121,7 +121,7 @@ pub(super) struct ProgramStep {
     pub(super) budget: [u64; 3],
     request: u64,
     branch: Option<String>,
-    evaluation: Option<(usize, SemanticEvaluationIntervention)>,
+    evaluation: Option<(usize, Option<SemanticEvaluationIntervention>)>,
 }
 
 /// One original instruction, admitted while its actual publication reader is
@@ -520,7 +520,7 @@ fn require_completed_instruction_prefix(
 
 fn evaluation_instruction_scope(
     value: &Value,
-) -> Result<Option<(usize, SemanticEvaluationIntervention)>, SemanticTransitionError> {
+) -> Result<Option<(usize, Option<SemanticEvaluationIntervention>)>, SemanticTransitionError> {
     let Some(sealed) = value.as_object().ok_or_else(invalid_program)?.get("sealed") else {
         return Ok(None);
     };
@@ -533,9 +533,10 @@ fn evaluation_instruction_scope(
         .and_then(|member| member.checked_add(2))
         .ok_or_else(invalid_program)?;
     let mode = match operation(&sealed[1])? {
-        "v0" => SemanticEvaluationIntervention::NoEdit,
-        "v1" => SemanticEvaluationIntervention::FixedRuleActivation,
-        "v3" => SemanticEvaluationIntervention::Structural,
+        "coding" => None,
+        "v0" => Some(SemanticEvaluationIntervention::NoEdit),
+        "v1" => Some(SemanticEvaluationIntervention::FixedRuleActivation),
+        "v3" => Some(SemanticEvaluationIntervention::Structural),
         _ => return Err(invalid_program()),
     };
     Ok(Some((member, mode)))
@@ -970,7 +971,7 @@ impl ActorRefreshProgram {
                     .ok_or_else(invalid_program)?;
                 validate_segment(&instruction)?;
                 if let Some((member, mode)) = evaluation_instruction_scope(&instruction)? {
-                    if !evaluation_requests.insert((member, mode as u64)) {
+                    if !evaluation_requests.insert((member, mode.map(|mode| mode as u64))) {
                         return Err(invalid_program());
                     }
                 }
@@ -1283,7 +1284,7 @@ fn require_cancelled_instruction_material(
 fn instruction_evaluation(
     program: &ActorRefreshProgram,
     claim: &InstructionAdmission,
-) -> Option<(usize, SemanticEvaluationIntervention)> {
+) -> Option<(usize, Option<SemanticEvaluationIntervention>)> {
     program.steps[claim.first as usize].evaluation
 }
 
@@ -2665,9 +2666,6 @@ impl SemanticTransitionSession {
         program: &ActorRefreshProgram,
     ) -> Result<[u64; 2], SemanticTransitionError> {
         if let Some(member) = self.evaluation_program_member() {
-            if self.evaluation_rule_library().is_none() {
-                return Err(invalid_program());
-            }
             let proposals = evaluation_proposal_capacity(program, member)?;
             if proposals == 0 {
                 return Err(invalid_program());
@@ -2687,8 +2685,10 @@ impl SemanticTransitionSession {
                 let mode = self
                     .task
                     .as_ref()
-                    .and_then(|task| task.0.spec.evaluation_intervention)
-                    .ok_or_else(invalid_program)?;
+                    .ok_or_else(invalid_program)?
+                    .0
+                    .spec
+                    .evaluation_intervention;
                 if step.evaluation != Some((member, mode))
                     || self.evaluation_fork.as_ref().is_none_or(|origin| {
                         origin.member != member || origin.intervention() != mode

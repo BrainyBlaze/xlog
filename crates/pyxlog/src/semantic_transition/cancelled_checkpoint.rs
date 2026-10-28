@@ -602,11 +602,12 @@ pub(super) fn terminal_checkpoint(
     let proof = native.checkpoint_proof().map_err(xlog_err)?;
     let evaluation_intervention = proof
         .evaluation_fork_origin()
-        .map(|origin| {
+        .and_then(|origin| origin.intervention())
+        .map(|mode| {
             let library = proof
                 .evaluation_rule_library()
                 .ok_or_else(|| invalid("cancelled evaluation lost its original rule library"))?;
-            Ok::<_, PyErr>((origin.intervention(), library.digest()))
+            Ok::<_, PyErr>((mode, library.digest()))
         })
         .transpose()?;
     Ok(Some(CancelledCheckpointTerminal {

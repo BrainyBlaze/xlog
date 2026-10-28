@@ -1701,7 +1701,7 @@ pub(super) fn source_content_geometry_seed(
         task.evaluation_intervention = source
             .proof
             .evaluation_fork_origin()
-            .map(|origin| origin.intervention());
+            .and_then(|origin| origin.intervention());
         *cached = Some(SourceTaskGeometry {
             task: Arc::new(task),
             metadata,
