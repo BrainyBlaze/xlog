@@ -4560,6 +4560,31 @@ impl SemanticHypergraph {
         });
         let (admission, symbols) =
             prepare_semantic_records_with_budget(records, limits, self.empty_root, Some(budget))?;
+        if admission.schema_generation != source.schema_generation
+            || admission.statement_keys.len() < source.statement_keys.len()
+            || admission
+                .statement_keys
+                .iter()
+                .zip(&source.statement_keys)
+                .any(|(target, original)| match (target, original) {
+                    (None, None) => false,
+                    (Some(target), Some(original)) => {
+                        target.identity != original.identity
+                            || target.record != original.record
+                            || target.owner != self.empty_root.owner
+                            || original.owner != source.base.owner
+                    }
+                    _ => true,
+                })
+            || !admission
+                .symbols
+                .entries()
+                .starts_with(source.symbols.entries())
+        {
+            return Err(admission_error(
+                "evaluation composition changes an original source schema, statement or symbol identity",
+            ));
+        }
         Ok(PreparedEvaluationAdmission {
             admission: admission.finish(target.base_snapshot),
             allocation,

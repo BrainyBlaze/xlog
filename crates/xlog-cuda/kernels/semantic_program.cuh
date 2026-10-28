@@ -75,7 +75,6 @@ struct Observation { Fact fact;uint64_t truth,present; };
 struct NoObservations {
     __device__ uint32_t size() const { return 0; }
     __device__ Observation operator[](uint32_t) const { return {}; }
-    __device__ bool protected_fact(Fact) const { return false; }
 };
 
 __device__ uint32_t bank_predicate_arity(const Bank& bank, uint32_t predicate) {
@@ -90,8 +89,13 @@ __device__ bool valid_fact(const Fact& fact, const Bank& bank) {
            (fact.arity == 2 || fact.second == 0);
 }
 
-__device__ uint32_t find_fact(const Fact* facts,uint32_t count,Fact needle) {
+__device__ uint32_t find_fact(const Fact* facts,uint32_t count,Fact needle,
+        uint64_t* charged=nullptr,uint64_t fuel=UINT64_MAX) {
     for(uint32_t index=0;index<count;++index) {
+        if(charged) {
+            if(*charged==fuel)return UINT32_MAX;
+            ++*charged;
+        }
         const Fact fact=facts[index];
         if(fact.predicate==needle.predicate && fact.arity==needle.arity &&
            fact.first==needle.first && fact.second==needle.second)return index;
@@ -253,13 +257,15 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
         if (!valid_rule(rules[index], bank)) return {Status::InvalidProgram, 0, 0, 0};
     for (uint32_t index = 0; index < initial_count; ++index)
         if (!valid_fact(initial[index], bank)) return {Status::InvalidProgram, 0, 0, 0};
+    uint64_t charged=0;
     for (uint32_t binding = 0; binding < observations.size(); ++binding) {
+        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+        ++charged;
         const Observation observation = observations[binding];
         if (observation.present > 1 || observation.truth > 3 ||
             !valid_fact(observation.fact, bank) || !support || binding / 64 >= support->words)
             return {Status::InvalidProgram, 0, 0, 0};
     }
-    uint64_t charged=0;
     if(support)for(uint32_t fact=0;fact<capacity;++fact) {
         support->truth[fact]=0;
         for(uint32_t channel=0;channel<2;++channel)
@@ -278,9 +284,12 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
         if(support)support->truth[slot]|=1;
     }
     for(uint32_t binding=0;binding<observations.size();++binding) {
+        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+        ++charged;
         const Observation observation=observations[binding];
         if(!observation.present)continue;
-        const uint32_t slot=find_fact(output,count,observation.fact);
+        const uint32_t slot=find_fact(output,count,observation.fact,&charged,fuel);
+        if(slot==UINT32_MAX)return {Status::FuelExhausted,0,0,charged};
         if(slot==count) {
             if(count==capacity)return {Status::FactCapacity,0,0,charged};
             output[count++]=observation.fact;
@@ -328,8 +337,16 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                     continue;
                 }
                 const Fact head = substitute_head(rule.head, values[depth + 1]);
-                if(rule_index>=protected_rule_begin && observations.protected_fact(head))
-                    return {Status::ProtectedObservation,0,0,charged};
+                if(rule_index>=protected_rule_begin) {
+                    for(uint32_t binding=0;binding<observations.size();++binding) {
+                        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+                        ++charged;
+                        const Fact target=observations[binding].fact;
+                        if(target.predicate==head.predicate && target.arity==head.arity &&
+                           target.first==head.first && target.second==head.second)
+                            return {Status::ProtectedObservation,0,0,charged};
+                    }
+                }
                 const uint32_t slot=find_fact(output,count,head);
                 if (slot==count) {
                     if (count == capacity) return {Status::FactCapacity, 0, 0, charged};

@@ -383,7 +383,9 @@ impl SemanticTaskVerificationBinding {
 }
 
 pub(super) const TASK_GROUND_MAGIC: u64 = 0x584c4f4754475244;
-pub(super) const TASK_GROUND_VERSION: u64 = 3;
+pub(super) const TASK_GROUND_VERSION: u64 = 4;
+pub(super) const INHERITED_OBSERVATIONS_MAGIC: u64 = 0x584c4f47494e484f;
+pub(super) const INHERITED_OBSERVATION_BYTES: usize = 176;
 
 /// One result from the original numerical candidate/query invocation.
 #[repr(C)]
@@ -425,10 +427,38 @@ pub(super) struct TaskGroundLayout {
     pub query_offset: usize,
     pub rule_offset: usize,
     pub rule_capacity: usize,
+    pub inherited_capacity: usize,
+    pub inherited_offset: usize,
     pub bytes: usize,
 }
 
 impl TaskGroundLayout {
+    pub fn from_material(bytes: &[u8]) -> Result<Self, SemanticTransitionError> {
+        if bytes.len() < 64 {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let word =
+            |index: usize| u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
+        let rules =
+            usize::try_from(word(7)).map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let initial_rules = crate::semantic_program::RESIDENT_PROGRAM_RULE_CAPACITY
+            .checked_sub(rules)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let layout = Self::new(
+            usize::try_from(word(2)).map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+            usize::try_from(word(3)).map_err(|_| SemanticTransitionError::ObservationMismatch)?,
+            Some(initial_rules),
+        )?;
+        let capacity = bytes
+            .get(layout.inherited_offset - 8..layout.inherited_offset)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let capacity = usize::try_from(u64::from_le_bytes(capacity.try_into().unwrap()))
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
+        let layout = layout.with_inherited_observations(capacity)?;
+        layout.validate(bytes)?;
+        Ok(layout)
+    }
+
     pub fn new(
         queries: usize,
         bindings: usize,
@@ -456,9 +486,12 @@ impl TaskGroundLayout {
             })
             .transpose()?
             .unwrap_or(0);
-        let bytes = rule_capacity
+        let inherited_offset = rule_capacity
             .checked_mul(std::mem::size_of::<crate::SemanticProgramRule>())
             .and_then(|bytes| bytes.checked_add(rule_offset))
+            .and_then(|bytes| bytes.checked_add(7))
+            .map(|bytes| bytes & !7)
+            .and_then(|bytes| bytes.checked_add(16))
             .ok_or_else(overflow)?;
         Ok(Self {
             queries,
@@ -466,8 +499,47 @@ impl TaskGroundLayout {
             query_offset,
             rule_offset,
             rule_capacity,
-            bytes,
+            inherited_capacity: 0,
+            inherited_offset,
+            bytes: inherited_offset,
         })
+    }
+
+    pub fn with_inherited_observations(
+        mut self,
+        capacity: usize,
+    ) -> Result<Self, SemanticTransitionError> {
+        if capacity > u32::MAX as usize
+            || self
+                .bindings
+                .checked_add(capacity)
+                .is_none_or(|count| count > u32::MAX as usize)
+        {
+            return Err(publication_input_error(
+                "inherited observation roster exceeds its finite native domain",
+            ));
+        }
+        self.bytes = capacity
+            .checked_mul(INHERITED_OBSERVATION_BYTES)
+            .and_then(|bytes| self.inherited_offset.checked_add(bytes))
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        self.inherited_capacity = capacity;
+        Ok(self)
+    }
+
+    pub fn support_binding_capacity(self) -> usize {
+        self.bindings + self.inherited_capacity
+    }
+
+    pub fn inherited_row(
+        self,
+        binding: usize,
+    ) -> Result<std::ops::Range<usize>, SemanticTransitionError> {
+        if binding >= self.inherited_capacity {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let begin = self.inherited_offset + binding * INHERITED_OBSERVATION_BYTES;
+        Ok(begin..begin + INHERITED_OBSERVATION_BYTES)
     }
 
     pub fn initial_bytes(self) -> Vec<u8> {
@@ -487,6 +559,10 @@ impl TaskGroundLayout {
         {
             bytes[index * 8..index * 8 + 8].copy_from_slice(&word.to_le_bytes());
         }
+        bytes[self.inherited_offset - 16..self.inherited_offset - 8]
+            .copy_from_slice(&INHERITED_OBSERVATIONS_MAGIC.to_le_bytes());
+        bytes[self.inherited_offset - 8..self.inherited_offset]
+            .copy_from_slice(&(self.inherited_capacity as u64).to_le_bytes());
         bytes
     }
 
@@ -522,7 +598,10 @@ impl TaskGroundLayout {
             .and_then(|count| count.checked_mul(std::mem::size_of::<crate::SemanticProgramRule>()))
             .and_then(|bytes| self.rule_offset.checked_add(bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        if bytes[used_rules..].iter().any(|byte| *byte != 0) {
+        if bytes[used_rules..self.inherited_offset - 16]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
             return Err(publication_input_error(
                 "unoccupied selected rule storage is not canonical",
             ));
@@ -537,7 +616,36 @@ impl TaskGroundLayout {
                 ));
             }
         }
-        for observation in bytes[64..self.query_offset].chunks_exact(144) {
+        if bytes[self.inherited_offset - 16..self.inherited_offset - 8]
+            != INHERITED_OBSERVATIONS_MAGIC.to_le_bytes()
+            || bytes[self.inherited_offset - 8..self.inherited_offset]
+                != (self.inherited_capacity as u64).to_le_bytes()
+        {
+            return Err(publication_input_error(
+                "inherited observation storage changes its frozen capacity",
+            ));
+        }
+        for (binding, row) in bytes[self.inherited_offset..]
+            .chunks_exact(INHERITED_OBSERVATION_BYTES)
+            .enumerate()
+        {
+            let word = |offset| u64::from_le_bytes(row[offset..offset + 8].try_into().unwrap());
+            let arity = u32::from_le_bytes(row[20..24].try_into().unwrap());
+            if word(0) != binding as u64
+                || word(8) > u32::MAX as u64
+                || !(1..=2).contains(&arity)
+                || (arity == 1 && row[28..32] != [0; 4])
+            {
+                return Err(publication_input_error(
+                    "inherited observation changes its frozen fact or original binding ordinal",
+                ));
+            }
+        }
+        for observation in bytes[64..self.query_offset].chunks_exact(144).chain(
+            bytes[self.inherited_offset..]
+                .chunks_exact(INHERITED_OBSERVATION_BYTES)
+                .map(|row| &row[32..]),
+        ) {
             let present = u64::from_le_bytes(observation[..8].try_into().expect("presence word"));
             let truth = u64::from_le_bytes(observation[8..16].try_into().expect("truth word"));
             if present > 2
@@ -604,7 +712,7 @@ pub(super) struct TaskGroundStorage {
 impl TaskGroundStorage {
     pub fn allocation_bytes(layout: TaskGroundLayout) -> Result<usize, SemanticTransitionError> {
         let facts = crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY;
-        let words = layout.bindings.div_ceil(64);
+        let words = layout.support_binding_capacity().div_ceil(64);
         facts
             .checked_mul(3)
             .and_then(|cells| cells.checked_mul(2))
@@ -622,7 +730,7 @@ impl TaskGroundStorage {
         reservation: &mut super::GpuMemoryReservation,
     ) -> Result<Self, SemanticTransitionError> {
         let facts = crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY;
-        let words = layout.bindings.div_ceil(64);
+        let words = layout.support_binding_capacity().div_ceil(64);
         let cells = facts
             .checked_mul(3)
             .and_then(|count| count.checked_mul(2))

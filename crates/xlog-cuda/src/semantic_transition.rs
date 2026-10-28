@@ -20024,6 +20024,7 @@ pub struct SemanticTransitionSession {
     // later binding must reproduce this exact executed task content.
     cold_content: Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)>,
     cold_statement_records: Vec<u32>,
+    cold_observation_records: Vec<u32>,
     cold_statement_reservation: Option<SemanticReplayMaterialReservation>,
     cold_observer_entered: bool,
     cold_observer_completed: bool,
@@ -38841,6 +38842,7 @@ impl SemanticTransitionSession {
             task_ground: None,
             cold_content: None,
             cold_statement_records: Vec::new(),
+            cold_observation_records: Vec::new(),
             cold_statement_reservation: None,
             cold_observer_entered: false,
             cold_observer_completed: false,
@@ -39752,6 +39754,18 @@ impl SemanticTransitionSession {
             }
         }
         let words = binding.words(self.graph.transition_arena()[1]);
+        let inherited_capacity = self
+            .codebooks
+            .model_catalogue
+            .as_ref()
+            .filter(|(_, member)| *member >= 2)
+            .map(|(catalogue, _)| {
+                catalogue
+                    .member_observation_records(evaluation_fork::SELECTED_TRAINING_CONTEXT)
+                    .map(<[u32]>::len)
+            })
+            .transpose()?
+            .unwrap_or(0);
         let ground_layout = task_ground::TaskGroundLayout::new(
             binding.spec.statement_records.len(),
             binding.spec.task_ground.bindings().len(),
@@ -39760,7 +39774,8 @@ impl SemanticTransitionSession {
                 .program
                 .editable_program()
                 .map(|program| program.initial_rules.len()),
-        )?;
+        )?
+        .with_inherited_observations(inherited_capacity)?;
         let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
         let task_bytes = words
             .len()
@@ -39869,8 +39884,10 @@ impl SemanticTransitionSession {
             .map(|budget| {
                 let bytes = statement_records
                     .len()
+                    .checked_add(task_ground.bindings().len())
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?
                     .checked_mul(size_of::<u32>())
-                    .and_then(|bytes| bytes.checked_add(size_of::<Vec<u32>>()))
+                    .and_then(|bytes| bytes.checked_add(2 * size_of::<Vec<u32>>()))
                     .ok_or(SemanticTransitionError::GenerationExhausted)?;
                 budget.reserve_auxiliary(bytes as u64)
             })
@@ -39914,6 +39931,11 @@ impl SemanticTransitionSession {
         }
         self.cold_content = Some(content.clone());
         self.cold_statement_records = statement_records.to_vec();
+        self.cold_observation_records = task_ground
+            .bindings()
+            .iter()
+            .map(|binding| binding.observation_record)
+            .collect();
         self.cold_statement_reservation = statement_reservation;
         Ok(content)
     }
