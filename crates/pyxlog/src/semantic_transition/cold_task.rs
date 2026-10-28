@@ -730,12 +730,7 @@ impl PySemanticTransitionSession {
         ground: &super::ColdValue,
         parent: &PySemanticTransitionFreshParent,
     ) -> PyResult<ColdTaskContent> {
-        let donor_program = donor
-            .editable_source()?
-            .program
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| invalid("evaluation donor requires its original native program"))?;
+        let donor_program = donor.editable_source()?.program.as_ref().cloned();
         let target_program = self
             .editable_source()?
             .program
@@ -745,7 +740,7 @@ impl PySemanticTransitionSession {
         let (program, record_offset) = target_owner
             .prepare_evaluation_model_context(
                 donor_owner,
-                &donor_program.program,
+                donor_program.as_ref().map(|owner| owner.program.as_ref()),
                 &target_program.program,
                 xlog_cuda::SemanticAdmissionLimits {
                     max_records: self.admission_limits.0,
@@ -1467,25 +1462,14 @@ impl PySemanticTransitionColdTask {
                 let first = &sessions[0];
                 if session.device_ordinal != first.device_ordinal
                     || session.memory_bytes != first.memory_bytes
-                    || session.capacities != first.capacities
-                    || session.admission_limits != first.admission_limits
                     || !Arc::ptr_eq(&session.material_sources, &first.material_sources)
-                    || parent.provenance_capacity_records != original.provenance_capacity_records
                     || parent.prefix_capacity != original.prefix_capacity
                     || parent.feedback_capacity != original.feedback_capacity
                     || parent.pad_token != original.pad_token
                     || parent.terminal_tokens != original.terminal_tokens
-                    || parent.final_intent_payload_bytes != original.final_intent_payload_bytes
-                    || parent.intent_entry_capacity != original.intent_entry_capacity
-                    || parent.intent_payload_capacity_bytes
-                        != original.intent_payload_capacity_bytes
-                    || parent.acknowledgement_payload_capacity_bytes
-                        != original.acknowledgement_payload_capacity_bytes
-                    || parent.authority_decisions_capacity_bytes
-                        != original.authority_decisions_capacity_bytes
                 {
                     return Err(invalid(
-                        "model contexts require one original material domain, device and finite model input and resource envelope",
+                        "model contexts require one original material domain, device, memory budget, model input geometry and token semantics",
                     ));
                 }
             }
