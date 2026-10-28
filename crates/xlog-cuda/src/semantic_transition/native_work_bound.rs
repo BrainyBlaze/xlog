@@ -1631,7 +1631,9 @@ pub(super) fn feedback_geometry_native_work_ceiling(
     )?;
     if editable {
         // Same fixed PROGRAM_FUEL used by task_program_closure. Every charged
-        // pair checks the fuel before increment, including failed prefixes.
+        // pair checks the fuel before increment, including failed prefixes,
+        // inherited read-only observation rows, protected-head scans and all
+        // inherited provenance words. The limit is unchanged by a fork.
         add_native_work_ceiling(
             &mut ceiling,
             [0, ceiling_sum([ranges, 1_000_000])?, 0, 0, 0, 0, 0, 0, 0],

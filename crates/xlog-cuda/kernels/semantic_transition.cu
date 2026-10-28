@@ -4232,7 +4232,7 @@ __device__ semantic_program::Result task_program_closure(const Descriptor& descr
         const semantic_program::Rule* inserted,uint32_t inserted_count,
         semantic_program::DualSupport* support,semantic_program::Fact** output,
         ExecutionWork* work=nullptr,semantic_graph::NativeWorkTally* native_work=nullptr) {
-    const uint64_t lineage_words=(uint64_t(bank.task.bindings)+63)/64;
+    const uint64_t lineage_words=(uint64_t(bank.task.bindings)+plane.inherited_capacity+63)/64;
     if(slot>2 || !descriptor.task_support_truths ||
        descriptor.task_support_lineage_words!=3*PROGRAM_FACT_CAPACITY*2*lineage_words ||
        (lineage_words && !descriptor.task_support_lineage))

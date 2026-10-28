@@ -9,6 +9,97 @@ impl SemanticTransitionSession {
         // completion join; this grants no new native submission or reader.
         Ok(self.evaluation_fork.clone())
     }
+
+    pub(super) fn require_evaluation_inherited_observations(
+        &self,
+        material: &OwnedPublicationMaterial,
+    ) -> Result<(), SemanticTransitionError> {
+        let ground = material
+            .ranges
+            .iter()
+            .find(|range| (range.range.role, range.range.index) == (58, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let layout = self
+            .task_ground
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .layout;
+        layout.validate(&ground.bytes)?;
+        let Some(origin) = &material.evaluation_fork else {
+            if layout.inherited_capacity != 0 {
+                return Err(publication_input_error(
+                    "inherited observations require their original guarded donor custody",
+                ));
+            }
+            return Ok(());
+        };
+        let (catalogue, member) = self
+            .codebooks
+            .model_catalogue
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if *member != origin.member || self.model_catalogue_binding().digest != origin.catalogue {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let records = catalogue.member_observation_records(SELECTED_TRAINING_CONTEXT)?;
+        let source = origin.source_material()?.into_complete()?;
+        let source_ground = source
+            .ranges
+            .iter()
+            .find(|range| (range.range.role, range.range.index) == (58, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        let source_layout = task_ground::TaskGroundLayout::from_material(&source_ground.bytes)?;
+        if source_layout.inherited_capacity != 0
+            || source_layout.bindings != records.len()
+            || layout.inherited_capacity != records.len()
+        {
+            return Err(publication_input_error(
+                "inherited observations differ from their original finite donor geometry",
+            ));
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let program = self
+            .task
+            .as_ref()
+            .and_then(|(binding, _)| binding.spec.program.editable_program())
+            .ok_or(SemanticTransitionError::NotBound)?;
+        for (binding, &record) in records.iter().enumerate() {
+            let row = &ground.bytes[layout.inherited_row(binding)?];
+            let fact = program
+                .observation_facts
+                .iter()
+                .find(|(original, _)| *original == record)
+                .map(|(_, fact)| fact)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            if row[..8] != (binding as u64).to_le_bytes()
+                || row[8..16] != u64::from(record).to_le_bytes()
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            for (index, value) in [fact.predicate, fact.arity, fact.first, fact.second]
+                .into_iter()
+                .enumerate()
+            {
+                if row[16 + index * 4..20 + index * 4] != value.to_le_bytes() {
+                    return Err(publication_input_error(
+                        "inherited observation remaps its frozen donor fact",
+                    ));
+                }
+            }
+            let begin = 64 + binding * size_of::<task_ground::TaskObservationRecord>();
+            if row[32..]
+                != source_ground.bytes
+                    [begin..begin + size_of::<task_ground::TaskObservationRecord>()]
+            {
+                return Err(publication_input_error(
+                    "inherited observation differs from its actual guarded donor receipt or truth",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SemanticEvaluationForkPreparation {
@@ -48,7 +139,7 @@ impl SemanticTransitionSession {
 
 // The complete selected training checkpoint belongs to the second presealed
 // training context. The first context remains the enclosing roster owner.
-const SELECTED_TRAINING_CONTEXT: usize = 1;
+pub(super) const SELECTED_TRAINING_CONTEXT: usize = 1;
 
 #[cfg(feature = "semantic-policy")]
 impl SemanticTransitionSession {
@@ -645,6 +736,36 @@ impl SemanticTransitionSession {
         ground[48..56].copy_from_slice(&source_rule_count.to_le_bytes());
         ground[ground_layout.rule_offset..ground_layout.rule_offset + rule_bytes]
             .copy_from_slice(selected_rules);
+        let inherited_records = catalogue.member_observation_records(SELECTED_TRAINING_CONTEXT)?;
+        if inherited_records.len() != source_layout.bindings
+            || inherited_records.len() != ground_layout.inherited_capacity
+        {
+            return Err(publication_input_error(
+                "inherited observation geometry changes the original frozen donor roster",
+            ));
+        }
+        for (binding, &record) in inherited_records.iter().enumerate() {
+            let fact = context
+                .program
+                .observation_facts
+                .iter()
+                .find(|(original, _)| *original == record)
+                .map(|(_, fact)| fact)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            let row = &mut ground[ground_layout.inherited_row(binding)?];
+            row[..8].copy_from_slice(&(binding as u64).to_le_bytes());
+            row[8..16].copy_from_slice(&u64::from(record).to_le_bytes());
+            for (index, value) in [fact.predicate, fact.arity, fact.first, fact.second]
+                .into_iter()
+                .enumerate()
+            {
+                row[16 + index * 4..20 + index * 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let begin = 64 + binding * size_of::<task_ground::TaskObservationRecord>();
+            row[32..].copy_from_slice(
+                &old_ground.bytes[begin..begin + size_of::<task_ground::TaskObservationRecord>()],
+            );
+        }
         ground_layout.validate(&ground)?;
         replace_evaluation_record(
             &mut material,
@@ -1403,7 +1524,8 @@ impl SemanticTransitionSession {
             if let Some(prepared) = prepared {
                 self.graph.install_evaluation_admission(prepared);
                 self.cold_content = None;
-                self.cold_statement_records.clear();
+                self.cold_statement_records = Vec::new();
+                self.cold_observation_records = Vec::new();
                 self.cold_statement_reservation = None;
                 self.cold_observer_entered = false;
                 self.cold_observer_completed = false;
@@ -1518,7 +1640,8 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         self.graph.install_evaluation_admission(prepared);
         self.cold_content = None;
-        self.cold_statement_records.clear();
+        self.cold_statement_records = Vec::new();
+        self.cold_observation_records = Vec::new();
         self.cold_statement_reservation = None;
         self.cold_observer_entered = false;
         self.cold_observer_completed = false;

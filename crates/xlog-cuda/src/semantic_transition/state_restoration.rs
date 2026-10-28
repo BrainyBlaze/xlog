@@ -795,6 +795,7 @@ impl SemanticTransitionSession {
                 "evaluation forks cannot consolidate or change learning phase",
             ));
         }
+        self.require_evaluation_inherited_observations(&material)?;
         if material.evaluation_fork.is_some()
             && (self.task_training_domain().is_some()
                 || self.training_views.is_some()

@@ -10,6 +10,7 @@ constexpr uint64_t kPublicationRole = 58;
 constexpr uint64_t kQueryWords = 44;
 constexpr uint64_t kObservationWords = 18;
 constexpr uint64_t kBindingWords = 36;
+constexpr uint64_t kInheritedMagic = 0x584c4f47494e484fULL;
 
 struct Task {
     const uint64_t* words;
@@ -134,14 +135,24 @@ struct Query { uint64_t receipt[42],truth,attained; };
 // The first word is an origin tag: zero is absent, one is Action, two is Intent.
 // The historical action word group holds the origin identity for either tag.
 struct Observation { uint64_t present,truth,receipt[4],action[4],intent[4],support[4]; };
+struct InheritedObservation {
+    // Immutable donor evidence, separate from the active task's verifier
+    // policy. Only the canonical closure reads this plane after restoration.
+    uint64_t binding, statement_record;
+    semantic_program::Fact fact;
+    Observation observation;
+};
 static_assert(sizeof(Query)==352,"task query record ABI");
 static_assert(sizeof(Observation)==144,"task observation record ABI");
+static_assert(sizeof(InheritedObservation)==176,"inherited observation record ABI");
 
 struct Plane {
     uint64_t* header;
     Observation* observations;
     Query* query_rows;
     semantic_program::Rule* selected_rules;
+    const InheritedObservation* inherited;
+    uint32_t inherited_capacity;
     __device__ Query& query(uint32_t candidate,uint32_t query) const {
         return query_rows[uint64_t(candidate)*header[2]+query];
     }
@@ -153,13 +164,26 @@ __device__ bool decode_plane(uint64_t address,uint64_t bytes,const Task& task,Pl
     const uint64_t capacity=task.editable ? semantic_program::kRuleCapacity-uint64_t(task.program.rule_count) : 0;
     const uint64_t query_offset=64+uint64_t(task.bindings)*sizeof(Observation);
     const uint64_t rule_offset=query_offset+3*uint64_t(task.queries)*sizeof(Query);
-    if(header[0]!=kMagic || header[1]!=3 || header[2]!=task.queries || header[3]!=task.bindings ||
+    if(header[0]!=kMagic || header[1]!=4 || header[2]!=task.queries || header[3]!=task.bindings ||
        header[4]!=kQueryWords || header[5]!=kObservationWords || header[6]>capacity || header[7]!=capacity ||
-       bytes!=rule_offset+capacity*sizeof(semantic_program::Rule))return false;
+       bytes<rule_offset+capacity*sizeof(semantic_program::Rule)+16)return false;
+    const uint64_t inherited_offset=((rule_offset+capacity*sizeof(semantic_program::Rule)+7)&~uint64_t(7))+16;
+    if(bytes<inherited_offset)return false;
+    const auto* inherited_header=reinterpret_cast<const uint64_t*>(address+inherited_offset-16);
+    if(inherited_header[0]!=kInheritedMagic || inherited_header[1]>UINT32_MAX-task.bindings ||
+       inherited_header[1]>(bytes-inherited_offset)/sizeof(InheritedObservation) ||
+       bytes!=inherited_offset+inherited_header[1]*sizeof(InheritedObservation))return false;
     Plane plane{header,reinterpret_cast<Observation*>(address+64),
-        reinterpret_cast<Query*>(address+query_offset),reinterpret_cast<semantic_program::Rule*>(address+rule_offset)};
-    for(uint32_t index=0;index<task.bindings;++index) {
-        const auto& observation=plane.observations[index];
+        reinterpret_cast<Query*>(address+query_offset),reinterpret_cast<semantic_program::Rule*>(address+rule_offset),
+        reinterpret_cast<const InheritedObservation*>(address+inherited_offset),uint32_t(inherited_header[1])};
+    for(uint32_t index=0;index<task.bindings+plane.inherited_capacity;++index) {
+        const bool inherited=index>=task.bindings;
+        if(inherited) {
+            const auto& row=plane.inherited[index-task.bindings];
+            if(row.binding!=index-task.bindings || row.statement_record>UINT32_MAX ||
+               !semantic_program::valid_fact(row.fact,task.program))return false;
+        }
+        const auto& observation=inherited ? plane.inherited[index-task.bindings].observation : plane.observations[index];
         const auto* words=reinterpret_cast<const uint64_t*>(&observation);
         if(observation.present>2 || observation.truth>3)return false;
         if(observation.present==2) {
@@ -181,22 +205,17 @@ __device__ bool decode_plane(uint64_t address,uint64_t bytes,const Task& task,Pl
 struct Observations {
     Task task;
     Plane plane;
-    __device__ uint32_t size() const { return task.bindings; }
+    __device__ uint32_t size() const { return task.bindings+plane.inherited_capacity; }
     __device__ semantic_program::Observation operator[](uint32_t index) const {
+        if(index>=task.bindings) {
+            const auto& row=plane.inherited[index-task.bindings];
+            return {row.fact,row.observation.truth,uint64_t(row.observation.present!=0)};
+        }
         semantic_program::Fact fact{};
         task.observation_fact(index,&fact);
         const auto& observation=plane.observations[index];
         // The generic program evaluator consumes presence, not an origin tag.
         return {fact,observation.truth,uint64_t(observation.present!=0)};
-    }
-    __device__ bool protected_fact(semantic_program::Fact fact) const {
-        for(uint32_t index=0;index<task.bindings;++index) {
-            semantic_program::Fact target{};
-            if(task.observation_fact(index,&target) && target.predicate==fact.predicate &&
-               target.arity==fact.arity && target.first==fact.first &&
-               (fact.arity==1 || target.second==fact.second))return true;
-        }
-        return false;
     }
 };
 
