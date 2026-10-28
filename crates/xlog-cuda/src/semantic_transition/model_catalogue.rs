@@ -936,21 +936,21 @@ impl SemanticTransitionSession {
 
     pub(super) fn require_original_model_context_preseal(
         &self,
-        source: &Self,
+        donor: &Self,
     ) -> Result<Arc<ModelContextPreseal>, SemanticTransitionError> {
         let preseal = self
             .model_context_preseal
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
         if !preseal.pending.load(Ordering::Acquire)
-            || source
+            || donor
                 .model_context_preseal
                 .as_ref()
                 .is_none_or(|original| !Arc::ptr_eq(preseal, original))
             || preseal
                 .issuers
-                .first()
-                .is_none_or(|issuer| !Arc::ptr_eq(issuer, &source.publication_issuer))
+                .get(1)
+                .is_none_or(|issuer| !Arc::ptr_eq(issuer, &donor.publication_issuer))
             || !preseal
                 .issuers
                 .iter()
@@ -1169,7 +1169,7 @@ impl SemanticTransitionSession {
         }
         let budget = Self::require_cold_model_contexts(contexts)?;
         for context in contexts.iter().skip(2) {
-            context.require_prepared_evaluation_model_context(contexts[0])?;
+            context.require_prepared_evaluation_model_context(contexts[1])?;
         }
         for count_word in [1, 3, 5, 7] {
             contexts.iter().try_fold(1u64, |total, context| {

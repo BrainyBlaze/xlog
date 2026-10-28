@@ -724,18 +724,18 @@ struct ColdTaskContent {
 impl PySemanticTransitionSession {
     fn prepare_evaluation_model_context(
         &self,
-        source: &Self,
-        source_owner: &xlog_cuda::SemanticTransitionSession,
+        donor: &Self,
+        donor_owner: &xlog_cuda::SemanticTransitionSession,
         target_owner: &mut xlog_cuda::SemanticTransitionSession,
         ground: &super::ColdValue,
         parent: &PySemanticTransitionFreshParent,
     ) -> PyResult<ColdTaskContent> {
-        let source_program = source
+        let donor_program = donor
             .editable_source()?
             .program
             .as_ref()
             .cloned()
-            .ok_or_else(|| invalid("evaluation source requires its original native program"))?;
+            .ok_or_else(|| invalid("evaluation donor requires its original native program"))?;
         let target_program = self
             .editable_source()?
             .program
@@ -744,8 +744,8 @@ impl PySemanticTransitionSession {
             .ok_or_else(|| invalid("evaluation context requires its original native program"))?;
         let (program, record_offset) = target_owner
             .prepare_evaluation_model_context(
-                source_owner,
-                &source_program.program,
+                donor_owner,
+                &donor_program.program,
                 &target_program.program,
                 xlog_cuda::SemanticAdmissionLimits {
                     max_records: self.admission_limits.0,
@@ -1505,7 +1505,7 @@ impl PySemanticTransitionColdTask {
             owners.push(session.owner()?);
         }
         for session in sessions.iter().skip(2) {
-            session.retain_evaluation_source_registry(Arc::clone(&sessions[0].material_sources))?;
+            session.retain_evaluation_source_registry(Arc::clone(&sessions[1].material_sources))?;
         }
         let mut native_contexts = Vec::new();
         native_contexts
@@ -1535,13 +1535,12 @@ impl PySemanticTransitionColdTask {
                     .map_err(xlog_err)?;
             drop(preseal_contexts);
             if !projected {
-                let (source, targets) =
-                    owners.split_first_mut().expect("source and target checked");
-                for (index, target) in targets.iter_mut().enumerate().skip(1) {
-                    let member = index + 1;
+                let (donor, targets) = owners[1..].split_first_mut().expect("target donor checked");
+                for (index, target) in targets.iter_mut().enumerate() {
+                    let member = index + 2;
                     let content = sessions[member].prepare_evaluation_model_context(
-                        &sessions[0],
-                        &*source,
+                        &sessions[1],
+                        &*donor,
                         &mut *target,
                         &cold_tasks[member].task_ground,
                         &cold_tasks[member].parent.borrow(py),
