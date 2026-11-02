@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and install local pyxlog for one explicit Python interpreter."""
+"""Build local pyxlog for one explicit Python interpreter and optionally install it."""
 
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run `maturin build` with its generated CUDA kernels for one explicit Python "
-            "interpreter, install the resulting pyxlog wheel into that same "
-            "interpreter, and verify the installed package contains kernels."
+            "interpreter. By default, install the resulting wheel into that same "
+            "interpreter and verify the installed package contains kernels."
         ),
         epilog=(
             "Example: python scripts/install_pyxlog_for_python.py --python "
@@ -69,6 +69,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--maturin",
         default=None,
         help="Path to a maturin executable. Defaults to maturin on PATH.",
+    )
+    parser.add_argument(
+        "--build-only",
+        action="store_true",
+        help="Build the distributable wheel without installing or importing pyxlog.",
     )
     parser.add_argument(
         "--user",
@@ -174,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     wheel = wheel_placeholder if args.dry_run else built_wheel(wheel_dir)
     if not args.dry_run:
         validate_wheel_contains_kernels(wheel)
+
+    if args.build_only:
+        print(f"pyxlog wheel: {wheel}", flush=True)
+        return 0
 
     install_cmd: list[str | Path] = [
         args.python,
