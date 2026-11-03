@@ -6,14 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(cuda, python)* [**breaking**] reserve replay outcomes with scalar
-  `append_capacity`, derive non-actor membership from authenticated rows and native
-  solving witnesses, and retain one immutable roster per admitted Update through
-  source geometry, both derivative banks and archive restoration. Source geometry
-  requires the original Update index and separate source and target authority refresh
-  callbacks; `SemanticPreparedStep.training_roster()` returns that same row/objective
-  projection.
-
 - Epistemic execution classifies modal dependencies before single-pass planning.
   Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
   ordinary founded least fixpoint; supported positive exact-tuple
