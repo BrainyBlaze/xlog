@@ -1,6 +1,6 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
@@ -42,7 +42,7 @@ pub(crate) fn replay_reservation_identity(
     domain: Option<&SemanticTrainingDomain>,
 ) -> Identity256 {
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.original-replay-reservation.v1\0");
+    hash.update(b"xlog.semantic.original-replay-reservation.v2\0");
     hash.update(
         domain
             .map_or(Identity256::default(), SemanticTrainingDomain::identity)
@@ -52,13 +52,7 @@ pub(crate) fn replay_reservation_identity(
     if let Some(binding) = binding {
         hash.update((binding.row_capacity as u64).to_le_bytes());
         hash.update((binding.raw_byte_capacity as u64).to_le_bytes());
-        hash.update((binding.append_groups.len() as u64).to_le_bytes());
-        for group in &binding.append_groups {
-            hash.update((group.len() as u64).to_le_bytes());
-            for kind in group {
-                hash.update(kind.to_le_bytes());
-            }
-        }
+        hash.update((binding.append_capacity as u64).to_le_bytes());
         for value in [
             binding.metadata_bytes,
             binding.max_material_bytes,
@@ -209,10 +203,99 @@ pub struct SemanticTrainingViewRow<B = Vec<u8>> {
     /// equal the native task content executed during this cold binding.
     pub task_content: Option<SemanticTaskContentIdentity>,
     pub origin: Option<SemanticTrainingViewOrigin>,
-    /// Byte hashes of the admitted original action, codebook, solving witness,
-    /// and task ground. These travel with the same immutable replay row.
-    pub edit_demonstration_material_roots: Option<[Identity256; 4]>,
+    /// Issued only by the native original solving-witness decoder.
+    pub(crate) edit_demonstration: Option<Arc<QualifiedEditDemonstration>>,
     pub bytes: B,
+}
+
+pub(crate) struct QualifiedEditDemonstration {
+    pub(crate) roots: [Identity256; 4],
+    pub(crate) origin: SemanticTrainingViewOrigin,
+    pub(crate) identity: Identity256,
+    pub(crate) bytes_identity: Identity256,
+    pub(crate) content_identity: Identity256,
+    pub(crate) _reservation: crate::semantic_transition::SemanticReplayMaterialReservation,
+}
+
+impl std::fmt::Debug for QualifiedEditDemonstration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QualifiedEditDemonstration")
+            .field("roots", &self.roots)
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<B: AsRef<[u8]>> SemanticTrainingViewRow<B> {
+    pub(crate) fn edit_demonstration_material_roots(
+        &self,
+    ) -> Result<Option<[Identity256; 4]>, SemanticTransitionError> {
+        let Some(proof) = &self.edit_demonstration else {
+            return Ok(None);
+        };
+        if self.basis != SemanticTrainingViewBasis::Episode
+            || self.origin != Some(proof.origin)
+            || self.identity != proof.identity
+            || self.bytes_identity != proof.bytes_identity
+            || self.content_identity != proof.content_identity
+        {
+            return Err(input_error(
+                "Edit qualification changed its original row or execution origin",
+            ));
+        }
+        Ok(Some(proof.roots))
+    }
+
+    /// Derive the non-actor loss membership from the original stored targets.
+    /// Edit membership requires the native original solving-witness qualification.
+    pub fn non_actor_group_mask(&self) -> Result<u64, SemanticTransitionError> {
+        if self.basis != SemanticTrainingViewBasis::Episode {
+            return Ok(0);
+        }
+        let bytes = self.bytes.as_ref();
+        let layout = validate_training_view_layout(bytes)?;
+        let window = layout.window;
+        let aligned = TRAINING_VIEW_HEADER_BYTES + window * 20 + (window % 2) * 4;
+        let integer = |offset: usize, position: usize| {
+            let begin = offset + position * 8;
+            i64::from_le_bytes(
+                bytes[begin..begin + 8]
+                    .try_into()
+                    .expect("validated target extent"),
+            )
+        };
+        let masked = (0..window).any(|position| {
+            let offset = TRAINING_VIEW_HEADER_BYTES + window * 16 + position * 4;
+            let weight = f32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("validated mask-weight extent"),
+            );
+            integer(TRAINING_VIEW_HEADER_BYTES + window * 8, position) != -100 && weight > 0.0
+        });
+        let autoregressive = (0..window).any(|position| integer(aligned, position) != -100);
+        let branch_labels = aligned + window * 16;
+        let branch_ids = aligned + window * 24;
+        let has_branch = |branch| {
+            (0..window).any(|position| {
+                integer(branch_ids, position) == branch && integer(branch_labels, position) != -100
+            })
+        };
+        let semantic = has_branch(0);
+        let execution = has_branch(1) && has_branch(2);
+        if semantic != execution {
+            return Err(input_error(
+                "episode training targets lack a complete semantic and execution branch roster",
+            ));
+        }
+        let edit = self.edit_demonstration_material_roots()?.is_some();
+        Ok(u64::from(masked)
+            | (u64::from(autoregressive) << 1)
+            | (u64::from(semantic) << 2)
+            | (u64::from(edit) << 3)
+            | (u64::from(execution) << 4))
+    }
 }
 
 /// Frozen evaluator term attached to the complete device-resident training roster.
@@ -237,11 +320,11 @@ pub struct SemanticTrainingObjectiveGroup {
     pub row_ordinals: Vec<u64>,
 }
 
-/// Finite replay storage and non-actor membership fixed before results arrive.
+/// Finite replay storage reserved before results; membership follows genuine rows.
 struct SemanticTrainingReplayCapacity {
     pub row_capacity: usize,
     pub raw_byte_capacity: usize,
-    pub append_groups: Vec<Vec<SemanticTrainingObjectiveGroupKind>>,
+    pub append_capacity: usize,
 }
 
 /// Mandatory acceptance gate evaluated from original full-vocabulary logits.
@@ -525,6 +608,9 @@ pub(crate) struct TrainingViewRowDescriptor {
     pub task_theory_program_identity: [u64; 4],
     pub task_result_identity: [u64; 4],
     pub origin: SemanticTrainingViewOriginRecord,
+    /// Actual non-actor groups derived from the authenticated row, never capacity.
+    pub non_actor_groups: u64,
+    pub edit_material_roots: [[u64; 4]; 4],
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -668,6 +754,10 @@ struct TrainingViewLaunch {
     append_entries_bytes: [u64; 2],
     append_payloads: [u64; 2],
     append_payload_bytes: [u64; 2],
+    snapshot_bound: u64,
+    snapshot_archive_count: u64,
+    snapshot_eligible_count: u64,
+    snapshot_chain_head: [u64; 4],
 }
 
 // SAFETY: the fixed CUDA ABI contains only u64 words.
@@ -718,6 +808,7 @@ pub struct SemanticSelectedTrainingView {
     arena: Arc<SemanticTrainingViewArena>,
     _origin_candidates: Option<Arc<TrackedCudaSlice<SemanticTrainingViewOriginRecord>>>,
     storage: SelectedTrainingViewStorage,
+    training_roster: Option<Arc<FrozenTrainingRoster>>,
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -730,6 +821,159 @@ pub(crate) struct FrozenPolicyGroupMember {
     pub content_identity: [u64; 4],
     pub origin: SemanticTrainingViewOriginRecord,
     pub edit_demonstration_material_roots: Option<[Identity256; 4]>,
+}
+
+/// Prepared before acknowledgement; installation owns no ordinary admission checks.
+pub(crate) struct PreparedTrainingAppendPublication {
+    arena: std::sync::Weak<SemanticTrainingViewArena>,
+    expected_count: u64,
+    expected_chain: Identity256,
+    expected_rows: usize,
+    archive_count: u64,
+    chain_head: Identity256,
+    rows: Vec<Arc<AuthenticatedTrainingAppendRow>>,
+}
+
+fn training_append_descriptor_bytes(row: &AuthenticatedTrainingAppendRow) -> &[u8] {
+    // SAFETY: the dense integer-only descriptor has an asserted complete ABI.
+    unsafe {
+        std::slice::from_raw_parts(
+            (&row.descriptor as *const TrainingViewRowDescriptor).cast::<u8>(),
+            size_of::<TrainingViewRowDescriptor>(),
+        )
+    }
+}
+
+fn same_training_append(
+    left: &AuthenticatedTrainingAppendRow,
+    right: &AuthenticatedTrainingAppendRow,
+) -> bool {
+    left.bytes_identity == right.bytes_identity
+        && training_append_descriptor_bytes(left) == training_append_descriptor_bytes(right)
+        && left.canonical.as_ref() == right.canonical.as_ref()
+}
+
+/// Cold metadata retained only after the same native acknowledgement commits.
+pub(crate) struct AuthenticatedTrainingAppendRow {
+    pub(crate) descriptor: TrainingViewRowDescriptor,
+    pub(crate) bytes_identity: Identity256,
+    pub(crate) canonical: Arc<[u8]>,
+    pub(crate) _custody: Option<Arc<dyn Send + Sync>>,
+    pub(crate) _reservation: Arc<crate::semantic_transition::SemanticReplayMaterialReservation>,
+}
+
+#[derive(Default)]
+struct PublishedTrainingAppendRoster {
+    archive_count: u64,
+    chain_head: Identity256,
+    rows: Vec<Arc<AuthenticatedTrainingAppendRow>>,
+}
+
+pub(crate) struct FrozenTrainingRoster {
+    arena: std::sync::Weak<SemanticTrainingViewArena>,
+    archive_count: u64,
+    chain_head: Identity256,
+    rows: Vec<Arc<AuthenticatedTrainingAppendRow>>,
+    groups: Vec<(u64, Vec<u64>)>,
+    #[cfg(feature = "semantic-policy")]
+    edit_members: Box<[FrozenPolicyGroupMember]>,
+    _reservation: Option<Arc<crate::semantic_transition::SemanticReplayMaterialReservation>>,
+}
+
+impl FrozenTrainingRoster {
+    pub(crate) fn projection(
+        &self,
+    ) -> Result<(Vec<Arc<[u8]>>, Vec<(u64, Vec<u64>)>), SemanticTransitionError> {
+        Ok((
+            self.rows
+                .iter()
+                .map(|row| Arc::clone(&row.canonical))
+                .collect(),
+            self.groups.clone(),
+        ))
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(crate) fn policy_members(
+        &self,
+    ) -> Result<(Arc<SemanticTrainingViewArena>, &[FrozenPolicyGroupMember]), SemanticTransitionError>
+    {
+        Ok((
+            self.arena
+                .upgrade()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            &self.edit_members,
+        ))
+    }
+}
+
+impl SemanticTrainingViewArena {
+    pub(crate) fn training_roster_allocation_bound(&self) -> Result<u64, SemanticTransitionError> {
+        self.row_count
+            .checked_mul(
+                4 * size_of::<Arc<AuthenticatedTrainingAppendRow>>()
+                    + 32 * size_of::<u64>()
+                    + 4 * size_of::<TrainingViewRowDescriptor>(),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(size_of::<FrozenTrainingRoster>() + 32 * size_of::<Vec<u64>>())
+            })
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    }
+
+    pub(crate) fn freeze_training_roster(
+        self: &Arc<Self>,
+        reservation: Option<Arc<crate::semantic_transition::SemanticReplayMaterialReservation>>,
+    ) -> Result<Arc<FrozenTrainingRoster>, SemanticTransitionError> {
+        self.require_authenticated_appends()?;
+        let published = self
+            .append_roster
+            .lock()
+            .map_err(|_| input_error("authenticated training archive owner is poisoned"))?;
+        let rows = published.rows.clone();
+        let mut groups = self.original_groups.clone();
+        #[cfg(feature = "semantic-policy")]
+        let mut edit_members = self.edit_group_members.to_vec();
+        for row in &rows {
+            let descriptor = &row.descriptor;
+            for (kind, members) in &mut groups {
+                if (1..=5).contains(kind)
+                    && descriptor.non_actor_groups & (1u64 << (*kind - 1)) != 0
+                {
+                    members.push(descriptor.ordinal);
+                }
+            }
+            #[cfg(feature = "semantic-policy")]
+            if descriptor.non_actor_groups & (1 << 3) != 0 {
+                edit_members.push(FrozenPolicyGroupMember {
+                    ordinal: descriptor.ordinal,
+                    identity: descriptor.identity,
+                    source_identity: descriptor.source_identity,
+                    bytes_identity: row.bytes_identity,
+                    content_identity: descriptor.content_identity,
+                    origin: descriptor.origin,
+                    edit_demonstration_material_roots: Some(descriptor.edit_material_roots.map(
+                        |words| {
+                            Identity256::from_bytes(std::array::from_fn(|index| {
+                                words[index / 8].to_le_bytes()[index % 8]
+                            }))
+                        },
+                    )),
+                });
+            }
+        }
+        Ok(Arc::new(FrozenTrainingRoster {
+            arena: Arc::downgrade(self),
+            archive_count: published.archive_count,
+            chain_head: published.chain_head,
+            rows,
+            groups,
+            #[cfg(feature = "semantic-policy")]
+            edit_members: edit_members.into_boxed_slice(),
+            _reservation: reservation,
+        }))
+    }
 }
 
 /// Fixed device port of the native-selected complete training roster.
@@ -778,6 +1022,37 @@ impl SemanticTrainingViewPort {
 }
 
 impl SemanticSelectedTrainingView {
+    pub(crate) fn bind_training_roster(
+        &mut self,
+        roster: Arc<FrozenTrainingRoster>,
+    ) -> Result<(), SemanticTransitionError> {
+        let arena = roster
+            .arena
+            .upgrade()
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !Arc::ptr_eq(&self.arena, &arena)
+            || self
+                .training_roster
+                .as_ref()
+                .is_some_and(|original| !Arc::ptr_eq(original, &roster))
+        {
+            return Err(input_error(
+                "Update changed its original training roster owner",
+            ));
+        }
+        self.training_roster = Some(roster);
+        Ok(())
+    }
+
+    pub(crate) fn training_roster_projection(
+        &self,
+    ) -> Result<(Vec<Arc<[u8]>>, Vec<(u64, Vec<u64>)>), SemanticTransitionError> {
+        self.training_roster
+            .as_ref()
+            .ok_or_else(|| input_error("Update lost its registered training roster"))?
+            .projection()
+    }
+
     pub fn capacity(&self) -> usize {
         self.arena.capacity
     }
@@ -830,7 +1105,11 @@ impl SemanticSelectedTrainingView {
 
     #[cfg(feature = "semantic-policy")]
     pub(crate) fn edit_group_members(&self) -> &[FrozenPolicyGroupMember] {
-        &self.arena.edit_group_members
+        self.training_roster
+            .as_ref()
+            .map_or(&self.arena.edit_group_members, |roster| {
+                roster.edit_members.as_ref()
+            })
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -839,6 +1118,7 @@ impl SemanticSelectedTrainingView {
         ordinal: u64,
         row: &SemanticTrainingViewRow<B>,
     ) -> Result<usize, SemanticTransitionError> {
+        let roots = row.edit_demonstration_material_roots()?;
         let descriptor = validate_row(
             usize::try_from(ordinal)
                 .map_err(|_| input_error("actor group ordinal exceeds host address space"))?,
@@ -855,8 +1135,7 @@ impl SemanticSelectedTrainingView {
                     && member.bytes_identity == row.bytes_identity
                     && member.content_identity == descriptor.content_identity
                     && member.origin == descriptor.origin
-                    && member.edit_demonstration_material_roots
-                        == row.edit_demonstration_material_roots
+                    && member.edit_demonstration_material_roots == roots
             })
             .ok_or_else(|| input_error("original replay is not an exact frozen actor group member"))
     }
@@ -867,6 +1146,7 @@ impl SemanticSelectedTrainingView {
         ordinal: u64,
         row: &SemanticTrainingViewRow<B>,
     ) -> Result<Option<usize>, SemanticTransitionError> {
+        let roots = row.edit_demonstration_material_roots()?;
         let descriptor = validate_row(
             usize::try_from(ordinal)
                 .map_err(|_| input_error("edit group ordinal exceeds host address space"))?,
@@ -881,7 +1161,7 @@ impl SemanticSelectedTrainingView {
                 && member.bytes_identity == row.bytes_identity
                 && member.content_identity == descriptor.content_identity
                 && member.origin == descriptor.origin
-                && member.edit_demonstration_material_roots == row.edit_demonstration_material_roots
+                && member.edit_demonstration_material_roots == roots
         }))
     }
 
@@ -1156,6 +1436,19 @@ impl SemanticSelectedTrainingView {
                 publication.payloads[0].len() as u64,
                 publication.payloads[1].len() as u64,
             ],
+            snapshot_bound: u64::from(self.training_roster.is_some()),
+            snapshot_archive_count: self
+                .training_roster
+                .as_ref()
+                .map_or(0, |roster| roster.archive_count),
+            snapshot_eligible_count: self
+                .training_roster
+                .as_ref()
+                .map_or(0, |roster| roster.rows.len() as u64),
+            snapshot_chain_head: self
+                .training_roster
+                .as_ref()
+                .map_or([0; 4], |roster| identity_words(roster.chain_head)),
         };
         let record = || {
             let mut recorder = self.arena.domain.new_strict_recorder();
@@ -1276,6 +1569,7 @@ pub(crate) struct PreparedOriginalTrainingRoster {
     pub objective: SemanticTrainingObjectiveRecord,
     pub groups: Vec<SemanticTrainingObjectiveGroupRecord>,
     pub group_members: Vec<u64>,
+    original_groups: Vec<(u64, Vec<u64>)>,
     pub canaries: Vec<SemanticTrainingCanaryRecord>,
     canary_rows: [u64; 5],
     pub protected_members: Vec<u64>,
@@ -1325,6 +1619,8 @@ pub(crate) struct SemanticTrainingViewArena {
     objective: TrackedCudaSlice<SemanticTrainingObjectiveRecord>,
     groups: TrackedCudaSlice<SemanticTrainingObjectiveGroupRecord>,
     group_members: TrackedCudaSlice<u64>,
+    original_groups: Vec<(u64, Vec<u64>)>,
+    append_roster: Mutex<PublishedTrainingAppendRoster>,
     canaries: TrackedCudaSlice<SemanticTrainingCanaryRecord>,
     canary_rows: [u64; 5],
     #[cfg(feature = "semantic-policy")]
@@ -1440,11 +1736,13 @@ impl SemanticTrainingViewArena {
         )?;
         add(training_domain.training_seed.capacity(), 1)?;
         if let Some(binding) = replay_binding {
-            add(binding.append_groups.capacity(), 2 * size_of::<Vec<u64>>())?;
-            for group in &binding.append_groups {
-                add(group.capacity(), 2 * size_of::<u64>())?;
-            }
+            add(
+                binding.append_capacity,
+                size_of::<Arc<AuthenticatedTrainingAppendRow>>(),
+            )?;
         }
+        add(member_capacity, 2 * size_of::<u64>())?;
+        add(8, size_of::<(u64, Vec<u64>)>())?;
         if let Some(objective) = objective {
             add(
                 objective.groups.capacity(),
@@ -1572,6 +1870,7 @@ impl SemanticTrainingViewArena {
         self.protected_member_count = prepared.protected_member_count;
         self.canary_rows = prepared.canary_rows;
         self.prefix_identity = prepared.prefix_identity;
+        self.original_groups = prepared.original_groups;
         #[cfg(feature = "semantic-policy")]
         {
             self.actor_group_member_count = prepared.actor_group_member_count;
@@ -1695,6 +1994,8 @@ impl SemanticTrainingViewArena {
             rows,
             multiply(original_rows, candidates)?,
             multiply(append_slots, append_slots)?,
+            multiply(8, append_slots)?,
+            7,
         ])?;
         let canonical_bytes = sum(&[
             multiply(2, extent(size_of::<SemanticTrainingViewSelection>())?)?,
@@ -1718,6 +2019,100 @@ impl SemanticTrainingViewArena {
         // NativeWorkEvent order: Command, TableSlot, ChainLink, Category,
         // SortComparison, CdfStep, PhiloxRound, ShaBlock, CanonicalByte.
         Ok([0, table_slots, 0, 0, 0, 0, 0, 0, canonical_bytes])
+    }
+
+    pub(crate) fn prepare_training_appends(
+        self: &Arc<Self>,
+        expected_count: u64,
+        archive_count: u64,
+        chain_head: Identity256,
+        rows: Vec<Arc<AuthenticatedTrainingAppendRow>>,
+    ) -> Result<PreparedTrainingAppendPublication, SemanticTransitionError> {
+        let published = self
+            .append_roster
+            .lock()
+            .map_err(|_| input_error("authenticated training archive owner is poisoned"))?;
+        let capacity = self.row_count - self.original_slot_boundary;
+        let reconciled = expected_count == 0
+            && published.archive_count == archive_count
+            && published.chain_head == chain_head
+            && published.rows.len() == rows.len()
+            && published
+                .rows
+                .iter()
+                .zip(&rows)
+                .all(|(left, right)| same_training_append(left, right));
+        let expected_rows = if reconciled { 0 } else { published.rows.len() };
+        if (!reconciled && published.archive_count != expected_count)
+            || archive_count < expected_count
+            || archive_count > capacity as u64
+            || expected_rows > capacity
+            || published.rows.capacity() < expected_rows
+            || rows.len() > published.rows.capacity() - expected_rows
+            || rows.len() > capacity - expected_rows
+            || rows.len() as u64 > archive_count - expected_count
+            || rows.iter().enumerate().any(|(index, row)| {
+                row.descriptor.ordinal != (self.initial_row_count + expected_rows + index) as u64
+                    || row.descriptor.non_actor_groups & !31 != 0
+            })
+        {
+            return Err(input_error(
+                "training suffix differs from its original archive prefix",
+            ));
+        }
+        Ok(PreparedTrainingAppendPublication {
+            arena: Arc::downgrade(self),
+            expected_count,
+            expected_chain: published.chain_head,
+            expected_rows,
+            archive_count,
+            chain_head,
+            rows,
+        })
+    }
+
+    pub(crate) fn publish_training_appends(
+        &self,
+        prepared: &PreparedTrainingAppendPublication,
+    ) -> Result<(), SemanticTransitionError> {
+        // Admission, vector capacity and complete qualification were checked
+        // before the native commit. Any divergence here is uncertain custody,
+        // not an ordinary refusal or permission to repeat acknowledgement.
+        let arena = prepared
+            .arena
+            .upgrade()
+            .ok_or(SemanticTransitionError::Poisoned)?;
+        if !std::ptr::eq(self, arena.as_ref()) {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        let mut published = self
+            .append_roster
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if published.archive_count == prepared.archive_count
+            && published.chain_head == prepared.chain_head
+        {
+            if published.rows.len() != prepared.expected_rows + prepared.rows.len()
+                || !published.rows[prepared.expected_rows..]
+                    .iter()
+                    .zip(&prepared.rows)
+                    .all(|(left, right)| same_training_append(left, right))
+            {
+                return Err(SemanticTransitionError::Poisoned);
+            }
+            return Ok(());
+        }
+        if published.archive_count != prepared.expected_count
+            || published.chain_head != prepared.expected_chain
+            || published.rows.len() != prepared.expected_rows
+            || published.rows.capacity() - published.rows.len() < prepared.rows.len()
+        {
+            return Err(SemanticTransitionError::Poisoned);
+        }
+        published.rows.extend(prepared.rows.iter().cloned());
+        published.archive_count = prepared.archive_count;
+        published.chain_head = prepared.chain_head;
+        Ok(())
     }
 
     pub(crate) fn require_append_authentication(&self) {
@@ -1934,6 +2329,7 @@ impl SemanticTrainingViewArena {
             arena: Arc::clone(self),
             _origin_candidates: origin_candidates,
             storage,
+            training_roster: None,
         })
     }
 
@@ -1962,25 +2358,7 @@ impl SemanticTrainingViewArena {
             Some(binding) => SemanticTrainingReplayCapacity {
                 row_capacity: binding.row_capacity,
                 raw_byte_capacity: binding.raw_byte_capacity,
-                append_groups: binding
-                    .append_groups
-                    .iter()
-                    .map(|groups| {
-                        groups
-                            .iter()
-                            .map(|kind| match kind {
-                                1 => Ok(SemanticTrainingObjectiveGroupKind::MaskedLanguage),
-                                2 => Ok(SemanticTrainingObjectiveGroupKind::AutoregressiveLanguage),
-                                3 => Ok(SemanticTrainingObjectiveGroupKind::Semantic),
-                                4 => Ok(SemanticTrainingObjectiveGroupKind::Edit),
-                                5 => Ok(SemanticTrainingObjectiveGroupKind::Execution),
-                                _ => Err(input_error(
-                                    "replay append accepts only original non-actor episode groups",
-                                )),
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
+                append_capacity: binding.append_capacity,
             },
             None => SemanticTrainingReplayCapacity {
                 row_capacity: rows.len(),
@@ -1989,7 +2367,7 @@ impl SemanticTrainingViewArena {
                         .checked_add(row.bytes.as_ref().len())
                         .ok_or(SemanticTransitionError::GenerationExhausted)
                 })?,
-                append_groups: Vec::new(),
+                append_capacity: 0,
             },
         };
         training_domain.validate()?;
@@ -2014,7 +2392,7 @@ impl SemanticTrainingViewArena {
             }
         }
         let initial_row_count = rows.len();
-        let append_slots = replay_capacity.append_groups.len();
+        let append_slots = replay_capacity.append_capacity;
         let original_slot_boundary = replay_capacity
             .row_capacity
             .checked_sub(append_slots)
@@ -2029,18 +2407,9 @@ impl SemanticTrainingViewArena {
                         .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                 )
                 .is_none_or(|count| count > record_limit)
-            || replay_capacity.append_groups.iter().any(|groups| {
-                groups.is_empty()
-                    || groups.iter().any(|kind| {
-                        *kind as u64 > SemanticTrainingObjectiveGroupKind::Execution as u64
-                    })
-                    || groups
-                        .windows(2)
-                        .any(|pair| pair[0] as u64 >= pair[1] as u64)
-            })
         {
             return Err(input_error(
-                "replay append capacity requires bounded original-domain non-actor groups",
+                "replay append capacity exceeds its original row or input domain",
             ));
         }
         let mut raw = Vec::new();
@@ -2052,7 +2421,8 @@ impl SemanticTrainingViewArena {
         for (ordinal, row) in rows.into_iter().enumerate() {
             let descriptor = validate_row(ordinal, &row, raw.len(), training_domain)?;
             #[cfg(feature = "semantic-policy")]
-            row_bytes_identities.push((row.bytes_identity, row.edit_demonstration_material_roots));
+            row_bytes_identities
+                .push((row.bytes_identity, row.edit_demonstration_material_roots()?));
             raw.extend_from_slice(row.bytes.as_ref());
             descriptors.push(descriptor);
         }
@@ -2096,6 +2466,14 @@ impl SemanticTrainingViewArena {
                     Vec::new(),
                 ),
             };
+        let original_groups = groups
+            .iter()
+            .map(|group| {
+                let begin = group.member_offset as usize;
+                let end = begin + group.member_count as usize;
+                (group.kind, group_members[begin..end].to_vec())
+            })
+            .collect::<Vec<_>>();
         let protected_member_count = protected_members.len();
         #[cfg(feature = "semantic-policy")]
         let actor_group = groups
@@ -2165,42 +2543,15 @@ impl SemanticTrainingViewArena {
         } else {
             Box::new([])
         };
-        let mut expanded_members = Vec::with_capacity(group_members.len());
-        for group in &mut groups {
-            let start = usize::try_from(group.member_offset)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-            let count = usize::try_from(group.member_count)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-            group.member_offset = u64::try_from(expanded_members.len())
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
-            expanded_members.extend_from_slice(&group_members[start..start + count]);
-            for (slot, assignments) in replay_capacity.append_groups.iter().enumerate() {
-                if assignments.iter().any(|kind| *kind as u64 == group.kind) {
-                    expanded_members.push(
-                        u64::try_from(original_slot_boundary + slot)
-                            .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-                    );
-                }
-            }
-            group.member_count = u64::try_from(expanded_members.len())
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?
-                - group.member_offset;
-        }
-        group_members = expanded_members;
         if materialized {
             let mut objective_hash = Sha256::new();
-            objective_hash.update(b"xlog.semantic.training-replay-capacity.v1\0");
+            objective_hash.update(b"xlog.semantic.training-replay-capacity.v2\0");
             for word in objective.identity {
                 objective_hash.update(word.to_le_bytes());
             }
             objective_hash.update((replay_capacity.row_capacity as u64).to_le_bytes());
             objective_hash.update((replay_capacity.raw_byte_capacity as u64).to_le_bytes());
-            for assignments in &replay_capacity.append_groups {
-                objective_hash.update((assignments.len() as u64).to_le_bytes());
-                for kind in assignments {
-                    objective_hash.update((*kind as u64).to_le_bytes());
-                }
-            }
+            objective_hash.update((replay_capacity.append_capacity as u64).to_le_bytes());
             objective.identity =
                 identity_words(Identity256::from_bytes(objective_hash.finalize().into()));
         }
@@ -2251,6 +2602,7 @@ impl SemanticTrainingViewArena {
             objective,
             groups,
             group_members,
+            original_groups,
             canaries,
             canary_rows,
             protected_members,
@@ -2346,6 +2698,7 @@ impl SemanticTrainingViewArena {
             objective,
             groups,
             group_members,
+            original_groups,
             canaries,
             canary_rows,
             protected_members,
@@ -2463,6 +2816,11 @@ impl SemanticTrainingViewArena {
             objective: device_objective,
             groups: device_groups,
             group_members: device_group_members,
+            original_groups,
+            append_roster: Mutex::new(PublishedTrainingAppendRoster {
+                rows: Vec::with_capacity(row_capacity - original_slot_boundary),
+                ..PublishedTrainingAppendRoster::default()
+            }),
             canaries: device_canaries,
             canary_rows,
             #[cfg(feature = "semantic-policy")]
@@ -3158,6 +3516,11 @@ fn validate_row<B: AsRef<[u8]>>(
             .map(|binding| identity_words(binding.result))
             .unwrap_or_default(),
         origin: row.origin.map(origin_record).unwrap_or_default(),
+        non_actor_groups: row.non_actor_group_mask()?,
+        edit_material_roots: row
+            .edit_demonstration_material_roots()?
+            .map(|roots| roots.map(identity_words))
+            .unwrap_or_default(),
     })
 }
 

@@ -510,6 +510,7 @@ pub(super) struct SourceContentGeometryOwner {
     pub(super) work: SemanticColdModelWork,
     pub(super) instruction: Arc<[u8]>,
     allowance: Arc<Mutex<ColdNativeAllowance>>,
+    _training_roster: Arc<crate::semantic_training_view::FrozenTrainingRoster>,
     pub(super) kind: SemanticSourceContentGeometryKind,
     step_index: usize,
     ordinal: u64,
@@ -532,7 +533,7 @@ pub(super) struct OriginalSourceGeometryRoster {
     instruction: Arc<[u8]>,
     handles: Arc<[SemanticPreparedSourceContentGeometry]>,
     seeds: Vec<(u64, Arc<SemanticSourceContentGeometrySeed>)>,
-    input_generations: Arc<OriginalModelInputGenerations>,
+    pub(super) input_generations: Arc<OriginalModelInputGenerations>,
     _reservation: Arc<SemanticReplayMaterialReservation>,
 }
 
@@ -1929,30 +1930,76 @@ impl SemanticTransitionSession {
         Ok(())
     }
 
-    pub fn source_content_geometry_member_ordinals<'a>(
-        &'a self,
+    pub fn prepare_instruction_training_roster(
+        &mut self,
         parent: &SemanticPublishedLease,
         admission: &SemanticSegmentInstructionAdmission,
-    ) -> Result<impl Iterator<Item = u64> + 'a, SemanticTransitionError> {
+        update_step: usize,
+    ) -> Result<(Vec<Arc<[u8]>>, Vec<(u64, Vec<u64>)>), SemanticTransitionError> {
         self.checked_reader(parent)?;
-        self.admitted_segment_steps(admission)?;
-        let arena = self
-            .training_views
+        self.require_segment_instruction_admission(admission, parent)?;
+        if self
+            .admitted_segment_steps(admission)?
+            .get(update_step)
+            .is_none_or(|step| step.kind != Some(SemanticTransitionKind::Update))
+        {
+            return Err(publication_input_error(
+                "training roster requires an original instruction Update",
+            ));
+        }
+        if let Some(roster) = self
+            .instruction_admission(admission)?
+            .training_rosters
+            .get(&update_step)
+        {
+            return roster.projection();
+        }
+        if self.pending_replay_delivery.is_some() {
+            return Err(publication_input_error(
+                "training roster requires completed original acknowledgements",
+            ));
+        }
+        let arena = Arc::clone(
+            self.training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        let budget = self
+            .replay_material_budget
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        let (actors, edits) = arena.original_policy_group_members();
-        Ok(actors
-            .iter()
-            .chain(edits)
-            .enumerate()
-            .filter_map(move |(index, member)| {
-                (!actors
-                    .iter()
-                    .chain(edits)
-                    .take(index)
-                    .any(|previous| previous.ordinal == member.ordinal))
-                .then_some(member.ordinal)
-            }))
+        let reservation =
+            Arc::new(budget.reserve_auxiliary(arena.training_roster_allocation_bound()?)?);
+        let roster = arena.freeze_training_roster(Some(reservation))?;
+        self.instruction_admission_mut(admission)?
+            .training_rosters
+            .insert(update_step, Arc::clone(&roster));
+        roster.projection()
+    }
+
+    pub fn source_content_geometry_member_ordinals(
+        &self,
+        parent: &SemanticPublishedLease,
+        admission: &SemanticSegmentInstructionAdmission,
+        update_step: usize,
+    ) -> Result<impl Iterator<Item = u64>, SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        let roster = self
+            .instruction_admission(admission)?
+            .training_rosters
+            .get(&update_step)
+            .ok_or_else(|| {
+                publication_input_error("SOURCE geometry requires its registered Update roster")
+            })?;
+        let (arena, edits) = roster.policy_members()?;
+        let (actors, _) = arena.original_policy_group_members();
+        let mut ordinals = Vec::with_capacity(actors.len() + edits.len());
+        for member in actors.iter().chain(edits) {
+            if !ordinals.contains(&member.ordinal) {
+                ordinals.push(member.ordinal);
+            }
+        }
+        Ok(ordinals.into_iter())
     }
 
     pub fn prepare_source_content_geometry(
@@ -1960,12 +2007,13 @@ impl SemanticTransitionSession {
         parent: &SemanticPublishedLease,
         admission: &SemanticSegmentInstructionAdmission,
         work: &SemanticColdModelWork,
+        update_step: usize,
         seeds: Vec<(u64, SemanticSourceContentGeometrySeed)>,
     ) -> Result<Arc<[SemanticPreparedSourceContentGeometry]>, SemanticTransitionError> {
         self.require_original_admitted_cold_model_work(admission, parent, work)?;
         let allowance = self.original_source_geometry_allowance(work)?;
         let instruction = Arc::clone(&self.instruction_admission(admission)?.instruction);
-        if let Some(original) = self.original_source_geometry_roster(work)? {
+        if let Some(original) = self.original_source_geometry_roster(work, update_step)? {
             original
                 .input_generations
                 .require_instruction(&instruction)?;
@@ -1988,15 +2036,24 @@ impl SemanticTransitionSession {
             return Ok(Arc::clone(&original.handles));
         }
         let steps = self.admitted_segment_steps(admission)?;
-        let updates = steps
-            .iter()
-            .filter(|step| step.kind == Some(SemanticTransitionKind::Update))
-            .count();
-        let arena = self
-            .training_views
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        let (actors, edits) = arena.original_policy_group_members();
+        if steps
+            .get(update_step)
+            .is_none_or(|step| step.kind != Some(SemanticTransitionKind::Update))
+        {
+            return Err(publication_input_error(
+                "SOURCE geometry requires its original Update ordinal",
+            ));
+        }
+        let roster = Arc::clone(
+            self.instruction_admission(admission)?
+                .training_rosters
+                .get(&update_step)
+                .ok_or_else(|| {
+                    publication_input_error("SOURCE geometry lost its registered Update roster")
+                })?,
+        );
+        let (arena, edits) = roster.policy_members()?;
+        let (actors, _) = arena.original_policy_group_members();
         for (ordinal, seed) in &seeds {
             let origin =
                 crate::semantic_training_view::origin_record(seed.material.training_view_origin()?);
@@ -2038,9 +2095,7 @@ impl SemanticTransitionSession {
             .checked_mul(2)
             .and_then(|count| count.checked_add(edits.len().checked_mul(3)?))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let count = updates
-            .checked_mul(per_update)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let count = per_update;
         let bytes = count
             .checked_mul(
                 size_of::<SourceContentGeometryOwner>()
@@ -2078,15 +2133,20 @@ impl SemanticTransitionSession {
         let reservation = Arc::new(budget.reserve_auxiliary(
             u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         )?);
-        let input_generations = OriginalModelInputGenerations::new(
-            self,
-            parent,
-            Arc::clone(&instruction),
-            steps.iter().enumerate().filter_map(|(index, step)| {
-                (step.kind == Some(SemanticTransitionKind::Update)).then_some(index)
-            }),
-            budget,
-        )?;
+        let existing_generations = self.source_geometry_input_generations(work)?;
+        let register_generations = existing_generations.is_none();
+        let input_generations = match existing_generations {
+            Some(original) => original,
+            None => OriginalModelInputGenerations::new(
+                self,
+                parent,
+                Arc::clone(&instruction),
+                steps.iter().enumerate().filter_map(|(index, step)| {
+                    (step.kind == Some(SemanticTransitionKind::Update)).then_some(index)
+                }),
+                budget,
+            )?,
+        };
         let mut original_seeds = Vec::with_capacity(seeds.len());
         let mut projections = Vec::with_capacity(seeds.len());
         for (ordinal, seed) in seeds {
@@ -2096,8 +2156,8 @@ impl SemanticTransitionSession {
         }
         let mut handles = Vec::with_capacity(count);
         let overlay_instruction = current_content_overlay::ContentOverlayInstruction::new(count)?;
-        for (step_index, step) in steps.iter().enumerate() {
-            if step.kind != Some(SemanticTransitionKind::Update) {
+        for (step_index, _) in steps.iter().enumerate() {
+            if step_index != update_step {
                 continue;
             }
             for (kind, members) in [
@@ -2124,6 +2184,7 @@ impl SemanticTransitionSession {
                                 work: work.clone(),
                                 instruction: Arc::clone(&instruction),
                                 allowance: Arc::clone(&allowance),
+                                _training_roster: Arc::clone(&roster),
                                 kind,
                                 step_index,
                                 ordinal: member.ordinal,
@@ -2159,13 +2220,15 @@ impl SemanticTransitionSession {
             input_generations: Arc::clone(&input_generations),
             _reservation: reservation,
         });
-        self.register_original_source_geometry_roster(work, original)?;
-        allowance
-            .lock()
-            .map_err(|_| {
-                publication_input_error("original model input generation allowance is poisoned")
-            })?
-            .register_model_input_generations(&input_generations)?;
+        self.register_original_source_geometry_roster(work, update_step, original)?;
+        if register_generations {
+            allowance
+                .lock()
+                .map_err(|_| {
+                    publication_input_error("original model input generation allowance is poisoned")
+                })?
+                .register_model_input_generations(&input_generations)?;
+        }
         Ok(result)
     }
 }

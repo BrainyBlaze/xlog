@@ -574,6 +574,7 @@ pub(crate) struct PySemanticPreparedActorRefresh {
 pub(super) fn replay_source_checkpoint(
     _py: Python<'_>,
     target: &PySemanticTransitionTaskUse,
+    roster: &ColdValue,
     ordinal: u64,
     refresh_snapshot: &Bound<'_, PyAny>,
 ) -> PyResult<Arc<VerifiedCheckpointSource>> {
@@ -592,7 +593,6 @@ pub(super) fn replay_source_checkpoint(
     );
     target.state()?.snapshot = snapshot;
     refreshed?;
-    let roster = target.checkpoint.original_training_roster()?;
     let ordinal = usize::try_from(ordinal)
         .map_err(|_| invalid("original replay source ordinal exceeds this host"))?;
     let row = roster.fields(2)?[0]
@@ -671,20 +671,58 @@ fn original_edit_demonstration_materials(
     ]))
 }
 
+fn retain_edit_material(
+    original: &ReplayMaterial,
+) -> PyResult<(
+    xlog_cuda::SemanticCompletedStepWitnessMaterial,
+    xlog_cuda::SemanticReplayMaterialReservation,
+)> {
+    let bytes = original.load_original()?;
+    let reservation = original
+        .source()?
+        .native_budget()?
+        .reserve_auxiliary(
+            u64::try_from(bytes.as_bytes().len())
+                .map_err(|_| invalid("demonstration material exceeds u64"))?,
+        )
+        .map_err(xlog_err)?;
+    Ok((
+        xlog_cuda::SemanticCompletedStepWitnessMaterial {
+            identity: replay_digest_identity(&original.identity)?,
+            bytes: bytes.as_bytes().to_vec(),
+        },
+        reservation,
+    ))
+}
+
 /// Freeze only bytes already resolved by the original admitted row and its
 /// material-source owner. A later preparation cannot replace these four roots.
-pub(super) fn original_edit_demonstration_material_roots(
+pub(super) fn qualify_edit_demonstration(
     row: &ReplayRow,
-) -> PyResult<Option<[Identity256; 4]>> {
+    training_row: xlog_cuda::SemanticReplayTrainingViewRow,
+) -> PyResult<xlog_cuda::SemanticReplayTrainingViewRow> {
     let Some(originals) = original_edit_demonstration_materials(row)? else {
-        return Ok(None);
+        return Ok(training_row);
     };
-    let mut roots = [Identity256::default(); 4];
-    for (index, original) in originals.iter().enumerate() {
-        let bytes = original.load_original()?;
-        roots[index] = Identity256::from_bytes(Sha256::digest(bytes.as_bytes()).into());
-    }
-    Ok(Some(roots))
+    let originals = [
+        retain_edit_material(originals[0])?,
+        retain_edit_material(originals[1])?,
+        retain_edit_material(originals[2])?,
+        retain_edit_material(originals[3])?,
+    ];
+    let material = row.native_replay()?;
+    let (_, batch_identity, batch_bytes) = row.actor_refresh_episode()?;
+    training_row
+        .qualify_edit_demonstration(
+            &material.material,
+            batch_identity,
+            batch_bytes.as_bytes(),
+            &originals[0].0,
+            &originals[1].0,
+            &originals[2].0,
+            &originals[3].0,
+        )
+        .map_err(xlog_err)
 }
 
 impl ActorRefreshCustody {
@@ -2422,6 +2460,7 @@ impl PySemanticPreparedActorRefresh {
         let source = replay_source_checkpoint(
             py,
             &update.task_use.borrow(py),
+            &update.frozen_training_roster(py)?.projection,
             self.inner.member_ordinal,
             refresh_snapshot,
         )?;
@@ -2826,11 +2865,16 @@ fn prepare_policy_refresh(
                 invalid("actor refresh requires its original instruction admission")
             })?)
         };
-    let source =
-        replay_source_checkpoint(py, &update.task_use.borrow(py), ordinal, refresh_snapshot)?;
+    let roster = update.frozen_training_roster(py)?;
+    let source = replay_source_checkpoint(
+        py,
+        &update.task_use.borrow(py),
+        &roster.projection,
+        ordinal,
+        refresh_snapshot,
+    )?;
     let target = update.task_use.borrow(py);
-    let roster = target.checkpoint.original_training_roster()?;
-    let row = roster.fields(2)?[0]
+    let row = roster.projection.fields(2)?[0]
         .sequence()?
         .get(
             usize::try_from(ordinal)
@@ -2861,31 +2905,13 @@ fn prepare_policy_refresh(
         let originals = original_edit_demonstration_materials(&replay)?.ok_or_else(|| {
             invalid("supervised edit requires its original native solving witness")
         })?;
-        let retain = |original: &ReplayMaterial| -> PyResult<_> {
-            let bytes = original.load_original()?;
-            let reservation = original
-                .source()?
-                .native_budget()?
-                .reserve_auxiliary(
-                    u64::try_from(bytes.as_bytes().len())
-                        .map_err(|_| invalid("demonstration material exceeds u64"))?,
-                )
-                .map_err(xlog_err)?;
-            Ok((
-                xlog_cuda::SemanticCompletedStepWitnessMaterial {
-                    identity: replay_digest_identity(&original.identity)?,
-                    bytes: bytes.as_bytes().to_vec(),
-                },
-                reservation,
-            ))
-        };
         // Each copy remains paired with its original allocation reservation
         // until the native owner has authenticated and decoded all bytes.
         let originals = [
-            retain(originals[0])?,
-            retain(originals[1])?,
-            retain(originals[2])?,
-            retain(originals[3])?,
+            retain_edit_material(originals[0])?,
+            retain_edit_material(originals[1])?,
+            retain_edit_material(originals[2])?,
+            retain_edit_material(originals[3])?,
         ];
         owner.prepare_edit_demonstration(
             &update.inner,

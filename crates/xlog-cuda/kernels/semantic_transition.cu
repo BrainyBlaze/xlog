@@ -524,7 +524,9 @@ struct TrainingViewRowDescriptor {
     uint64_t identity[4],source_identity[4],content_identity[4],task_query_identity[4];
     uint64_t task_theory_program_identity[4],task_result_identity[4];
     SemanticTrainingViewOriginRecord origin;
+    uint64_t non_actor_groups,edit_material_roots[4][4];
 };
+static_assert(sizeof(TrainingViewRowDescriptor)==656,"training row descriptor ABI");
 struct SemanticTrainingReplayAppendHeader {
     uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count;
     uint64_t original_stage,original_count,original_prefix_identity[4],chain_head[4];
@@ -551,7 +553,7 @@ struct TrainingOriginalMaterializationInput {
 };
 static_assert(sizeof(TrainingOriginalMaterializationInput)==176,"original training materialization ABI");
 static_assert(sizeof(SemanticTrainingReplayAppendHeader)==128 && sizeof(SemanticTrainingReplayAppendEntry)==384 &&
-    sizeof(PublicationReplayDeliveryRow)==936 && sizeof(PublicationReplayDeliveryInput)==232,
+    sizeof(PublicationReplayDeliveryRow)==1072 && sizeof(PublicationReplayDeliveryInput)==232,
     "replay append queue ABI");
 static_assert(offsetof(PublicationReplayDeliveryInput,receiver_outcome)==88 &&
     offsetof(PublicationReplayDeliveryInput,rows)==144 &&
@@ -4660,7 +4662,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                 else {
                     const auto& row=reinterpret_cast<const SemanticTrainingRosterRow*>(b.roster_rows)[b.member_ordinal];
                     if(row.ordinal!=b.member_ordinal || row.basis!=1 || row.origin.present!=1 ||
-                       row.origin.transition!=1 || row.origin_candidate==UINT64_MAX-1)*status=1;
+                       row.origin.transition!=1 || (b.mode!=5 && row.origin_candidate==UINT64_MAX-1))*status=1;
                     for(uint32_t word=0;word<sizeof(row.origin)/sizeof(uint64_t);++word) {
                         slot(2);
                         if(reinterpret_cast<const uint64_t*>(&row.origin)[word]!=
@@ -4809,6 +4811,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                             const auto& row=roster[ordinal];
                             if(row.origin_candidate==committed_append_origin) {
                                 if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1)*status=1;
+                                if(b.mode==5 && ordinal==b.member_ordinal)++matching_edit_rows;
                                 continue;
                             }
                             if(row.ordinal!=ordinal || row.basis!=1 || row.origin.present!=1 ||
@@ -4866,7 +4869,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                         const auto* actual=reinterpret_cast<const uint64_t*>(&row.origin);
                         const auto* original=reinterpret_cast<const uint64_t*>(&proof->original_origin);
                         if(row.ordinal!=b.member_ordinal || row.basis!=1 || row.origin.present!=1 ||
-                           row.origin.transition!=1 || row.origin_candidate==committed_append_origin ||
+                           row.origin.transition!=1 || (b.mode!=5 && row.origin_candidate==committed_append_origin) ||
                            child.abi!=1 || child.word!=(b.mode==5 ? 3 : 4) ||
                            !publication_pointer_span(child.banks[1],sizeof(PublicationBank),alignof(PublicationBank)) ||
                            !publication_identity_equal(child.instance,origin_lease->instance) ||

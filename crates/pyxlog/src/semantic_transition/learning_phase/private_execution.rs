@@ -285,8 +285,11 @@ impl PrivateReplayChildCustody {
         };
         work.borrow(py).check(py)?;
         let issued = instruction.task_use.borrow(py);
-        let roster = issued.checkpoint.original_training_roster()?;
-        let roster = roster.fields(2)?;
+        let roster = super::super::source_content_geometry::instruction_training_roster(
+            instruction,
+            step_index,
+        )?;
+        let roster = roster.projection.fields(2)?;
         let objective = read_training_objective(&roster[1])?
             .ok_or_else(|| invalid("replay requires the original frozen training objective"))?;
         let ordinal = usize::try_from(replay_ordinal)
@@ -351,6 +354,7 @@ impl PySemanticPrivateReplayChild {
         let source = super::super::actor_refresh::replay_source_checkpoint(
             py,
             &target,
+            &self.inner.training_roster()?.projection,
             self.inner.replay_ordinal,
             refresh_snapshot,
         )?;
@@ -390,15 +394,28 @@ impl PrivateReplayChildCustody {
         ))
     }
 
+    fn training_roster(
+        &self,
+    ) -> PyResult<Arc<super::super::source_content_geometry::OriginalUpdateTrainingRoster>> {
+        let instruction = self
+            .instruction
+            .upgrade()
+            .ok_or_else(|| invalid("private replay lost its original instruction roster owner"))?;
+        super::super::source_content_geometry::instruction_training_roster(
+            &instruction,
+            self.step_index,
+        )
+    }
+
     pub(in crate::semantic_transition) fn original_replay_row(
         &self,
         py: Python<'_>,
     ) -> PyResult<ReplayRow> {
         let target = self.task.borrow(py);
-        let roster = target.checkpoint.original_training_roster()?;
+        let roster = self.training_roster()?;
         let ordinal = usize::try_from(self.replay_ordinal)
             .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
-        let row = roster.fields(2)?[0]
+        let row = roster.projection.fields(2)?[0]
             .sequence()?
             .get(ordinal)
             .ok_or_else(|| invalid("private replay lost its original target row"))?;
@@ -897,8 +914,8 @@ impl PrivateReplayChildCustody {
         let source = self.source_checkpoint(py)?;
         self.refresh_current_authority(py)?;
         let task = self.task.borrow(py);
-        let roster = task.checkpoint.original_training_roster()?;
-        let roster = roster.fields(2)?;
+        let roster = self.training_roster()?;
+        let roster = roster.projection.fields(2)?;
         let ordinal = usize::try_from(self.replay_ordinal)
             .map_err(|_| invalid("private replay ordinal exceeds native address space"))?;
         let selected = selection.fields(2)?;

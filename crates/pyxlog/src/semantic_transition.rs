@@ -2242,6 +2242,11 @@ struct CheckpointSources {
 
 struct VerifiedCheckpointSource {
     referent: CheckpointReferent,
+    #[cfg(feature = "semantic-policy")]
+    current_authority: Mutex<(
+        AuthoritySnapshot,
+        Option<xlog_cuda::SemanticReplayMaterialReservation>,
+    )>,
     proof: xlog_cuda::SemanticReplayStateMaterialProof,
     initial_prefill: xlog_cuda::SemanticReplayLoadedMaterial,
     seed: TaskCheckpointSeed,
@@ -2341,7 +2346,7 @@ impl CheckpointSources {
         let mut native = envelope.slice_payload(native_range).map_err(xlog_err)?;
         let manifest = SemanticCheckpointManifest::decode_borrowed(envelope.as_bytes())?;
         referent.verify_source_bound(envelope.as_bytes(), material_sources, &mut native)?;
-        let (seed, _, phase, binding) =
+        let (seed, _snapshot, phase, binding) =
             TaskCheckpointSeed::decode_bound(manifest.task, material_sources)?;
         let config = SemanticCheckpointSessionConfig::decode(manifest.session)?;
         let initial_prefill = material_sources.copy_payload(manifest.initial_prefill)?;
@@ -2351,6 +2356,8 @@ impl CheckpointSources {
         let cold = cold_task::editable_source_from_admission_bound(&admission, material_sources)?;
         let source = Arc::new(VerifiedCheckpointSource {
             referent: referent.clone(),
+            #[cfg(feature = "semantic-policy")]
+            current_authority: Mutex::new((_snapshot, None)),
             proof,
             initial_prefill,
             seed,
@@ -2404,6 +2411,7 @@ impl CheckpointSources {
 fn resolve_replay_checkpoint_referents(
     py: Python<'_>,
     authority: &TaskAuthority,
+    replay: &[ReplayRow],
     snapshot: &mut AuthoritySnapshot,
     resolve_checkpoint: Option<&Bound<'_, PyAny>>,
     refresh_snapshot: &Bound<'_, PyAny>,
@@ -2413,7 +2421,7 @@ fn resolve_replay_checkpoint_referents(
 ) -> PyResult<bool> {
     let mut use_count = 0usize;
     let mut source_owner = None;
-    for row in &authority.replay {
+    for row in replay {
         let count = usize::from(
             row.checkpoint_referent()?
                 .or(row.pre_action_checkpoint_referent()?)
@@ -2455,7 +2463,7 @@ fn resolve_replay_checkpoint_referents(
         })
         .transpose()?;
     let mut uses = Vec::with_capacity(use_count);
-    for (ordinal, row) in authority.replay.iter().enumerate() {
+    for (ordinal, row) in replay.iter().enumerate() {
         let actor = row.checkpoint_referent()?;
         let late = row.pre_action_checkpoint_referent()?;
         let initial = row
@@ -2538,14 +2546,14 @@ fn resolve_replay_checkpoint_referents(
     if referents.is_empty() {
         return Ok(false);
     }
-    let source = authority.replay[uses[0].0].evidence.0.payload_source()?;
+    let source = replay[uses[0].0].evidence.0.payload_source()?;
     let _verified_index = source
         .native_budget()?
         .reserve_ordered_index::<[u8; 32], Arc<VerifiedCheckpointSource>>(referents.len())
         .map_err(xlog_err)?;
     let mut verified = BTreeMap::<[u8; 32], Arc<VerifiedCheckpointSource>>::new();
     for (ordinal, recovered_prefill, referent) in &uses {
-        let row = &authority.replay[*ordinal];
+        let row = &replay[*ordinal];
         let material_sources = row.evidence.0.payload_source()?;
         let native = row.native_replay()?;
         let late_pre_action = referent.phase == CheckpointReferentPhase::PreActionBound;
@@ -4252,6 +4260,7 @@ impl PySemanticTransitionSession {
         resolve_replay_checkpoint_referents(
             py,
             &authority,
+            &authority.replay,
             &mut current_snapshot,
             resolve_checkpoint,
             refresh_snapshot.unwrap_or_else(|| no_refresh.bind(py)),
@@ -5409,7 +5418,8 @@ struct SegmentInstructionPreparation {
         Option<Py<model_context_continuation::PySemanticModelContextContinuation>>,
     callback: Option<Py<PyAny>>,
     work: Option<Py<learning_phase::cold_model_work::PySemanticColdModelWork>>,
-    source_geometry: Option<source_content_geometry::OriginalSourceGeometry>,
+    source_geometry: BTreeMap<usize, source_content_geometry::OriginalSourceGeometry>,
+    training_rosters: BTreeMap<usize, Arc<source_content_geometry::OriginalUpdateTrainingRoster>>,
     result: Option<Py<PyAny>>,
     report: Option<xlog_cuda::SemanticColdModelWorkResult>,
     callback_failed: bool,
@@ -7690,7 +7700,7 @@ fn replay_capacity_value(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResu
     const FIELDS: &[&str] = &[
         "row_capacity",
         "raw_byte_capacity",
-        "append_groups",
+        "append_capacity",
         "metadata_bytes",
         "max_material_bytes",
         "total_material_bytes",
@@ -7736,17 +7746,8 @@ fn read_replay_capacity(value: &ColdValue) -> PyResult<Option<SemanticReplayAppe
             .map_err(|_| invalid("replay row capacity overflows"))?,
         raw_byte_capacity: usize::try_from(fields[1].unsigned()?)
             .map_err(|_| invalid("replay raw byte capacity overflows"))?,
-        append_groups: fields[2]
-            .sequence()?
-            .iter()
-            .map(|group| {
-                group
-                    .sequence()?
-                    .iter()
-                    .map(ColdValue::unsigned)
-                    .collect::<PyResult<Vec<_>>>()
-            })
-            .collect::<PyResult<Vec<_>>>()?,
+        append_capacity: usize::try_from(fields[2].unsigned()?)
+            .map_err(|_| invalid("replay append capacity overflows"))?,
         metadata_bytes: fields[3].unsigned()?,
         max_material_bytes: fields[4].unsigned()?,
         total_material_bytes: fields[5].unsigned()?,
@@ -9574,7 +9575,7 @@ impl ReplayRow {
                 *task_content,
             ),
         };
-        bytes
+        let training_row = bytes
             .into_training_view_row(
                 basis,
                 replay_digest_identity(identity[1].text()?)?,
@@ -9590,9 +9591,9 @@ impl ReplayRow {
                 training_seed,
                 task_content,
                 origin,
-                actor_refresh::original_edit_demonstration_material_roots(self)?,
             )
-            .map_err(xlog_err)
+            .map_err(xlog_err)?;
+        actor_refresh::qualify_edit_demonstration(self, training_row)
     }
 
     fn native_replay(&self) -> PyResult<NativeReplayBinding> {
@@ -12162,6 +12163,20 @@ impl TaskAuthority {
         Ok(snapshot.segment_end.micros)
     }
 
+    fn require_replay_learning_scope(&self, rows: &[ReplayRow], purpose: &str) -> PyResult<()> {
+        for row in rows {
+            let split = row.identity.fields(6)?[0].fields(9)?[2].text()?;
+            if (purpose == "current-request-fast-adaptation" && split != "request-local-replay")
+                || (purpose == "durable-slow-consolidation" && !matches!(split, "train" | "dev"))
+            {
+                return Err(invalid(
+                    "training grant is incompatible with the immutable replay split",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn check_grants(
         &self,
         grants: &[ResolvedGrant],
@@ -12202,18 +12217,7 @@ impl TaskAuthority {
                         ));
                     }
                 }
-                for row in &self.replay {
-                    let split = row.identity.fields(6)?[0].fields(9)?[2].text()?;
-                    if (purpose == "current-request-fast-adaptation"
-                        && split != "request-local-replay")
-                        || (purpose == "durable-slow-consolidation"
-                            && !matches!(split, "train" | "dev"))
-                    {
-                        return Err(invalid(
-                            "training grant is incompatible with the immutable replay split",
-                        ));
-                    }
-                }
+                self.require_replay_learning_scope(&self.replay, purpose)?;
             }
         }
         if self
@@ -24419,6 +24423,7 @@ impl PySemanticTransitionController {
         let has_checkpoint_referents = resolve_replay_checkpoint_referents(
             py,
             &authority,
+            &authority.replay,
             &mut snapshot,
             resolve_checkpoint,
             refresh_snapshot,
@@ -24853,6 +24858,7 @@ impl PySemanticTransitionController {
         resolve_replay_checkpoint_referents(
             py,
             &validation,
+            &validation.replay,
             &mut current,
             resolve_checkpoint,
             refresh_snapshot,
@@ -27381,7 +27387,17 @@ impl PySemanticTransitionController {
                 ));
             }
             let result = exact_replay_bytes(result)?;
-            trains |= ReplayRow::result_permission_disposition(result)? == 1;
+            let trains_row = ReplayRow::result_permission_disposition(result)? == 1;
+            if trains_row {
+                for grant in &task_use.authority.training {
+                    if let Some(purpose) = &grant.learning_purpose {
+                        task_use
+                            .authority
+                            .require_replay_learning_scope(std::slice::from_ref(&row), purpose)?;
+                    }
+                }
+            }
+            trains |= trains_row;
             let record_digest =
                 Identity256::from_bytes(Sha256::digest(row.record_line.as_bytes()).into());
             let evidence_digest = Identity256::from_bytes(Sha256::digest(&row.evidence).into());

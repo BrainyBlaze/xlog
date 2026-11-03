@@ -3210,7 +3210,7 @@ impl SemanticNonterminalIntentBinding {
 pub struct SemanticReplayAppendBinding {
     pub row_capacity: usize,
     pub raw_byte_capacity: usize,
-    pub append_groups: Vec<Vec<u64>>,
+    pub append_capacity: usize,
     pub metadata_bytes: u64,
     pub max_material_bytes: u64,
     pub total_material_bytes: u64,
@@ -3222,8 +3222,8 @@ impl SemanticReplayAppendBinding {
     pub(crate) fn validate(&self) -> Result<(), SemanticTransitionError> {
         if self.row_capacity == 0
             || self.raw_byte_capacity == 0
-            || self.append_groups.is_empty()
-            || self.append_groups.len() >= self.row_capacity
+            || self.append_capacity == 0
+            || self.append_capacity >= self.row_capacity
             || self.metadata_bytes == 0
             || self.max_material_bytes == 0
             || self.total_material_bytes == 0
@@ -7713,7 +7713,6 @@ impl SemanticReplayLoadedMaterial {
         training_seed: &str,
         task_content: Option<SemanticTaskContentIdentity>,
         origin: Option<SemanticTrainingViewOrigin>,
-        edit_demonstration_material_roots: Option<[Identity256; 4]>,
     ) -> Result<SemanticReplayTrainingViewRow, SemanticTransitionError> {
         if self.decoded.is_some() {
             return Err(publication_input_error(
@@ -7740,7 +7739,7 @@ impl SemanticReplayLoadedMaterial {
             training_seed: training_seed.to_owned(),
             task_content,
             origin,
-            edit_demonstration_material_roots,
+            edit_demonstration: None,
             bytes: SemanticReplayTrainingViewBytes {
                 material: self,
                 _metadata: metadata,
@@ -17439,7 +17438,7 @@ fn initial_replay_append_records(
     };
     let (entry_capacity, payload_capacity) = if let Some(binding) = binding {
         binding.validate()?;
-        (binding.append_groups.len(), binding.payload_capacity_bytes)
+        (binding.append_capacity, binding.payload_capacity_bytes)
     } else {
         (0, 0)
     };
@@ -24561,6 +24560,32 @@ impl SemanticTransitionSession {
             )?))
         };
         #[cfg(feature = "semantic-policy")]
+        let update_rosters = if let Some((admission, _)) = admission {
+            let original = self.instruction_admission(admission)?;
+            transitions
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    if *kind == SemanticTransitionKind::Update {
+                        original
+                            .training_rosters
+                            .get(&index)
+                            .map(Arc::clone)
+                            .map(Some)
+                            .ok_or_else(|| {
+                                publication_input_error(
+                                    "Update requires its registered instruction training roster",
+                                )
+                            })
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect::<Result<Vec<_>, SemanticTransitionError>>()?
+        } else {
+            Vec::new()
+        };
+        #[cfg(feature = "semantic-policy")]
         let original_reader_only = if matches!(&source, PreparedSegmentSource::AdmittedPublication)
         {
             let (admission, parent) = admission.ok_or(SemanticTransitionError::NotBound)?;
@@ -25261,15 +25286,18 @@ impl SemanticTransitionSession {
                         .as_ref()
                         .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
                     training_view: if *kind == SemanticTransitionKind::Update {
-                        Some(
-                            training_view
-                                .as_ref()
-                                .expect("validated update training-view owner")
-                                .allocate_selection_reserved(
-                                    &mut reservation,
-                                    training_origins.clone(),
-                                )?,
-                        )
+                        let mut selected = training_view
+                            .as_ref()
+                            .expect("validated update training-view owner")
+                            .allocate_selection_reserved(
+                                &mut reservation,
+                                training_origins.clone(),
+                            )?;
+                        #[cfg(feature = "semantic-policy")]
+                        if let Some(Some(roster)) = update_rosters.get(ordinal) {
+                            selected.bind_training_roster(Arc::clone(roster))?;
+                        }
+                        Some(selected)
                     } else {
                         None
                     },

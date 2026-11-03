@@ -683,6 +683,7 @@ impl PySemanticTransitionController {
         resolve_replay_checkpoint_referents(
             py,
             &source_authority,
+            &source_authority.replay,
             &mut source_snapshot,
             Some(resolve_checkpoint.bind(py)),
             refresh.as_any(),

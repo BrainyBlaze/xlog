@@ -841,7 +841,10 @@ pub(super) struct ColdModelWorkStorage {
     operation_ordinal: u64,
     admission: Arc<RetainedColdAdmission>,
     allowance: Arc<Mutex<native_work_bound::ColdNativeAllowance>>,
-    source_geometry: Option<Arc<prepared_source_content::OriginalSourceGeometryRoster>>,
+    source_geometry: Vec<(
+        usize,
+        Arc<prepared_source_content::OriginalSourceGeometryRoster>,
+    )>,
     capacity_limit: Option<usize>,
     work: Option<PreparedModelWork>,
     native_work: TrackedCudaSlice<u64>,
@@ -4257,7 +4260,7 @@ impl SemanticTransitionSession {
             allowance: Arc::new(Mutex::new(native_work_bound::ColdNativeAllowance::new(
                 purpose,
             ))),
-            source_geometry: None,
+            source_geometry: Vec::new(),
             capacity_limit,
             work: None,
             native_work,
@@ -4574,6 +4577,7 @@ impl SemanticTransitionSession {
     pub(super) fn original_source_geometry_roster(
         &self,
         handle: &SemanticColdModelWork,
+        update_step: usize,
     ) -> Result<
         Option<&Arc<prepared_source_content::OriginalSourceGeometryRoster>>,
         SemanticTransitionError,
@@ -4581,16 +4585,36 @@ impl SemanticTransitionSession {
         Ok(self
             .original_cold_model_work(handle)?
             .source_geometry
-            .as_ref())
+            .iter()
+            .find(|(index, _)| *index == update_step)
+            .map(|(_, roster)| roster))
+    }
+
+    pub(super) fn source_geometry_input_generations(
+        &self,
+        handle: &SemanticColdModelWork,
+    ) -> Result<
+        Option<Arc<prepared_source_content::OriginalModelInputGenerations>>,
+        SemanticTransitionError,
+    > {
+        Ok(self
+            .original_cold_model_work(handle)?
+            .source_geometry
+            .first()
+            .map(|(_, original)| Arc::clone(&original.input_generations)))
     }
 
     pub(super) fn register_original_source_geometry_roster(
         &mut self,
         handle: &SemanticColdModelWork,
+        update_step: usize,
         roster: Arc<prepared_source_content::OriginalSourceGeometryRoster>,
     ) -> Result<(), SemanticTransitionError> {
         let original = self.original_cold_model_work(handle)?;
-        if original.source_geometry.is_some()
+        if original
+            .source_geometry
+            .iter()
+            .any(|(index, _)| *index == update_step)
             || original.purpose != SemanticColdModelWorkPurpose::PrivatePrefix
             || original.native_initialized
             || original.initialization_write.is_some()
@@ -4610,7 +4634,8 @@ impl SemanticTransitionSession {
             handle.token,
         )
         .expect("authenticated original report")
-        .source_geometry = Some(roster);
+        .source_geometry
+        .push((update_step, roster));
         Ok(())
     }
 
