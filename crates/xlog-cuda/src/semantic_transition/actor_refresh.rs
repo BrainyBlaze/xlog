@@ -45,6 +45,75 @@ impl SemanticPreparedActorRefresh {
     }
 }
 
+impl SemanticTrainingViewRow<SemanticReplayTrainingViewBytes> {
+    /// Retain native qualification bound to this row and its original execution.
+    pub fn qualify_edit_demonstration(
+        mut self,
+        material: &SemanticReplayMaterial,
+        batch_identity: Identity256,
+        batch_bytes: &[u8],
+        action: &SemanticCompletedStepWitnessMaterial,
+        codebook: &SemanticCompletedStepWitnessMaterial,
+        solution: &SemanticCompletedStepWitnessMaterial,
+        ground: &SemanticCompletedStepWitnessMaterial,
+    ) -> Result<Self, SemanticTransitionError> {
+        if self.edit_demonstration.is_some()
+            || self.basis != SemanticTrainingViewBasis::Episode
+            || self.origin != Some(material.training_view_origin()?)
+            || Identity256::from_bytes(Sha256::digest(self.bytes.as_ref()).into())
+                != self.bytes_identity
+        {
+            return Err(publication_input_error(
+                "Edit qualification requires its original native training row",
+            ));
+        }
+        let budget = self.bytes.material.bytes.budget().ok_or_else(|| {
+            publication_input_error("Edit qualification lost its original material pool")
+        })?;
+        let bytes = size_of::<crate::semantic_training_view::QualifiedEditDemonstration>()
+            .checked_add(4 * size_of::<usize>())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = budget.reserve_auxiliary(
+            u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        )?;
+        let maximum_payload = COMPLETED_COMPONENT_RECEIPT_BYTES.max(42 * size_of::<u64>());
+        let maximum_kind = b"component-receipt".len().max(b"hard-decode-receipt".len());
+        let workspace = completed_material_extent(&[
+            maximum_payload,
+            maximum_payload,
+            b"XLOG-COMPLETED-ACTION-CHILD\0".len(),
+            4 * size_of::<u64>(),
+            32,
+            maximum_kind,
+        ])?;
+        let _workspace = budget.reserve_auxiliary(
+            u64::try_from(workspace).map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+        )?;
+        OriginalEditDemonstration::decode(
+            material,
+            batch_identity,
+            batch_bytes,
+            action,
+            codebook,
+            solution,
+            ground,
+        )?;
+        self.edit_demonstration = Some(Arc::new(
+            crate::semantic_training_view::QualifiedEditDemonstration {
+                roots: [action, codebook, solution, ground].map(|original| {
+                    Identity256::from_bytes(Sha256::digest(&original.bytes).into())
+                }),
+                origin: material.training_view_origin()?,
+                identity: self.identity,
+                bytes_identity: self.bytes_identity,
+                content_identity: self.content_identity,
+                _reservation: reservation,
+            },
+        ));
+        Ok(self)
+    }
+}
+
 pub(super) struct OriginalEditDemonstration {
     pub(super) lane: u64,
     pub(super) choices: [u64; COMPONENT_COUNT],

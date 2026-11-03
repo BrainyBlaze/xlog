@@ -28,15 +28,414 @@ pub(super) struct OriginalSourceGeometry {
     _metadata: xlog_cuda::SemanticReplayMaterialReservation,
 }
 
+/// One admitted Update's immutable projection and original payload custody.
+pub(super) struct OriginalUpdateTrainingRoster {
+    pub(super) projection: ColdValue,
+    python: Mutex<Option<(Py<PyTuple>, xlog_cuda::SemanticReplayMaterialReservation)>>,
+    _metadata: Vec<xlog_cuda::SemanticReplayMaterialReservation>,
+}
+
+fn cold_clone_extent(value: &ColdValue) -> PyResult<usize> {
+    let mut bytes = std::mem::size_of::<ColdValue>();
+    match value {
+        ColdValue::Integer(text) | ColdValue::Text(text) => bytes = add(bytes, text.len())?,
+        ColdValue::Sequence(items) => {
+            for item in items {
+                bytes = add(bytes, cold_clone_extent(item)?)?;
+            }
+        }
+        ColdValue::Stored(item) => bytes = add(bytes, item.digest.len())?,
+        _ => {}
+    }
+    Ok(bytes)
+}
+
+impl OriginalUpdateTrainingRoster {
+    fn python_projection(
+        &self,
+        py: Python<'_>,
+        budget: &xlog_cuda::SemanticReplayMaterialBudget,
+    ) -> PyResult<Py<PyTuple>> {
+        let mut cached = self
+            .python
+            .lock()
+            .map_err(|_| invalid("Update training roster projection owner is poisoned"))?;
+        if let Some((value, _)) = cached.as_ref() {
+            return Ok(value.clone_ref(py));
+        }
+        let extent = add(
+            projection_extent(py, &self.projection)?,
+            projection_scratch_extent(&self.projection)?,
+        )?;
+        let metadata = budget
+            .reserve_auxiliary(
+                u64::try_from(extent)
+                    .map_err(|_| invalid("Update training roster projection exceeds u64"))?,
+            )
+            .map_err(xlog_err)?;
+        let value = project_sequence(py, self.projection.fields(2)?)?;
+        *cached = Some((value.clone_ref(py), metadata));
+        Ok(value)
+    }
+}
+
+pub(super) fn instruction_training_roster(
+    instruction: &SegmentInstructionCustody,
+    update_step: usize,
+) -> PyResult<Arc<OriginalUpdateTrainingRoster>> {
+    instruction
+        .preparation()?
+        .training_rosters
+        .get(&update_step)
+        .map(Arc::clone)
+        .ok_or_else(|| invalid("Update lost its original instruction training roster"))
+}
+
+fn prepare_update_training_roster(
+    py: Python<'_>,
+    session: &PySemanticTransitionSession,
+    task: &PySemanticTransitionTaskUse,
+    instruction: &SegmentInstructionCustody,
+    update_step: usize,
+) -> PyResult<Arc<OriginalUpdateTrainingRoster>> {
+    if let Some(roster) = instruction
+        .preparation()?
+        .training_rosters
+        .get(&update_step)
+    {
+        return Ok(Arc::clone(roster));
+    }
+    let (appended, groups) = session
+        .owner()?
+        .prepare_instruction_training_roster(
+            &*instruction.parent.borrow(py).lease()?,
+            &instruction.inner,
+            update_step,
+        )
+        .map_err(xlog_err)?;
+    let budget = task.checkpoint.material_sources.native_budget()?;
+    let original = task
+        .checkpoint
+        .original_training_roster
+        .lock()
+        .map_err(|_| invalid("original training roster owner mutex is poisoned"))?;
+    if original.handoff.is_some() {
+        return Err(invalid(
+            "Update snapshot cannot interrupt original roster materialization",
+        ));
+    }
+    let extent = cold_clone_extent(&original.projection)?;
+    let mut metadata = vec![
+        budget
+            .reserve_auxiliary(
+                u64::try_from(extent)
+                    .map_err(|_| invalid("Update training roster metadata exceeds u64"))?,
+            )
+            .map_err(xlog_err)?,
+        budget
+            .reserve_ordered_index::<usize, Arc<OriginalUpdateTrainingRoster>>(1)
+            .map_err(xlog_err)?,
+    ];
+    let original_fields = original.projection.fields(2)?;
+    let mut rows = original_fields[0].sequence()?.to_vec();
+    let mut objective = original_fields[1].fields(6)?.to_vec();
+    drop(original);
+    if !appended.is_empty() {
+        let limits = read_replay_capacity(&task.checkpoint.replay_capacity)?
+            .ok_or_else(|| invalid("appended training rows lost their original capacity"))?;
+        let bound = |value| {
+            usize::try_from(value)
+                .map_err(|_| invalid("replay capacity exceeds native address space"))
+        };
+        for bytes in appended {
+            let plan = checked_checkpoint_cold_value(&bytes, bytes.len(), false, None)?;
+            let extent = plan
+                .owned_bytes
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(bytes.len() as u64 * 2))
+                .ok_or_else(|| invalid("Update archive projection extent overflow"))?;
+            metadata.push(budget.reserve_auxiliary(extent).map_err(xlog_err)?);
+            let row = bind_archived_replay_row(
+                checkpoint_cold_value(&bytes, bytes.len())?,
+                bound(limits.max_material_bytes)?,
+                bound(limits.total_material_bytes)?,
+                bound(limits.max_evidence_bytes)?,
+                &task.checkpoint.material_sources,
+            )?;
+            if checkpoint_cold_value_bytes(&row).as_slice() != bytes.as_ref() {
+                return Err(invalid(
+                    "Update roster changed its authenticated archived row",
+                ));
+            }
+            rows.push(row);
+        }
+    }
+    let member_count = groups
+        .iter()
+        .try_fold(0usize, |count, (_, members)| add(count, members.len()))?;
+    let extent = add(
+        multiply(member_count, std::mem::size_of::<ColdValue>() + 20)?,
+        multiply(groups.len(), 4 * std::mem::size_of::<ColdValue>() + 64)?,
+    )?;
+    metadata.push(
+        budget
+            .reserve_auxiliary(
+                u64::try_from(extent)
+                    .map_err(|_| invalid("Update objective metadata exceeds u64"))?,
+            )
+            .map_err(xlog_err)?,
+    );
+    let names = [
+        "masked-language",
+        "autoregressive-language",
+        "semantic",
+        "edit",
+        "execution",
+        "retention-language",
+        "retention-symbolic",
+        "actor-critic-cost",
+    ];
+    objective[4] = ColdValue::Sequence(
+        groups
+            .into_iter()
+            .map(|(kind, members)| {
+                let index = usize::try_from(kind)
+                    .ok()
+                    .and_then(|kind| kind.checked_sub(1))
+                    .filter(|index| *index < names.len())
+                    .ok_or_else(|| {
+                        invalid("native training group kind is outside its objective")
+                    })?;
+                Ok(ColdValue::Sequence(vec![
+                    ColdValue::Text(names[index].into()),
+                    ColdValue::Integer(members.len().to_string()),
+                    ColdValue::Sequence(
+                        members
+                            .into_iter()
+                            .map(|n| ColdValue::Integer(n.to_string()))
+                            .collect(),
+                    ),
+                ]))
+            })
+            .collect::<PyResult<Vec<_>>>()?,
+    );
+    let roster = Arc::new(OriginalUpdateTrainingRoster {
+        projection: ColdValue::Sequence(vec![
+            ColdValue::Sequence(rows),
+            ColdValue::Sequence(objective),
+        ]),
+        python: Mutex::new(None),
+        _metadata: metadata,
+    });
+    instruction
+        .preparation()?
+        .training_rosters
+        .insert(update_step, Arc::clone(&roster));
+    Ok(roster)
+}
+
+fn resolve_update_checkpoint_sources(
+    py: Python<'_>,
+    task: &PySemanticTransitionTaskUse,
+    roster: &OriginalUpdateTrainingRoster,
+    refresh_snapshot: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let budget = task.checkpoint.material_sources.native_budget()?;
+    let rows = roster.projection.fields(2)?[0].sequence()?;
+    let extent = rows
+        .iter()
+        .try_fold(0usize, |count, row| add(count, cold_clone_extent(row)?))?;
+    let _parse = budget
+        .reserve_auxiliary(
+            u64::try_from(multiply(extent, 4)?)
+                .map_err(|_| invalid("Update checkpoint roster exceeds u64"))?,
+        )
+        .map_err(xlog_err)?;
+    let mut parsed = Vec::with_capacity(rows.len());
+    let mut parse_metadata = Vec::with_capacity(
+        rows.len()
+            .checked_mul(2)
+            .ok_or_else(|| invalid("Update replay parser roster extent overflow"))?,
+    );
+    for value in rows {
+        let fields = value.fields(5)?;
+        parse_metadata.push(
+            budget
+                .reserve_json_parse(fields[2].text()?.as_bytes())
+                .map_err(xlog_err)?,
+        );
+        let evidence = match &fields[4] {
+            ColdValue::ReplayBytes(evidence) => evidence.bytes(),
+            _ => return Err(invalid("Update replay lost its original guarded evidence")),
+        };
+        parse_metadata.push(budget.reserve_json_parse(evidence).map_err(xlog_err)?);
+        parsed.push(ReplayRow::parse_with_live(value, &task.authority.live)?);
+    }
+    let rows = parsed;
+    for grant in &task.authority.training {
+        if let Some(purpose) = &grant.learning_purpose {
+            task.authority
+                .require_replay_learning_scope(&rows, purpose)?;
+        }
+    }
+    let (resolver, limits) = {
+        let sources = task
+            .checkpoint
+            .checkpoint_sources
+            .lock()
+            .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?;
+        (
+            sources.resolver.as_ref().map(|value| value.clone_ref(py)),
+            sources.limits,
+        )
+    };
+    let item = limits.map(|limits| limits.item_bytes).into_pyobject(py)?;
+    let total = limits.map(|limits| limits.total_bytes).into_pyobject(py)?;
+    let mut snapshot = task.state()?.snapshot.clone();
+    let result = resolve_replay_checkpoint_referents(
+        py,
+        &task.authority,
+        &rows,
+        &mut snapshot,
+        resolver.as_ref().map(|value| value.bind(py)),
+        refresh_snapshot,
+        limits.map(|_| item.as_any()),
+        limits.map(|_| total.as_any()),
+        &task.checkpoint.checkpoint_sources,
+    );
+    task.state()?.snapshot = snapshot;
+    result.map(|_| ())
+}
+
+fn refresh_geometry_source_authority(
+    py: Python<'_>,
+    source: &VerifiedCheckpointSource,
+    refresh_snapshot: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if !refresh_snapshot.is_callable() {
+        return Err(invalid(
+            "SOURCE geometry requires its original authority callback",
+        ));
+    }
+    let projection = source_task_projection(py, source)?;
+    let fields = projection.bind(py).get_item(1)?;
+    let authority = fields.cast::<PyTuple>()?.get_item(0)?;
+    let value = refresh_snapshot.call1((authority,))?;
+    let snapshot = if let Some(donor) = &source.seed.dormant_evaluation_source {
+        let (donor_snapshot, member) = evaluation_authority_snapshots(&value)?;
+        donor.require_native(
+            source.proof.evaluation_fork_origin(),
+            &donor_snapshot,
+            &source.seed.material_sources,
+        )?;
+        member
+    } else {
+        value
+    };
+    let snapshot =
+        AuthoritySnapshot::parse(&ColdValue::read(&snapshot, &mut (16 * 1024 * 1024), 0)?)?;
+    let budget = source.seed.material_sources.native_budget()?;
+    let (_, bytes, nodes) = ColdValue::checked_canonical_bytes(&snapshot.canonical, false)?;
+    // The observed snapshot, retained clone and temporary parsed metadata coexist.
+    let extent = nodes
+        .checked_mul(std::mem::size_of::<ColdValue>())
+        .and_then(|n| n.checked_add(bytes))
+        .and_then(|n| n.checked_add(snapshot.canonical.len()))
+        .and_then(|n| n.checked_add(std::mem::size_of::<AuthoritySnapshot>()))
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| invalid("source authority watermark extent overflow"))?;
+    let metadata = budget
+        .reserve_auxiliary(
+            u64::try_from(extent).map_err(|_| invalid("source authority watermark exceeds u64"))?,
+        )
+        .map_err(xlog_err)?;
+    {
+        let mut retained = source
+            .current_authority
+            .lock()
+            .map_err(|_| invalid("source authority watermark owner is poisoned"))?;
+        snapshot.newer_than(&retained.0)?;
+        // A denied source read still advances its original rollback watermark.
+        *retained = (snapshot.clone(), Some(metadata));
+    }
+    let mut authority = TaskAuthority::parse(&source.seed.authority)?;
+    authority.bind_initial_sources(&source.seed.initial_sources, &source.seed.source_mapping)?;
+    match &source.phase {
+        CheckpointTaskPhase::Segment(operation) => authority.check_use(operation, &snapshot, true),
+        CheckpointTaskPhase::Imported | CheckpointTaskPhase::InitialPrefillBound => {
+            authority.check_snapshot(&snapshot).map(drop)
+        }
+    }
+}
+
+impl PySemanticPreparedStep {
+    pub(super) fn frozen_training_roster(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Arc<OriginalUpdateTrainingRoster>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        self.require_task(py, &self.task_use.borrow(py))?;
+        let instruction = {
+            let stored = session
+                .prepared_segment
+                .lock()
+                .map_err(|_| invalid("prepared segment owner is poisoned"))?;
+            let stored = stored
+                .as_ref()
+                .filter(|stored| Arc::ptr_eq(&stored.scope, &self.scope))
+                .ok_or_else(|| invalid("training roster requires its original prepared segment"))?;
+            Arc::clone(
+                stored
+                    .instruction
+                    .as_ref()
+                    .ok_or_else(|| invalid("training roster requires its original instruction"))?,
+            )
+        };
+        let position = instruction
+            .preparation()?
+            .native_steps
+            .iter()
+            .position(|step| step.same_handle(&self.inner))
+            .ok_or_else(|| invalid("training roster changed its original Update"))?;
+        // This reads the immutable selected snapshot, never the current archive.
+        session
+            .owner()?
+            .prepare_training_roster(&self.inner)
+            .map_err(xlog_err)?;
+        instruction_training_roster(&instruction, position)
+    }
+}
+
+#[pymethods]
+impl PySemanticPreparedStep {
+    /// Return this Update's admitted rows and objective through their original owners.
+    fn training_roster(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let roster = self.frozen_training_roster(py)?;
+        roster.python_projection(
+            py,
+            &self
+                .task_use
+                .borrow(py)
+                .checkpoint
+                .material_sources
+                .native_budget()?,
+        )
+    }
+}
+
 #[pymethods]
 impl PySemanticTransitionController {
     /// Lower the original admitted roster before any model factory or tensor export.
-    #[pyo3(signature = (task_use, *, instruction_admission))]
+    #[pyo3(signature = (task_use, *, instruction_admission, update_step, refresh_snapshot, target_refresh_snapshot))]
     fn prepare_source_content_geometry(
         &self,
         py: Python<'_>,
         task_use: Py<PySemanticTransitionTaskUse>,
         instruction_admission: Py<PySemanticSegmentInstructionAdmission>,
+        update_step: usize,
+        refresh_snapshot: &Bound<'_, PyAny>,
+        target_refresh_snapshot: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);
         session.require_creator()?;
@@ -73,65 +472,73 @@ impl PySemanticTransitionController {
         work.borrow(py).check(py)?;
         let custody = work.borrow(py).custody(py)?;
         let budget = task.checkpoint.material_sources.native_budget()?;
-        let mut preparation = instruction.preparation()?;
-        if preparation.source_geometry.is_none() {
-            let parent = instruction.parent.borrow(py);
-            let lease = parent.lease()?;
-            let mut native = session.owner()?;
-            task.require_identity(&native)?;
-            let count = native
-                .source_content_geometry_member_ordinals(&lease, &instruction.inner)
-                .map_err(xlog_err)?
-                .count();
+        let roster =
+            prepare_update_training_roster(py, &session, &task, &instruction, update_step)?;
+        resolve_update_checkpoint_sources(py, &task, &roster, target_refresh_snapshot)?;
+        let cached_sources = instruction
+            .preparation()?
+            .source_geometry
+            .get(&update_step)
+            .map(|geometry| {
+                geometry
+                    .sources
+                    .iter()
+                    .map(|(_, source)| Arc::clone(source))
+                    .collect::<Vec<_>>()
+            });
+        if let Some(sources) = cached_sources {
+            for source in sources {
+                refresh_geometry_source_authority(py, &source, refresh_snapshot)?;
+            }
+        } else {
+            let ordinals = {
+                let parent = instruction.parent.borrow(py);
+                let lease = parent.lease()?;
+                let native = session.owner()?;
+                task.require_identity(&native)?;
+                native
+                    .source_content_geometry_member_ordinals(
+                        &lease,
+                        &instruction.inner,
+                        update_step,
+                    )
+                    .map_err(xlog_err)?
+                    .collect::<Vec<_>>()
+            };
+            let count = ordinals.len();
+            let extent = add(
+                multiply(
+                    count,
+                    std::mem::size_of::<(u64, Arc<VerifiedCheckpointSource>)>(),
+                )?,
+                std::mem::size_of::<OriginalSourceGeometry>() + 32 * std::mem::size_of::<usize>(),
+            )?;
             let metadata = budget
                 .reserve_auxiliary(
-                    u64::try_from(multiply(
-                        count,
-                        std::mem::size_of::<(u64, Arc<VerifiedCheckpointSource>)>(),
-                    )?)
-                    .map_err(|_| invalid("original source geometry roster exceeds u64"))?,
+                    u64::try_from(extent)
+                        .map_err(|_| invalid("original source geometry roster exceeds u64"))?,
                 )
                 .map_err(xlog_err)?;
             let _seed_metadata = budget
                 .reserve_auxiliary(
                     u64::try_from(multiply(
                         count,
-                        std::mem::size_of::<(u64, xlog_cuda::SemanticSourceContentGeometrySeed)>(),
+                        std::mem::size_of::<(u64, xlog_cuda::SemanticSourceContentGeometrySeed)>()
+                            + std::mem::size_of::<u64>(),
                     )?)
                     .map_err(|_| invalid("original source seed roster exceeds u64"))?,
                 )
                 .map_err(xlog_err)?;
             let mut seeds = Vec::with_capacity(count);
             let mut sources = Vec::with_capacity(count);
-            // Borrow the original checkpoint roster. Cloning its ColdValue
-            // projection would recreate metadata and lose the original receipt.
-            let roster = task
-                .checkpoint
-                .original_training_roster
-                .lock()
-                .map_err(|_| invalid("original training roster owner mutex is poisoned"))?;
-            if roster.handoff.is_some() {
-                return Err(invalid(
-                    "source geometry cannot interrupt original roster materialization",
-                ));
-            }
             let rows = roster.projection.fields(2)?[0].sequence()?;
-            let verified = task
-                .checkpoint
-                .checkpoint_sources
-                .lock()
-                .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?;
-            for ordinal in native
-                .source_content_geometry_member_ordinals(&lease, &instruction.inner)
-                .map_err(xlog_err)?
-            {
+            for ordinal in ordinals {
                 let row = rows
-                    .get(usize::try_from(ordinal).map_err(|_| {
-                        invalid("original source ordinal exceeds native address space")
-                    })?)
-                    .ok_or_else(|| {
-                        invalid("source geometry row is absent from its original roster")
-                    })?
+                    .get(
+                        usize::try_from(ordinal)
+                            .map_err(|_| invalid("source ordinal exceeds native address space"))?,
+                    )
+                    .ok_or_else(|| invalid("source geometry row is absent from its Update roster"))?
                     .fields(5)?;
                 if row[0].text()? != "episode" {
                     return Err(invalid(
@@ -142,7 +549,7 @@ impl PySemanticTransitionController {
                     ColdValue::ReplayBytes(payload) => {
                         if !Arc::ptr_eq(&payload.source()?, &task.checkpoint.material_sources) {
                             return Err(invalid(
-                                "source geometry evidence changed its original material registry",
+                                "source geometry changed its original material registry",
                             ));
                         }
                         payload.bytes()
@@ -154,20 +561,25 @@ impl PySemanticTransitionController {
                     }
                 };
                 let key = native_replay_cache_key(row[2].text()?, evidence);
-                let key = std::str::from_utf8(&key).expect("canonical original replay cache key");
                 let binding = task
                     .checkpoint
                     .material_sources
-                    .cached_native_binding(key)?
-                    .ok_or_else(|| {
-                        invalid("source geometry lost its already-decoded original replay owner")
-                    })?;
-                let digest = binding.checkpoint_source.ok_or_else(|| {
-                    invalid("source geometry lost its original verified checkpoint join")
-                })?;
-                let source = verified.verified.get(&digest).ok_or_else(|| {
-                    invalid("source geometry lost its original verified checkpoint owner")
-                })?;
+                    .cached_native_binding(
+                        std::str::from_utf8(&key).expect("canonical original replay cache key"),
+                    )?
+                    .ok_or_else(|| invalid("source geometry lost its original replay owner"))?;
+                let digest = binding
+                    .checkpoint_source
+                    .ok_or_else(|| invalid("source geometry lost its verified checkpoint join"))?;
+                let source = task
+                    .checkpoint
+                    .checkpoint_sources
+                    .lock()
+                    .map_err(|_| invalid("checkpoint source owner mutex is poisoned"))?
+                    .verified
+                    .get(&digest)
+                    .map(Arc::clone)
+                    .ok_or_else(|| invalid("source geometry lost its verified checkpoint owner"))?;
                 if !Arc::ptr_eq(
                     &source.seed.material_sources,
                     &task.checkpoint.material_sources,
@@ -176,28 +588,51 @@ impl PySemanticTransitionController {
                         "source geometry changed its original material registry",
                     ));
                 }
+                // Call the source's original authority owner without holding
+                // instruction, native Session or checkpoint-registry mutexes.
+                refresh_geometry_source_authority(py, &source, refresh_snapshot)?;
                 seeds.push((
                     ordinal,
-                    source_content_geometry_seed(source, binding.material)?,
+                    source_content_geometry_seed(&source, binding.material)?,
                 ));
-                sources.push((ordinal, Arc::clone(source)));
+                sources.push((ordinal, source));
             }
-            let handles = native
-                .prepare_source_content_geometry(&lease, &instruction.inner, &custody.inner, seeds)
+            let mut preparation = instruction.preparation()?;
+            if preparation.build_entered
+                || preparation.callback_failed
+                || preparation.result.is_some()
+            {
+                return Err(invalid(
+                    "source geometry must precede original preparation effects",
+                ));
+            }
+            let handles = session
+                .owner()?
+                .prepare_source_content_geometry(
+                    &*instruction.parent.borrow(py).lease()?,
+                    &instruction.inner,
+                    &custody.inner,
+                    update_step,
+                    seeds,
+                )
                 .map_err(xlog_err)?;
-            preparation.source_geometry = Some(OriginalSourceGeometry {
-                handles,
-                sources,
-                projections: Vec::new(),
-                projection: None,
-                projection_metadata: None,
-                tuple_metadata: None,
-                _metadata: metadata,
-            });
+            preparation.source_geometry.insert(
+                update_step,
+                OriginalSourceGeometry {
+                    handles,
+                    sources,
+                    projections: Vec::new(),
+                    projection: None,
+                    projection_metadata: None,
+                    tuple_metadata: None,
+                    _metadata: metadata,
+                },
+            );
         }
+        let mut preparation = instruction.preparation()?;
         let original = preparation
             .source_geometry
-            .as_mut()
+            .get_mut(&update_step)
             .expect("original geometry roster retained");
         if let Some(value) = &original.projection {
             return Ok(value.clone_ref(py));
@@ -1690,14 +2125,18 @@ pub(super) fn source_content_geometry_seed(
                 "original source observer differs from its canonical admission",
             ));
         }
-        let task = task_evaluation_spec_with_allocation_owner(
+        let mut task = task_evaluation_spec_with_allocation_owner(
             &source.seed.evaluation,
             task_priority_levels(priorities)?,
-            Some(Arc::clone(&cold.program)),
+            Some(cold.program_owner_with_library(source.proof.evaluation_rule_library())),
             &source.seed.training_domain,
             Some(&cold.initial_source),
             &source.seed.material_sources,
         )?;
+        task.evaluation_intervention = source
+            .proof
+            .evaluation_fork_origin()
+            .and_then(|origin| origin.intervention());
         *cached = Some(SourceTaskGeometry {
             task: Arc::new(task),
             metadata,

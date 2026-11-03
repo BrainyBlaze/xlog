@@ -75,7 +75,6 @@ struct Observation { Fact fact;uint64_t truth,present; };
 struct NoObservations {
     __device__ uint32_t size() const { return 0; }
     __device__ Observation operator[](uint32_t) const { return {}; }
-    __device__ bool protected_fact(Fact) const { return false; }
 };
 
 __device__ uint32_t bank_predicate_arity(const Bank& bank, uint32_t predicate) {
@@ -90,8 +89,13 @@ __device__ bool valid_fact(const Fact& fact, const Bank& bank) {
            (fact.arity == 2 || fact.second == 0);
 }
 
-__device__ uint32_t find_fact(const Fact* facts,uint32_t count,Fact needle) {
+__device__ uint32_t find_fact(const Fact* facts,uint32_t count,Fact needle,
+        uint64_t* charged=nullptr,uint64_t fuel=UINT64_MAX) {
     for(uint32_t index=0;index<count;++index) {
+        if(charged) {
+            if(*charged==fuel)return UINT32_MAX;
+            ++*charged;
+        }
         const Fact fact=facts[index];
         if(fact.predicate==needle.predicate && fact.arity==needle.arity &&
            fact.first==needle.first && fact.second==needle.second)return index;
@@ -158,12 +162,15 @@ __device__ Atom bank_atom(const uint64_t* values) {
              {uint32_t(values[4]), uint32_t(values[5])}}};
 }
 
-__device__ Rule bank_rule(const Bank& bank, uint32_t index) {
-    const uint64_t* values = bank.words + 5 + bank.predicate_count +
-        4 * (uint64_t(bank.query_count) + bank.initial_count) + kRuleWords * uint64_t(index);
+__device__ Rule rule_words(const uint64_t* values) {
     return {bank_atom(values + 1),
             {bank_atom(values + 7), bank_atom(values + 13), bank_atom(values + 19)},
             uint32_t(values[0])};
+}
+
+__device__ Rule bank_rule(const Bank& bank, uint32_t index) {
+    return rule_words(bank.words + 5 + bank.predicate_count +
+        4 * (uint64_t(bank.query_count) + bank.initial_count) + kRuleWords * uint64_t(index));
 }
 
 // Decode only the exact versioned canonical word bank emitted by the cold compiler.
@@ -253,13 +260,15 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
         if (!valid_rule(rules[index], bank)) return {Status::InvalidProgram, 0, 0, 0};
     for (uint32_t index = 0; index < initial_count; ++index)
         if (!valid_fact(initial[index], bank)) return {Status::InvalidProgram, 0, 0, 0};
+    uint64_t charged=0;
     for (uint32_t binding = 0; binding < observations.size(); ++binding) {
+        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+        ++charged;
         const Observation observation = observations[binding];
         if (observation.present > 1 || observation.truth > 3 ||
             !valid_fact(observation.fact, bank) || !support || binding / 64 >= support->words)
             return {Status::InvalidProgram, 0, 0, 0};
     }
-    uint64_t charged=0;
     if(support)for(uint32_t fact=0;fact<capacity;++fact) {
         support->truth[fact]=0;
         for(uint32_t channel=0;channel<2;++channel)
@@ -278,9 +287,12 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
         if(support)support->truth[slot]|=1;
     }
     for(uint32_t binding=0;binding<observations.size();++binding) {
+        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+        ++charged;
         const Observation observation=observations[binding];
         if(!observation.present)continue;
-        const uint32_t slot=find_fact(output,count,observation.fact);
+        const uint32_t slot=find_fact(output,count,observation.fact,&charged,fuel);
+        if(slot==UINT32_MAX)return {Status::FuelExhausted,0,0,charged};
         if(slot==count) {
             if(count==capacity)return {Status::FactCapacity,0,0,charged};
             output[count++]=observation.fact;
@@ -328,8 +340,16 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                     continue;
                 }
                 const Fact head = substitute_head(rule.head, values[depth + 1]);
-                if(rule_index>=protected_rule_begin && observations.protected_fact(head))
-                    return {Status::ProtectedObservation,0,0,charged};
+                if(rule_index>=protected_rule_begin) {
+                    for(uint32_t binding=0;binding<observations.size();++binding) {
+                        if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
+                        ++charged;
+                        const Fact target=observations[binding].fact;
+                        if(target.predicate==head.predicate && target.arity==head.arity &&
+                           target.first==head.first && target.second==head.second)
+                            return {Status::ProtectedObservation,0,0,charged};
+                    }
+                }
                 const uint32_t slot=find_fact(output,count,head);
                 if (slot==count) {
                     if (count == capacity) return {Status::FactCapacity, 0, 0, charged};
@@ -371,8 +391,15 @@ __device__ Result materialize_bank(const Bank& bank, const Rule* inserted,
                                    uint32_t rule_capacity, Fact* output,
                                    uint32_t output_capacity, uint64_t fuel,
                                    const Rule* selected,uint32_t selected_count,
-                                   DualSupport* support,const Observations& observations) {
-    const uint64_t total_rules = uint64_t(bank.rule_count) + selected_count + inserted_count;
+                                   DualSupport* support,const Observations& observations,
+                                   const uint64_t* library,uint32_t library_count,
+                                   uint64_t active_mask) {
+    const uint64_t permitted = library_count == 64 ? UINT64_MAX :
+        library_count < 64 ? (uint64_t(1) << library_count) - 1 : 0;
+    if (library_count > 64 || (library_count && !library) || (active_mask & ~permitted))
+        return {Status::InvalidProgram, 0, 0, 0};
+    const uint32_t active_count = __popcll(active_mask);
+    const uint64_t total_rules = uint64_t(bank.rule_count) + selected_count + inserted_count + active_count;
     if (!bank.words || !bank.predicate_arities || (inserted_count && !inserted) ||
         (selected_count && !selected) || (bank.initial_count && !input) ||
         (total_rules && !rules)) return {Status::InvalidProgram, 0, 0, 0};
@@ -386,15 +413,27 @@ __device__ Result materialize_bank(const Bank& bank, const Rule* inserted,
         rules[bank.rule_count + index] = selected[index];
     for (uint32_t index = 0; index < inserted_count; ++index)
         rules[bank.rule_count + selected_count + index] = inserted[index];
-    return materialize(input, bank.initial_count, rules, uint32_t(total_rules), bank,
-                       output, output_capacity, fuel,support,observations,bank.rule_count);
+    uint64_t charged = 0;
+    uint32_t active = bank.rule_count + selected_count + inserted_count;
+    for (uint32_t index = 0; index < library_count; ++index) {
+        if (charged == fuel) return {Status::FuelExhausted, 0, 0, charged};
+        ++charged;
+        if (!(active_mask & (uint64_t(1) << index))) continue;
+        if (kRuleWords > fuel - charged) return {Status::FuelExhausted, 0, 0, charged};
+        charged += kRuleWords;
+        rules[active++] = rule_words(library + kRuleWords * uint64_t(index));
+    }
+    auto result = materialize(input, bank.initial_count, rules, uint32_t(total_rules), bank,
+                              output, output_capacity, fuel - charged,support,observations,bank.rule_count);
+    result.charged_pairs += charged;
+    return result;
 }
 
 __device__ Result materialize_bank(const Bank& bank,const Rule* inserted,uint32_t inserted_count,
         Fact* input,uint32_t input_capacity,Rule* rules,uint32_t rule_capacity,
         Fact* output,uint32_t output_capacity,uint64_t fuel) {
     return materialize_bank(bank,inserted,inserted_count,input,input_capacity,rules,
-        rule_capacity,output,output_capacity,fuel,nullptr,0,nullptr,NoObservations{});
+        rule_capacity,output,output_capacity,fuel,nullptr,0,nullptr,NoObservations{},nullptr,0,0);
 }
 
 }  // namespace semantic_program

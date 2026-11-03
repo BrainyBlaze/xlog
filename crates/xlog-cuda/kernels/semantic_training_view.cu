@@ -43,7 +43,10 @@ struct TrainingViewRowDescriptor {
     uint64_t task_theory_program_identity[4];
     uint64_t task_result_identity[4];
     SemanticTrainingViewOriginRecord origin;
+    uint64_t non_actor_groups;
+    uint64_t edit_material_roots[4][4];
 };
+static_assert(sizeof(TrainingViewRowDescriptor)==656,"training row descriptor ABI");
 
 struct SemanticTrainingViewSelection {
     uint64_t status;
@@ -151,6 +154,7 @@ struct TrainingViewLaunch {
     uint64_t append_entries_bytes[2];
     uint64_t append_payloads[2];
     uint64_t append_payload_bytes[2];
+    uint64_t snapshot_bound,snapshot_archive_count,snapshot_eligible_count,snapshot_chain_head[4];
 };
 
 static_assert(sizeof(TrainingPublicationRange)==64 && sizeof(TrainingPublicationStorageEntry)==24 &&
@@ -335,6 +339,13 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         uint64_t published_rows=launch.initial_row_count;
         publication_valid=publication_valid && semantic_training_append_queue(launch,
             &append_header,&append_entries,work);
+        if (publication_valid && launch.snapshot_bound) {
+            semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 7);
+            publication_valid=launch.snapshot_bound==1
+                && append_header->count==launch.snapshot_archive_count
+                && append_header->eligible_count==launch.snapshot_eligible_count
+                && semantic_training_identity_equal(append_header->chain_head,launch.snapshot_chain_head);
+        }
         if (publication_valid) published_rows+=append_header->eligible_count;
         selection->status = !publication_valid ? 4 : (cursor < published_rows ? 0 : 1);
         selection->row_count = published_rows;
@@ -361,14 +372,29 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
             target.member_offset = member_count;
             for (uint64_t member = 0; member < source.member_count; ++member) {
                 semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
-                const uint64_t physical = member_templates[source.member_offset + member];
-                const uint64_t ordinal = physical<launch.original_slot_boundary ? physical :
-                    launch.initial_row_count+(physical-launch.original_slot_boundary);
-                if ((physical<launch.initial_row_count || physical>=launch.original_slot_boundary) &&
-                    ordinal < selection->row_count) {
-                    members[member_count++] = ordinal;
-                    semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
-                        sizeof(ordinal));
+                const uint64_t ordinal = member_templates[source.member_offset + member];
+                if (ordinal>=launch.initial_row_count || member_count>=launch.group_member_capacity) {
+                    selection->status=4;break;
+                }
+                members[member_count++] = ordinal;
+                semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(ordinal));
+            }
+            if (publication_valid && source.kind>=1 && source.kind<=5) {
+                const auto* descriptors=reinterpret_cast<const TrainingViewRowDescriptor*>(launch.descriptors);
+                for (uint64_t slot=0;slot<append_header->eligible_count;++slot) {
+                    semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+                    const uint64_t ordinal=launch.initial_row_count+slot;
+                    const auto& row=descriptors[launch.original_slot_boundary+slot];
+                    if (row.ordinal!=ordinal || row.basis!=1 || (row.non_actor_groups&~31ULL)) {
+                        selection->status=4;break;
+                    }
+                    if (row.non_actor_groups&(1ULL<<(source.kind-1))) {
+                        if (member_count>=launch.group_member_capacity) {selection->status=4;break;}
+                        members[member_count++]=ordinal;
+                        semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::CanonicalByte,
+                            sizeof(ordinal));
+                    }
                 }
             }
             target.member_count = member_count - target.member_offset;

@@ -1815,6 +1815,28 @@ fn positive_task_source_only(program: &Program) -> bool {
         && program.directives == Default::default()
 }
 
+/// Validate one authored rule record through the same positive source parser.
+/// Library framing must preserve the one-to-one relation between record order
+/// and rule order before the complete task compiler lowers predicate bindings.
+pub fn validate_positive_rule_library_record_with_allocation_owner(
+    source: &str,
+    reserve: &mut dyn FnMut(u64) -> Result<Arc<dyn Send + Sync>>,
+) -> Result<()> {
+    let mut reserve = Some(reserve);
+    let owner = parse_positive_source(source, &mut reserve)?;
+    let program = &owner.program;
+    if !positive_task_source_only(program)
+        || !program.predicates.is_empty()
+        || program.rules.len() != 1
+        || program.rules[0].is_fact()
+    {
+        return Err(XlogError::Compilation(
+            "rule library record must contain exactly one positive rule".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn positive_atom_predicate(
     atom: &Atom,
     predicates: &BTreeMap<String, u32>,

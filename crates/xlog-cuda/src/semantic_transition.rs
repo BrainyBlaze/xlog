@@ -27,6 +27,17 @@ mod late_replay;
 mod learning_phase;
 mod model_catalogue;
 pub use model_catalogue::SemanticFrozenModelContext;
+mod evaluation_fork;
+mod rule_control;
+pub use evaluation_fork::{
+    SemanticDetachedColdTaskContext, SemanticEvaluationForkOrigin,
+    SemanticEvaluationForkPreparation, SemanticEvaluationForkTarget,
+    SemanticEvaluationForkTargetRecords,
+};
+pub use rule_control::{
+    SemanticEvaluationIntervention, SemanticEvaluationInterventionPreparation,
+    SemanticEvaluationRuleLibrary,
+};
 #[cfg(feature = "semantic-policy")]
 mod model_context_continuation;
 #[cfg(feature = "semantic-policy")]
@@ -76,6 +87,7 @@ mod publication_readback;
 pub use material_output::{
     SemanticPublicationReadbackLoan, SemanticReplayMaterialOutput, SemanticReplayMaterialScratch,
 };
+pub use publication_readback::{SemanticSelectedTaskFacts, SemanticSelectedTaskFactsObservation};
 mod native_work_report;
 pub use native_work_report::SemanticColdModelWorkResult;
 mod training_arena_materialization;
@@ -581,6 +593,8 @@ fn task_candidate_better(
 /// attach an authorized task to its retained semantic session.
 #[derive(Clone, Debug)]
 pub struct SemanticTaskEvaluationSpec {
+    pub rule_library: Option<Arc<SemanticEvaluationRuleLibrary>>,
+    pub evaluation_intervention: Option<SemanticEvaluationIntervention>,
     /// Original statement records in the retained admission, in observer order.
     pub statement_records: Vec<u32>,
     /// Original logical/reference or coding/verification ground, fixed before draw.
@@ -938,6 +952,7 @@ fn task_content_identity(
     observation: &SemanticTaskObservation,
     editable: Option<&crate::SemanticProgramAdmission>,
     task_ground: &SemanticTaskGround,
+    rule_library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> SemanticTaskContentIdentity {
     let append_bytes = |hash: &mut Sha256, bytes: &[u8]| {
         hash.update((bytes.len() as u64).to_le_bytes());
@@ -966,6 +981,11 @@ fn task_content_identity(
     theory_program.update(schema_generation.as_bytes());
     theory_program.update(b"xlog.semantic.task-ground.v2\0");
     theory_program.update(task_ground.code().to_le_bytes());
+    if let Some(library) = rule_library {
+        theory_program.update(b"xlog.semantic.frozen-rule-library.v1\0");
+        theory_program.update(library.digest().as_bytes());
+        theory_program.update(library.binding().as_bytes());
+    }
     theory_program.update((task_ground.bindings().len() as u64).to_le_bytes());
     for binding in task_ground.bindings() {
         for word in binding.words() {
@@ -1079,6 +1099,13 @@ impl TaskEvaluationBinding {
     }
 
     pub(crate) fn identity(&self) -> Identity256 {
+        self.identity_with_intervention(self.spec.evaluation_intervention)
+    }
+
+    fn identity_with_intervention(
+        &self,
+        intervention: Option<SemanticEvaluationIntervention>,
+    ) -> Identity256 {
         let mut hash = Sha256::new();
         hash.update(if self.spec.program.editable_program().is_some() {
             b"xlog.semantic.task-evaluation.v12\0".as_slice()
@@ -1087,6 +1114,16 @@ impl TaskEvaluationBinding {
         });
         hash.update(self.admission_identity.as_bytes());
         hash.update(self.schema_generation.as_bytes());
+        hash.update(b"xlog.semantic.rule-control.v1\0");
+        hash.update([u8::from(intervention.is_some())]);
+        hash.update(
+            (intervention.unwrap_or(SemanticEvaluationIntervention::Structural) as u64)
+                .to_le_bytes(),
+        );
+        if let Some(library) = &self.spec.rule_library {
+            hash.update(library.digest().as_bytes());
+            hash.update(library.binding().as_bytes());
+        }
         // Keep source occurrence and explicit selection order separate from
         // the distinct original support records consumed by the device policy.
         hash.update((self.spec.statement_records.len() as u64).to_le_bytes());
@@ -1187,6 +1224,7 @@ impl TaskEvaluationBinding {
             &self.observation,
             self.spec.program.editable_program(),
             &self.spec.task_ground,
+            self.spec.rule_library.as_deref(),
         )
     }
 
@@ -1197,6 +1235,7 @@ impl TaskEvaluationBinding {
         editable: Option<&crate::SemanticProgramAdmission>,
         observation: SemanticTaskObservation,
         task_ground: &SemanticTaskGround,
+        rule_library: Option<&SemanticEvaluationRuleLibrary>,
     ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
         if observation.program_source.is_empty()
@@ -1229,6 +1268,7 @@ impl TaskEvaluationBinding {
             &observation,
             editable,
             task_ground,
+            rule_library,
         );
         Ok((content, observation.actual_truths))
     }
@@ -1307,7 +1347,14 @@ impl TaskEvaluationBinding {
                 .and_then(|words| count.checked_add(words))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         }
-        Ok(count)
+        count
+            .checked_add(
+                self.spec
+                    .rule_library
+                    .as_ref()
+                    .map_or(8, |library| library.word_count()),
+            )
+            .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
     /// The exact-capacity result plus its original requirement encoder and
@@ -1329,6 +1376,14 @@ impl TaskEvaluationBinding {
     }
 
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
+        self.words_with_intervention(owner, self.spec.evaluation_intervention)
+    }
+
+    fn words_with_intervention(
+        &self,
+        owner: u64,
+        intervention: Option<SemanticEvaluationIntervention>,
+    ) -> Vec<u64> {
         let count = self
             .word_count()
             .expect("immutable task binding retains its finite canonical encoding");
@@ -1340,8 +1395,10 @@ impl TaskEvaluationBinding {
             .map(|level| level.goals.len())
             .sum::<usize>();
         let mut words = Vec::with_capacity(count);
-        words.extend([9, owner]);
-        words.extend(identity_words(*self.identity().as_bytes()));
+        words.extend([10, owner]);
+        words.extend(identity_words(
+            *self.identity_with_intervention(intervention).as_bytes(),
+        ));
         words.extend([
             self.statements.len() as u64,
             self.spec.task_ground.bindings().len() as u64,
@@ -1412,6 +1469,21 @@ impl TaskEvaluationBinding {
         words.extend(requirements);
         if let Some(program) = program {
             program.visit_words(|word| words.push(word));
+        }
+        let mode = intervention.unwrap_or(SemanticEvaluationIntervention::Structural);
+        if let Some(library) = &self.spec.rule_library {
+            library.visit_control_words(mode, |word| words.push(word));
+        } else {
+            words.extend([
+                rule_control::RULE_CONTROL_MAGIC,
+                1,
+                mode as u64,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]);
         }
         debug_assert_eq!(words.len(), count);
         words
@@ -1745,6 +1817,7 @@ struct ActionCodebooks {
     input_cells: usize,
     model_catalogue: Option<(Arc<model_catalogue::FrozenModelCatalogue>, usize)>,
     model_projection_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
+    derivation_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
 }
 
 impl ActionCodebooks {
@@ -2253,6 +2326,7 @@ impl ActionCodebooks {
             input_cells,
             model_catalogue: None,
             model_projection_reservation: None,
+            derivation_reservation: None,
         })
     }
 
@@ -2260,6 +2334,7 @@ impl ActionCodebooks {
         words: &[u64],
         has_program: bool,
     ) -> Result<([SemanticComponent; COMPONENT_COUNT], usize), SemanticTransitionError> {
+        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
         if words.len() < model_catalogue::HEADER_WORDS
             || words[39] != u64::from(has_program)
             || [1, 3, 5, 7]
@@ -2746,6 +2821,7 @@ pub struct SemanticTensorInput {
 /// Python-side delivery owner is retired; it grants no publication authority.
 pub struct SemanticGradientDeliveryBinding {
     _tensors: Vec<PreparedSemanticTensor>,
+    _reservation: Option<SemanticReplayMaterialReservation>,
 }
 
 #[derive(Clone, Copy)]
@@ -3134,7 +3210,7 @@ impl SemanticNonterminalIntentBinding {
 pub struct SemanticReplayAppendBinding {
     pub row_capacity: usize,
     pub raw_byte_capacity: usize,
-    pub append_groups: Vec<Vec<u64>>,
+    pub append_capacity: usize,
     pub metadata_bytes: u64,
     pub max_material_bytes: u64,
     pub total_material_bytes: u64,
@@ -3146,8 +3222,8 @@ impl SemanticReplayAppendBinding {
     pub(crate) fn validate(&self) -> Result<(), SemanticTransitionError> {
         if self.row_capacity == 0
             || self.raw_byte_capacity == 0
-            || self.append_groups.is_empty()
-            || self.append_groups.len() >= self.row_capacity
+            || self.append_capacity == 0
+            || self.append_capacity >= self.row_capacity
             || self.metadata_bytes == 0
             || self.max_material_bytes == 0
             || self.total_material_bytes == 0
@@ -6637,6 +6713,9 @@ trait PublicationByteStorage:
     fn reserve_decode(&self, _bytes: usize) -> Result<(), SemanticTransitionError> {
         Ok(())
     }
+    fn evaluation_origin_budget(&self) -> Option<&SemanticReplayMaterialBudget> {
+        None
+    }
 }
 
 impl PublicationByteStorage for Vec<u8> {
@@ -7264,6 +7343,7 @@ pub struct SemanticReplayStateMaterialProof {
 }
 
 struct ReplayStateMaterialProofContents {
+    rule_library: Option<Arc<SemanticEvaluationRuleLibrary>>,
     header: PublicationHeader,
     contract: PublicationContract,
     model_memory: ModelMemoryGeometry,
@@ -7271,6 +7351,7 @@ struct ReplayStateMaterialProofContents {
     directory: Vec<PublicationRange>,
     allocation_geometry: Vec<PublicationAllocationGeometry>,
     codebook_header: [u64; model_catalogue::HEADER_WORDS],
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
     continuation_blocks: Option<usize>,
     model_contract: SemanticReplayLoadedMaterial,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
@@ -7281,6 +7362,9 @@ struct ReplayStateMaterialProofContents {
 }
 
 impl SemanticReplayStateMaterialProof {
+    pub fn evaluation_rule_library(&self) -> Option<Arc<SemanticEvaluationRuleLibrary>> {
+        self.owner.rule_library.clone()
+    }
     pub fn original_identity(&self) -> SemanticPublishedIdentity {
         let header = self.owner.header;
         SemanticPublishedIdentity {
@@ -7463,6 +7547,18 @@ impl SemanticReplayStateMaterialProof {
         }
         Ok(SemanticReplayStateMaterialProof {
             owner: Arc::new(ReplayStateMaterialProofContents {
+                rule_library: material
+                    .ranges
+                    .iter()
+                    .find(|range| (range.range.role, range.range.index) == (48, 0))
+                    .map(|range| {
+                        SemanticEvaluationRuleLibrary::from_codebook_frame(
+                            range.bytes.as_ref(),
+                            &budget,
+                        )
+                    })
+                    .transpose()?
+                    .flatten(),
                 header: material.bank.header,
                 contract: material.contract,
                 model_memory: material.model_memory.clone(),
@@ -7481,9 +7577,16 @@ impl SemanticReplayStateMaterialProof {
                     })
                     .collect(),
                 codebook_header,
+                evaluation_fork: material.evaluation_fork.clone(),
                 continuation_blocks,
                 model_contract,
-                learning_phases: material.learning_phases.clone(),
+                learning_phases: {
+                    let mut phases = material.learning_phases.clone();
+                    for phase in &mut phases {
+                        phase.detach_admission_carrier()?;
+                    }
+                    phases
+                },
                 source_digest,
                 encoded_bytes,
                 budget,
@@ -7610,7 +7713,6 @@ impl SemanticReplayLoadedMaterial {
         training_seed: &str,
         task_content: Option<SemanticTaskContentIdentity>,
         origin: Option<SemanticTrainingViewOrigin>,
-        edit_demonstration_material_roots: Option<[Identity256; 4]>,
     ) -> Result<SemanticReplayTrainingViewRow, SemanticTransitionError> {
         if self.decoded.is_some() {
             return Err(publication_input_error(
@@ -7637,7 +7739,7 @@ impl SemanticReplayLoadedMaterial {
             training_seed: training_seed.to_owned(),
             task_content,
             origin,
-            edit_demonstration_material_roots,
+            edit_demonstration: None,
             bytes: SemanticReplayTrainingViewBytes {
                 material: self,
                 _metadata: metadata,
@@ -7847,6 +7949,9 @@ impl PartialEq<[u8]> for PublicationMaterialBytes {
 }
 
 impl PublicationByteStorage for PublicationMaterialBytes {
+    fn evaluation_origin_budget(&self) -> Option<&SemanticReplayMaterialBudget> {
+        self.budget()
+    }
     fn from_owned(bytes: Vec<u8>) -> Self {
         bytes.into()
     }
@@ -8435,6 +8540,203 @@ fn publication_action_receipts_digest<B: PublicationByteStorage>(
     publication_action_receipts_digest_bytes(&codebook.bytes, receipts)
 }
 
+fn validate_frozen_codebook_frame(
+    word_count: usize,
+    word: impl Fn(usize) -> u64,
+) -> Result<Option<rule_control::FrozenRuleLibraryFrame>, SemanticTransitionError> {
+    let invalid =
+        || publication_input_error("action codebook changed its complete frozen context frame");
+    if word_count < model_catalogue::HEADER_WORDS {
+        return Err(invalid());
+    }
+    if word(40) == 0 {
+        return if word(41) == 0 && word(42) == 0 && word(43) == 0 {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    let start = usize::try_from(word(40) / 8).map_err(|_| invalid())?;
+    let length = usize::try_from(word(41) / 8).map_err(|_| invalid())?;
+    if word(40) % 8 != 0
+        || word(41) % 8 != 0
+        || length < 4
+        || start.checked_add(length) != Some(word_count)
+        || start < model_catalogue::HEADER_WORDS
+        || word(start) != 0x584c4f474d4f444c
+        || word(start + 1) != 3
+        || word(start + 2) != word(37)
+        || word(start + 3) != word(43)
+    {
+        return Err(invalid());
+    }
+    let members = usize::try_from(word(43)).map_err(|_| invalid())?;
+    let selected = usize::try_from(word(42))
+        .map_err(|_| invalid())?
+        .checked_sub(1)
+        .ok_or_else(invalid)?;
+    if members < 2
+        || selected >= members
+        || members > (length - 4) / model_catalogue::FRAME_MEMBER_WORDS
+    {
+        return Err(invalid());
+    }
+    let mut cursor = start + 4;
+    let mut counts = [1u64; 4];
+    let mut owned = [(0u64, 0u64); 4];
+    let mut selected_library = None;
+    for member in 0..members {
+        if cursor
+            .checked_add(model_catalogue::FRAME_MEMBER_WORDS)
+            .is_none_or(|end| end > word_count)
+        {
+            return Err(invalid());
+        }
+        let has_program = word(cursor + 12);
+        let recipe_words = usize::try_from(word(cursor + 17)).map_err(|_| invalid())?;
+        let metadata = cursor;
+        let library_present = word(cursor + 18);
+        let declaration_bytes = usize::try_from(word(cursor + 27)).map_err(|_| invalid())?;
+        let library_count = usize::try_from(word(cursor + 28)).map_err(|_| invalid())?;
+        cursor += model_catalogue::FRAME_MEMBER_WORDS;
+        let end = cursor
+            .checked_add(recipe_words)
+            .filter(|end| *end <= word_count)
+            .ok_or_else(invalid)?;
+        if recipe_words < model_catalogue::HEADER_WORDS
+            || has_program > 1
+            || word(cursor + 39) != has_program
+            || (40..44).any(|index| word(cursor + index) != 0)
+            || [14, 15, 16, 21, 22, 23, 24]
+                .into_iter()
+                .any(|index| word(cursor + index) != 0)
+        {
+            return Err(invalid());
+        }
+        for (table, width) in [10usize, 6, 3, 18].into_iter().enumerate() {
+            let count = word(cursor + 2 * table + 1);
+            let table_start = usize::try_from(word(cursor + 2 * table)).map_err(|_| invalid())?;
+            if count == 0
+                || count > 65536
+                || table_start < model_catalogue::HEADER_WORDS
+                || usize::try_from(count)
+                    .ok()
+                    .and_then(|count| count.checked_mul(width))
+                    .and_then(|size| table_start.checked_add(size))
+                    .is_none_or(|end| end > recipe_words)
+            {
+                return Err(invalid());
+            }
+            let begin = counts[table];
+            counts[table] = begin
+                .checked_add(count - 1)
+                .filter(|count| *count <= 65536)
+                .ok_or_else(invalid)?;
+            if member == selected {
+                owned[table] = (begin, counts[table]);
+            }
+        }
+        let payload = word(cursor + 8);
+        if payload % 8 != 0
+            || payload / 8 > recipe_words as u64
+            || word(cursor + 9) != recipe_words as u64 * 8 - payload
+        {
+            return Err(invalid());
+        }
+        let rule_start = end
+            .checked_add(declaration_bytes.div_ceil(8))
+            .ok_or_else(invalid)?;
+        let library_end = library_count
+            .checked_mul(25)
+            .and_then(|words| rule_start.checked_add(words))
+            .filter(|end| *end <= word_count)
+            .ok_or_else(invalid)?;
+        if library_present == 0 {
+            if (19..29).any(|index| word(metadata + index) != 0) {
+                return Err(invalid());
+            }
+        } else if library_present != 1
+            || has_program == 0
+            || declaration_bytes == 0
+            || library_count != rule_control::RULE_LIBRARY_COUNT
+        {
+            return Err(invalid());
+        } else {
+            let mut declaration_hash = Sha256::new();
+            for index in 0..declaration_bytes {
+                declaration_hash.update([(word(end + index / 8) >> (8 * (index % 8))) as u8]);
+            }
+            if declaration_bytes % 8 != 0
+                && word(rule_start - 1) >> (8 * (declaration_bytes % 8)) != 0
+            {
+                return Err(invalid());
+            }
+            let digest: [u8; 32] = declaration_hash.finalize().into();
+            let common_digest = Identity256::from_bytes(digest);
+            let mut binding_hash = Sha256::new();
+            binding_hash.update(b"xlog.semantic.fixed-rule-library.v1\0");
+            binding_hash.update(digest);
+            for index in 0..4 {
+                if word(metadata + 19 + index)
+                    != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap())
+                {
+                    return Err(invalid());
+                }
+            }
+            for index in rule_start..library_end {
+                if word(index) > u32::MAX as u64 {
+                    return Err(invalid());
+                }
+                binding_hash.update(word(index).to_le_bytes());
+            }
+            let digest: [u8; 32] = binding_hash.finalize().into();
+            for index in 0..4 {
+                if word(metadata + 23 + index)
+                    != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap())
+                {
+                    return Err(invalid());
+                }
+            }
+            if member == selected {
+                selected_library = Some(rule_control::FrozenRuleLibraryFrame {
+                    declaration_begin: end * 8,
+                    declaration_bytes,
+                    rule_word_begin: rule_start,
+                    digest: common_digest,
+                    binding: Identity256::from_bytes(digest),
+                });
+            }
+        }
+        cursor = library_end;
+    }
+    if cursor != word_count {
+        return Err(invalid());
+    }
+    for table in 0..4 {
+        if word(2 * table + 1) != counts[table]
+            || word(29 + 2 * table) != owned[table].0
+            || word(30 + 2 * table) != owned[table].1
+        {
+            return Err(invalid());
+        }
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"xlog.semantic.immutable-model-catalogue.v3\0");
+    hash.update(CATALOGUE_DIGEST);
+    for index in start..word_count {
+        hash.update(word(index).to_le_bytes());
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    for index in 0..4 {
+        if word(25 + index)
+            != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap())
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(selected_library)
+}
+
 fn publication_action_receipts_digest_bytes(
     bytes: &[u8],
     receipts: &[SemanticTransitionReceipt],
@@ -8446,6 +8748,7 @@ fn publication_action_receipts_digest_bytes(
     }
     let word =
         |index: usize| u64::from_le_bytes(bytes[index * 8..(index + 1) * 8].try_into().unwrap());
+    validate_frozen_codebook_frame(bytes.len() / 8, word)?;
     let (offset, length) = (word(8), word(9));
     if offset % 8 != 0
         || offset > bytes.len() as u64
@@ -8627,6 +8930,8 @@ fn validated_rule_receipt(
     choices: &[u32; 18],
     previous_choices: Option<&[u32; 18]>,
     receipt: &[u64; 42],
+    intervention: Option<SemanticEvaluationIntervention>,
+    library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<
     (
         SemanticDecodedRuleInsertion,
@@ -8652,7 +8957,12 @@ fn validated_rule_receipt(
         .transpose()?
         .unwrap_or([0; 10]);
     if receipt[0] != 0
-        || receipt[1] != 3
+        || receipt[1]
+            != if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
+                4
+            } else {
+                3
+            }
         || receipt[2] != lane as u64 + 1
         || receipt[3] != slot as u64
         || receipt[4..8] != identity_words(*task_identity.as_bytes())
@@ -8662,8 +8972,37 @@ fn validated_rule_receipt(
         || receipt[23] != program.initial_rules.len() as u64
         || receipt[24] != u64::from(previous.is_some())
         || receipt[25..35] != previous_fields
-        || receipt[35..].iter().any(|&word| word != 0)
     {
+        return Err(mismatch());
+    }
+    if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
+        let library = library.ok_or_else(mismatch)?;
+        let current = library
+            .rules()
+            .iter()
+            .position(|rule| *rule == decoded.rule)
+            .ok_or_else(mismatch)?;
+        let prior = previous
+            .map(|previous| {
+                library
+                    .rules()
+                    .iter()
+                    .position(|rule| *rule == previous)
+                    .ok_or_else(mismatch)
+            })
+            .transpose()?;
+        let allowed = (1u64 << library.rules().len()) - 1;
+        if receipt[35] != current as u64
+            || receipt[36] != prior.map_or(0, |index| index as u64 + 1)
+            || receipt[37] & !allowed != 0
+            || receipt[38] != receipt[37] ^ (1u64 << current)
+            || receipt[39] != library.rules().len() as u64
+            || receipt[40] != 1
+            || receipt[41] != 0
+        {
+            return Err(mismatch());
+        }
+    } else if receipt[35..].iter().any(|word| *word != 0) {
         return Err(mismatch());
     }
     Ok((decoded, previous))
@@ -8689,12 +9028,14 @@ fn completed_theory_delta_for_slot(
     lane_admission: &[u64; 42],
     component_receipts: &[SemanticTransitionReceipt],
     lane_refusal: u64,
+    intervention: Option<SemanticEvaluationIntervention>,
+    library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<Option<SemanticCompletedTheoryDeltaMaterial>, SemanticTransitionError> {
     if lane >= 2
         || slot >= 2
         || component_receipts.len() != 18
         || hard_decode[0] != 0
-        || hard_decode[1] > 3
+        || hard_decode[1] > 4
         || lane_refusal > 4
     {
         return Err(SemanticTransitionError::ObservationMismatch);
@@ -8705,7 +9046,7 @@ fn completed_theory_delta_for_slot(
         }
         return Ok(None);
     }
-    if hard_decode[1] == 3 {
+    if hard_decode[1] == 3 || hard_decode[1] == 4 {
         let program = program.ok_or(SemanticTransitionError::ObservationMismatch)?;
         let (decoded, previous) = validated_rule_receipt(
             codebooks,
@@ -8716,6 +9057,8 @@ fn completed_theory_delta_for_slot(
             choices,
             previous_choices,
             hard_decode,
+            intervention,
+            library,
         )?;
         let previous_fields = previous.map(semantic_program_rule_words).unwrap_or([0; 25]);
         let program_binding = ActionCodebooks::program_binding(program);
@@ -8731,8 +9074,33 @@ fn completed_theory_delta_for_slot(
             program_binding
         };
         let ordinal = (lane * 2 + slot) as u64;
-        let delta =
-            completed_action_child_material(owner, b"theory-rule-delta", ordinal, &decoded.bytes);
+        let activation = hard_decode[1] == 4;
+        let mut delta_bytes = decoded.bytes.clone();
+        if activation {
+            delta_bytes = b"XLOG-FIXED-RULE-ACTIVATION\0".to_vec();
+            delta_bytes.extend_from_slice(
+                library
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .binding()
+                    .as_bytes(),
+            );
+            for word in &hard_decode[35..41] {
+                material_u64(&mut delta_bytes, *word);
+            }
+            for word in semantic_program_rule_words(decoded.rule) {
+                material_u64(&mut delta_bytes, word);
+            }
+        }
+        let delta = completed_action_child_material(
+            owner,
+            if activation {
+                b"fixed-rule-activation"
+            } else {
+                b"theory-rule-delta"
+            },
+            ordinal,
+            &delta_bytes,
+        );
         let mut payload = Vec::new();
         payload.extend_from_slice(theory_generation.as_bytes());
         payload.extend_from_slice(task_identity.as_bytes());
@@ -8754,7 +9122,11 @@ fn completed_theory_delta_for_slot(
             &payload,
         );
         return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
-            kind: "rule",
+            kind: if activation {
+                "rule-activation"
+            } else {
+                "rule"
+            },
             delta,
             theory_generation: predecessor_semantic_root_digest,
             verdict: if lane_refusal == 0 {
@@ -8828,6 +9200,8 @@ fn validate_program_query_receipts(
     ground: &[u8],
     prior_rule_count: u64,
     candidate_facts: &[SemanticTaskFacts; 3],
+    intervention: Option<SemanticEvaluationIntervention>,
+    library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<(), SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
     let expected_queries = program.queries.len() as u64
@@ -8846,6 +9220,15 @@ fn validate_program_query_receipts(
         return Err(mismatch());
     }
     let mut inserted: [Vec<crate::SemanticProgramRule>; 2] = std::array::from_fn(|_| Vec::new());
+    let fixed = intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation);
+    if intervention == Some(SemanticEvaluationIntervention::NoEdit)
+        && edits
+            .iter()
+            .flatten()
+            .any(|choices| choices.iter().any(|value| *value != 0))
+    {
+        return Err(mismatch());
+    }
     for (lane, actions) in edits.iter().enumerate() {
         for choices in actions {
             match (choices[0], choices[1]) {
@@ -8856,6 +9239,70 @@ fn validate_program_query_receipts(
                 _ => return Err(mismatch()),
             }
         }
+    }
+    let mut activity = [0u64; 3];
+    let mut library_indices = [[0u64; 2]; 2];
+    if fixed {
+        let library = library.ok_or_else(mismatch)?;
+        if layout.library_count != library.rules().len() {
+            return Err(mismatch());
+        }
+        activity[0] = layout.query(ground, 0, 0)?.receipt[14];
+        let allowed = (1u64 << library.rules().len()) - 1;
+        if activity[0] & !allowed != 0 {
+            return Err(mismatch());
+        }
+        for lane in 0..2 {
+            activity[lane + 1] = activity[0];
+            let mut count = 0;
+            for slot in 0..2 {
+                if edits[lane][slot][0] == 1 {
+                    let rule = codebooks
+                        .decoded_rule_insertion(program, &edits[lane][slot])?
+                        .rule;
+                    let index = library
+                        .rules()
+                        .iter()
+                        .position(|entry| *entry == rule)
+                        .ok_or_else(mismatch)?;
+                    let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
+                    validated_rule_receipt(
+                        codebooks,
+                        program,
+                        task_identity,
+                        lane,
+                        slot,
+                        &edits[lane][slot],
+                        (slot == 1).then_some(&edits[lane][0]),
+                        receipt,
+                        intervention,
+                        Some(library),
+                    )?;
+                    if receipt[37] != activity[lane + 1] {
+                        return Err(mismatch());
+                    }
+                    activity[lane + 1] ^= 1u64 << index;
+                    library_indices[lane][count] = index as u64 + 1;
+                    count += 1;
+                }
+            }
+            if layout.rule_activity(ground, lane + 1)? != activity[lane + 1] {
+                return Err(mismatch());
+            }
+        }
+        let winner = usize::try_from(state.task_evaluation.winner)
+            .ok()
+            .filter(|winner| *winner < 3)
+            .ok_or_else(mismatch)?;
+        if layout.rule_activity(ground, 0)? != activity[winner] {
+            return Err(mismatch());
+        }
+    } else if (0..3).any(|slot| {
+        layout
+            .rule_activity(ground, slot)
+            .is_ok_and(|mask| mask != 0)
+    }) {
+        return Err(mismatch());
     }
     let task_words = identity_words(*task_identity.as_bytes());
     let binding_words = identity_words(*codebooks.binding.digest.as_bytes());
@@ -8901,16 +9348,31 @@ fn validate_program_query_receipts(
         }
         for (query, receipt) in receipts.iter().enumerate() {
             let mut expected = [0u64; 42];
-            expected[1] = 0x5850524f47515532;
+            expected[1] = if fixed {
+                0x5850524f47515533
+            } else {
+                0x5850524f47515532
+            };
             expected[2] = facts.truth[query];
             expected[3] = slot as u64;
             expected[4] = query as u64;
             expected[5..9].copy_from_slice(&task_words);
             expected[9..13].copy_from_slice(&binding_words);
             expected[13] = rules.len() as u64;
-            for (edit, rule) in rules.iter().enumerate() {
-                expected[14 + edit * 10..24 + edit * 10]
-                    .copy_from_slice(&semantic_generated_rule_receipt_words(*rule, program)?);
+            if fixed {
+                let library = library.ok_or_else(mismatch)?;
+                expected[14] = activity[0];
+                expected[15] = activity[slot];
+                expected[16] = library.rules().len() as u64;
+                expected[17..21].copy_from_slice(&identity_words(*library.binding().as_bytes()));
+                if slot != 0 {
+                    expected[21..23].copy_from_slice(&library_indices[slot - 1]);
+                }
+            } else {
+                for (edit, rule) in rules.iter().enumerate() {
+                    expected[14 + edit * 10..24 + edit * 10]
+                        .copy_from_slice(&semantic_generated_rule_receipt_words(*rule, program)?);
+                }
             }
             let query_fact = program.queries[query];
             expected[34..37].copy_from_slice(&[
@@ -8927,9 +9389,14 @@ fn validate_program_query_receipts(
         }
         if slot != 0 {
             let baseline = &candidate_facts[0];
-            let derived = metrics[2]
-                .checked_sub(layout.query(ground, 0, 0)?.receipt[39])
-                .ok_or_else(mismatch)?;
+            let baseline_derived = layout.query(ground, 0, 0)?.receipt[39];
+            let derived = if fixed {
+                metrics[2].saturating_sub(baseline_derived)
+            } else {
+                metrics[2]
+                    .checked_sub(baseline_derived)
+                    .ok_or_else(mismatch)?
+            };
             let truth_changes = facts
                 .truth
                 .iter()
@@ -10382,6 +10849,7 @@ struct PublicationMaterialStorage<B> {
     ranges: Vec<PublicationMaterialRangeStorage<B>>,
     graph: SemanticRootMaterial,
     learning_phases: Vec<SemanticLearningPhaseRecord>,
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
 }
 
 impl OwnedPublicationMaterial {
@@ -10816,6 +11284,8 @@ fn publication_material_runtime() -> [u8; 32] {
         #[cfg(feature = "semantic-policy")]
         hash.update(include_bytes!("semantic_transition/model_evaluation.rs"));
         hash.update(include_bytes!("semantic_transition/model_catalogue.rs"));
+        hash.update(include_bytes!("semantic_transition/evaluation_fork.rs"));
+        hash.update(include_bytes!("semantic_transition/rule_control.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         hash.update(include_bytes!("../kernels/semantic_conditional_policy.cuh"));
         hash.update(include_bytes!("../kernels/semantic_program.cuh"));
@@ -11193,6 +11663,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
                 .map(|range| (range.range, range.capacity, Some(range.bytes.as_ref()))),
             self.ranges.len(),
             &self.learning_phases,
+            self.evaluation_fork.as_ref(),
             write,
         )
     }
@@ -11211,7 +11682,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         graph: &SemanticRootMaterial,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-PUBLICATION-MATERIAL\0".to_vec();
-        material_u32(&mut bytes, 4);
+        material_u32(&mut bytes, 9);
         bytes.extend_from_slice(&publication_material_runtime());
         material_bytes(
             &mut bytes,
@@ -11243,6 +11714,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         ranges: impl Iterator<Item = (PublicationRange, usize, Option<&'a [u8]>)>,
         range_count: usize,
         learning_phases: &[SemanticLearningPhaseRecord],
+        evaluation_fork: Option<&SemanticEvaluationForkOrigin>,
         mut write: impl FnMut(&[u8]) -> Result<(), SemanticTransitionError>,
     ) -> Result<(), SemanticTransitionError> {
         let mut bytes = Vec::new();
@@ -11271,7 +11743,8 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         }
         bytes.clear();
         learning_phase::encode_history(learning_phases, &mut bytes)?;
-        write(&bytes)
+        write(&bytes)?;
+        SemanticEvaluationForkOrigin::write(evaluation_fork, write)
     }
 
     fn write_encoded_field(
@@ -11444,6 +11917,17 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             let admission = reader.bytes().map_err(SemanticTransitionError::Semantic)?;
             add(1, B::learning_admission_decode_bound(admission.len())?)?;
         }
+        match reader.u32().map_err(SemanticTransitionError::Semantic)? {
+            0 => {}
+            tag @ (1 | 2) => {
+                let restriction_bytes = if tag == 1 { 8 + 32 } else { 0 };
+                reader
+                    .take(72 + 32 + 32 + 8 + 32 + 8 + restriction_bytes + 4 * 8 + 8 + 32)
+                    .map_err(SemanticTransitionError::Semantic)?;
+                add(1, size_of::<SemanticEvaluationForkOrigin>())?;
+            }
+            _ => return Err(publication_input_error("invalid evaluation fork origin")),
+        }
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         Ok(bound)
     }
@@ -11471,7 +11955,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let mut reader = SemanticMaterialReader::new(bytes);
         if reader.take(26).map_err(SemanticTransitionError::Semantic)?
             != b"XLOG-PUBLICATION-MATERIAL\0"
-            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 4
+            || reader.u32().map_err(SemanticTransitionError::Semantic)? != 9
             || reader.take(32).map_err(SemanticTransitionError::Semantic)?
                 != publication_material_runtime()
         {
@@ -11588,6 +12072,8 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
         let learning_phases = learning_phase::decode_history(&mut reader, |admission| {
             Self::decoded_byte_view(&owner, bytes, admission)?.into_learning_phase_admission()
         })?;
+        let evaluation_fork =
+            SemanticEvaluationForkOrigin::decode(&mut reader, owner.evaluation_origin_budget())?;
         reader.finish().map_err(SemanticTransitionError::Semantic)?;
         let material = Self {
             bank,
@@ -11600,6 +12086,7 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             ranges,
             graph,
             learning_phases,
+            evaluation_fork,
         };
         material.validate_mode(mode)?;
 
@@ -11936,6 +12423,34 @@ impl<B: PublicationByteStorage> PublicationMaterialStorage<B> {
             }
         }
         validate_replay_append_records(contract, &self.ranges)?;
+        let codebook = self
+            .ranges
+            .iter()
+            .find(|item| (item.range.role, item.range.index) == (48, 0))
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if !codebook.bytes.len().is_multiple_of(8) {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        validate_frozen_codebook_frame(codebook.bytes.len() / 8, |index| {
+            u64::from_le_bytes(codebook.bytes[index * 8..index * 8 + 8].try_into().unwrap())
+        })?;
+        if let Some(origin) = &self.evaluation_fork {
+            let word = |index: usize| {
+                u64::from_le_bytes(codebook.bytes[index * 8..index * 8 + 8].try_into().unwrap())
+            };
+            if word(42)
+                != (origin.member as u64)
+                    .checked_add(1)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?
+                || word(43) <= origin.member as u64
+                || codebook.bytes[25 * 8..29 * 8] != *origin.catalogue.as_bytes()
+                || self.contract.task_identity == origin.source_task
+            {
+                return Err(publication_input_error(
+                    "evaluation origin differs from its original frozen target task",
+                ));
+            }
+        }
         self.model_numerical_mode()?;
         Ok(())
     }
@@ -16923,7 +17438,7 @@ fn initial_replay_append_records(
     };
     let (entry_capacity, payload_capacity) = if let Some(binding) = binding {
         binding.validate()?;
-        (binding.append_groups.len(), binding.payload_capacity_bytes)
+        (binding.append_capacity, binding.payload_capacity_bytes)
     } else {
         (0, 0)
     };
@@ -19843,6 +20358,7 @@ pub struct SemanticTransitionSession {
     // later binding must reproduce this exact executed task content.
     cold_content: Option<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>)>,
     cold_statement_records: Vec<u32>,
+    cold_observation_records: Vec<u32>,
     cold_statement_reservation: Option<SemanticReplayMaterialReservation>,
     cold_observer_entered: bool,
     cold_observer_completed: bool,
@@ -19865,6 +20381,12 @@ pub struct SemanticTransitionSession {
     learning_phases: Vec<SemanticLearningPhaseRecord>,
     publication_uploads: Vec<(usize, PublicationPayload)>,
     state_material_restore: Option<Arc<state_restoration::OriginalStateMaterialRestore>>,
+    evaluation_context: Option<Arc<evaluation_fork::ColdEvaluationContext>>,
+    evaluation_fork: Option<SemanticEvaluationForkOrigin>,
+    model_context_preseal: Option<Arc<model_catalogue::ModelContextPreseal>>,
+    evaluation_fork_model_handoff: Option<SemanticPublishedIdentity>,
+    evaluation_fork_archive_release_blocked: bool,
+    rule_library: Option<Arc<SemanticEvaluationRuleLibrary>>,
     replay_material_budget: Option<SemanticReplayMaterialBudget>,
     publication_preparation: Option<Arc<state_restoration::OriginalPublicationPreparation>>,
     #[cfg(feature = "semantic-policy")]
@@ -23961,6 +24483,21 @@ impl SemanticTransitionSession {
         self.require_authenticated_task_observations()?;
         let external_floor = cold_capacity.external_floor()?;
         let transitions = transitions.collect::<Vec<_>>();
+        if self.evaluation_fork.is_some() {
+            self.evaluation_fork_archive_release_blocked = true;
+        }
+        if self.evaluation_fork.is_some()
+            && transitions.iter().any(|kind| {
+                !matches!(
+                    kind,
+                    SemanticTransitionKind::Proposal | SemanticTransitionKind::Recompute
+                )
+            })
+        {
+            return Err(publication_input_error(
+                "evaluation forks admit only proposal and recompute transitions",
+            ));
+        }
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
                 "a prepared segment requires frozen proposal, recompute, or update steps",
@@ -24021,6 +24558,32 @@ impl SemanticTransitionSession {
                     )
                 },
             )?))
+        };
+        #[cfg(feature = "semantic-policy")]
+        let update_rosters = if let Some((admission, _)) = admission {
+            let original = self.instruction_admission(admission)?;
+            transitions
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    if *kind == SemanticTransitionKind::Update {
+                        original
+                            .training_rosters
+                            .get(&index)
+                            .map(Arc::clone)
+                            .map(Some)
+                            .ok_or_else(|| {
+                                publication_input_error(
+                                    "Update requires its registered instruction training roster",
+                                )
+                            })
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect::<Result<Vec<_>, SemanticTransitionError>>()?
+        } else {
+            Vec::new()
         };
         #[cfg(feature = "semantic-policy")]
         let original_reader_only = if matches!(&source, PreparedSegmentSource::AdmittedPublication)
@@ -24723,15 +25286,18 @@ impl SemanticTransitionSession {
                         .as_ref()
                         .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
                     training_view: if *kind == SemanticTransitionKind::Update {
-                        Some(
-                            training_view
-                                .as_ref()
-                                .expect("validated update training-view owner")
-                                .allocate_selection_reserved(
-                                    &mut reservation,
-                                    training_origins.clone(),
-                                )?,
-                        )
+                        let mut selected = training_view
+                            .as_ref()
+                            .expect("validated update training-view owner")
+                            .allocate_selection_reserved(
+                                &mut reservation,
+                                training_origins.clone(),
+                            )?;
+                        #[cfg(feature = "semantic-policy")]
+                        if let Some(Some(roster)) = update_rosters.get(ordinal) {
+                            selected.bind_training_roster(Arc::clone(roster))?;
+                        }
+                        Some(selected)
                     } else {
                         None
                     },
@@ -28004,6 +28570,14 @@ impl SemanticTransitionSession {
             .as_ref()
             .and_then(|(task, _)| task.spec().program.editable_program())
             .cloned();
+        let intervention = self
+            .task
+            .as_ref()
+            .and_then(|(task, _)| task.spec.evaluation_intervention);
+        let rule_library = self
+            .task
+            .as_ref()
+            .and_then(|(task, _)| task.spec.rule_library.clone());
         if let Some(program) = task_program.as_ref() {
             let edits = std::array::from_fn(|lane| lanes[lane].edit_actions);
             if let Err(error) = validate_program_query_receipts(
@@ -28016,6 +28590,8 @@ impl SemanticTransitionSession {
                 &query_ground,
                 prior_rule_count,
                 &task_facts,
+                intervention,
+                rule_library.as_deref(),
             ) {
                 self.poisoned = true;
                 return Err(error);
@@ -28040,6 +28616,8 @@ impl SemanticTransitionSession {
                     &state.semantic_receipts[3 + lane * 3],
                     &receipts[begin..begin + 18],
                     state.task_evaluation.lane_refusal[lane],
+                    intervention,
+                    rule_library.as_deref(),
                 );
                 match projected {
                     Ok(Some(delta)) => theory_deltas.push(delta),
@@ -29289,7 +29867,10 @@ impl SemanticTransitionSession {
             .expect("checked gradient-delivery step")
             .consumer_streams
             .insert(consumer_stream);
-        Ok(SemanticGradientDeliveryBinding { _tensors: imported })
+        Ok(SemanticGradientDeliveryBinding {
+            _tensors: imported,
+            _reservation: None,
+        })
     }
 
     /// Attach actual original output owners as they are born during recording.
@@ -35899,6 +36480,12 @@ impl SemanticTransitionSession {
             add(phase.recipe().len(), 5 * 8)?;
             add(phase.admission().len(), 1)?;
         }
+        add(
+            1,
+            self.evaluation_fork
+                .as_ref()
+                .map_or(Ok(4), SemanticEvaluationForkOrigin::encoded_bytes)?,
+        )?;
         Ok(extent)
     }
 
@@ -36637,6 +37224,7 @@ impl SemanticTransitionSession {
             ranges,
             graph,
             learning_phases: original.learning_phases.clone(),
+            evaluation_fork: self.evaluation_fork.clone(),
         };
         (|| {
             if original.control.is_some() {
@@ -38151,6 +38739,19 @@ impl SemanticTransitionSession {
         kind: SemanticTransitionKind,
     ) -> Result<(), SemanticTransitionError> {
         self.require_authenticated_task_observations()?;
+        if self.evaluation_fork.is_some() {
+            self.evaluation_fork_archive_release_blocked = true;
+        }
+        if self.evaluation_fork.is_some()
+            && !matches!(
+                kind,
+                SemanticTransitionKind::Proposal | SemanticTransitionKind::Recompute
+            )
+        {
+            return Err(publication_input_error(
+                "evaluation forks admit only proposal and recompute transitions",
+            ));
+        }
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         self.checked_reader(lease)?;
@@ -38625,6 +39226,7 @@ impl SemanticTransitionSession {
             task_ground: None,
             cold_content: None,
             cold_statement_records: Vec::new(),
+            cold_observation_records: Vec::new(),
             cold_statement_reservation: None,
             cold_observer_entered: false,
             cold_observer_completed: false,
@@ -38645,6 +39247,12 @@ impl SemanticTransitionSession {
             learning_phases: Vec::new(),
             publication_uploads: Vec::new(),
             state_material_restore: None,
+            evaluation_context: None,
+            evaluation_fork: None,
+            model_context_preseal: None,
+            evaluation_fork_model_handoff: None,
+            evaluation_fork_archive_release_blocked: false,
+            rule_library: None,
             publication_preparation: None,
             #[cfg(feature = "semantic-policy")]
             model_context_continuation: None,
@@ -39509,6 +40117,37 @@ impl SemanticTransitionSession {
             .inspect_err(|_error| {
                 self.poisoned = true;
             })?;
+        let mut spec = spec;
+        let library = self.evaluation_rule_library();
+        if spec.rule_library.as_ref().map(|library| library.binding())
+            != library.as_ref().map(|library| library.binding())
+        {
+            return Err(publication_input_error(
+                "task rule library differs from its original frozen context",
+            ));
+        }
+        if spec.evaluation_intervention.is_some()
+            && (spec.training_domain.is_some()
+                || self
+                    .codebooks
+                    .model_catalogue
+                    .as_ref()
+                    .is_none_or(|(_, member)| *member < 2))
+        {
+            return Err(publication_input_error(
+                "rule intervention requires a nontraining evaluation member",
+            ));
+        }
+        if let Some(library) = library {
+            let library = library.for_codebooks(
+                &self.codebooks,
+                self.replay_material_budget
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            )?;
+            self.rule_library = Some(Arc::clone(&library));
+            spec.rule_library = Some(library);
+        }
         let mut binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
         binding._requirement_allocation = requirement_allocation;
         if self
@@ -39533,6 +40172,18 @@ impl SemanticTransitionSession {
             }
         }
         let words = binding.words(self.graph.transition_arena()[1]);
+        let inherited_capacity = self
+            .codebooks
+            .model_catalogue
+            .as_ref()
+            .filter(|(_, member)| *member >= 2)
+            .map(|(catalogue, _)| {
+                catalogue
+                    .member_observation_records(evaluation_fork::SELECTED_TRAINING_CONTEXT)
+                    .map(<[u32]>::len)
+            })
+            .transpose()?
+            .unwrap_or(0);
         let ground_layout = task_ground::TaskGroundLayout::new(
             binding.spec.statement_records.len(),
             binding.spec.task_ground.bindings().len(),
@@ -39541,6 +40192,14 @@ impl SemanticTransitionSession {
                 .program
                 .editable_program()
                 .map(|program| program.initial_rules.len()),
+        )?
+        .with_inherited_observations(inherited_capacity)?
+        .with_rule_library(
+            binding
+                .spec
+                .rule_library
+                .as_ref()
+                .map_or(0, |library| library.rules().len()),
         )?;
         let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
         let task_bytes = words
@@ -39613,7 +40272,15 @@ impl SemanticTransitionSession {
         task_ground: &SemanticTaskGround,
     ) -> Result<(SemanticTaskContentIdentity, Vec<crate::SemanticTruth>), SemanticTransitionError>
     {
-        self.ensure_rebindable()?;
+        if let Some(original) = self
+            .model_context_preseal
+            .as_ref()
+            .filter(|_| self.evaluation_context.is_some())
+        {
+            self.ensure_rebindable_except_model_context_preseal(original)?;
+        } else {
+            self.ensure_rebindable()?;
+        }
         if self.publication.is_some()
             || self.task.is_some()
             || self.cold_content.is_some()
@@ -39642,8 +40309,10 @@ impl SemanticTransitionSession {
             .map(|budget| {
                 let bytes = statement_records
                     .len()
+                    .checked_add(task_ground.bindings().len())
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?
                     .checked_mul(size_of::<u32>())
-                    .and_then(|bytes| bytes.checked_add(size_of::<Vec<u32>>()))
+                    .and_then(|bytes| bytes.checked_add(2 * size_of::<Vec<u32>>()))
                     .ok_or(SemanticTransitionError::GenerationExhausted)?;
                 budget.reserve_auxiliary(bytes as u64)
             })
@@ -39660,6 +40329,7 @@ impl SemanticTransitionSession {
             program.editable_program(),
             observation,
             task_ground,
+            self.rule_library.as_deref(),
         )
         .inspect_err(|_| self.poisoned = true)?;
         if matches!(task_ground, SemanticTaskGround::Logical) {
@@ -39687,6 +40357,11 @@ impl SemanticTransitionSession {
         }
         self.cold_content = Some(content.clone());
         self.cold_statement_records = statement_records.to_vec();
+        self.cold_observation_records = task_ground
+            .bindings()
+            .iter()
+            .map(|binding| binding.observation_record)
+            .collect();
         self.cold_statement_reservation = statement_reservation;
         Ok(content)
     }
@@ -44592,6 +45267,8 @@ impl SemanticTransitionSession {
                         .as_ref()
                         .ok_or(SemanticTransitionError::ObservationMismatch)?
                         .facts,
+                    task.spec.evaluation_intervention,
+                    task.spec.rule_library.as_deref(),
                 ) {
                     self.poisoned = true;
                     return Err(error);
@@ -44611,6 +45288,8 @@ impl SemanticTransitionSession {
                                 choices,
                                 previous,
                                 receipt,
+                                task.spec.evaluation_intervention,
+                                task.spec.rule_library.as_deref(),
                             ) {
                                 Ok((decoded, _)) => program_rules[lane][slot] = Some(decoded.rule),
                                 Err(error) => {
@@ -44618,7 +45297,7 @@ impl SemanticTransitionSession {
                                     return Err(error);
                                 }
                             }
-                        } else if choices[0] == 1 || receipt[1] == 3 {
+                        } else if choices[0] == 1 || matches!(receipt[1], 3 | 4) {
                             self.poisoned = true;
                             return Err(SemanticTransitionError::ObservationMismatch);
                         }
@@ -44924,7 +45603,26 @@ impl SemanticTransitionSession {
     }
 
     fn ensure_quiescent(&self) -> Result<(), SemanticTransitionError> {
+        if self.has_pending_model_context_preseal() {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
         self.ensure_quiescent_except_cold_report(None)
+    }
+
+    fn ensure_rebindable_except_model_context_preseal(
+        &self,
+        original: &Arc<model_catalogue::ModelContextPreseal>,
+    ) -> Result<(), SemanticTransitionError> {
+        if self
+            .model_context_preseal
+            .as_ref()
+            .is_none_or(|owner| !Arc::ptr_eq(owner, original))
+            || self.initial_prefill.is_some()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.ensure_quiescent_except_cold_report(None)?;
+        self.ensure_rebinding_ownership()
     }
 
     fn ensure_quiescent_except_cold_report(
@@ -48759,6 +49457,7 @@ mod text_parent_tests {
                 admission_base_extents: [0; 3],
             },
             learning_phases: Vec::new(),
+            evaluation_fork: None,
         };
         publication_material_sample_runtime(&mut material);
         for range in &mut material.ranges {
@@ -51551,6 +52250,8 @@ pub(crate) mod task_binding_tests {
         allowed_support_records: Vec<u32>,
     ) -> SemanticTaskEvaluationSpec {
         SemanticTaskEvaluationSpec {
+            rule_library: None,
+            evaluation_intervention: None,
             statement_records,
             allowed_support_records,
             program: Arc::new(ArithmeticProgram),

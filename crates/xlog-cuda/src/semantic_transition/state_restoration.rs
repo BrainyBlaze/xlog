@@ -8,6 +8,75 @@ pub use model_context_checkpoint::{
 };
 
 impl SemanticTransitionSession {
+    pub(super) fn retire_completed_evaluation_restore_custody(
+        &mut self,
+        lease: &SemanticPublishedLease,
+    ) -> Result<(), SemanticTransitionError> {
+        let owner = self
+            .state_material_restore
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if !Arc::ptr_eq(&owner.issuer, &self.publication_issuer)
+            || owner.pending.load(Ordering::Acquire)
+            || !owner.initialized.load(Ordering::Acquire)
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        let mut original = owner
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if !matches!(original.stage, StateRestoreStage::Completed)
+            || original.result != Some(lease.identity)
+            || original.material.evaluation_fork.is_none()
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let preparation = self
+            .publication_preparation
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        if preparation.pending.load(Ordering::Acquire)
+            || preparation
+                .restoration
+                .as_ref()
+                .is_none_or(|issuance| !Arc::ptr_eq(issuance, &owner.issuance))
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        let mut prepared = preparation
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if prepared.poisoned
+            || prepared.storage.is_some()
+            || prepared.upload_write.is_some()
+            || !prepared.uploads.is_empty()
+            || !prepared.writes.is_empty()
+            || !prepared.memory.is_empty()
+        {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        // Preserve exact historical admission bytes without retaining slices
+        // into the complete donor carrier after its actual native verification.
+        for phase in &mut self.learning_phases {
+            phase.detach_admission_carrier()?;
+        }
+        original.material.ranges = Vec::new();
+        original.material.model_allocations = Vec::new();
+        original.material.learning_phases = Vec::new();
+        original.model_payloads = Vec::new();
+        original.plans = None;
+        prepared.uploads = Vec::new();
+        prepared.writes = Vec::new();
+        prepared.upload_write = None;
+        drop(prepared);
+        drop(original);
+        self.publication_preparation = None;
+        self.state_material_restore = None;
+        Ok(())
+    }
+
     #[cfg(feature = "semantic-policy")]
     pub(super) fn admit_original_model_context_preparation(
         &self,
@@ -405,6 +474,11 @@ impl SemanticTransitionSession {
         &self,
         transition: Option<&SemanticLearningPhaseTransition>,
     ) -> Result<(), SemanticTransitionError> {
+        if self.evaluation_fork.is_some() && transition.is_some() {
+            return Err(publication_input_error(
+                "evaluation forks cannot consolidate or change learning phase",
+            ));
+        }
         if let Some(transition) = transition {
             let admission = transition.admission.as_ref().ok_or_else(|| {
                 publication_input_error(
@@ -502,6 +576,7 @@ impl SemanticTransitionSession {
             restoration,
             #[cfg(feature = "semantic-policy")]
             None,
+            false,
         )
     }
 
@@ -521,6 +596,7 @@ impl SemanticTransitionSession {
             None,
             #[cfg(feature = "semantic-policy")]
             None,
+            false,
         )
     }
 
@@ -561,6 +637,7 @@ impl SemanticTransitionSession {
                 work: work.clone(),
                 allowance,
             }),
+            false,
         )?;
         if result.is_some() {
             return Err(SemanticTransitionError::ObservationMismatch);
@@ -756,7 +833,7 @@ impl SemanticTransitionSession {
         ))
     }
 
-    fn restore_decoded_state_material_original(
+    pub(super) fn restore_decoded_state_material_original(
         &mut self,
         material: OwnedPublicationMaterial,
         source_digest: Identity256,
@@ -766,12 +843,45 @@ impl SemanticTransitionSession {
             SemanticPreparedResidentModelRestoration,
         >,
         #[cfg(feature = "semantic-policy")] dormant_context: Option<DormantStateRestoreCustody>,
+        evaluation_derivation: bool,
     ) -> Result<Option<SemanticPublishedIdentity>, SemanticTransitionError> {
         // Keep the outside-array receipt alive through every local material
         // error drop, then transfer it behind the retained material's data.
         let mut phase_metadata: Option<Arc<SemanticReplayMaterialReservation>> = None;
         let mut coverage_metadata: Option<Arc<SemanticReplayMaterialReservation>> = None;
         let mut material = material;
+        if material
+            .evaluation_fork
+            .as_ref()
+            .is_some_and(|origin| !origin.is_resolved())
+        {
+            return Err(publication_input_error(
+                "evaluation restoration requires its resolved original guarded source checkpoint",
+            ));
+        }
+        if material.evaluation_fork.is_some() && transition.is_some() {
+            return Err(publication_input_error(
+                "evaluation forks cannot consolidate or change learning phase",
+            ));
+        }
+        self.require_evaluation_inherited_observations(&material)?;
+        if material.evaluation_fork.is_some()
+            && (self.task_training_domain().is_some()
+                || self.training_views.is_some()
+                || immutable_models.is_some())
+        {
+            return Err(publication_input_error("restored evaluation forks cannot activate inherited training state or alias model allocations"));
+        }
+        if evaluation_derivation
+            && (transition.is_some()
+                || immutable_models.is_some()
+                || material.evaluation_fork.is_none()
+                || self.task_training_domain().is_some())
+        {
+            return Err(publication_input_error(
+                "evaluation derivation cannot alias models or admit learning",
+            ));
+        }
         if self.state_material_restore.is_some() {
             return Err(publication_input_error(
                 "original state restoration is already retained; resolve that owner",
@@ -1039,6 +1149,7 @@ impl SemanticTransitionSession {
                     .map(Arc::new)
             })
             .transpose()?;
+        let evaluation_fork = material.evaluation_fork.clone();
         let owner = Arc::new(OriginalStateMaterialRestore {
             issuer: Arc::clone(&self.publication_issuer),
             issuance,
@@ -1059,6 +1170,7 @@ impl SemanticTransitionSession {
                 rng,
                 fold,
                 transitioned: transition.is_some(),
+                evaluation_derivation,
                 immutable_models: immutable_models.map(OwnedRestoredModelOwners::retain),
                 plans: None,
                 model_payloads: Vec::new(),
@@ -1100,6 +1212,7 @@ impl SemanticTransitionSession {
             self.task_observations_authenticated = false;
         }
         self.state_material_restore = Some(owner);
+        self.evaluation_fork = evaluation_fork;
         self.resolve_state_material_restore()
     }
 
@@ -1562,6 +1675,8 @@ impl SemanticTransitionSession {
                     }
                     let operation = if original.fold.is_some() {
                         7
+                    } else if original.evaluation_derivation {
+                        1
                     } else if original.transitioned {
                         5
                     } else {
@@ -1651,6 +1766,7 @@ impl SemanticTransitionSession {
                         logical_digest: header.logical_digest,
                     });
                     if !original.transitioned
+                        && !original.evaluation_derivation
                         && original.result.is_some_and(|restored| {
                             restored.logical_digest != original.header.logical_digest
                         })
@@ -1729,6 +1845,7 @@ impl SemanticTransitionSession {
                         .result
                         .ok_or(SemanticTransitionError::ObservationMismatch)?;
                     if !original.transitioned
+                        && !original.evaluation_derivation
                         && (restored.logical_digest != original.header.logical_digest)
                     {
                         return Err(SemanticTransitionError::ObservationMismatch);
@@ -2201,7 +2318,7 @@ enum StateRestoreStage {
 }
 
 #[cfg(feature = "semantic-policy")]
-struct DormantStateRestoreCustody {
+pub(super) struct DormantStateRestoreCustody {
     continuation: SemanticModelContextContinuation,
     work: SemanticColdModelWork,
     allowance: Arc<Mutex<ColdNativeAllowance>>,
@@ -2309,6 +2426,7 @@ struct StateMaterialRestore {
     rng: SemanticRngBinding,
     fold: Option<learning_phase::LearningFoldPlan>,
     transitioned: bool,
+    evaluation_derivation: bool,
     immutable_models: Option<OwnedRestoredModelOwners>,
     plans: Option<Vec<PublicationAllocationPlan>>,
     model_payloads: Vec<PublicationPayload>,
@@ -2720,6 +2838,7 @@ impl SemanticTransitionSession {
                 model_generation: rng.model_generation,
                 family_id: u32::from(rng.family_id),
                 stream_serial: rng.stream_serial,
+                proposal: bank.state.proposal,
                 next_proposal: u64::from(rng.proposal),
                 catalogue_generation: binding.generation,
                 catalogue_digest: Identity256::from_bytes(CATALOGUE_DIGEST),

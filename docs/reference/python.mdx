@@ -316,7 +316,14 @@ prepared SOURCE import and returns its full original
 `(role, index, storage, byte_offset, layout)` with the existing tensor layout.
 Before any source factory or tensor export, call
 `controller.prepare_source_content_geometry(task_use,
-instruction_admission=original_instruction)`. It returns the original complete
+instruction_admission=original_instruction, update_step=update_index,
+refresh_snapshot=source_refresh, target_refresh_snapshot=target_refresh)`.
+`update_step` is the integer index of an actual Update in the admitted instruction,
+before segment construction. The source callback receives that source's original
+authority projection and returns the existing snapshot or evaluation snapshot pair;
+the target callback takes no arguments and returns its current authority snapshot.
+Collect all Update geometries before compiling source content once. Each call fixes
+that Update's reached authenticated replay prefix and returns its complete
 SOURCE roster, with immutable `kind()`, `step_index()`, `member_ordinal()` and
 `bank()` selectors. Each handle exposes the cached `source_task()` pair,
 guarded `model_contract_material()`, opaque original allocation identities in
@@ -1313,7 +1320,7 @@ already complete original-only arena or this exact dictionary before allocation:
 {
     "row_capacity": total_original_and_append_slots,
     "raw_byte_capacity": total_fixed_stride_raw_bytes,
-    "append_groups": ((group_kind, ...), ...),
+    "append_capacity": maximum_archived_outcomes,
     "metadata_bytes": original_metadata_limit,
     "max_material_bytes": original_per_material_limit,
     "total_material_bytes": original_total_material_limit,
@@ -1322,8 +1329,10 @@ already complete original-only arena or this exact dictionary before allocation:
 }
 ```
 
-Each future slot has a nonempty, ordered, duplicate-free subset of regular
-group kinds `1..5`; retention kinds `6/7` and actor kind `8` are excluded.
+`append_capacity` is a positive integer bound on all archived outcomes, including
+rejected outcomes. It reserves metadata space for every non-actor group `1..5`;
+actual membership comes from each authenticated row's targets and native solving
+witness. Retention kinds `6/7` and actor kind `8` never acquire appended members.
 The total episode count, including all reserved append slots, must fit the
 original manifest record bound. Raw capacity must fit every fixed-stride slot;
 transport capacity includes the full episode materials/evidence, original row
@@ -1337,7 +1346,7 @@ An empty first import may reserve this finite storage with `replay_rows=()` and
 `training_objective=None`. The original sealed domain supplies the window;
 there is no default window, placeholder row, actor, objective or active count.
 This unmaterialized owner permits inference, not training selection or Update.
-The reserved original boundary is `row_capacity - len(append_groups)`; it is
+The reserved original boundary is `row_capacity - append_capacity`; it is
 not the active original count. One genuine original roster may use fewer slots
 than that boundary. It must still satisfy all eight nonempty objective groups,
 five actual canary policies and the original actor qualification requirements.
@@ -1355,8 +1364,25 @@ shapes retain full capacity. The task seed has 17 fields, including a separate
 complete original-roster/objective owner; older seeds are not accepted as
 matching this lifecycle. The native publication authenticates stage, genuine
 original count, original-prefix identity and append extent. Its frozen contract
-also authenticates all original caps, ordered append assignments and the sealed
+also authenticates all original caps, the scalar append capacity and the sealed
 domain, including while no objective exists. Episode transport is unchanged.
+
+Acknowledgement commits the complete outcome archive and eligible membership
+together. All ordinary prefix, capacity and row-qualification checks precede that
+native commit; an uncertain completion retains the same original attempt. A rejected
+outcome remains archived and contributes no training member. A solving Edit must
+carry its original complete native action, codebook, edit-solution and task-ground
+witnesses. It follows the existing fixed-choice CURRENT scoring, reverse derivative
+and original parameter delivery path.
+
+After geometry registration and segment construction,
+`prepared_update.training_roster()` returns the same immutable `(rows, objective)`
+projection used to prepare that Update, including actual non-actor append membership
+and denominators. Both derivative banks and model work share that owner. Later
+acknowledgements cannot enlarge it. Material and checkpoint references retain their
+original guarded owners; historical SOURCE imports continue to use the source's
+own checkpoint roster. Fresh restore authenticates the full archive and reconstructs
+the eligible prefix before any new Update snapshot.
 
 `task_use.task_training_domain()` returns
 `(domain_identity_bytes, original_domain_projection)` in the same immutable read
@@ -1368,7 +1394,7 @@ new binding. Restore and late arena admission require exact original-domain
 equality; changed manifests, caps or loader fields cannot enlarge it.
 
 `task_use.task_replay_capacity()` returns the retained original reservation as
-`(row_capacity, raw_byte_capacity, append_groups, metadata_bytes,
+`(row_capacity, raw_byte_capacity, append_capacity, metadata_bytes,
 max_material_bytes, total_material_bytes, max_evidence_bytes,
 payload_capacity_bytes)`, or `None`. It projects the saved seed after validating
 the current owner; it does not reconstruct a budget from active rows or geometry.

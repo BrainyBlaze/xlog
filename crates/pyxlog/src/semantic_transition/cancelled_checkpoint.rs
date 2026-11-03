@@ -46,6 +46,8 @@ pub(super) struct CancelledCheckpointTerminal {
     pub(super) proposal_spent: u64,
     pub(super) task_identity: [u8; 32],
     source_checkpoint_digest: Identity256,
+    evaluation_intervention: Option<(xlog_cuda::SemanticEvaluationIntervention, Identity256)>,
+    budget: xlog_cuda::SemanticReplayMaterialBudget,
 }
 
 fn material_digest(bytes: &[u8]) -> Identity256 {
@@ -60,14 +62,56 @@ pub(super) fn initial_index(admission: &OriginalActorRefreshAdmission) -> PyResu
     Ok(material_digest(index))
 }
 
-fn require_seed_fields(original: &ColdValue, current: &ColdValue, terminal: bool) -> PyResult<()> {
-    let original = original.fields(20)?;
-    let current = current.fields(20)?;
+fn require_seed_fields(
+    original: &ColdValue,
+    current: &ColdValue,
+    terminal: bool,
+    budget: &xlog_cuda::SemanticReplayMaterialBudget,
+) -> PyResult<()> {
+    let original = original.fields(21)?;
+    let current = current.fields(21)?;
+    if original[20] != current[20] {
+        let prior = original[20].fields(8)?;
+        let latest = current[20].fields(8)?;
+        if prior[..7] != latest[..7] {
+            return Err(invalid(
+                "cancelled checkpoint changed its immutable evaluation donor",
+            ));
+        }
+        let (ColdValue::Bytes(prior), ColdValue::Bytes(latest)) = (&prior[7], &latest[7]) else {
+            return Err(invalid(
+                "cancelled checkpoint lost its accepted donor authority snapshot",
+            ));
+        };
+        let extent = [prior, latest]
+            .into_iter()
+            .try_fold(0usize, |total, bytes| {
+                let (_, owned, nodes) = ColdValue::checked_canonical_bytes(bytes, false)?;
+                nodes
+                    .checked_mul(std::mem::size_of::<ColdValue>())
+                    .and_then(|extent| extent.checked_add(owned))
+                    .and_then(|extent| extent.checked_add(bytes.len()))
+                    .and_then(|extent| extent.checked_mul(3))
+                    .and_then(|extent| extent.checked_add(total))
+                    .ok_or_else(|| invalid("cancelled donor snapshot comparison extent overflow"))
+            })?;
+        let _metadata = budget
+            .reserve_auxiliary(
+                u64::try_from(extent)
+                    .map_err(|_| invalid("cancelled donor snapshot comparison exceeds u64"))?,
+            )
+            .map_err(xlog_err)?;
+        let prior = AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(prior)?)?;
+        let latest = AuthoritySnapshot::parse(&ColdValue::from_canonical_bytes(latest)?)?;
+        latest.newer_than(&prior)?;
+    }
     if original
         .iter()
         .zip(current)
         .enumerate()
-        .any(|(index, (left, right))| !(terminal && matches!(index, 12 | 18)) && left != right)
+        .any(|(index, (left, right))| {
+            index != 20 && !(terminal && matches!(index, 12 | 18)) && left != right
+        })
     {
         return Err(invalid(
             "cancelled checkpoint differs from its original task capsule",
@@ -279,6 +323,7 @@ impl OriginalCancelledCheckpointCustody {
             &seed_value,
             &checkpoint_cold_value(&current_task, current_task.len())?,
             false,
+            &budget,
         )?;
         let source_checkpoint_digest = material_digest(bytes);
         Ok(Self {
@@ -404,8 +449,9 @@ impl OriginalCancelledCheckpointCustody {
             &checkpoint_cold_value(manifest.task, manifest.task.len())?,
             &task_value,
             true,
+            &self.budget,
         )?;
-        let fields = task_value.fields(20)?;
+        let fields = task_value.fields(21)?;
         let ColdValue::Bytes(assignments) = &fields[18] else {
             return Err(invalid(
                 "cancelled checkpoint has no original native assignment material",
@@ -553,6 +599,17 @@ pub(super) fn terminal_checkpoint(
     SemanticTransitionSession::state_material_loaded_projection(native).map_err(xlog_err)?;
     SemanticCheckpointSessionConfig::decode(&manifest.session)?;
     require_initial_prefill_source(&manifest, phase, binding, native)?;
+    let proof = native.checkpoint_proof().map_err(xlog_err)?;
+    let evaluation_intervention = proof
+        .evaluation_fork_origin()
+        .and_then(|origin| origin.intervention())
+        .map(|mode| {
+            let library = proof
+                .evaluation_rule_library()
+                .ok_or_else(|| invalid("cancelled evaluation lost its original rule library"))?;
+            Ok::<_, PyErr>((mode, library.digest()))
+        })
+        .transpose()?;
     Ok(Some(CancelledCheckpointTerminal {
         first_program_ordinal: first,
         end_program_ordinal: end,
@@ -560,6 +617,8 @@ pub(super) fn terminal_checkpoint(
         proposal_spent,
         task_identity: binding.identity,
         source_checkpoint_digest,
+        evaluation_intervention,
+        budget: seed.material_sources.native_budget()?,
     }))
 }
 
@@ -577,6 +636,15 @@ pub(super) fn terminal_error(
     value.setattr("first_program_ordinal", terminal.first_program_ordinal)?;
     value.setattr("end_program_ordinal", terminal.end_program_ordinal)?;
     value.setattr("proposal_spent", terminal.proposal_spent)?;
+    let intervention = terminal
+        .evaluation_intervention
+        .map(|(mode, digest)| {
+            evaluation_rule_library::intervention_material(py, mode, digest, &terminal.budget)
+                .map(|material| material.into_any())
+        })
+        .transpose()?
+        .unwrap_or_else(|| py.None());
+    value.setattr("evaluation_intervention", intervention)?;
     value.setattr(
         "parent_identity",
         (
@@ -655,9 +723,23 @@ pub(crate) fn restore_cancelled_checkpoint(
             "cancelled checkpoint differs from the expected original Program",
         ));
     }
+    let target_snapshot = if let Some(source) = &seed.dormant_evaluation_source {
+        snapshot
+            .map(|pair| -> PyResult<_> {
+                let (current_source, target) = evaluation_authority_snapshots(pair)?;
+                source.require_current_source_snapshot(
+                    &current_source,
+                    &material_sources.native_budget()?,
+                )?;
+                Ok(target)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let _closure = learning_phase::cold_restore::read_checkpoint_restore_closure_bound(
         raw,
-        snapshot,
+        target_snapshot.as_ref().or(snapshot),
         learning_phase_issuer,
         learning_phase_records,
         learning_phase_record_limits,

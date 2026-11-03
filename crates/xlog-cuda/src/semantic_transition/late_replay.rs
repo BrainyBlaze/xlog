@@ -54,7 +54,7 @@ const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, recei
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, rows) == 144);
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, observations) == 192);
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, native_work) == 224);
-const _: () = assert!(size_of::<PublicationReplayDeliveryRow>() == 936);
+const _: () = assert!(size_of::<PublicationReplayDeliveryRow>() == 1072);
 
 type LoadedReplayDeliveryAcquisition<V> = (
     SemanticReplayMaterial,
@@ -160,6 +160,7 @@ pub(super) struct PendingReplayDelivery {
     eligible: bool,
     lease_token: u64,
     completion: Option<SemanticPublishedIdentity>,
+    training_publication: crate::semantic_training_view::PreparedTrainingAppendPublication,
     #[cfg(feature = "semantic-policy")]
     context_acknowledgement: Option<
         Arc<std::sync::Mutex<model_context_continuation::OriginalModelContextAcknowledgement>>,
@@ -1285,6 +1286,7 @@ impl SemanticTransitionSession {
             .layout;
         let entries = self.read_replay_authentication_range(56)?;
         let payload = self.read_replay_authentication_range(57)?;
+        let training_header = append_header(&entries.bytes)?;
         let row_count = entries
             .bytes
             .len()
@@ -1439,6 +1441,7 @@ impl SemanticTransitionSession {
             .map(|budget| budget.reserve_auxiliary(metadata_bytes as u64))
             .transpose()?;
         let mut eligible_count = 0;
+        let mut restored_training_rows = Vec::with_capacity(acquisitions.len());
         let mut observations = vec![[0u64; 18]; ground.bindings().len()];
         let mut sources = Vec::with_capacity(source_count);
         let mut receiver_results = Vec::with_capacity(receipts.len());
@@ -1667,6 +1670,10 @@ impl SemanticTransitionSession {
                     "restored training row differs from its original committed descriptor",
                 ));
             }
+            if disposition == 1 {
+                restored_training_rows
+                    .push(self.retain_training_append(descriptor, row, canonical, None)?);
+            }
             let receipt = &receipts
                 .iter()
                 .find(|record| record.stable_identity == stable)
@@ -1745,6 +1752,15 @@ impl SemanticTransitionSession {
             return Err(publication_input_error(
                 "append authentication changed its original acquired publication",
             ));
+        }
+        if let Some(arena) = &arena {
+            let prepared = arena.prepare_training_appends(
+                0,
+                training_header.count,
+                training_header.chain_head,
+                restored_training_rows,
+            )?;
+            arena.publish_training_appends(&prepared)?;
         }
         Ok(())
     }
@@ -2451,6 +2467,8 @@ impl SemanticTransitionSession {
         )?;
         let mut packed = Vec::with_capacity(packed_capacity);
         let mut rows = Vec::with_capacity(acquisitions.len());
+        let mut training_rows = Vec::with_capacity(acquisitions.len());
+        let mut training_chain = queue_header.chain_head;
         for ((((_, row, canonical, _, _, _, _, _, _), result), verification), digest) in
             acquisitions
                 .iter()
@@ -2482,17 +2500,39 @@ impl SemanticTransitionSession {
                     "complete replay batch exceeds its original payload reservation",
                 ));
             }
+            let entry = SemanticTrainingReplayAppendEntry {
+                row_ordinal: descriptor.ordinal,
+                content_identity: descriptor.content_identity,
+                original_origin: descriptor.origin,
+                stable_intent: identity_words(*stable.as_bytes()),
+                result_receipt_digest: identity_words(*digest.as_bytes()),
+                payload_offset_bytes: queue_header.payload_used_bytes + payload_offset,
+                payload_length_bytes: bytes.len() as u64,
+                disposition: verification.disposition,
+            };
+            let archive_ordinal = queue_header.count + rows.len() as u64;
+            training_chain = publication_fold_digest(
+                training_chain,
+                56,
+                archive_ordinal,
+                Identity256::from_bytes(Sha256::digest(publication_abi_bytes(&[entry])).into()),
+            );
+            training_chain = publication_fold_digest(
+                training_chain,
+                57,
+                archive_ordinal,
+                Identity256::from_bytes(Sha256::digest(&bytes).into()),
+            );
+            if verification.disposition == 1 {
+                training_rows.push(self.retain_training_append(
+                    descriptor,
+                    row,
+                    canonical,
+                    row_custody.clone(),
+                )?);
+            }
             rows.push(PublicationReplayDeliveryRow {
-                entry: SemanticTrainingReplayAppendEntry {
-                    row_ordinal: descriptor.ordinal,
-                    content_identity: descriptor.content_identity,
-                    original_origin: descriptor.origin,
-                    stable_intent: identity_words(*stable.as_bytes()),
-                    result_receipt_digest: identity_words(*digest.as_bytes()),
-                    payload_offset_bytes: queue_header.payload_used_bytes + payload_offset,
-                    payload_length_bytes: bytes.len() as u64,
-                    disposition: verification.disposition,
-                },
+                entry,
                 payload: payload_offset,
                 payload_bytes: bytes.len() as u64,
                 row_descriptor: descriptor,
@@ -2648,12 +2688,19 @@ impl SemanticTransitionSession {
             }
         }
         let eligible = authenticated.iter().any(|result| result.disposition == 1);
+        let training_publication = arena.prepare_training_appends(
+            queue_header.count,
+            queue_header.count + acquisitions.len() as u64,
+            training_chain,
+            training_rows,
+        )?;
         self.pending_replay_delivery = Some(PendingReplayDelivery {
             base: lease.identity,
             fuel: lease.header.fuel,
             eligible,
             lease_token: lease.token,
             completion: None,
+            training_publication,
             #[cfg(feature = "semantic-policy")]
             context_acknowledgement,
             receipt,
@@ -2704,6 +2751,62 @@ impl SemanticTransitionSession {
             self.pending_replay_delivery = None;
         }
         result
+    }
+
+    fn retain_training_append<R: AsRef<[u8]>>(
+        &self,
+        descriptor: TrainingViewRowDescriptor,
+        row: &SemanticTrainingViewRow<R>,
+        canonical: &[u8],
+        custody: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<
+        Arc<crate::semantic_training_view::AuthenticatedTrainingAppendRow>,
+        SemanticTransitionError,
+    > {
+        use crate::semantic_training_view::AuthenticatedTrainingAppendRow;
+        let bytes = canonical
+            .len()
+            .checked_add(size_of::<AuthenticatedTrainingAppendRow>())
+            .and_then(|bytes| {
+                bytes.checked_add(4 * size_of::<Arc<AuthenticatedTrainingAppendRow>>())
+            })
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let reservation = Arc::new(
+            self.replay_material_budget
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .reserve_auxiliary(bytes)?,
+        );
+        Ok(Arc::new(AuthenticatedTrainingAppendRow {
+            descriptor,
+            bytes_identity: row.bytes_identity,
+            canonical: canonical.to_vec().into(),
+            _custody: custody,
+            _reservation: reservation,
+        }))
+    }
+
+    /// Return the same immutable roster registered before this Update's geometry.
+    /// A later acknowledgement cannot change this projection or its derivatives.
+    pub fn prepare_training_roster(
+        &self,
+        step: &SemanticPreparedStep,
+    ) -> Result<(Vec<Arc<[u8]>>, Vec<(u64, Vec<u64>)>), SemanticTransitionError> {
+        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+            return Err(publication_input_error(
+                "training roster requires its original Update",
+            ));
+        }
+        self.checked_prepared_step(step, false)?;
+        self.steps
+            .get(&step.token)
+            .and_then(|record| record.prepared.as_ref())
+            .and_then(|prepared| prepared.training_view.as_ref())
+            .ok_or_else(|| {
+                publication_input_error("Update has no original selected training view")
+            })?
+            .training_roster_projection()
     }
 
     pub fn replay_delivery_pending(&self) -> bool {
@@ -2933,6 +3036,18 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::NoPendingLaunch)?
             .support_references;
         self.graph.finish_authenticated_supports(references);
+        let pending = self
+            .pending_replay_delivery
+            .as_ref()
+            .ok_or(SemanticTransitionError::NoPendingLaunch)?;
+        if pending
+            ._arena
+            .publish_training_appends(&pending.training_publication)
+            .is_err()
+        {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::Poisoned);
+        }
         self.pending_replay_delivery
             .as_mut()
             .ok_or(SemanticTransitionError::NoPendingLaunch)?

@@ -1937,6 +1937,7 @@ impl SemanticTransitionSession {
                     ranges,
                     graph,
                     learning_phases: target.learning_phases.clone(),
+                    evaluation_fork: target.evaluation_fork.clone(),
                 },
                 Arc::clone(&original.source),
             )?);

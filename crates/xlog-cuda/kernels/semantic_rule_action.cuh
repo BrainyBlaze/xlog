@@ -286,6 +286,74 @@ __device__ bool prefix_completes(const uint64_t* books,
     return false;
 }
 
+// The immutable bank supplies complete original category tuples. A prefix is
+// legal only when a whole member of that bank survives the original product
+// support, including all future fields. This same test serves draw and backward.
+template <typename Component, typename Charge = UnaccountedPrefixWork>
+__device__ bool library_prefix_completes(const uint64_t* books,
+                                        const Component* components,
+                                        const uint8_t* support,uint32_t start,
+                                        const uint32_t choices[18],uint32_t field,
+                                        uint32_t category,const uint64_t* tuples,
+                                        uint32_t count,Charge charge = {}) {
+    if (!books || !components || !support || !choices || !tuples || !count ||
+        count > 64 || field < 1 || field >= 18) return false;
+    for (uint32_t member = 0; member < count; ++member) {
+        bool admitted = true;
+        for (uint32_t position = 0; position < 18; ++position) {
+            charge(PrefixWorkEvent::TableSlot);
+            const uint64_t encoded = tuples[uint64_t(member) * 18 + position];
+            charge(PrefixWorkEvent::Category);
+            if (encoded > UINT32_MAX) { admitted = false; break; }
+            const uint32_t candidate = uint32_t(encoded);
+            charge(PrefixWorkEvent::TableSlot);
+            const Component component = components[start + position];
+            if (candidate >= component.cardinality ||
+                !context_category(books,position,candidate,charge) ||
+                (charge(PrefixWorkEvent::TableSlot), !support[component.offset + candidate]) ||
+                (position <= field && candidate !=
+                    (position == field ? category : choices[position]))) {
+                admitted = false; break;
+            }
+        }
+        if (admitted) return true;
+    }
+    return false;
+}
+
+template <typename Charge = UnaccountedPrefixWork>
+__device__ bool library_member(const uint64_t* books,const uint32_t choices[18],
+                              const semantic_program::Bank& bank,
+                              const uint64_t* rules,const uint64_t* tuples,
+                              uint32_t count,uint32_t* index,
+                              semantic_program::Rule* rule,Charge charge = {}) {
+    if (!rules || !tuples || !count || count > 64 || !index || !rule) return false;
+    semantic_program::Rule decoded{};
+    if (!decode(books,choices,bank,&decoded,charge)) return false;
+    for (uint32_t member = 0; member < count; ++member) {
+        bool equal = true;
+        for (uint32_t field = 0; field < 18; ++field) {
+            charge(PrefixWorkEvent::TableSlot);
+            equal &= tuples[uint64_t(member) * 18 + field] == choices[field];
+        }
+        if (!equal) continue;
+        for (uint32_t word = 0; word < semantic_program::kRuleWords; ++word)
+            charge(PrefixWorkEvent::TableSlot);
+        const auto original = semantic_program::rule_words(
+            rules + semantic_program::kRuleWords * uint64_t(member));
+        const auto* left = reinterpret_cast<const uint32_t*>(&original);
+        const auto* right = reinterpret_cast<const uint32_t*>(&decoded);
+        for (uint32_t word = 0; word < sizeof(original) / sizeof(uint32_t); ++word) {
+            charge(PrefixWorkEvent::TableSlot);
+            if (left[word] != right[word]) return false;
+        }
+        *index = member;
+        *rule = original;
+        return true;
+    }
+    return false;
+}
+
 struct Evaluation {
     semantic_program::Result closure;
     uint64_t truth[3];

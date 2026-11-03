@@ -20,6 +20,13 @@ mod semantic_program;
 mod semantic_training_view;
 mod semantic_transition;
 mod semantic_work;
+pub use semantic_transition::{
+    SemanticDetachedColdTaskContext, SemanticEvaluationForkOrigin,
+    SemanticEvaluationForkPreparation, SemanticEvaluationForkTarget,
+    SemanticEvaluationForkTargetRecords, SemanticEvaluationIntervention,
+    SemanticEvaluationInterventionPreparation, SemanticEvaluationRuleLibrary,
+    SemanticSelectedTaskFacts, SemanticSelectedTaskFactsObservation,
+};
 pub mod type_seam;
 pub mod wcoj_metadata;
 #[cfg(feature = "wcoj-phase-timing")]

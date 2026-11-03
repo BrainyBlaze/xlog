@@ -234,6 +234,107 @@ pub struct SemanticAdmissionLimits {
     pub max_utf8_bytes: usize,
 }
 
+impl SemanticAdmissionRecords {
+    /// Compose original cold admissions with an unchanged source prefix and an
+    /// independently qualified target. The returned offset and requirements come
+    /// from the actual composed records; no graph or CUDA context is created.
+    pub fn evaluation_context(
+        source: &Self,
+        target: &Self,
+        context: Identity256,
+        limits: SemanticAdmissionLimits,
+        budget: Option<&crate::semantic_transition::SemanticReplayMaterialBudget>,
+    ) -> Result<(Self, u32, SemanticAdmissionLimits), SemanticHypergraphError> {
+        if !source.supports.is_empty()
+            || !target.supports.is_empty()
+            || source.predicates != target.predicates
+        {
+            return Err(admission_error(
+                "evaluation composition requires original empty cold contexts with identical typed schemas",
+            ));
+        }
+        let target_record_offset =
+            u32::try_from(source.records.len()).map_err(|_| size_overflow())?;
+        let mut records = source.clone();
+        for original in &target.records {
+            let mut record = original.clone();
+            for qualifier in &mut record.qualifiers {
+                *qualifier = qualifier
+                    .checked_add(target_record_offset)
+                    .ok_or_else(size_overflow)?;
+            }
+            // Query selectors carry the actual record ordinal as their second
+            // u32. Their authoritative schema, rather than a numeric predicate
+            // convention, identifies that reference.
+            let schema = target
+                .predicates
+                .iter()
+                .find(|predicate| predicate.predicate == record.predicate)
+                .ok_or_else(|| admission_error("evaluation record has no original schema"))?;
+            if schema.schema.sort_labels() == ["task-query-ordinal", "task-statement-record"] {
+                let Some(SemanticArgument::U32(reference)) = record.arguments.get_mut(1) else {
+                    return Err(admission_error(
+                        "evaluation query selector lost its typed statement reference",
+                    ));
+                };
+                *reference = reference
+                    .checked_add(target_record_offset)
+                    .ok_or_else(size_overflow)?;
+            }
+            records.records.push(record);
+        }
+        // Reuse the admitted input qualifier schema. Extending the predicate
+        // roster would change the whole schema generation and therefore every
+        // inherited source statement, support and version identity.
+        let context_predicate = records
+            .predicates
+            .iter()
+            .find(|predicate| {
+                predicate.role == SemanticRecordRole::Qualifier
+                    && predicate.schema.sort_labels() == ["task-input-kind", "task-input-text"]
+            })
+            .ok_or_else(|| admission_error("evaluation scope requires its original input schema"))?
+            .predicate;
+        let text = context
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let context = if let Some(budget) = budget {
+            symbol::intern_with_allocation_owner(&text, &mut |bytes| {
+                budget
+                    .reserve_auxiliary(bytes as u64)
+                    .map(|owner| Arc::new(owner) as Arc<dyn Send + Sync>)
+                    .map_err(|error| xlog_core::XlogError::Compilation(error.to_string()))
+            })
+            .map_err(|error| admission_error(error.to_string()))?
+        } else {
+            symbol::intern(&text)
+        };
+        let context_record = u32::try_from(records.records.len()).map_err(|_| size_overflow())?;
+        for record in &mut records.records[target_record_offset as usize..] {
+            if records.predicates.iter().any(|predicate| {
+                predicate.predicate == record.predicate
+                    && predicate.role == SemanticRecordRole::Statement
+            }) {
+                record.qualifiers.push(context_record);
+            }
+        }
+        records.records.push(SemanticTypedRecord {
+            predicate: context_predicate,
+            arguments: vec![
+                SemanticArgument::U32(u32::MAX),
+                SemanticArgument::Symbol(context),
+            ],
+            qualifiers: Vec::new(),
+        });
+        let metadata = prepare_semantic_record_metadata(&records, limits, budget)?;
+        let requirements = metadata.requirements;
+        drop(metadata);
+        Ok((records, target_record_offset, requirements))
+    }
+}
+
 /// Complete immutable admission and the selected root's chronological insertions.
 /// Symbol arguments index `symbols` in occurrence order, never a process registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -426,6 +527,30 @@ fn material_string(
 }
 
 impl SemanticRootMaterial {
+    pub(crate) fn evaluation_context(
+        &self,
+        admission: &SemanticAdmission,
+    ) -> Result<Self, SemanticHypergraphError> {
+        let (records, symbols) = normalized_material_admission(admission)?;
+        if !records.predicates.starts_with(&self.records.predicates)
+            || !records.records.starts_with(&self.records.records)
+            || !records.supports.starts_with(&self.records.supports)
+            || !symbols.starts_with(&self.symbols)
+        {
+            return Err(admission_error(
+                "evaluation admission changes the selected source's ordered typed prefix",
+            ));
+        }
+        let mut derived = self.clone();
+        derived.records = records;
+        derived.symbols = symbols;
+        // Every insertion, version, support and base identity is verified by the
+        // same restoration verifier against the composite admission. No source
+        // insertion or learned reconstruction is translated to the target.
+        derived.validate_lineage(admission)?;
+        Ok(derived)
+    }
+
     /// Checked allocation bound for the original decoder's owned records and
     /// its temporary schema labels. This scan grants no semantic authority.
     pub(crate) fn decode_allocation_bound(bytes: &[u8]) -> Result<usize, SemanticHypergraphError> {
@@ -1618,6 +1743,13 @@ pub struct SemanticAdmission {
     pub(crate) encoded_records: Vec<SemanticRecordEncoding>,
 }
 
+pub(crate) struct PreparedEvaluationAdmission {
+    pub(crate) admission: SemanticAdmission,
+    allocation: Arc<crate::semantic_transition::SemanticReplayMaterialReservation>,
+    symbols: Option<Arc<dyn Send + Sync>>,
+    pub(crate) target_record_offset: u32,
+}
+
 struct PreparedSemanticAdmission {
     records: SemanticAdmissionRecords,
     symbols: symbol::SymbolSnapshot,
@@ -1921,12 +2053,20 @@ fn semantic_records_preparation_allocation_bound(
     Ok(bytes)
 }
 
-fn prepare_semantic_records_with_budget(
-    records: SemanticAdmissionRecords,
+struct SemanticRecordMetadata {
+    schema_bytes: Vec<u8>,
+    schema_generation: Identity256,
+    roles: Vec<SemanticRecordRole>,
+    symbols: symbol::SymbolSnapshot,
+    symbol_owner: Option<Arc<dyn Send + Sync>>,
+    requirements: SemanticAdmissionLimits,
+}
+
+fn prepare_semantic_record_metadata(
+    records: &SemanticAdmissionRecords,
     limits: SemanticAdmissionLimits,
-    base: SemanticRootHandle,
     budget: Option<&crate::semantic_transition::SemanticReplayMaterialBudget>,
-) -> Result<(PreparedSemanticAdmission, Option<Arc<dyn Send + Sync>>), SemanticHypergraphError> {
+) -> Result<SemanticRecordMetadata, SemanticHypergraphError> {
     let mut record_budget = limits.max_records as usize;
     for count in [
         records.predicates.len(),
@@ -2093,6 +2233,48 @@ fn prepare_semantic_records_with_budget(
         }
     }
     let schema_generation = Identity256::from_bytes(Sha256::digest(&schema_bytes).into());
+    let symbol_bytes = symbols
+        .entries()
+        .iter()
+        .try_fold(0usize, |bytes, (_, text)| {
+            bytes.checked_add(text.len()).ok_or_else(size_overflow)
+        })?;
+    let requirements = SemanticAdmissionLimits {
+        max_records: limits.max_records
+            - u32::try_from(record_budget).map_err(|_| size_overflow())?,
+        max_terms: limits.max_terms - u32::try_from(term_budget).map_err(|_| size_overflow())?,
+        max_references: limits.max_references
+            - u32::try_from(reference_budget).map_err(|_| size_overflow())?,
+        max_utf8_bytes: limits
+            .max_utf8_bytes
+            .checked_sub(byte_budget)
+            .and_then(|bytes| bytes.checked_add(symbol_bytes))
+            .ok_or_else(size_overflow)?,
+    };
+    Ok(SemanticRecordMetadata {
+        schema_bytes,
+        schema_generation,
+        roles,
+        symbols,
+        symbol_owner,
+        requirements,
+    })
+}
+
+fn prepare_semantic_records_with_budget(
+    records: SemanticAdmissionRecords,
+    limits: SemanticAdmissionLimits,
+    base: SemanticRootHandle,
+    budget: Option<&crate::semantic_transition::SemanticReplayMaterialBudget>,
+) -> Result<(PreparedSemanticAdmission, Option<Arc<dyn Send + Sync>>), SemanticHypergraphError> {
+    let SemanticRecordMetadata {
+        schema_bytes,
+        schema_generation,
+        roles,
+        symbols,
+        symbol_owner,
+        ..
+    } = prepare_semantic_record_metadata(&records, limits, budget)?;
     let mut symbol_text = symbols.entries().iter();
     let mut atoms = Vec::<[u8; 32]>::with_capacity(records.records.len());
     let mut encoded_records = Vec::with_capacity(records.records.len());
@@ -4408,6 +4590,99 @@ impl SemanticHypergraph {
     /// Returns the retained cold snapshot, not a re-resolution of live inputs.
     pub fn admission(&self) -> Option<&SemanticAdmission> {
         self.admission.as_ref()
+    }
+
+    /// Extend an unexecuted target's original typed admission with an unchanged
+    /// source prefix. The fresh target qualifier prevents equal textual records
+    /// in the two tasks from becoming the same semantic statement.
+    pub(crate) fn prepare_evaluation_admission(
+        &self,
+        source: &Self,
+        limits: SemanticAdmissionLimits,
+        context: Identity256,
+    ) -> Result<PreparedEvaluationAdmission, SemanticHypergraphError> {
+        self.ensure_not_poisoned()?;
+        source.ensure_not_poisoned()?;
+        let target = self
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("evaluation target is not admitted"))?;
+        let source = source
+            .admission
+            .as_ref()
+            .ok_or_else(|| admission_error("evaluation source is not admitted"))?;
+        if target.base != self.empty_root
+            || target.base_snapshot.extents != SemanticExtents::new(0, 0, 0)
+            || source.base_snapshot.extents != SemanticExtents::new(0, 0, 0)
+            || !target.records.supports.is_empty()
+            || !source.records.supports.is_empty()
+            || target.records.predicates != source.records.predicates
+            || self.current_fork.is_some()
+            || self.root_restoration.is_some()
+        {
+            return Err(admission_error("evaluation composition requires original empty cold contexts with identical typed schemas"));
+        }
+        let budget = self.replay_material_budget.as_ref().ok_or_else(|| {
+            admission_error("evaluation composition lost its original capacity pool")
+        })?;
+        let bytes = semantic_records_preparation_allocation_bound(&source.records)?
+            .checked_add(semantic_records_preparation_allocation_bound(
+                &target.records,
+            )?)
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(size_overflow)?;
+        let allocation = Arc::new(
+            budget
+                .reserve_auxiliary(u64::try_from(bytes).map_err(|_| size_overflow())?)
+                .map_err(|error| admission_error(error.to_string()))?,
+        );
+        let (records, target_record_offset, _) = SemanticAdmissionRecords::evaluation_context(
+            &source.records,
+            &target.records,
+            context,
+            limits,
+            Some(budget),
+        )?;
+        let (admission, symbols) =
+            prepare_semantic_records_with_budget(records, limits, self.empty_root, Some(budget))?;
+        if admission.schema_generation != source.schema_generation
+            || admission.statement_keys.len() < source.statement_keys.len()
+            || admission
+                .statement_keys
+                .iter()
+                .zip(&source.statement_keys)
+                .any(|(target, original)| match (target, original) {
+                    (None, None) => false,
+                    (Some(target), Some(original)) => {
+                        target.identity != original.identity
+                            || target.record != original.record
+                            || target.owner != self.empty_root.owner
+                            || original.owner != source.base.owner
+                    }
+                    _ => true,
+                })
+            || !admission
+                .symbols
+                .entries()
+                .starts_with(source.symbols.entries())
+        {
+            return Err(admission_error(
+                "evaluation composition changes an original source schema, statement or symbol identity",
+            ));
+        }
+        Ok(PreparedEvaluationAdmission {
+            admission: admission.finish(target.base_snapshot),
+            allocation,
+            symbols,
+            target_record_offset,
+        })
+    }
+
+    pub(crate) fn install_evaluation_admission(&mut self, prepared: PreparedEvaluationAdmission) {
+        self.admission = Some(prepared.admission);
+        self.admission_allocation_owner = Some(prepared.allocation);
+        self.admission_symbol_allocation_owner = prepared.symbols;
     }
 
     /// Cold export under the transition owner's exclusive, quiescent acquisition.

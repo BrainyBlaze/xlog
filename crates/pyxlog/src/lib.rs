@@ -1375,6 +1375,14 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
+        m.add_class::<semantic_transition::evaluation_fork::PySemanticEvaluationFork>()?;
+        m.add(
+            "SemanticEvaluationForkPending",
+            m.py()
+                .get_type::<semantic_transition::evaluation_fork::SemanticEvaluationForkPending>(),
+        )?;
+        m.add_class::<semantic_transition::selected_task_facts::PySemanticSelectedTaskFactsObservation>()?;
+        m.add("SemanticSelectedTaskFactsPending", m.py().get_type::<semantic_transition::selected_task_facts::SemanticSelectedTaskFactsPending>())?;
         m.add_class::<semantic_transition::PySemanticCompletedExecutionObservation>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticCompletedModelEvaluation>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticCancelledModelEvaluation>()?;

@@ -1163,6 +1163,7 @@ impl SemanticTransitionSession {
                 ranges,
                 graph,
                 learning_phases: history,
+                evaluation_fork: self.evaluation_fork.clone(),
             };
             let RetainedPublication {
                 bank: next,
