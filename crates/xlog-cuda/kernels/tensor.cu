@@ -184,6 +184,91 @@ extern "C" __global__ void tensor_select_f32(
     if (i < count) output[i] = input[indices[i]];
 }
 
+struct LogitMaximum {
+    float score;
+    uint32_t token;
+};
+
+static __device__ LogitMaximum logit_maximum(LogitMaximum a, LogitMaximum b) {
+    return b.score > a.score || (b.score == a.score && b.token < a.token) ? b : a;
+}
+
+// Both launches use exactly 256 threads. Five u32 words retain the original FP32
+// score bits, both token IDs and a flag covering every nonfinite input, even masked.
+static __device__ void block_logit_selection(
+    LogitMaximum raw, LogitMaximum selected, uint32_t invalid, uint32_t* output
+) {
+    __shared__ uint32_t warps[8][5];
+    const unsigned lane = threadIdx.x & 31;
+    const unsigned warp = threadIdx.x >> 5;
+    for (unsigned offset = 16; offset; offset >>= 1) {
+        raw = logit_maximum(raw, {__shfl_down_sync(0xffffffffU, raw.score, offset),
+                                 __shfl_down_sync(0xffffffffU, raw.token, offset)});
+        selected = logit_maximum(selected, {__shfl_down_sync(0xffffffffU, selected.score, offset),
+                                           __shfl_down_sync(0xffffffffU, selected.token, offset)});
+        invalid |= __shfl_down_sync(0xffffffffU, invalid, offset);
+    }
+    if (lane == 0) {
+        warps[warp][0] = raw.token;
+        warps[warp][1] = __float_as_uint(raw.score);
+        warps[warp][2] = selected.token;
+        warps[warp][3] = __float_as_uint(selected.score);
+        warps[warp][4] = invalid;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        raw = lane < 8 ? LogitMaximum{__uint_as_float(warps[lane][1]), warps[lane][0]}
+                       : LogitMaximum{-INFINITY, UINT32_MAX};
+        selected = lane < 8 ? LogitMaximum{__uint_as_float(warps[lane][3]), warps[lane][2]}
+                            : LogitMaximum{-INFINITY, UINT32_MAX};
+        invalid = lane < 8 ? warps[lane][4] : 0;
+        for (unsigned offset = 16; offset; offset >>= 1) {
+            raw = logit_maximum(raw, {__shfl_down_sync(0xffffffffU, raw.score, offset),
+                                     __shfl_down_sync(0xffffffffU, raw.token, offset)});
+            selected = logit_maximum(selected, {__shfl_down_sync(0xffffffffU, selected.score, offset),
+                                               __shfl_down_sync(0xffffffffU, selected.token, offset)});
+            invalid |= __shfl_down_sync(0xffffffffU, invalid, offset);
+        }
+        if (lane == 0) {
+            output[0] = raw.token;
+            output[1] = __float_as_uint(raw.score);
+            output[2] = selected.token;
+            output[3] = __float_as_uint(selected.score);
+            output[4] = invalid;
+        }
+    }
+}
+
+extern "C" __global__ void tensor_greedy_partial_f32(
+    const float* logits, const uint8_t* mask, uint32_t* partials, uint32_t vocabulary
+) {
+    LogitMaximum raw{-INFINITY, UINT32_MAX}, selected{-INFINITY, UINT32_MAX};
+    uint32_t invalid = 0;
+    for (uint32_t token = blockIdx.x * blockDim.x + threadIdx.x;
+         token < vocabulary; token += gridDim.x * blockDim.x) {
+        const float score = logits[token];
+        if (!isfinite(score)) { invalid = 1; continue; }
+        raw = logit_maximum(raw, {score, token});
+        if (!mask || (mask[token / 8] & (1U << (token % 8))))
+            selected = logit_maximum(selected, {score, token});
+    }
+    block_logit_selection(raw, selected, invalid, partials + blockIdx.x * 5);
+}
+
+extern "C" __global__ void tensor_greedy_reduce_f32(
+    const uint32_t* partials, uint32_t* output, uint32_t count
+) {
+    LogitMaximum raw{-INFINITY, UINT32_MAX}, selected{-INFINITY, UINT32_MAX};
+    uint32_t invalid = 0;
+    for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+        const uint32_t* row = partials + i * 5;
+        raw = logit_maximum(raw, {__uint_as_float(row[1]), row[0]});
+        selected = logit_maximum(selected, {__uint_as_float(row[3]), row[2]});
+        invalid |= row[4];
+    }
+    block_logit_selection(raw, selected, invalid, output);
+}
+
 extern "C" __global__ void tensor_check_finite_f32(
     const float* input, uint32_t* invalid, uint64_t elements
 ) {

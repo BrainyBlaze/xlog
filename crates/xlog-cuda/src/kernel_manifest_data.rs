@@ -71,6 +71,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "tensor_prediction_row_bf16",
             "tensor_bf16_to_f32",
             "tensor_select_f32",
+            "tensor_greedy_partial_f32",
+            "tensor_greedy_reduce_f32",
             "tensor_check_finite_f32",
             "tensor_fill_f32",
             "tensor_accumulate_f32",
