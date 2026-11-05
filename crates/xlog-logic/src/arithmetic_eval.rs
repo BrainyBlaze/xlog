@@ -34,11 +34,13 @@ pub enum ArithmeticValue {
 impl ArithmeticValue {
     /// Convert an AST term into a scalar value.
     ///
-    /// Integer and float terms use the AST literal types (`i64` and `f64`). Callers
-    /// with schema information can construct a narrower typed variant directly.
+    /// Integers use `i64` when representable and `u64` above `i64::MAX`; floats use
+    /// `f64`. A declared schema may select another native scalar type.
     pub fn from_term(term: &Term) -> Result<Self> {
         match term {
-            Term::Integer(value) => Ok(Self::I64(*value)),
+            Term::Integer(value) => {
+                Self::from_typed_term(term, crate::ast::integer_literal_type(*value))
+            }
             Term::Float(value) => Ok(Self::F64(*value)),
             Term::String(value) => Ok(Self::String(value.clone())),
             Term::Symbol(value) => Ok(Self::Symbol(*value)),
@@ -61,15 +63,13 @@ impl ArithmeticValue {
     /// Convert the evaluated scalar back into an AST term.
     pub fn into_term(self) -> Result<Term> {
         Ok(match self {
-            Self::I32(value) => Term::Integer(i64::from(value)),
-            Self::I64(value) => Term::Integer(value),
-            Self::U32(value) => Term::Integer(i64::from(value)),
-            Self::U64(value) => Term::Integer(i64::try_from(value).map_err(|_| {
-                XlogError::Compilation("u64 arithmetic result exceeds AST integer range".into())
-            })?),
+            Self::I32(value) => Term::Integer(i128::from(value)),
+            Self::I64(value) => Term::Integer(i128::from(value)),
+            Self::U32(value) => Term::Integer(i128::from(value)),
+            Self::U64(value) => Term::Integer(i128::from(value)),
             Self::F32(value) => Term::Float(f64::from(value)),
             Self::F64(value) => Term::Float(value),
-            Self::Bool(value) => Term::Integer(i64::from(value)),
+            Self::Bool(value) => Term::Integer(i128::from(value)),
             Self::Symbol(value) => Term::Symbol(value),
             Self::String(value) => Term::String(value),
         })
@@ -231,7 +231,9 @@ pub fn evaluate_arithmetic_expression(
                     })?,
                 )),
                 ArithExpr::Integer(value) => {
-                    values.push(EvaluationValue::Arithmetic(ArithmeticValue::I64(*value)));
+                    values.push(EvaluationValue::Arithmetic(ArithmeticValue::from_term(
+                        &Term::Integer(*value),
+                    )?));
                 }
                 ArithExpr::Float(value) => {
                     values.push(EvaluationValue::Arithmetic(ArithmeticValue::F64(*value)));
@@ -642,7 +644,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(&ArithExpr::Add(
-                Box::new(ArithExpr::Integer(i64::MAX)),
+                Box::new(ArithExpr::Integer(i128::from(i64::MAX))),
                 Box::new(ArithExpr::Integer(1)),
             ))
             .expect("wrapping sum"),

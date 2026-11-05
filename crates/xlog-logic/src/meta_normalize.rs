@@ -1114,7 +1114,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 Ok(term.clone())
             }
             Some(TypeRef::Term) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Any)? as i64
+                self.register_term(term, ExpectedTerm::Any)? as i128
             )),
             Some(TypeRef::Compound) if term.is_any_variable() => {
                 if temporary_receipt.is_none() {
@@ -1123,7 +1123,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 Ok(term.clone())
             }
             Some(TypeRef::Compound) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Compound)? as i64,
+                self.register_term(term, ExpectedTerm::Compound)? as i128,
             )),
             Some(TypeRef::PredRef) if term.is_any_variable() => {
                 if temporary_receipt.is_none() {
@@ -1132,7 +1132,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 Ok(term.clone())
             }
             Some(TypeRef::PredRef) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::PredRef)? as i64,
+                self.register_term(term, ExpectedTerm::PredRef)? as i128,
             )),
             Some(TypeRef::List(inner)) => self.normalize_list_value(term, inner, temporary_receipt),
             Some(TypeRef::Scalar(_)) | Some(TypeRef::Domain(_)) | None => {
@@ -1945,7 +1945,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                     &mut self.allocation_owner,
                 ))
             }
-            Term::Integer(_) => Ok(RetainedTypeRef::scalar(ScalarType::U32)),
+            Term::Integer(_) => Ok(RetainedTypeRef::scalar(template.inferred_scalar_type())),
             Term::Float(_) => Ok(RetainedTypeRef::scalar(ScalarType::F64)),
             Term::String(_) | Term::Symbol(_) => Ok(RetainedTypeRef::scalar(ScalarType::Symbol)),
             Term::Compound { .. } | Term::PredRef(_) | Term::List(_) | Term::Cons { .. } => {
@@ -1977,7 +1977,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 &mut self.allocation_owner,
             )),
             _ => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Any)? as i64
+                self.register_term(term, ExpectedTerm::Any)? as i128
             )),
         }
     }
@@ -1993,7 +1993,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(Term::Integer(
-                        self.register_term(item, ExpectedTerm::Any)? as i64
+                        self.register_term(item, ExpectedTerm::Any)? as i128
                     ));
                 }
                 Ok(Term::List(values))
@@ -2027,7 +2027,7 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 self.acquire_term_clone(term)?;
                 Ok(term.clone())
             }
-            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i64 => {
+            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i128 => {
                 self.acquire_term_clone(term)?;
                 Ok(term.clone())
             }
@@ -2381,9 +2381,9 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                 let terms = self.capture(|normalizer| {
                     normalizer.acquire_vector::<Term>(3)?;
                     Ok(vec![
-                        Term::Integer(record.id as i64),
+                        Term::Integer(record.id as i128),
                         Term::Symbol(functor_id),
-                        Term::Integer(args.len() as i64),
+                        Term::Integer(args.len() as i128),
                     ])
                 })?;
                 self.add_helper_fact(functor_pred(), terms)?;
@@ -2392,18 +2392,18 @@ impl<'a, 'pool> MetaNormalizer<'a, 'pool> {
                     normalizer.acquire_vector::<Term>(parts.len())?;
                     let mut values = Vec::with_capacity(parts.len());
                     for id in parts {
-                        values.push(Term::Integer(id as i64));
+                        values.push(Term::Integer(id as i128));
                     }
-                    Ok(vec![Term::Integer(record.id as i64), Term::List(values)])
+                    Ok(vec![Term::Integer(record.id as i128), Term::List(values)])
                 })?;
                 self.add_helper_fact(univ_pred(), terms)?;
                 for (idx, arg_id) in args.into_iter().enumerate() {
                     let terms = self.capture(|normalizer| {
                         normalizer.acquire_vector::<Term>(3)?;
                         Ok(vec![
-                            Term::Integer(record.id as i64),
-                            Term::Integer(idx as i64),
-                            Term::Integer(arg_id as i64),
+                            Term::Integer(record.id as i128),
+                            Term::Integer(idx as i128),
+                            Term::Integer(arg_id as i128),
                         ])
                     })?;
                     self.add_helper_fact(arg_pred(), terms)?;
@@ -2751,10 +2751,7 @@ fn template_construction_allocation_bytes(
 fn infer_type_ref_from_terms(items: &[Term]) -> RetainedTypeRef {
     if let Some(first) = items.first() {
         match first {
-            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i64 => {
-                RetainedTypeRef::scalar(ScalarType::U32)
-            }
-            Term::Integer(_) => RetainedTypeRef::scalar(ScalarType::I64),
+            Term::Integer(_) => RetainedTypeRef::scalar(first.inferred_scalar_type()),
             Term::Float(_) => RetainedTypeRef::scalar(ScalarType::F64),
             Term::String(_) | Term::Symbol(_) => RetainedTypeRef::scalar(ScalarType::Symbol),
             Term::Compound { .. } | Term::PredRef(_) | Term::List(_) | Term::Cons { .. } => {

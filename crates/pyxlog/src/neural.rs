@@ -53,7 +53,7 @@ enum Fetch {
 /// the program's ground facts.
 #[derive(Debug, Clone, PartialEq)]
 enum ConstKey {
-    Int(i64),
+    Int(i128),
     Sym(u32),
     Str(String),
     Float(u64),
@@ -1152,7 +1152,7 @@ impl CompiledProgram {
                     terms: (0..arity.max(1))
                         .map(|p| {
                             if p == 0 {
-                                Term::Integer(i as i64)
+                                Term::Integer(i as i128)
                             } else {
                                 Term::Integer(0)
                             }
@@ -2684,7 +2684,7 @@ impl CompiledProgram {
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::DomainRow(row),
-                        ground_const: Some(Term::Integer(*ev)),
+                        ground_const: Some(Term::Integer(i128::from(*ev))),
                         #[cfg(feature = "host-io")]
                         output_var: occ.output_var.clone(),
                     });
@@ -2727,7 +2727,7 @@ impl CompiledProgram {
                     groups.push(NeuralGroup {
                         info: occ.info.clone(),
                         input_source: InputSource::ConstDummy,
-                        ground_const: Some(Term::Integer(*edge)),
+                        ground_const: Some(Term::Integer(i128::from(*edge))),
                         #[cfg(feature = "host-io")]
                         output_var: occ.output_var.clone(),
                     });
@@ -2876,7 +2876,12 @@ impl CompiledProgram {
             })?;
             match term {
                 Term::Integer(v) => {
-                    set.insert(*v);
+                    set.insert(i64::try_from(*v).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "relation '{}' arg {} integer {} is outside the i64 row-ID range",
+                            relation, arg_pos, v
+                        ))
+                    })?);
                 }
                 _ => {
                     return Err(PyValueError::new_err(format!(
@@ -2999,7 +3004,7 @@ impl CompiledProgram {
                                     }
                                     _ => group_idx,
                                 };
-                                Term::Integer(placeholder as i64)
+                                Term::Integer(placeholder as i128)
                             }
                         };
                         terms.push(term);
@@ -3068,7 +3073,7 @@ impl CompiledProgram {
                             query_pred, pos
                         ))
                     })?;
-                    terms.push(Term::Integer(*group_idx as i64));
+                    terms.push(Term::Integer(*group_idx as i128));
                 }
                 template_program
                     .prob_queries
@@ -3095,7 +3100,7 @@ impl CompiledProgram {
                         if pos == *target_position {
                             terms.push(self.label_string_to_term(target));
                         } else if let Some(group_idx) = head_to_group.get(&pos) {
-                            terms.push(Term::Integer(*group_idx as i64));
+                            terms.push(Term::Integer(*group_idx as i128));
                         } else {
                             let head_term = template_rule
                                 .head
@@ -3306,7 +3311,7 @@ impl CompiledProgram {
     #[cfg(feature = "host-io")]
     fn label_string_to_term(&self, label: &str) -> Term {
         if let Ok(v) = label.parse::<i64>() {
-            Term::Integer(v)
+            Term::Integer(i128::from(v))
         } else {
             Term::Symbol(xlog_core::symbol::intern(label))
         }

@@ -315,7 +315,7 @@ pub enum ExecutableTerm {
     },
     Anonymous,
     Integer {
-        value: i64,
+        value: i128,
     },
     Float {
         ieee754_bits: u64,
@@ -415,7 +415,7 @@ pub enum ExecutableArithmeticExpression {
         name: String,
     },
     Integer {
-        value: i64,
+        value: i128,
     },
     Float {
         ieee754_bits: u64,

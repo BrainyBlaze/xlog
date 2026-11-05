@@ -9533,6 +9533,45 @@ impl ReplayRow {
         CheckpointReferent::decode(bytes.as_bytes()).map(Some)
     }
 
+    fn edit_demonstration_materials(&self) -> PyResult<Option<[&ReplayMaterial; 4]>> {
+        if !matches!(self.basis, ReplayBasis::Episode { .. }) {
+            return Ok(None);
+        }
+        let trace = replay_json_object(replay_json_field(&self.record, "action_trace")?)?;
+        let solution = replay_json_field(&trace, "edit_solution")?;
+        if replay_json_value(solution)?.is_null() {
+            return Ok(None);
+        }
+        let solution = replay_json_object(solution)?;
+        let ground = replay_json_object(replay_json_field(&trace, "task_ground")?)?;
+        let envelope = replay_json_object(replay_json_field(&self.record, "envelope")?)?;
+        let resolve =
+            |object: &ReplayJsonObject, field: &str, kind: &str| -> PyResult<&ReplayMaterial> {
+                let value = replay_json_value(replay_json_field(object, field)?)?;
+                let identity = value.as_str().ok_or_else(|| {
+                    invalid("edit demonstration requires its original material identity")
+                })?;
+                replay_digest_identity(identity)?;
+                let mut matches = self
+                    .materials
+                    .iter()
+                    .filter(|original| original.identity == identity && original.kind == kind);
+                let original = matches.next().ok_or_else(|| {
+                    invalid("edit demonstration lost its original solving material")
+                })?;
+                if matches.next().is_some() {
+                    return Err(invalid("edit demonstration material identity is ambiguous"));
+                }
+                Ok(original)
+            };
+        Ok(Some([
+            resolve(&envelope, "action_identity", "action")?,
+            resolve(&envelope, "edit_codebook_identity", "codebook")?,
+            resolve(&solution, "witness_identity", "edit-solution")?,
+            resolve(&ground, "witness_identity", "task-ground")?,
+        ]))
+    }
+
     fn training_view_row(&self) -> PyResult<xlog_cuda::SemanticReplayTrainingViewRow> {
         let mut materials = self
             .materials
@@ -9593,7 +9632,19 @@ impl ReplayRow {
                 origin,
             )
             .map_err(xlog_err)?;
-        actor_refresh::qualify_edit_demonstration(self, training_row)
+        #[cfg(feature = "semantic-policy")]
+        {
+            actor_refresh::qualify_edit_demonstration(self, training_row)
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            if self.edit_demonstration_materials()?.is_some() {
+                return Err(invalid(
+                    "edit demonstration replay requires a semantic-policy build",
+                ));
+            }
+            Ok(training_row)
+        }
     }
 
     fn native_replay(&self) -> PyResult<NativeReplayBinding> {
