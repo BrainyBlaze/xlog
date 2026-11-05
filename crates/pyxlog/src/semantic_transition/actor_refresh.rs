@@ -42,7 +42,26 @@ pub(super) fn record_prepared_steps(
     private: Option<&Py<learning_phase::PySemanticLearningPhaseTransition>>,
     actor_refreshes: &[Arc<ActorRefreshCustody>],
 ) -> PyResult<()> {
-    for step in steps {
+    let resource_interval = session
+        .prepared_segment
+        .lock()
+        .map_err(|_| invalid("prepared segment mutex is poisoned"))?
+        .as_ref()
+        .and_then(|original| original.resource_interval.as_ref().map(Arc::clone));
+    if private.is_some() && resource_interval.is_some() {
+        return Err(invalid(
+            "private recorder cannot issue a second resource interval",
+        ));
+    }
+    if let Some(interval) = &resource_interval {
+        let native = steps
+            .iter()
+            .map(|step| step.borrow(py).inner.clone())
+            .collect::<Vec<_>>();
+        interval.retain_steps(&native)?;
+        interval.retain_capture_stream(stream.cu_stream() as u64)?;
+    }
+    for (step_index, step) in steps.iter().enumerate() {
         check()?;
         let native = step.borrow(py).inner.clone();
         let admission_error = std::cell::RefCell::new(None);
@@ -61,6 +80,14 @@ pub(super) fn record_prepared_steps(
                             &session,
                             &issued,
                             &step.borrow(py),
+                            stream.cu_stream() as u64,
+                            false,
+                        )?;
+                    } else if let Some(interval) = &resource_interval {
+                        interval.bind_step(
+                            py,
+                            step_index,
+                            &native,
                             stream.cu_stream() as u64,
                             false,
                         )?;
@@ -232,6 +259,14 @@ pub(super) fn record_prepared_steps(
                                 &session,
                                 &issued,
                                 &step.borrow(py),
+                                stream.cu_stream() as u64,
+                                true,
+                            )?;
+                        } else if let Some(interval) = &resource_interval {
+                            interval.bind_step(
+                                py,
+                                step_index,
+                                &native,
                                 stream.cu_stream() as u64,
                                 true,
                             )?;
@@ -2700,6 +2735,7 @@ impl PySemanticPreparedActorRefresh {
                     producers_retired: false,
                     producer_retirement_entered: false,
                     retirement_streams: None,
+                    resource_interval: None,
                     retirement_steps_quiesced: 0,
                     graph_retired: false,
                     outcomes: None,

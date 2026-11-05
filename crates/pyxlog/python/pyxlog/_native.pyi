@@ -515,6 +515,31 @@ class SemanticSegmentInstructionAdmission:
     @property
     def control_measurements(self) -> dict[str, Any] | None: ...
 
+    @property
+    def resource_interval(self) -> dict[str, Any] | None:
+        """Original interval after native and external retirement; never finishes work."""
+        ...
+
+    @property
+    def resource_retirement(self) -> SemanticSegmentResourceRetirement | None: ...
+
+    def finish_retirement(self) -> dict[str, Any]:
+        """After real cold/model teardown, finish only this original observer suffix."""
+        ...
+
+class SemanticSegmentRetirementPending(RuntimeError):
+    """Continue the same native or observer retirement; completed callbacks cannot repeat."""
+
+class SemanticSegmentResourceRetirement:
+    """Original CPU-only interval owner; it retains no graph, model or producer."""
+
+    @property
+    def resource_interval(self) -> dict[str, Any] | None: ...
+
+    def finish_retirement(self) -> dict[str, Any]:
+        """Finish after the original native closes and external model owners release."""
+        ...
+
 class SemanticEvaluationInstructionAdmission:
     """Original public read-only Evaluation; retained across genuine Pending."""
 
@@ -1382,7 +1407,7 @@ class SemanticTransitionController:
 
     def admit_segment_instruction(
         self, task_use: SemanticTransitionTaskUse, *, parent: SemanticPublishedParent,
-        instruction_bytes: bytes, first_program_ordinal: int,
+        instruction_bytes: bytes, first_program_ordinal: int, resource_observer: Any,
         checkpoint: Optional[bytes] = None,
     ) -> SemanticSegmentInstructionAdmission:
         """Ordinary admission requires its exact original pre-request checkpoint.

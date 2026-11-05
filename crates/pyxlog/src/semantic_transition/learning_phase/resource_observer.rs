@@ -492,6 +492,8 @@ struct Interval {
     boundaries: Option<(u64, u64)>,
     backing_peak: Option<u64>,
     trace: Option<serde_json::Value>,
+    #[cfg(feature = "semantic-policy")]
+    completion_status: Option<u32>,
     release_attempted: bool,
     released: bool,
     steps: Vec<StepInterval>,
@@ -566,6 +568,83 @@ impl ResourceObserver {
             original_context,
             interval: Mutex::new(None),
         })
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn capture_registered(
+        py: Python<'_>,
+        device: ([u8; 16], u64),
+    ) -> PyResult<Self> {
+        let capsule = {
+            let original = PROCESS_BACKING_OBSERVER
+                .lock()
+                .map_err(|_| invalid("original process observer custody is poisoned"))?;
+            original
+                .as_ref()
+                .filter(|original| original.creator == thread::current().id())
+                .ok_or_else(|| {
+                    invalid("frozen context requires the original registered process observer")
+                })?
+                ._capsule
+                .clone_ref(py)
+        };
+        Self::capture(capsule.bind(py), device)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn derive(
+        &self,
+        py: Python<'_>,
+        device: ([u8; 16], u64),
+    ) -> PyResult<Self> {
+        self.require_original(py)?;
+        Self::capture(self.capsule.bind(py), device)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn require_capsule(
+        &self,
+        py: Python<'_>,
+        capsule: &Bound<'_, PyCapsule>,
+    ) -> PyResult<()> {
+        self.require_original(py)?;
+        if self.capsule.as_ptr() != capsule.as_ptr() {
+            return Err(invalid(
+                "segment changed its original resource observer capsule",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn has_step_captures(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<bool> {
+        self.require_original(py)?;
+        Ok(!self
+            .interval()?
+            .as_ref()
+            .ok_or_else(|| invalid("capture metadata lost its original interval"))?
+            .steps
+            .is_empty())
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(in crate::semantic_transition) fn completion_pending(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<bool> {
+        self.require_original(py)?;
+        Ok(self.interval()?.as_ref().is_some_and(|interval| {
+            interval.begun
+                && !interval.release_attempted
+                && if interval.cancellation_attempted && !interval.cancelled_roster {
+                    matches!(interval.cancellation_status, INCOMPLETE | UNKNOWN)
+                } else {
+                    matches!(interval.completion_status, Some(INCOMPLETE | UNKNOWN))
+                }
+        }))
     }
 
     pub(in crate::semantic_transition) fn require_original(&self, py: Python<'_>) -> PyResult<()> {
@@ -649,7 +728,9 @@ impl ResourceObserver {
     /// Export retained original scalars without another producer read or join.
     /// Group boundaries include cold preparation/retirement; capture handles
     /// remain handles and are never interpreted as activity graph identifiers.
-    fn original_interval_projection(&self) -> PyResult<serde_json::Value> {
+    pub(in crate::semantic_transition) fn original_interval_projection(
+        &self,
+    ) -> PyResult<serde_json::Value> {
         let retained = self.interval()?;
         let interval = retained
             .as_ref()
@@ -748,6 +829,8 @@ impl ResourceObserver {
             boundaries: None,
             backing_peak: None,
             trace: None,
+            #[cfg(feature = "semantic-policy")]
+            completion_status: None,
             release_attempted: false,
             released: false,
             steps: Vec::new(),
@@ -783,7 +866,7 @@ impl ResourceObserver {
     /// These are cold capture delimiters, NOT execution timestamps. The same
     /// producer binds the actual captured node/correlation identities, then
     /// obtains original GPU execution boundaries in its own timestamp scale.
-    pub(super) fn bind_step_capture(
+    pub(in crate::semantic_transition) fn bind_step_capture(
         &self,
         py: Python<'_>,
         ordinal: u64,
@@ -879,7 +962,7 @@ impl ResourceObserver {
     /// subinterval obligations. Preserve every original attempt and its status;
     /// an unknown bind or handoff cannot be repaired by absence of GPU activity.
     #[cfg(feature = "semantic-policy")]
-    pub(super) fn cancel_step_captures(
+    pub(in crate::semantic_transition) fn cancel_step_captures(
         &self,
         py: Python<'_>,
         ordinal: u64,
@@ -942,7 +1025,7 @@ impl ResourceObserver {
     /// Observe the same original cancellation, never repeat its handoff or
     /// replace the native non-submission proof with collector activity.
     #[cfg(feature = "semantic-policy")]
-    pub(super) fn resolve_step_cancellation(
+    pub(in crate::semantic_transition) fn resolve_step_cancellation(
         &self,
         py: Python<'_>,
         ordinal: u64,
@@ -990,7 +1073,7 @@ impl ResourceObserver {
     }
 
     #[cfg(feature = "semantic-policy")]
-    pub(super) fn step_cancellation_pending(
+    pub(in crate::semantic_transition) fn step_cancellation_pending(
         &self,
         py: Python<'_>,
         ordinal: u64,
@@ -1065,6 +1148,8 @@ impl ResourceObserver {
         // source creator has joined actual consumers before entering this call.
         let status =
             unsafe { (self.finish)(self.context as *mut c_void, interval.handle as *mut c_void) };
+        #[cfg(feature = "semantic-policy")]
+        interval.completion_status = Some(status);
         if status != COMPLETE && status != INCOMPLETE {
             return Err(invalid("original resource interval finish is unknown; read only the same interval without repeating finish"));
         }
@@ -1102,6 +1187,8 @@ impl ResourceObserver {
                 &mut view,
             )
         };
+        #[cfg(feature = "semantic-policy")]
+        interval.completion_status = Some(status);
         if status != COMPLETE {
             return Err(invalid("original resource result is unknown; retain the original interval and completed source result"));
         }
@@ -1149,7 +1236,11 @@ impl ResourceObserver {
         Ok(view.backing_peak_bytes)
     }
 
-    pub(super) fn step_backing_peaks(&self, py: Python<'_>, count: usize) -> PyResult<Vec<u64>> {
+    pub(in crate::semantic_transition) fn step_backing_peaks(
+        &self,
+        py: Python<'_>,
+        count: usize,
+    ) -> PyResult<Vec<u64>> {
         let group_peak = self.backing_peak(py)?;
         let mut retained = self.interval()?;
         let interval = retained.as_mut().expect("known original backing interval");
@@ -1185,6 +1276,8 @@ impl ResourceObserver {
                         &mut view,
                     )
                 };
+                #[cfg(feature = "semantic-policy")]
+                interval.completion_status = Some(status);
                 let required = START_VALID
                     | END_VALID
                     | DELIVERY_DRAINED
