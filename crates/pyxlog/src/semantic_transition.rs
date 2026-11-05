@@ -27537,9 +27537,24 @@ impl PySemanticTransitionController {
                 return Err(invalid("replay delivery already entered; resolve its original parent instead of resubmitting"));
             }
             task_use.require_current(&owner)?;
-            owner
-                .replay_append_limits(&*acquired.lease()?)
-                .map_err(xlog_err)?
+            if owner.coding_delivery_is_observation().map_err(xlog_err)? {
+                for input in [proposals, result_receipts, replay_rows] {
+                    if !input.is_exact_instance_of::<PyTuple>()
+                        || input.cast::<PyTuple>()?.len() != 0
+                    {
+                        return Err(invalid(
+                            "evaluation coding observations require empty training append tuples",
+                        ));
+                    }
+                }
+                // Match ordinary delivery's authority decoding bound. This
+                // disposition admits no replay metadata or material inputs.
+                [16 * 1024 * 1024, 0, 0, 0]
+            } else {
+                owner
+                    .replay_append_limits(&*acquired.lease()?)
+                    .map_err(xlog_err)?
+            }
         };
         let [metadata_limit, material_limit, total_material_limit, evidence_limit] =
             limits.map(|limit| {
