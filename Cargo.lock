@@ -2510,6 +2510,7 @@ name = "xlog-ir"
 version = "0.12.0"
 dependencies = [
  "serde",
+ "serde_json",
  "xlog-core",
 ]
 
