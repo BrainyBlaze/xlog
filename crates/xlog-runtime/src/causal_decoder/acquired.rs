@@ -34,7 +34,8 @@ impl NativeCausalModel {
     pub fn acquisition_context(&self, insertion_layer: usize) -> Result<serde_json::Value> {
         use serde_json::json;
         let program = self.program();
-        let hidden = program.parameters[self.acquisition_down_projection(insertion_layer)?].shape[0];
+        let hidden =
+            program.parameters[self.acquisition_down_projection(insertion_layer)?].shape[0];
         let signature = TensorSignature::Causal {
             input_width: hidden,
             output_width: ACQUIRED_WIDTH,
@@ -45,11 +46,14 @@ impl NativeCausalModel {
         let entrypoint = loop {
             let name = format!("acquired::{ordinal}");
             let namespace = format!("{name}::");
-            if !self.functions.functions().any(|function| {
-                function.name == name || function.name.starts_with(&namespace)
-            }) && !program.parameters.iter().any(|parameter| {
-                parameter.name == name || parameter.name.starts_with(&namespace)
-            }) {
+            if !self
+                .functions
+                .functions()
+                .any(|function| function.name == name || function.name.starts_with(&namespace))
+                && !program.parameters.iter().any(|parameter| {
+                    parameter.name == name || parameter.name.starts_with(&namespace)
+                })
+            {
                 break name;
             }
             ordinal = ordinal

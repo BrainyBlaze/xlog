@@ -1480,11 +1480,8 @@ impl FuncDef {
     /// Construct the typed public entry point of a causal numerical program.
     /// The body is retained here, rather than copied into a separate registry.
     pub fn numerical(name: String, program: TensorProgram) -> Result<Self> {
-        let (params, result) = Self::numerical_types(
-            &program.signature,
-            program.vocabulary,
-            program.max_context,
-        )?;
+        let (params, result) =
+            Self::numerical_types(&program.signature, program.vocabulary, program.max_context)?;
         let definition = Self {
             name,
             params,
@@ -1562,11 +1559,8 @@ impl FuncDef {
         let FuncBody::Numerical(program) = &self.body else {
             return Ok(());
         };
-        let (params, result) = Self::numerical_types(
-            &program.signature,
-            program.vocabulary,
-            program.max_context,
-        )?;
+        let (params, result) =
+            Self::numerical_types(&program.signature, program.vocabulary, program.max_context)?;
         let mut names = std::collections::HashSet::new();
         if self.name.is_empty()
             || self.params.len() != params.len()

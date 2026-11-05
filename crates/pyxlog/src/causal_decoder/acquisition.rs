@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use xlog_ir::tensor::TensorParameter;
 use xlog_runtime::causal_decoder::acquired::{
     ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
