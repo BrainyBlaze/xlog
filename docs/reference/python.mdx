@@ -146,6 +146,52 @@ and canonical parameter bytes actually imported, not a substitute for checking
 the publisher's file hashes. `model.max_context` and `model.vocabulary_size`
 expose the admitted dimensions.
 
+`fork_trainable(down_projection_layer=17)` returns an independent candidate with
+that zero-based decoder layer's MLP down projection trainable. Frozen parameters
+share the original allocations. The candidate owns FP32 master weights and Adam
+first/second moments; its BF16 forward view changes only after a complete update.
+Forking an already trainable model preserves its optimizer version and selected
+layer. Source models, other forks and retained logits keep their original bytes.
+
+```python
+candidate = model.fork_trainable(down_projection_layer=17)
+mean_loss, gradient_norm, step = candidate.fit_binary(
+    training_prefixes,
+    prediction_positions=training_positions,
+    outcomes=observed_bits,  # Python bool values, one per prefix
+    negative_token_id=15,
+    positive_token_id=16,
+)
+updated_logits = candidate.forward(token_ids, prediction_position=len(token_ids) - 1)
+```
+
+`fit_binary` minimizes the mean Bernoulli NLL of
+`sigmoid(logit[positive_token_id] - logit[negative_token_id])`. `fit_tokens` takes
+the same prefixes and `prediction_positions`, with `target_ids` replacing the
+binary arguments, and minimizes cross entropy over the entire vocabulary. Both
+return pre-update mean loss, the norm of the mean gradient before clipping, and
+the completed per-parameter update count. Prefixes are recomputed against the
+same pre-update weights; input lists must have equal nonzero length. The caller
+owns minibatch selection, replay, attempt limits and the overall compute budget.
+
+Reverse execution follows the forward graph through frozen upper layers, including
+causal attention and grouped key/value accumulation. Cotangents and matrix
+products in the reverse pass are FP32, with TF32 disabled. BF16 casts and residual
+addition use an explicit straight-through surrogate; this is not the mathematical
+derivative of quantization. Softmax uses probabilities before their BF16 cast in
+its VJP. Token IDs and discrete choices have no derivative.
+
+The update uses learning rate `1e-5`, AdamW betas `(0.9, 0.999)`, epsilon `1e-8`,
+zero weight decay and global gradient norm clipping at one. New moments start at
+zero. Each successful update replaces the weight and optimizer version together;
+an exception leaves both unchanged. Training uses the same memory budget as
+forward, including retained activations, FP32 reverse temporaries and optimizer
+state. It also reads loss/norm scalars to the host. `checkpoint_identity` continues
+to identify the imported checkpoint, not the subsequently trained parameter bytes.
+The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
+Acquired-function insertion, model snapshot serialization and restoration are
+separate capabilities not provided by these methods.
+
 ### Semantic task binding
 
 `SemanticTransitionColdTask` retains the full admitted `statements` roster and

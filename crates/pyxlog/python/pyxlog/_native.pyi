@@ -56,7 +56,7 @@ def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDevice
 _Path = Union[str, PathLike[str]]
 
 class NativeCausalModel:
-    """Checkpoint-backed native BF16 Qwen3 forward on an XLOG CUDA provider."""
+    """Native BF16 Qwen3 forward and candidate down-projection training."""
 
     @staticmethod
     def from_checkpoint(
@@ -65,6 +65,15 @@ class NativeCausalModel:
     def forward(
         self, token_ids: Sequence[int], *, prediction_position: int
     ) -> NativeLogits: ...
+    def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
+    def fit_binary(
+        self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
+        outcomes: Sequence[bool], negative_token_id: int, positive_token_id: int,
+    ) -> tuple[float, float, int]: ...
+    def fit_tokens(
+        self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
+        target_ids: Sequence[int],
+    ) -> tuple[float, float, int]: ...
     @property
     def checkpoint_identity(self) -> str: ...
     @property

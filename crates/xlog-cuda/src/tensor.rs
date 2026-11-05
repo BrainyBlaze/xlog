@@ -15,6 +15,9 @@ use crate::{CudaFunction, CudaKernelProvider, LaunchAsync, LaunchConfig};
 
 const BLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 
+mod training;
+pub use training::{TensorAdamState, TensorLoss, TensorTrainingResult};
+
 fn failure(error: impl std::fmt::Display) -> XlogError {
     XlogError::Kernel(format!("native numerical execution: {error}"))
 }
@@ -240,6 +243,7 @@ impl TensorExecutor {
         b: &NativeTensor,
         output: &NativeTensor,
         transpose_a: bool,
+        transpose_b: bool,
         m: usize,
         n: usize,
         k: usize,
@@ -270,8 +274,29 @@ impl TensorExecutor {
         } else {
             blas_sys::cublasOperation_t::CUBLAS_OP_N
         };
-        let no_transpose = blas_sys::cublasOperation_t::CUBLAS_OP_N;
-        let dtype = blas_sys::cudaDataType::CUDA_R_16BF;
+        let transb = if transpose_b {
+            blas_sys::cublasOperation_t::CUBLAS_OP_T
+        } else {
+            blas_sys::cublasOperation_t::CUBLAS_OP_N
+        };
+        let extent = |rows: i32, columns: i32| {
+            (rows as usize)
+                .checked_mul(columns as usize)
+                .and_then(|n| n.checked_mul(batches as usize))
+        };
+        if a.shape.float32 != output.shape.float32
+            || b.shape.float32 != output.shape.float32
+            || Some(a.elements()) != extent(m, k)
+            || Some(b.elements()) != extent(k, n)
+            || Some(output.elements()) != extent(m, n)
+        {
+            return Err(failure("GEMM storage type or extent mismatch"));
+        }
+        let dtype = if output.shape.float32 {
+            blas_sys::cudaDataType::CUDA_R_32F
+        } else {
+            blas_sys::cudaDataType::CUDA_R_16BF
+        };
         // SAFETY: execute() has checked every matrix extent and type. This handle
         // is bound permanently to the recorder's stream. Inputs, output, and
         // workspace are retained/registered; host alpha/beta live until enqueue.
@@ -285,7 +310,7 @@ impl TensorExecutor {
                 blas_result::gemm_strided_batched_ex(
                     *state.handle.handle(),
                     transa,
-                    no_transpose,
+                    transb,
                     m,
                     n,
                     k,
@@ -296,7 +321,7 @@ impl TensorExecutor {
                     i64::from(m) * i64::from(k),
                     b.pointer() as usize as *const c_void,
                     dtype,
-                    k,
+                    if transpose_b { n } else { k },
                     i64::from(k) * i64::from(n),
                     (&beta as *const f32).cast(),
                     output.pointer() as usize as *mut c_void,
@@ -304,7 +329,11 @@ impl TensorExecutor {
                     m,
                     i64::from(m) * i64::from(n),
                     batches,
-                    blas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    if output.shape.float32 {
+                        blas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+                    } else {
+                        blas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
+                    },
                     blas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
                 )
                 .map_err(failure)
@@ -331,53 +360,27 @@ impl TensorExecutor {
             columns: head_dim,
             float32: false,
         };
-        let pack = |input: &NativeTensor, source_heads| -> Result<NativeTensor> {
-            let packed = self.allocate(packed_shape)?;
-            self.launch(
-                self.recorder(&[input], &packed),
-                "tensor_attention_pack_bf16",
-                grid(packed.elements().div_ceil(256))?,
-                (
-                    input.pointer(),
-                    packed.pointer(),
-                    packed.elements() as u64,
-                    sequence as u32,
-                    heads as u32,
-                    source_heads as u32,
-                    head_dim as u32,
-                ),
-            )?;
-            Ok(packed)
-        };
-        let q = pack(query, heads)?;
-        let k = pack(key, kv_heads)?;
-        let v = pack(value, kv_heads)?;
+        let q = self.attention_pack(query, heads, heads, head_dim)?;
+        let k = self.attention_pack(key, heads, kv_heads, head_dim)?;
+        let v = self.attention_pack(value, heads, kv_heads, head_dim)?;
         let scores = self.allocate(TensorValueShape {
             rows: heads * sequence,
             columns: sequence,
             float32: false,
         })?;
-        self.gemm(&k, &q, &scores, true, sequence, sequence, head_dim, heads)?;
+        self.gemm(
+            &k, &q, &scores, true, false, sequence, sequence, head_dim, heads,
+        )?;
         drop(q);
         drop(k);
-        let probabilities = self.allocate(scores.shape)?;
-        self.launch(
-            self.recorder(&[&scores], &probabilities),
-            "tensor_causal_softmax_bf16",
-            grid(heads * sequence)?,
-            (
-                scores.pointer(),
-                probabilities.pointer(),
-                sequence as u32,
-                1.0f32 / (head_dim as f32).sqrt(),
-            ),
-        )?;
+        let probabilities = self.attention_probabilities(&scores, sequence, head_dim)?;
         drop(scores);
         let attended = self.allocate(packed_shape)?;
         self.gemm(
             &v,
             &probabilities,
             &attended,
+            false,
             false,
             head_dim,
             sequence,
@@ -408,6 +411,21 @@ impl TensorExecutor {
         token_ids: &[u32],
         prediction_position: usize,
     ) -> Result<NativeTensor> {
+        let mut values =
+            self.execute_retaining(program, parameters, token_ids, prediction_position, &[])?;
+        values[program.output]
+            .take()
+            .ok_or_else(|| failure("missing numerical output"))
+    }
+
+    fn execute_retaining(
+        &self,
+        program: &TensorProgram,
+        parameters: &[NativeTensor],
+        token_ids: &[u32],
+        prediction_position: usize,
+        retained: &[bool],
+    ) -> Result<Vec<Option<NativeTensor>>> {
         let shapes = program.shapes(token_ids.len(), prediction_position)?;
         if parameters.len() != program.parameters.len()
             || token_ids
@@ -433,6 +451,9 @@ impl TensorExecutor {
             .htod_sync_copy_into_tracked(token_ids, &mut tokens)?;
         let mut uses = vec![0usize; program.operations.len()];
         uses[program.output] = 1;
+        for (id, &keep) in retained.iter().enumerate() {
+            uses[id] += usize::from(keep);
+        }
         for operation in &program.operations {
             for input in operation.inputs() {
                 uses[input] += 1;
@@ -476,6 +497,7 @@ impl TensorExecutor {
                         source,
                         &output,
                         true,
+                        false,
                         output.shape.columns,
                         source.shape.rows,
                         source.shape.columns,
@@ -593,10 +615,10 @@ impl TensorExecutor {
             }
         }
         let output = values[program.output]
-            .take()
+            .as_ref()
             .ok_or_else(|| failure("missing numerical output"))?;
-        self.require_finite(&output)?;
-        Ok(output)
+        self.require_finite(output)?;
+        Ok(values)
     }
 
     fn require_finite(&self, tensor: &NativeTensor) -> Result<()> {
@@ -620,7 +642,9 @@ impl TensorExecutor {
         self.provider
             .dtoh_sync_copy_into_tracked(&invalid, &mut flag)?;
         if flag[0] != 0 {
-            return Err(failure("forward produced nonfinite logits"));
+            return Err(failure(
+                "numerical execution produced nonfinite FP32 values",
+            ));
         }
         Ok(())
     }
