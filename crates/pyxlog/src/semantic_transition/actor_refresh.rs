@@ -630,47 +630,6 @@ pub(super) fn replay_source_projection(
     source_content_geometry::source_task_projection(py, source)
 }
 
-fn original_edit_demonstration_materials(
-    row: &ReplayRow,
-) -> PyResult<Option<[&ReplayMaterial; 4]>> {
-    if !matches!(row.basis, ReplayBasis::Episode { .. }) {
-        return Ok(None);
-    }
-    let trace = replay_json_object(replay_json_field(&row.record, "action_trace")?)?;
-    let solution = replay_json_field(&trace, "edit_solution")?;
-    if replay_json_value(solution)?.is_null() {
-        return Ok(None);
-    }
-    let solution = replay_json_object(solution)?;
-    let ground = replay_json_object(replay_json_field(&trace, "task_ground")?)?;
-    let envelope = replay_json_object(replay_json_field(&row.record, "envelope")?)?;
-    let resolve =
-        |object: &ReplayJsonObject, field: &str, kind: &str| -> PyResult<&ReplayMaterial> {
-            let value = replay_json_value(replay_json_field(object, field)?)?;
-            let identity = value.as_str().ok_or_else(|| {
-                invalid("edit demonstration requires its original material identity")
-            })?;
-            replay_digest_identity(identity)?;
-            let mut matches = row
-                .materials
-                .iter()
-                .filter(|original| original.identity == identity && original.kind == kind);
-            let original = matches
-                .next()
-                .ok_or_else(|| invalid("edit demonstration lost its original solving material"))?;
-            if matches.next().is_some() {
-                return Err(invalid("edit demonstration material identity is ambiguous"));
-            }
-            Ok(original)
-        };
-    Ok(Some([
-        resolve(&envelope, "action_identity", "action")?,
-        resolve(&envelope, "edit_codebook_identity", "codebook")?,
-        resolve(&solution, "witness_identity", "edit-solution")?,
-        resolve(&ground, "witness_identity", "task-ground")?,
-    ]))
-}
-
 fn retain_edit_material(
     original: &ReplayMaterial,
 ) -> PyResult<(
@@ -701,7 +660,7 @@ pub(super) fn qualify_edit_demonstration(
     row: &ReplayRow,
     training_row: xlog_cuda::SemanticReplayTrainingViewRow,
 ) -> PyResult<xlog_cuda::SemanticReplayTrainingViewRow> {
-    let Some(originals) = original_edit_demonstration_materials(row)? else {
+    let Some(originals) = row.edit_demonstration_materials()? else {
         return Ok(training_row);
     };
     let originals = [
