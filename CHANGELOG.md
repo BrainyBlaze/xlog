@@ -30,6 +30,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- *(cuda)* keep control/update output handoffs under the same `semantic-policy`
+  feature as their forward witnesses and callers, restoring the default build.
+- *(python)* compile resource-observer status writes as conditional blocks and
+  preserve ordinary replay rows without `semantic-policy`; edit demonstration
+  rows still require the feature's original qualification.
 - *(runtime)* encode each resident-route certificate node from its local fields once, avoiding repeated recursive plan formatting for deep unary plans while preserving exact expression constants and route identity.
 - *(runtime)* preserve nullary schemas when initializing mutually recursive predicates.
 - *(runtime)* serialize execution statistics through a JSON encoder so diagnostic text and operation names are escaped correctly.

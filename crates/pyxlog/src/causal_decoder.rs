@@ -10,7 +10,7 @@ use super::{dlpack_capsule_from_tensor, types::xlog_err};
 
 /// Native BF16 causal decoder imported from a local SafeTensors checkpoint.
 #[pyclass(name = "NativeCausalModel", module = "pyxlog._native")]
-pub struct PyNativeCausalModel {
+pub(crate) struct PyNativeCausalModel {
     inner: NativeCausalModel,
 }
 
@@ -70,7 +70,7 @@ impl PyNativeCausalModel {
 
 /// Retained native FP32 logits for one prediction position.
 #[pyclass(name = "NativeLogits", module = "pyxlog._native")]
-pub struct PyNativeLogits {
+pub(crate) struct PyNativeLogits {
     inner: NativeLogits,
 }
 

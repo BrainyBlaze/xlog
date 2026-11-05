@@ -127,7 +127,7 @@ impl TensorExecutor {
         // SAFETY: the budgeted allocation is CUDA aligned, retained with this handle,
         // and every GEMM records it as writable on this same immutable stream.
         let status = unsafe {
-            blas_sys::cublasSetWorkspace(
+            blas_sys::cublasSetWorkspace_v2(
                 *handle.handle(),
                 workspace.device_ptr_value() as usize as *mut c_void,
                 BLAS_WORKSPACE_BYTES,
