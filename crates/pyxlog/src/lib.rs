@@ -1376,6 +1376,9 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
         m.add_class::<semantic_transition::evaluation_instruction::PySemanticEvaluationInstructionAdmission>()?;
+        m.add_class::<semantic_transition::segment_resource_observation::PySemanticSegmentResourceRetirement>()?;
+        m.add("SemanticSegmentRetirementPending",
+            _py.get_type::<semantic_transition::segment_resource_observation::SemanticSegmentRetirementPending>())?;
         m.add_class::<semantic_transition::evaluation_fork::PySemanticEvaluationFork>()?;
         m.add(
             "SemanticEvaluationForkPending",

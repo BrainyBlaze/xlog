@@ -137,6 +137,16 @@ impl SemanticModelContextContinuation {
             .cold_capacity())
     }
 
+    /// The exact original coordinate of this frozen future instruction.
+    pub fn first_program_ordinal(&self) -> Result<u64, SemanticTransitionError> {
+        Ok(self
+            .inner
+            .program
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?
+            .first_program_ordinal())
+    }
+
     pub fn original_instruction_bytes(&self) -> Result<Vec<u8>, SemanticTransitionError> {
         Ok(self
             .inner

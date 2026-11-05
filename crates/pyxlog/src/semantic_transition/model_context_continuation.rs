@@ -24,6 +24,7 @@ pub(crate) struct PySemanticModelContextContinuation {
     target_controller: Py<PySemanticTransitionController>,
     target_task: Py<PySemanticTransitionTaskUse>,
     model_owner: Py<PyAny>,
+    resource_interval: Option<Arc<segment_resource_observation::OriginalSegmentResourceInterval>>,
     state: Mutex<ContinuationState>,
     _metadata: Arc<xlog_cuda::SemanticReplayMaterialReservation>,
 }
@@ -114,6 +115,13 @@ impl ModelContextPythonCustody {
             Some(Err(error)) => return Err(error.clone_ref(py)),
             None => return Err(invalid("retain the original model continuation issuance")),
         };
+        let resource_interval = retain_context_resource_interval(
+            py,
+            &self.target_controller.borrow(py).session,
+            &inner,
+            instruction.resource_interval.as_ref(),
+            instruction.resource_interval.is_some(),
+        )?;
         let context = Py::new(
             py,
             PySemanticModelContextContinuation {
@@ -123,6 +131,7 @@ impl ModelContextPythonCustody {
                 target_controller: self.target_controller.clone_ref(py),
                 target_task: self.target_task.clone_ref(py),
                 model_owner: self.model_owner.clone_ref(py),
+                resource_interval,
                 state: Mutex::new(ContinuationState::default()),
                 _metadata: Arc::clone(&self.cap_metadata),
             },
@@ -196,6 +205,12 @@ struct SourceModelAlias {
 }
 
 impl PySemanticModelContextContinuation {
+    pub(super) fn resource_interval_handle(
+        &self,
+    ) -> Option<Arc<segment_resource_observation::OriginalSegmentResourceInterval>> {
+        self.resource_interval.as_ref().map(Arc::clone)
+    }
+
     pub(in crate::semantic_transition) fn checkpoint_target(
         &self,
         py: Python<'_>,
@@ -387,6 +402,14 @@ impl PySemanticModelContextContinuation {
         target_task_owner
             .frozen_model_context
             .store(true, Ordering::Release);
+        let ordinary = private_execution_owner(py, &source_session)?.is_none();
+        let resource_interval = retain_context_resource_interval(
+            py,
+            &target_task_owner.session,
+            &inner,
+            None,
+            ordinary,
+        )?;
         drop(target_session);
         drop(source_session);
         drop(parent);
@@ -407,6 +430,7 @@ impl PySemanticModelContextContinuation {
                 target_controller,
                 target_task,
                 model_owner,
+                resource_interval,
                 state: Mutex::new(ContinuationState {
                     parent_ready: true,
                     ..ContinuationState::default()
@@ -1068,6 +1092,46 @@ impl PySemanticSegmentInstructionAdmission {
 
 #[pymethods]
 impl PySemanticModelContextContinuation {
+    #[getter]
+    fn resource_retirement(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<segment_resource_observation::PySemanticSegmentResourceRetirement>>>
+    {
+        self.target_task
+            .borrow(py)
+            .session
+            .borrow(py)
+            .require_creator()?;
+        self.resource_interval
+            .as_ref()
+            .map(|interval| {
+                Py::new(
+                    py,
+                    segment_resource_observation::PySemanticSegmentResourceRetirement {
+                        interval: Arc::clone(interval),
+                    },
+                )
+            })
+            .transpose()
+    }
+
+    #[getter]
+    fn resource_interval(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        self.target_task
+            .borrow(py)
+            .session
+            .borrow(py)
+            .require_creator()?;
+        self.resource_interval
+            .as_ref()
+            .map(|interval| interval.projection())
+            .transpose()?
+            .flatten()
+            .map(|value| native_observation_report(py, value))
+            .transpose()
+    }
+
     #[getter]
     fn restored_prefill(
         &self,
@@ -2627,6 +2691,7 @@ impl PySemanticModelContextContinuation {
                 cold_capacity,
                 replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
                 cancelled_checkpoint: Mutex::new(Some(cancelled_checkpoint)),
+                resource_interval: self.resource_interval.as_ref().map(Arc::clone),
                 preparation: Mutex::new(SegmentInstructionPreparation {
                     scope: state.scope.as_ref().map(Arc::clone),
                     native_steps: state.steps.clone(),
@@ -2669,4 +2734,49 @@ impl PySemanticModelContextContinuation {
         context.handoff_target_parent(py, &admission.borrow(py), &slf)?;
         Ok(admission)
     }
+}
+
+/// Freeze authorizes preparation of this exact target, not execution. Retain the
+/// interval before its first CAPI effect so a lost return cannot start another.
+pub(super) fn retain_context_resource_interval(
+    py: Python<'_>,
+    target: &Py<PySemanticTransitionSession>,
+    native: &xlog_cuda::SemanticModelContextContinuation,
+    source: Option<&Arc<segment_resource_observation::OriginalSegmentResourceInterval>>,
+    ordinary: bool,
+) -> PyResult<Option<Arc<segment_resource_observation::OriginalSegmentResourceInterval>>> {
+    if !ordinary {
+        return Ok(None);
+    }
+    let session = target.borrow(py);
+    session.require_creator()?;
+    let ordinal = native.first_program_ordinal().map_err(xlog_err)?;
+    let mut retained = session
+        .model_context_resource_interval
+        .lock()
+        .map_err(|_| invalid("original context resource custody is poisoned"))?;
+    let interval = if let Some(interval) = retained.as_ref() {
+        interval.require_ordinal(ordinal)?;
+        Arc::clone(interval)
+    } else {
+        let device = session
+            .owner()?
+            .resource_device_identity()
+            .map_err(xlog_err)?;
+        let interval = if let Some(source) = source {
+            source.derive(py, device, ordinal)?
+        } else {
+            Arc::new(
+                segment_resource_observation::OriginalSegmentResourceInterval::new(
+                    learning_phase::ResourceObserver::capture_registered(py, device)?,
+                    ordinal,
+                ),
+            )
+        };
+        *retained = Some(Arc::clone(&interval));
+        interval
+    };
+    drop(retained);
+    interval.begin(py)?;
+    Ok(Some(interval))
 }

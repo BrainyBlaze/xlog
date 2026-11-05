@@ -280,6 +280,17 @@ pub(super) fn resolve_model_context_restore(
             state.result.is_some(),
         )
     };
+    {
+        let source = restored.session.borrow(py);
+        let ordinary = private_execution_owner(py, &source)?.is_none();
+        model_context_continuation::retain_context_resource_interval(
+            py,
+            &target_task.borrow(py).session,
+            &continuation,
+            None,
+            ordinary,
+        )?;
+    }
     if factory_completed {
         // The factory closed its sole region. Only the original report may
         // still be pending; entering an active callback would replay custody

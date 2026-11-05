@@ -3043,3 +3043,16 @@ impl PySemanticTransitionController {
         Ok(pending)
     }
 }
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticLearningPhaseTransition {
+    pub(in crate::semantic_transition) fn require_original_resource_capsule(
+        &self,
+        py: Python<'_>,
+        capsule: &Bound<'_, pyo3::types::PyCapsule>,
+    ) -> PyResult<()> {
+        self.preparation_inputs
+            .resource_observer
+            .require_capsule(py, capsule)
+    }
+}

@@ -31630,13 +31630,33 @@ impl SemanticTransitionSession {
         Ok(false)
     }
 
+    fn ensure_cancelled_prepared_retirement_quiescent(
+        &self,
+        proof: &SemanticPreparedSegmentNonSubmission,
+    ) -> Result<(), SemanticTransitionError> {
+        self.prepared_segment
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotCaptured)?
+            .require_non_submission(proof)?;
+        if self.has_pending_model_context_preseal() {
+            return Err(SemanticTransitionError::OverlappingLaunch);
+        }
+        self.ensure_quiescent_except_cold_report_with_effect_exclusion(
+            None,
+            OriginalSessionEffectExclusion {
+                allow_session_poison: true,
+                delivery_acknowledgement: None,
+            },
+        )
+    }
+
     /// The cancelled graph was never submitted. Its authentic preparation join
     /// does not complete a step or release a device reader. Destroy it unlocked.
     pub fn take_cancelled_prepared_executable_for_retirement(
         &mut self,
         proof: &SemanticPreparedSegmentNonSubmission,
     ) -> Result<Option<CapturedCudaGraph>, SemanticTransitionError> {
-        self.ensure_quiescent()?;
+        self.ensure_cancelled_prepared_retirement_quiescent(proof)?;
         self.prepared_segment
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
@@ -31651,7 +31671,7 @@ impl SemanticTransitionSession {
         &self,
         proof: &SemanticPreparedSegmentNonSubmission,
     ) -> Result<(), SemanticTransitionError> {
-        self.ensure_quiescent()?;
+        self.ensure_cancelled_prepared_retirement_quiescent(proof)?;
         let build = self
             .prepared_segment
             .as_ref()
@@ -31713,7 +31733,11 @@ impl SemanticTransitionSession {
         &mut self,
         cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
     ) -> Result<Vec<Arc<dyn Send + Sync>>, SemanticTransitionError> {
-        self.ensure_quiescent()?;
+        if let Some(proof) = cancellation {
+            self.ensure_cancelled_prepared_retirement_quiescent(proof)?;
+        } else {
+            self.ensure_quiescent()?;
+        }
         let build = self
             .prepared_segment
             .as_ref()
@@ -31755,7 +31779,9 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         self.actor_refresh_work.clear();
         if retired_preparation.is_none() {
-            self.reclaim_model_generations()?;
+            if cancellation.is_none() {
+                self.reclaim_model_generations()?;
+            }
             // The original graphs and step consumers have retired. Publication
             // generations retain their own selected model owners; these are only
             // the extra producer aliases from the one-use initial prefill.
@@ -38700,7 +38726,7 @@ impl SemanticTransitionSession {
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared step retirement stream admission", error))?;
         self.quiesce_prepared_step(step, consumer_streams)?;
-        self.release_prepared_step_storage(step)
+        self.release_prepared_step_storage(step, None)
     }
 
     /// Drop only the original unused preparation storage, after real consumer
@@ -38712,13 +38738,17 @@ impl SemanticTransitionSession {
         consumer_streams: &[u64],
     ) -> Result<(), SemanticTransitionError> {
         self.quiesce_cancelled_prepared_step(step, proof, consumer_streams)?;
-        self.release_prepared_step_storage(step)
+        self.release_prepared_step_storage(step, Some(proof))
     }
 
     fn release_prepared_step_storage(
         &mut self,
         step: &SemanticPreparedStep,
+        cancellation: Option<&SemanticPreparedSegmentNonSubmission>,
     ) -> Result<(), SemanticTransitionError> {
+        if let Some(proof) = cancellation {
+            self.ensure_cancelled_prepared_retirement_quiescent(proof)?;
+        }
         let owner = self
             .steps
             .get_mut(&step.token)
@@ -38741,7 +38771,10 @@ impl SemanticTransitionSession {
                 "output aliases still retain this prepared step",
             ));
         }
-        if self.original_retired_prepared_catalogue()?.is_none() {
+        // A cancelled preparation selected no execution result. Its original
+        // Session retains model generations until genuine terminal release;
+        // an unused dormant target has no published catalogue to reinterpret.
+        if cancellation.is_none() && self.original_retired_prepared_catalogue()?.is_none() {
             self.reclaim_model_generations()?;
         }
         self.steps.remove(&step.token);
@@ -38840,7 +38873,6 @@ impl SemanticTransitionSession {
         &self,
         step: &SemanticPreparedStep,
     ) -> Result<Vec<u64>, SemanticTransitionError> {
-        self.ensure_quiescent()?;
         let build = self
             .prepared_segment
             .as_ref()
@@ -38854,7 +38886,21 @@ impl SemanticTransitionSession {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
             self.require_original_prepared_graph_retirement()?;
+            // Terminal poison cannot erase an actual joined final-use receipt.
+            // Both the original consumer roster above and graph destruction
+            // are authenticated before permitting this read-only projection.
+            if self.has_pending_model_context_preseal() {
+                return Err(SemanticTransitionError::OverlappingLaunch);
+            }
+            self.ensure_quiescent_except_cold_report_with_effect_exclusion(
+                None,
+                OriginalSessionEffectExclusion {
+                    allow_session_poison: true,
+                    delivery_acknowledgement: None,
+                },
+            )?;
         } else {
+            self.ensure_quiescent()?;
             self.require_completed_prepared_graph_retirement()?;
         }
         Ok(streams.iter().copied().collect())
@@ -38893,7 +38939,11 @@ impl SemanticTransitionSession {
                     "prepared final use changed its original consumer roster",
                 ));
             }
-            return self.ensure_quiescent();
+            return if let Some(proof) = cancellation {
+                self.ensure_cancelled_prepared_retirement_quiescent(proof)
+            } else {
+                self.ensure_quiescent()
+            };
         }
         let _ordinary = crate::cuda_graph::reserve_uncaptured_stream(&self.stream)
             .map_err(|error| runtime_error("prepared step quiescence stream admission", error))?;
