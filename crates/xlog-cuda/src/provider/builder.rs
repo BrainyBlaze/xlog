@@ -3,11 +3,13 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 
+use super::kernel_loading::KernelModuleSet;
 use super::{warmup_profiling_enabled, CudaKernelProvider, PtxLoadProfile};
 use crate::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, LoggingSink,
     StreamPool, XlogDeviceRuntime,
 };
+use crate::tensor::TensorExecutor;
 use crate::{CudaDevice, GpuMemoryManager};
 
 /// Builds the complete production CUDA provider ownership graph.
@@ -62,6 +64,19 @@ impl CudaProviderBuilder {
 
     /// Construct and validate the complete provider-owned runtime.
     pub fn build(self) -> Result<CudaKernelProvider> {
+        self.build_with_modules(KernelModuleSet::All)
+    }
+
+    /// Construct a dense executor with only its tensor module and cuBLAS.
+    ///
+    /// It retains the same provider-owned runtime, allocator and device registry
+    /// as `build`. The partial provider stays private to the executor; a later
+    /// full provider loads the remaining modules on the shared device handle.
+    pub fn build_tensor_executor(self) -> Result<TensorExecutor> {
+        TensorExecutor::new(Arc::new(self.build_with_modules(KernelModuleSet::Tensor)?))
+    }
+
+    fn build_with_modules(self, modules: KernelModuleSet) -> Result<CudaKernelProvider> {
         let runtime_ordinal =
             u32::try_from(self.device_ordinal).map_err(|_| XlogError::Configuration {
                 name: "device_ordinal".to_string(),
@@ -71,7 +86,7 @@ impl CudaProviderBuilder {
         let runtime_budget_limit = checked_runtime_budget_limit(self.runtime_budget_bytes())?;
 
         let profiling = warmup_profiling_enabled()?;
-        let (device, ptx_load_profile) = loaded_device(self.device_ordinal, profiling)?;
+        let (device, ptx_load_profile) = loaded_device(self.device_ordinal, modules, profiling)?;
         let stream_pool = Arc::new(match self.stream_capacity {
             Some(stream_capacity) => StreamPool::new(Arc::clone(&device), stream_capacity),
             None => StreamPool::with_defaults(Arc::clone(&device)),
@@ -113,6 +128,7 @@ impl CudaProviderBuilder {
 
 fn loaded_device(
     ordinal: usize,
+    modules: KernelModuleSet,
     profiling: bool,
 ) -> Result<(Arc<CudaDevice>, Option<PtxLoadProfile>)> {
     static DEVICES: OnceLock<Mutex<HashMap<usize, Weak<CudaDevice>>>> = OnceLock::new();
@@ -122,11 +138,12 @@ fn loaded_device(
         .lock()
         .map_err(|_| XlogError::Kernel("canonical CUDA device registry is poisoned".to_string()))?;
     if let Some(device) = devices.get(&ordinal).and_then(Weak::upgrade) {
-        return Ok((device, None));
+        let profile = CudaKernelProvider::load_kernel_modules(&device, modules, profiling)?;
+        return Ok((device, profile));
     }
 
     let device = Arc::new(CudaDevice::new(ordinal)?);
-    let ptx_load_profile = CudaKernelProvider::load_all_kernel_modules(&device, profiling)?;
+    let ptx_load_profile = CudaKernelProvider::load_kernel_modules(&device, modules, profiling)?;
     devices.insert(ordinal, Arc::downgrade(&device));
     Ok((device, ptx_load_profile))
 }

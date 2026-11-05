@@ -9,7 +9,7 @@ use xlog_cuda::tensor::{
     GreedySelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss,
     TensorTrainingResult,
 };
-use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
+use xlog_cuda::{CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::{TensorProgram, TensorValueShape};
 use xlog_logic::function::FunctionRegistry;
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
@@ -30,10 +30,10 @@ fn native_executor(
                 .into(),
         ));
     }
-    let provider: Arc<CudaKernelProvider> = Arc::new(
-        CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_budget_bytes)).build()?,
-    );
-    Ok(Arc::new(TensorExecutor::new(provider)?))
+    Ok(Arc::new(
+        CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_budget_bytes))
+            .build_tensor_executor()?,
+    ))
 }
 
 /// Versioned weights and executable numerical definition on one native provider.

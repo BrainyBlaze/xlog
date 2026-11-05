@@ -24,6 +24,15 @@ one device handle, one stream pool, one asynchronous resource stack, one runtime
 and one memory manager. Those exact shared handles are then used by ordinary,
 recorded, solver, and resident execution.
 
+`build()` loads the complete kernel manifest. Checkpoint import and snapshot
+restoration for native causal models call `build_tensor_executor()`, which loads
+only `xlog_tensor` and initializes cuBLAS through the same ownership graph. This
+avoids compiling unrelated relational and solver PTX during dense-model startup.
+The restricted provider remains inside the tensor executor. If a full provider
+is later requested on the same live device, the serialized loader adds the missing
+modules and retains already loaded images and their function owners. A module
+load failure remains an error; it does not switch execution backends.
+
 ## Resource Stack
 
 The core trait is `DeviceMemoryResource`. Implementations compose as decorators —
