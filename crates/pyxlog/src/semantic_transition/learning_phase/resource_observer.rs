@@ -455,6 +455,23 @@ pub(in crate::semantic_transition) fn require_restore_memory_admission(
     cold_restore::require_program_memory(&cold_restore::json(program)?, &certificate.value())
 }
 
+/// Scalar facts copied only from an authenticated original completed read.
+/// The observer's event pointers and borrowed arrays never leave its owner.
+fn trace_metadata(view: &TraceView) -> serde_json::Value {
+    serde_json::json!({
+        "state": view.state,
+        "boundary_flags": view.boundary_flags,
+        "requested_coverage": view.requested_coverage,
+        "enabled_coverage": view.enabled_coverage,
+        "unsupported_coverage": view.unsupported_coverage,
+        "process_dropped_records": view.process_dropped_records,
+        "process_errors": view.process_errors,
+        "process_buffer_overflows": view.process_buffer_overflows,
+        "backing_baseline_bytes": view.backing_baseline_bytes,
+        "backing_peak_bytes": view.backing_peak_bytes,
+    })
+}
+
 struct StepInterval {
     ordinal: u64,
     capture_stream: u64,
@@ -463,6 +480,7 @@ struct StepInterval {
     capture_finished: bool,
     boundaries: Option<(u64, u64)>,
     peak: Option<u64>,
+    trace: Option<serde_json::Value>,
 }
 
 struct Interval {
@@ -473,6 +491,7 @@ struct Interval {
     finish_attempted: bool,
     boundaries: Option<(u64, u64)>,
     backing_peak: Option<u64>,
+    trace: Option<serde_json::Value>,
     release_attempted: bool,
     released: bool,
     steps: Vec<StepInterval>,
@@ -578,11 +597,39 @@ impl ResourceObserver {
     }
 
     pub(super) fn require_observed_history(&self, program: &[u8], history: &[u8]) -> PyResult<()> {
+        let history = cold_restore::json(history)?;
         cold_restore::require_memory_history(
             &cold_restore::json(program)?,
-            &cold_restore::json(history)?,
+            &history,
             Some(&self.certificate.value()),
-        )
+        )?;
+        let current = self
+            .interval()?
+            .as_ref()
+            .filter(|interval| interval.backing_peak.is_some())
+            .map(|interval| interval.ordinal);
+        let latest = history
+            .get("terminal_cleanup")
+            .filter(|record| !record.is_null())
+            .or_else(|| {
+                history["records"]
+                    .as_array()
+                    .and_then(|records| records.last())
+            });
+        // Before append, the original prefix ends earlier. Once this operation
+        // is recorded, its full interval must equal the native-retained facts.
+        if let (Some(ordinal), Some(record)) = (current, latest) {
+            if record["operation_ordinal"]
+                .as_u64()
+                .is_some_and(|recorded| recorded >= ordinal)
+                && record["resource_interval"] != self.original_interval_projection()?
+            {
+                return Err(invalid(
+                    "history changed its original native resource interval",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::semantic_transition) fn observation_arguments(
@@ -593,7 +640,77 @@ impl ResourceObserver {
         self.require_original(py)?;
         arguments.set_item("memory_unit", MEMORY_UNIT)?;
         arguments.set_item("memory_admission", MEMORY_ADMISSION)?;
-        arguments.set_item("device_certificate", self.certificate.python_value(py)?)
+        arguments.set_item("device_certificate", self.certificate.python_value(py)?)?;
+        let value = self.original_interval_projection()?;
+        let interval = crate::semantic_transition::native_observation_report(py, value)?;
+        arguments.set_item("resource_interval", interval)
+    }
+
+    /// Export retained original scalars without another producer read or join.
+    /// Group boundaries include cold preparation/retirement; capture handles
+    /// remain handles and are never interpreted as activity graph identifiers.
+    fn original_interval_projection(&self) -> PyResult<serde_json::Value> {
+        let retained = self.interval()?;
+        let interval = retained
+            .as_ref()
+            .ok_or_else(|| invalid("resource metadata lost its original interval"))?;
+        let (start, end) = interval
+            .boundaries
+            .ok_or_else(|| invalid("resource metadata lacks original execution boundaries"))?;
+        if !interval.begun || !interval.finish_attempted || interval.backing_peak.is_none() {
+            return Err(invalid(
+                "resource metadata requires its original completed backing observation",
+            ));
+        }
+        let trace = interval
+            .trace
+            .as_ref()
+            .ok_or_else(|| invalid("resource metadata lost its original trace status"))?;
+        let nonce = interval
+            .nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let certificate = self.certificate.value();
+        let steps: Vec<_> = interval
+            .steps
+            .iter()
+            .map(|step| {
+                serde_json::json!({
+                    "operation_ordinal": step.ordinal,
+                    "capture_stream_handle": step.capture_stream,
+                    "start_confirmed": step.start_confirmed,
+                    "end_attempted": step.end_attempted,
+                    "capture_finished": step.capture_finished,
+                    "boundaries": step.boundaries.map(|(start, end)| [start, end]),
+                    "trace": step.trace,
+                })
+            })
+            .collect();
+        let cancellation = interval
+            .cancellation_arguments
+            .map(|(ordinal, count, stream)| {
+                serde_json::json!({
+                    "operation_ordinal": ordinal,
+                    "planned_count": count,
+                    "capture_stream_handle": stream,
+                    "status": interval.cancellation_status,
+                })
+            });
+        Ok(serde_json::json!({
+            "original_attempt_nonce": nonce,
+            "operation_ordinal": interval.ordinal,
+            "timestamp_scale": "activity-producer",
+            "start": start, "end": end,
+            "observer_identity": certificate["observer_identity"],
+            "process_id": certificate["process_id"],
+            "device_uuid": certificate["device_uuid"],
+            "cuda_context_handle": self.original_context,
+            "cancelled_roster": interval.cancelled_roster,
+            "cancellation": cancellation,
+            "steps": steps,
+            "trace": trace,
+        }))
     }
 
     fn interval(&self) -> PyResult<MutexGuard<'_, Option<Interval>>> {
@@ -630,6 +747,7 @@ impl ResourceObserver {
             finish_attempted: false,
             boundaries: None,
             backing_peak: None,
+            trace: None,
             release_attempted: false,
             released: false,
             steps: Vec::new(),
@@ -729,6 +847,7 @@ impl ResourceObserver {
                 capture_finished: false,
                 boundaries: None,
                 peak: None,
+                trace: None,
             });
         }
         // SAFETY: original pinned ABI context and handle; these immutable
@@ -1025,6 +1144,7 @@ impl ResourceObserver {
             // Do not read the stored scalar, even when its bits happen to be 0.
             return Err(invalid("original owned GPU backing peak or allocator completion is unknown; retain the same interval and owners without numerical resource admission"));
         }
+        interval.trace = Some(trace_metadata(&view));
         interval.backing_peak = Some(view.backing_peak_bytes);
         Ok(view.backing_peak_bytes)
     }
@@ -1101,6 +1221,7 @@ impl ResourceObserver {
                 {
                     return Err(invalid("original per-step backing memory or execution boundaries are unknown; group peak cannot replace them"));
                 }
+                step.trace = Some(trace_metadata(&view));
                 step.peak = Some(view.backing_peak_bytes);
             }
             let (start, end) = step.boundaries.expect("known original step boundaries");
