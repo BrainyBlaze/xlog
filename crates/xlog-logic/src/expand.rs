@@ -1067,6 +1067,11 @@ impl<'a> ExpansionContext<'a> {
                     subst,
                     in_conditional_branch,
                 } => match body {
+                    FuncBody::Numerical(_) => {
+                        return Err(FunctionError::NumericalBodyRequiresTensorInvocation {
+                            name: function_name,
+                        })
+                    }
                     FuncBody::Arithmetic(expression) => {
                         tasks.push(ExpansionTask::Expression {
                             expression,

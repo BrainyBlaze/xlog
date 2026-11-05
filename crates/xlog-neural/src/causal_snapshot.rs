@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use safetensors::tensor::{Dtype, Metadata, TensorInfo};
@@ -12,12 +13,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use xlog_core::Result;
 use xlog_ir::tensor::TensorProgram;
+use xlog_logic::function::FunctionRegistry;
 
 use crate::tensor_archive::{
     invalid, io_error, TensorArchive, MAX_HEADER_BYTES, TRANSFER_CHUNK_BYTES,
 };
 
-const SCHEMA: &str = "xlog.native-causal-snapshot.v1";
+const SCHEMA: &str = "xlog.native-causal-snapshot.v2";
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 /// The physical down projection and its completed optimizer update count.
@@ -35,8 +37,10 @@ pub struct OptimizerSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct CausalSnapshotDescription {
     schema: String,
-    /// Exact operations and parameter indices, preserving tied allocations.
-    pub program: TensorProgram,
+    /// The actual canonical definitions, including numerical bodies and signatures.
+    pub functions: Arc<FunctionRegistry>,
+    /// Name resolved in the common function registry for forward and differentiation.
+    pub entrypoint: String,
     /// Provenance of the original import, distinct from this file's identity.
     pub checkpoint_identity: [u8; 32],
     /// Present only for a trainable candidate.
@@ -48,18 +52,25 @@ pub struct CausalSnapshotDescription {
 impl CausalSnapshotDescription {
     /// Capture a cold model version and the application's immutable byte payload.
     pub fn new(
-        program: TensorProgram,
+        functions: Arc<FunctionRegistry>,
+        entrypoint: String,
         checkpoint_identity: [u8; 32],
         optimizer: Option<OptimizerSnapshot>,
         application_state: Vec<u8>,
     ) -> Self {
         Self {
             schema: SCHEMA.into(),
-            program,
+            functions,
+            entrypoint,
             checkpoint_identity,
             optimizer,
             application_state,
         }
+    }
+
+    /// Resolve the saved entry point instead of trusting a second plan copy.
+    pub fn program(&self) -> Result<&TensorProgram> {
+        self.functions.numerical(&self.entrypoint)
     }
 
     /// Storage roster in exactly the order passed to archive readers and writers.
@@ -69,9 +80,11 @@ impl CausalSnapshotDescription {
                 "unsupported native snapshot schema or numerical convention",
             ));
         }
-        self.program.shapes(1, 0)?;
-        let mut tensors = Vec::with_capacity(self.program.parameters.len() + 3);
-        for (id, parameter) in self.program.parameters.iter().enumerate() {
+        self.functions.validate()?;
+        let program = self.program()?;
+        program.shapes(1, 0)?;
+        let mut tensors = Vec::with_capacity(program.parameters.len() + 3);
+        for (id, parameter) in program.parameters.iter().enumerate() {
             let (rows, columns) = match parameter.shape.as_slice() {
                 &[columns] => (1, columns),
                 &[rows, columns] => (rows, columns),
@@ -85,8 +98,7 @@ impl CausalSnapshotDescription {
             });
         }
         if let Some(optimizer) = &self.optimizer {
-            let parameter = self
-                .program
+            let parameter = program
                 .parameters
                 .get(optimizer.parameter)
                 .ok_or_else(|| invalid("snapshot optimizer parameter is absent"))?;

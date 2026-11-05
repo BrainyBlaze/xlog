@@ -157,6 +157,7 @@ fn collect_function_body_dependencies(
     functions: &mut HashSet<String>,
 ) {
     match body {
+        FuncBody::Numerical(_) => {}
         FuncBody::Arithmetic(expression) => {
             collect_arithmetic_function_dependencies(expression, functions);
         }

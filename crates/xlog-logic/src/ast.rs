@@ -1,6 +1,8 @@
 //! Abstract Syntax Tree for XLOG programs
 
+use serde::{Deserialize, Serialize};
 use xlog_core::{Result, ScalarType, XlogError};
+use xlog_ir::tensor::TensorProgram;
 
 type AuthoredIdentityAllocationOwner<'a> =
     Option<&'a mut dyn FnMut(u64) -> Result<std::sync::Arc<dyn Send + Sync>>>;
@@ -29,7 +31,8 @@ fn authored_identity_error(
 }
 
 /// A term in an atom
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Term {
     /// Named logic variable (e.g. `X`).
     Variable(String),
@@ -161,7 +164,8 @@ impl Term {
 }
 
 /// Aggregate expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AggExpr {
     /// The aggregation operator.
     pub op: AggOp,
@@ -204,7 +208,8 @@ impl AggExpr {
 }
 
 /// Aggregation operator
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AggOp {
     /// Count aggregation.
     Count,
@@ -219,7 +224,8 @@ pub enum AggOp {
 }
 
 /// Arithmetic expression tree
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ArithExpr {
     /// Variable reference.
     Variable(String),
@@ -321,7 +327,8 @@ impl ArithExpr {
 }
 
 /// Is-expression for variable binding: Z is X + Y
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IsExpr {
     /// Target variable (must be a fresh, unbound variable).
     pub target: String,
@@ -330,7 +337,8 @@ pub struct IsExpr {
 }
 
 /// An atom (predicate applied to terms)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Atom {
     /// Predicate name.
     pub predicate: String,
@@ -360,7 +368,8 @@ impl Atom {
 }
 
 /// Epistemic operator on an atom.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum EpistemicOp {
     /// Known/believed true in the selected epistemic mode.
     Know,
@@ -369,7 +378,8 @@ pub enum EpistemicOp {
 }
 
 /// Epistemic atom literal in a rule body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EpistemicLiteral {
     /// Epistemic operator.
     pub op: EpistemicOp,
@@ -380,7 +390,8 @@ pub struct EpistemicLiteral {
 }
 
 /// Comparison operator
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum CompOp {
     /// Equal.
     Eq,
@@ -397,7 +408,8 @@ pub enum CompOp {
 }
 
 /// A comparison expression
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Comparison {
     /// Left operand.
     pub left: Term,
@@ -408,7 +420,8 @@ pub struct Comparison {
 }
 
 /// A finite univ expression (`Term =.. Parts`) in a rule body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Univ {
     /// Term side of the univ relation.
     pub term: Term,
@@ -417,7 +430,8 @@ pub struct Univ {
 }
 
 /// A literal in the body of a rule
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BodyLiteral {
     /// Positive atom.
     Positive(Atom),
@@ -955,17 +969,71 @@ impl PredDecl {
     }
 }
 
+/// An extent in a numerical function's public tensor signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FunctionDimension {
+    /// Exact positive extent.
+    Fixed {
+        /// Number of elements along this axis.
+        size: usize,
+    },
+    /// The complete causal sequence, with no implicit truncation.
+    CausalSequence {
+        /// Maximum admitted number of original tokens.
+        maximum: usize,
+    },
+}
+
+/// Element representation at a numerical function boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionElement {
+    /// Original vocabulary identifiers.
+    U32,
+    /// Brain floating point storage.
+    Bf16,
+    /// IEEE 754 binary32 values.
+    F32,
+}
+
+/// Function argument/result type, shared by scalar and numerical definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FunctionType {
+    /// An ordinary scalar value.
+    Scalar {
+        /// Scalar representation.
+        scalar_type: ScalarType,
+    },
+    /// A dense tensor with an explicit element and extent contract.
+    Tensor {
+        /// Representation of each stored element.
+        element: FunctionElement,
+        /// Ordered dimensions, including any causal sequence axis.
+        dimensions: Vec<FunctionDimension>,
+    },
+}
+
+impl From<ScalarType> for FunctionType {
+    fn from(scalar_type: ScalarType) -> Self {
+        Self::Scalar { scalar_type }
+    }
+}
+
 /// Function parameter with optional type annotation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FuncParam {
     /// Parameter name.
     pub name: String,
     /// Optional type annotation.
-    pub typ: Option<ScalarType>,
+    pub typ: Option<FunctionType>,
 }
 
 /// Conditional expression: if X < 0 then A else B
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CondExpr {
     /// Left side of condition
     pub cond_left: ArithExpr,
@@ -979,9 +1047,12 @@ pub struct CondExpr {
     pub else_branch: Box<FuncBody>,
 }
 
-/// Function body - arithmetic, conditional, or predicate-based
-#[derive(Debug, Clone, PartialEq)]
+/// Function body in the common scalar, relational and numerical namespace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum FuncBody {
+    /// Typed numerical operations and their shared physical parameter identities.
+    Numerical(TensorProgram),
     /// Pure arithmetic expression: X * X
     Arithmetic(ArithExpr),
     /// Conditional expression: if X < 0 then ...
@@ -996,14 +1067,15 @@ pub enum FuncBody {
 }
 
 /// User-defined function
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FuncDef {
     /// Function name
     pub name: String,
     /// Parameters
     pub params: Vec<FuncParam>,
     /// Optional return type annotation
-    pub return_type: Option<ScalarType>,
+    pub return_type: Option<FunctionType>,
     /// Function body
     pub body: FuncBody,
     /// Is this function private?
@@ -1243,6 +1315,14 @@ impl<'a> AstAllocationSize<'a> {
 
     fn function_body(&mut self, body: &FuncBody) -> Result<()> {
         match body {
+            FuncBody::Numerical(program) => {
+                self.vector(&program.parameters)?;
+                for parameter in &program.parameters {
+                    self.text(&parameter.name)?;
+                    self.vector(&parameter.shape)?;
+                }
+                self.vector(&program.operations)
+            }
             FuncBody::Arithmetic(expression) => self.expression(expression),
             FuncBody::Conditional(condition) => {
                 self.expression(&condition.cond_left)?;
@@ -1271,6 +1351,12 @@ impl<'a> AstAllocationSize<'a> {
         self.vector(&function.params)?;
         for parameter in &function.params {
             self.text(&parameter.name)?;
+            if let Some(FunctionType::Tensor { dimensions, .. }) = &parameter.typ {
+                self.vector(dimensions)?;
+            }
+        }
+        if let Some(FunctionType::Tensor { dimensions, .. }) = &function.return_type {
+            self.vector(dimensions)?;
         }
         self.function_body(&function.body)
     }
@@ -1367,6 +1453,85 @@ impl FuncBody {
 }
 
 impl FuncDef {
+    /// Construct the typed public entry point of a causal numerical program.
+    /// The body is retained here, rather than copied into a separate registry.
+    pub fn numerical(name: String, program: TensorProgram) -> Result<Self> {
+        let definition = Self {
+            name,
+            params: vec![
+                FuncParam {
+                    name: "tokens".into(),
+                    typ: Some(FunctionType::Tensor {
+                        element: FunctionElement::U32,
+                        dimensions: vec![FunctionDimension::CausalSequence {
+                            maximum: program.max_context,
+                        }],
+                    }),
+                },
+                FuncParam {
+                    name: "prediction_position".into(),
+                    typ: Some(ScalarType::U32.into()),
+                },
+            ],
+            return_type: Some(FunctionType::Tensor {
+                element: FunctionElement::F32,
+                dimensions: vec![
+                    FunctionDimension::Fixed { size: 1 },
+                    FunctionDimension::Fixed {
+                        size: program.vocabulary,
+                    },
+                ],
+            }),
+            body: FuncBody::Numerical(program),
+            is_private: false,
+        };
+        definition.validate_numerical()?;
+        Ok(definition)
+    }
+
+    pub(crate) fn validate_numerical(&self) -> Result<()> {
+        let FuncBody::Numerical(program) = &self.body else {
+            return Ok(());
+        };
+        let invalid = || {
+            XlogError::Compilation(format!(
+                "numerical function {} has a signature inconsistent with its body",
+                self.name
+            ))
+        };
+        let output = program.shapes(1, 0)?[program.output];
+        if self.name.is_empty()
+            || self.params.len() != 2
+            || self.params[0].name.is_empty()
+            || self.params[1].name.is_empty()
+            || self.params[0].name == self.params[1].name
+            || self.params[0].typ
+                != Some(FunctionType::Tensor {
+                    element: FunctionElement::U32,
+                    dimensions: vec![FunctionDimension::CausalSequence {
+                        maximum: program.max_context,
+                    }],
+                })
+            || self.params[1].typ != Some(ScalarType::U32.into())
+            || self.return_type
+                != Some(FunctionType::Tensor {
+                    element: FunctionElement::F32,
+                    dimensions: vec![
+                        FunctionDimension::Fixed { size: 1 },
+                        FunctionDimension::Fixed {
+                            size: program.vocabulary,
+                        },
+                    ],
+                })
+            || output.rows != 1
+            || output.columns != program.vocabulary
+            || !output.float32
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
     /// Original function clone geometry, including parameter names and body.
     pub fn owned_allocation_bytes(&self) -> Result<u64> {
         let mut size = AstAllocationSize::new(std::mem::size_of::<Self>());

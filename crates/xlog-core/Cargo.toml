@@ -12,6 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
 arrow = { version = "60", default-features = false, features = ["ffi"] }
 
 [dev-dependencies]

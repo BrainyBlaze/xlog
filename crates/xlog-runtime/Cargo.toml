@@ -17,15 +17,15 @@ xlog-ir.workspace = true
 xlog-neural.workspace = true
 xlog-cuda.workspace = true
 xlog-stats.workspace = true
-xlog-logic = { workspace = true, optional = true }
+xlog-logic.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 
 [features]
 default = []
-epistemic-logic-tests = ["dep:xlog-logic"]
-resident-graph-tests = ["dep:xlog-logic"]
+epistemic-logic-tests = []
+resident-graph-tests = []
 # Diagnostic-only: per-phase timing of WCOJ triangle dispatch
 # (classifier + 3 layouts + count/scan/total/materialize).
 # Forwards to xlog-cuda's `wcoj-phase-timing` so the events
@@ -40,7 +40,7 @@ wcoj-phase-timing = ["xlog-cuda/wcoj-phase-timing"]
 # in its `required-features`, so it is only compiled when
 # the feature is enabled (e.g., `cargo test --features
 # xlog-runtime/recursive-stats-trace` or `--all-features`).
-recursive-stats-trace = ["dep:xlog-logic"]
+recursive-stats-trace = []
 
 # Recursive stats trace test target — only compiled when the
 # `recursive-stats-trace` feature is enabled. Workspace

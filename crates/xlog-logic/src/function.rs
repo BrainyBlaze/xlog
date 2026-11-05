@@ -1,13 +1,25 @@
 //! Function registry and validation for user-defined functions.
 
 use crate::ast::{ArithExpr, BodyLiteral, CompOp, CondExpr, FuncBody, FuncDef, Program};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use xlog_ir::tensor::TensorProgram;
 
 /// Errors related to functions
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum FunctionError {
+    /// A numerical body's declared signature disagrees with its actual program.
+    InvalidNumericalDefinition {
+        /// Original validation failure.
+        cause: Arc<xlog_core::XlogError>,
+    },
+    /// Tensor-valued functions require numerical invocation, not scalar expansion.
+    NumericalBodyRequiresTensorInvocation {
+        /// Function called in a scalar expression.
+        name: String,
+    },
     /// The original compiler allocation owner refused a reached allocation.
     AllocationRejected { cause: Arc<xlog_core::XlogError> },
     /// Duplicate function definition
@@ -75,6 +87,8 @@ pub enum FunctionError {
 impl std::fmt::Display for FunctionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FunctionError::InvalidNumericalDefinition { cause } => std::fmt::Display::fmt(cause.as_ref(), f),
+            FunctionError::NumericalBodyRequiresTensorInvocation { name } => write!(f, "numerical function `{name}` requires tensor arguments and a numerical execution entry point"),
             FunctionError::AllocationRejected { cause } => std::fmt::Display::fmt(cause.as_ref(),f),
             FunctionError::DuplicateDefinition { name } => {
                 write!(f, "error[E0501]: duplicate function definition `{}`", name)
@@ -178,6 +192,33 @@ pub struct FunctionRegistry {
     registration_order: Vec<String>,
 }
 
+// Persist authored definitions in their original order. Dependency edges are
+// reconstructed and validated from those bodies, never trusted as a second copy.
+impl Serialize for FunctionRegistry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.registration_order.len()))?;
+        for name in &self.registration_order {
+            sequence.serialize_element(&self.functions[name])?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionRegistry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let definitions = Vec::<FuncDef>::deserialize(deserializer)?;
+        let mut registry = Self::new();
+        for definition in definitions {
+            registry
+                .register(definition)
+                .map_err(serde::de::Error::custom)?;
+        }
+        registry.validate().map_err(serde::de::Error::custom)?;
+        Ok(registry)
+    }
+}
+
 impl FunctionRegistry {
     /// Create an empty function registry.
     pub fn new() -> Self {
@@ -208,7 +249,6 @@ impl FunctionRegistry {
                     )
                 };
                 let mut bytes = func
-                    .body
                     .owned_allocation_bytes()?
                     .checked_mul(2)
                     .ok_or_else(overflow)?;
@@ -268,6 +308,11 @@ impl FunctionRegistry {
             })?;
         }
 
+        func.validate_numerical()
+            .map_err(|cause| FunctionError::InvalidNumericalDefinition {
+                cause: Arc::new(cause),
+            })?;
+
         // Build call graph
         let name = func.name.clone();
         let calls = Self::extract_calls(&func.body);
@@ -281,6 +326,20 @@ impl FunctionRegistry {
     /// Get a function by name
     pub fn get(&self, name: &str) -> Option<&FuncDef> {
         self.functions.get(name)
+    }
+
+    /// Resolve the actual numerical body in the common function namespace.
+    pub fn numerical(&self, name: &str) -> xlog_core::Result<&TensorProgram> {
+        match self.get(name) {
+            Some(FuncDef {
+                body: FuncBody::Numerical(program),
+                ..
+            }) => Ok(program),
+            Some(_) => Err(xlog_core::XlogError::Compilation(format!(
+                "function `{name}` is not a numerical entry point"
+            ))),
+            None => Err(FunctionError::UndefinedFunction { name: name.into() }.into()),
+        }
     }
 
     /// Check if a function exists
@@ -297,6 +356,7 @@ impl FunctionRegistry {
 
     fn extract_calls_from_body(body: &FuncBody, calls: &mut Vec<String>) {
         match body {
+            FuncBody::Numerical(_) => {}
             FuncBody::Arithmetic(expr) => Self::extract_calls_from_expr(expr, calls),
             FuncBody::Conditional(cond) => {
                 Self::extract_calls_from_expr(&cond.cond_left, calls);
@@ -492,6 +552,7 @@ impl FunctionRegistry {
     fn find_recursive_calls_in_body(name: &str, body: &FuncBody) -> Vec<Vec<ArithExpr>> {
         let mut calls = Vec::new();
         match body {
+            FuncBody::Numerical(_) => {}
             FuncBody::Arithmetic(expr) => {
                 Self::find_recursive_calls_in_expr(name, expr, &mut calls);
             }
