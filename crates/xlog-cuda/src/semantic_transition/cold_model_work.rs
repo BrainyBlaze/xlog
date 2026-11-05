@@ -4175,6 +4175,18 @@ impl SemanticTransitionSession {
             }
             _ => None,
         };
+        let mut allowance = native_work_bound::ColdNativeAllowance::new(purpose);
+        if let Some(ColdWorkAdmission::Instruction(original, InstructionColdRole::Preparation)) =
+            &instruction
+        {
+            if let Some(coordinates) = self.instruction_family_cohort_coordinates(original)? {
+                let frame = self.original_family_cohort(coordinates)?.ok_or_else(|| {
+                    publication_input_error("freeze the original cohort before cold admission")
+                })?;
+                let (source, dma) = frame.hydration_dma_ceiling()?;
+                allowance.freeze_original_cohort_dma(source, dma)?;
+            }
+        }
         if let SemanticColdModelWorkAdmission::Loaded(bytes) = &admission {
             bytes.require_budget(
                 self.replay_material_budget
@@ -4272,9 +4284,7 @@ impl SemanticTransitionSession {
             model_context,
             operation_ordinal,
             admission,
-            allowance: Arc::new(Mutex::new(native_work_bound::ColdNativeAllowance::new(
-                purpose,
-            ))),
+            allowance: Arc::new(Mutex::new(allowance)),
             source_geometry: Vec::new(),
             capacity_limit,
             work: None,

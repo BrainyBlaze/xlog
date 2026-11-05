@@ -102,6 +102,26 @@ impl FrozenFamilyCohort {
         })
     }
 
+    pub(super) fn hydration_dma_ceiling(
+        &self,
+    ) -> Result<(Identity256, [u64; 9]), SemanticTransitionError> {
+        let bytes = self.saved.get().ok_or_else(|| {
+            publication_input_error("freeze the original cohort before cold admission")
+        })?;
+        let saved = decode(bytes)?;
+        let mut dma = [0; 9];
+        dma[0] = PORTS as u64;
+        dma[8] = saved.ports.iter().try_fold(0u64, |total, port| {
+            total
+                .checked_add(
+                    u64::try_from(port.len())
+                        .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+                )
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })?;
+        Ok((saved.digest, dma))
+    }
+
     pub(super) fn selection_material(&self) -> Result<&[u8], SemanticTransitionError> {
         let bytes = self
             .saved

@@ -1806,14 +1806,12 @@ fn decode_assignment_material(
             return Err(invalid_program());
         }
         let frame_count = reader.u64().map_err(semantic)?;
-        let required = program_family_binding(&json_value(&program.bytes)?["family_binding"])?;
         let allowed = required_family_coordinates(program)?;
         if frame_count > allowed.len() as u64
             || (frame_count != 0
                 && admissions
                     .iter()
                     .any(|claim| !claim.family_cohorts.is_empty()))
-            || (frame_count != 0 && required.is_none())
         {
             return Err(invalid_program());
         }
@@ -1942,7 +1940,7 @@ fn decode_assignment_material(
                 claim.state,
                 InstructionState::Bound | InstructionState::Completed
             )
-            && program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_some()
+            && !required_family_coordinates(program)?.is_empty()
         {
             for key in required_family_coordinates(program)? {
                 if admissions[..=index]
@@ -4458,10 +4456,13 @@ impl SemanticTransitionSession {
         let Some(program) = self.actor_refresh_program.as_ref() else {
             return Ok(None);
         };
-        if program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_none() {
+        let coordinates = required_family_coordinates(program)?;
+        if coordinates.is_empty()
+            && program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_none()
+        {
             return Ok(None);
         }
-        Ok(Some(required_family_coordinates(program)?))
+        Ok(Some(coordinates))
     }
 
     pub(super) fn original_family_cohort(
