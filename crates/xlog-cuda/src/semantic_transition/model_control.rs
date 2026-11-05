@@ -330,6 +330,10 @@ impl SemanticControlObservation {
         })
     }
 
+    pub(super) fn selection_material(&self) -> Result<Vec<u8>, SemanticTransitionError> {
+        Ok(publication_abi_bytes(&[self.facts()?.selection]))
+    }
+
     pub(super) fn context(&self) -> Result<ControlContext, SemanticTransitionError> {
         Ok(self.facts()?.context)
     }
@@ -360,7 +364,8 @@ impl SemanticControlObservation {
             "frozen_record": publication_abi_bytes(std::slice::from_ref(frozen)),
             "availability": measured.availability, "reason": measured.reason,
             "measurement_bits": (measured.availability == 2).then_some(measured.measurement_bits),
-            "memory_used": measured.memory_used, "work_used": measured.work_used
+            "memory_used": (measured.availability != 0).then_some(measured.memory_used),
+            "work_used": (measured.availability != 0).then_some(measured.work_used)
         })).collect::<Vec<_>>();
         let forwards = facts.forwards.iter().map(|receipt| json!({
             "availability": receipt.availability,
@@ -571,7 +576,17 @@ impl SemanticTransitionSession {
         else {
             return Ok(None);
         };
-        let retirement = self.control_retirement_material(&observation)?;
-        Ok(Some(observation.projection(retirement)?))
+        Ok(Some(self.control_observation_projection(&observation)?))
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn control_observation_projection(
+        &self,
+        observation: &SemanticControlObservation,
+    ) -> Result<Value, SemanticTransitionError> {
+        let mut result = observation.projection(self.control_retirement_material(observation)?)?;
+        result["source_cohort"] = self.control_source_projection(observation)?;
+        Ok(result)
     }
 }

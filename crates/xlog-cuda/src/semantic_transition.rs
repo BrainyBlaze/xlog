@@ -13,6 +13,8 @@ mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 mod actor_refresh_program;
 #[cfg(feature = "semantic-policy")]
+mod family_cohort;
+#[cfg(feature = "semantic-policy")]
 mod model_control;
 #[cfg(feature = "semantic-policy")]
 pub use model_control::SemanticControlObservation;
@@ -15508,8 +15510,7 @@ struct PreparedStepStorage {
     observed_result: Option<PreparedStepResult>,
     result: TrackedCudaSlice<PreparedStepResult>,
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
-    training_view: Option<SemanticSelectedTrainingView>,
-    control_coordinates: Option<TrackedCudaSlice<u64>>,
+    training_view: Option<Arc<SemanticSelectedTrainingView>>,
     #[cfg(feature = "semantic-policy")]
     policy_work: Option<policy_work::PolicyWorkBuffers>,
     #[cfg(feature = "semantic-policy")]
@@ -24561,22 +24562,26 @@ impl SemanticTransitionSession {
             ));
         }
         #[cfg(feature = "semantic-policy")]
-        let control_coordinates = if transitions == [SemanticTransitionKind::Control] {
-            Some(self.instruction_control_coordinates(
+        if admission.is_some() && transitions.iter().any(|kind| kind.uses_pending_model()) {
+            self.require_family_cohorts_ready()?;
+        }
+        #[cfg(feature = "semantic-policy")]
+        let control_cohort = if transitions == [SemanticTransitionKind::Control] {
+            let coordinates = self.instruction_control_coordinates(
                 admission.ok_or(SemanticTransitionError::NotBound)?.0,
-            )?)
+            )?;
+            Some(Arc::clone(
+                &self.prepared_family_cohort(coordinates)?.selected,
+            ))
         } else {
             None
         };
         #[cfg(not(feature = "semantic-policy"))]
-        let control_coordinates: Option<[u64; 5]> =
-            if transitions == [SemanticTransitionKind::Control] {
-                return Err(publication_input_error(
-                    "Control requires original Program admission",
-                ));
-            } else {
-                None
-            };
+        if transitions == [SemanticTransitionKind::Control] {
+            return Err(publication_input_error(
+                "Control requires original Program admission",
+            ));
+        }
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
                 "a prepared segment requires frozen proposal, recompute, or update steps",
@@ -24585,6 +24590,10 @@ impl SemanticTransitionSession {
         let pending_count = transitions
             .iter()
             .filter(|kind| kind.uses_pending_model())
+            .count();
+        let learning_count = transitions
+            .iter()
+            .filter(|kind| **kind == SemanticTransitionKind::Update)
             .count();
         #[cfg(feature = "semantic-policy")]
         if let PreparedSegmentSource::DormantModelContext(original) = &source {
@@ -24856,23 +24865,27 @@ impl SemanticTransitionSession {
         let training_view_bytes = training_view.as_ref().map_or(Ok(0usize), |arena| {
             arena
                 .selection_bytes()?
-                .checked_mul(pending_count)
+                .checked_mul(learning_count)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         })?;
         #[cfg(feature = "semantic-policy")]
-        let policy_work_capacity = training_view
-            .as_ref()
-            .map_or(Ok(0usize), |arena| {
-                arena.policy_work_capacity(
-                    transitions
-                        .iter()
-                        .copied()
-                        .filter(|kind| *kind == SemanticTransitionKind::Proposal)
-                        .count(),
-                )
-            })?
-            .checked_add(1)
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let policy_work_capacity = if learning_count == 0 {
+            1
+        } else {
+            training_view
+                .as_ref()
+                .map_or(Ok(0usize), |arena| {
+                    arena.policy_work_capacity(
+                        transitions
+                            .iter()
+                            .copied()
+                            .filter(|kind| *kind == SemanticTransitionKind::Proposal)
+                            .count(),
+                    )
+                })?
+                .checked_add(1)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?
+        };
         #[cfg(feature = "semantic-policy")]
         let other_model_count = transitions
             .iter()
@@ -24880,16 +24893,14 @@ impl SemanticTransitionSession {
             .filter(|kind| {
                 !matches!(
                     kind,
-                    SemanticTransitionKind::Update
-                        | SemanticTransitionKind::Control
-                        | SemanticTransitionKind::Drain
+                    SemanticTransitionKind::Update | SemanticTransitionKind::Drain
                 )
             })
             .count();
         #[cfg(feature = "semantic-policy")]
         let policy_work_bytes = u64::try_from(
             policy_work::PolicyWorkBuffers::bytes(policy_work_capacity)?
-                .checked_mul(pending_count)
+                .checked_mul(learning_count)
                 .and_then(|bytes| {
                     policy_work::PolicyWorkBuffers::bytes(1)
                         .ok()
@@ -24927,12 +24938,6 @@ impl SemanticTransitionSession {
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let base_bytes =
             prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?
-                .checked_add(if control_coordinates.is_some() {
-                    5 * size_of::<u64>() as u64
-                } else {
-                    0
-                })
-                .ok_or(SemanticTransitionError::GenerationExhausted)?
                 .checked_add(
                     u64::try_from(training_view_bytes)
                         .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
@@ -25372,21 +25377,7 @@ impl SemanticTransitionSession {
                     training_origin: training_origins
                         .as_ref()
                         .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
-                    control_coordinates: if let Some(coordinates) = control_coordinates {
-                        let owned = reservation
-                            .alloc::<u64>(5)
-                            .map_err(|e| runtime_error("Control coordinates allocation", e))?;
-                        writes.push(state_restoration::OriginalDeviceWrite::new(
-                            &self.stream,
-                            &coordinates,
-                            owned.view(),
-                            false,
-                        )?);
-                        Some(owned)
-                    } else {
-                        None
-                    },
-                    training_view: if kind.uses_pending_model() {
+                    training_view: if *kind == SemanticTransitionKind::Update {
                         let mut selected = training_view
                             .as_ref()
                             .expect("validated update training-view owner")
@@ -25398,15 +25389,22 @@ impl SemanticTransitionSession {
                         if let Some(Some(roster)) = update_rosters.get(ordinal) {
                             selected.bind_training_roster(Arc::clone(roster))?;
                         }
-                        Some(selected)
+                        Some(Arc::new(selected))
                     } else {
-                        None
+                        #[cfg(feature = "semantic-policy")]
+                        {
+                            control_cohort.as_ref().map(Arc::clone)
+                        }
+                        #[cfg(not(feature = "semantic-policy"))]
+                        {
+                            None
+                        }
                     },
                     #[cfg(feature = "semantic-policy")]
                     policy_work: if *kind != SemanticTransitionKind::Drain {
                         Some(policy_work::PolicyWorkBuffers::allocate(
                             &mut reservation,
-                            if kind.uses_pending_model() {
+                            if *kind == SemanticTransitionKind::Update {
                                 policy_work_capacity
                             } else {
                                 1
@@ -31057,7 +31055,11 @@ impl SemanticTransitionSession {
             &owner.prepared.as_ref().expect("prepared lease").reader,
             descriptor,
         )?;
-        let selection = if let Some(selected) = owner
+        // The frozen cohort needs no resident selection or host transfer. The
+        // common completion below still seals the original input producer.
+        let selection = if self.prepared_transition_kind(step)? == SemanticTransitionKind::Control {
+            Ok(())
+        } else if let Some(selected) = owner
             .prepared
             .as_ref()
             .expect("prepared selection owner")
@@ -31076,22 +31078,11 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("prepared update has no acquired training-view input")
                 })?;
-            let coordinates = match self.prepared_transition_kind(step)? {
-                SemanticTransitionKind::Control => owner
-                    .prepared
-                    .as_ref()
-                    .expect("prepared selection owner")
-                    .control_coordinates
-                    .as_ref()
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-                    .view(),
-                SemanticTransitionKind::Update => owner
-                    .inputs
-                    .as_ref()
-                    .expect("fixed input owner")
-                    .training_coordinates_view()?,
-                _ => return Err(SemanticTransitionError::ObservationMismatch),
-            };
+            let coordinates = owner
+                .inputs
+                .as_ref()
+                .expect("fixed input owner")
+                .training_coordinates_view()?;
             selected.enqueue_device_selection(selected_view, coordinates)
         } else {
             Ok(())
@@ -41192,8 +41183,16 @@ impl SemanticTransitionSession {
             .publication
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?;
-        let work =
-            OriginalTrainingMaterializationWork::new(storage, &lease.directory, packed.len())?;
+        #[cfg(feature = "semantic-policy")]
+        let cohort_preparation = self.family_cohort_preparation_ceiling()?;
+        #[cfg(not(feature = "semantic-policy"))]
+        let cohort_preparation = [[0; 9]; 2];
+        let work = OriginalTrainingMaterializationWork::new(
+            storage,
+            &lease.directory,
+            packed.len(),
+            cohort_preparation,
+        )?;
         self.training_materialization_work = Some(Arc::clone(&work.accounting));
         self.pending_training_materialization = Some(PendingTrainingMaterialization {
             base: lease.identity,
@@ -41650,6 +41649,10 @@ impl SemanticTransitionSession {
             .take()
             .expect("original completion");
         let result = (|| {
+            // Freeze after genuine materialization/Acquire and before the
+            // original arena report closes or the phase SOURCE is checkpointed.
+            #[cfg(feature = "semantic-policy")]
+            self.prepare_original_family_cohorts(successor, None, pending.work.native().view())?;
             if !pending.release_complete {
                 if self.poisoned {
                     self.stream

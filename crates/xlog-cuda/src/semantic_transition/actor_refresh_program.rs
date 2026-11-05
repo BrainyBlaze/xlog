@@ -181,6 +181,7 @@ pub(super) struct InstructionAdmission {
     pub(super) retirement_work: Option<SemanticColdModelWork>,
     pub(super) retirement_result: Option<SemanticColdModelWorkResult>,
     pub(super) control_result: Option<SemanticControlObservation>,
+    pub(super) family_cohorts: BTreeMap<[u64; 5], Arc<super::family_cohort::FrozenFamilyCohort>>,
     pub(super) retirement_cancellation: Option<SemanticPreparedSegmentNonSubmission>,
     pub(super) prepared_cold_results: Vec<(u64, Option<SemanticColdModelWorkResult>)>,
     handoff_streams: Option<Vec<u64>>,
@@ -790,8 +791,12 @@ fn program_family_binding(
 }
 
 fn control_view_coordinates(value: &Value) -> Result<[u64; 5], SemanticTransitionError> {
+    view_coordinates(value, "control_view")
+}
+
+fn view_coordinates(value: &Value, field: &str) -> Result<[u64; 5], SemanticTransitionError> {
     let fields = object(
-        value.get("control_view").ok_or_else(invalid_program)?,
+        value.get(field).ok_or_else(invalid_program)?,
         &["cursor", "rng"],
     )?;
     let rng = array(&fields["rng"])?;
@@ -1415,7 +1420,7 @@ fn assignment_material(
     assignments: &[&MainActorAssignment],
 ) -> Vec<u8> {
     let mut bytes = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0".to_vec();
-    material_u64(&mut bytes, 7);
+    material_u64(&mut bytes, 8);
     bytes.extend_from_slice(program.as_bytes());
     bytes.extend_from_slice(initial_index.as_bytes());
     material_u64(&mut bytes, u64::from(rng.is_some()));
@@ -1467,6 +1472,17 @@ fn assignment_material(
             material_u64(&mut bytes, result.bytes.len() as u64);
             bytes.extend_from_slice(&result.bytes);
         }
+        material_u64(&mut bytes, claim.family_cohorts.len() as u64);
+        for (coordinates, frame) in &claim.family_cohorts {
+            for value in coordinates {
+                material_u64(&mut bytes, *value);
+            }
+            material_u64(&mut bytes, u64::from(frame.saved.get().is_some()));
+            if let Some(material) = frame.saved.get() {
+                material_u64(&mut bytes, material.len() as u64);
+                bytes.extend_from_slice(material);
+            }
+        }
     }
     material_u64(&mut bytes, assignments.len() as u64);
     let mut assignments = assignments.to_vec();
@@ -1516,6 +1532,13 @@ fn assignment_material_allocation_bound(
         }
         for (_, result) in &claim.prepared_cold_results {
             add(8 + cold_result(*result)?)?;
+        }
+        add(8)?;
+        for frame in claim.family_cohorts.values() {
+            add(6 * 8)?;
+            if let Some(material) = frame.saved.get() {
+                add(8 + material.len() as u64)?;
+            }
         }
     }
     for assignment in &program.main_origins {
@@ -1614,7 +1637,7 @@ fn decode_assignment_material(
     let magic = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0";
     let semantic = SemanticTransitionError::Semantic;
     if reader.take(magic.len()).map_err(semantic)? != magic
-        || reader.u64().map_err(semantic)? != 7
+        || reader.u64().map_err(semantic)? != 8
         || reader.take(32).map_err(semantic)? != program.identity.as_bytes()
         || reader.take(32).map_err(semantic)? != initial_index.as_bytes()
     {
@@ -1782,6 +1805,44 @@ fn decode_assignment_material(
         if original.kind != Some(SemanticTransitionKind::Control) && control_result.is_some() {
             return Err(invalid_program());
         }
+        let frame_count = reader.u64().map_err(semantic)?;
+        let required = program_family_binding(&json_value(&program.bytes)?["family_binding"])?;
+        let allowed = required_family_coordinates(program)?;
+        if frame_count > allowed.len() as u64
+            || (frame_count != 0
+                && admissions
+                    .iter()
+                    .any(|claim| !claim.family_cohorts.is_empty()))
+            || (frame_count != 0 && required.is_none())
+        {
+            return Err(invalid_program());
+        }
+        let mut family_cohorts = BTreeMap::new();
+        for _ in 0..frame_count {
+            let mut coordinates = [0; 5];
+            for value in &mut coordinates {
+                *value = reader.u64().map_err(semantic)?;
+            }
+            if !allowed.contains(&coordinates) || family_cohorts.contains_key(&coordinates) {
+                return Err(invalid_program());
+            }
+            let material = match reader.u64().map_err(semantic)? {
+                0 => None,
+                1 => {
+                    let length = usize::try_from(reader.u64().map_err(semantic)?)
+                        .map_err(|_| invalid_program())?;
+                    Some(Arc::from(reader.take(length).map_err(semantic)?))
+                }
+                _ => return Err(invalid_program()),
+            };
+            family_cohorts.insert(
+                coordinates,
+                Arc::new(super::family_cohort::FrozenFamilyCohort::restored(
+                    coordinates,
+                    material,
+                )?),
+            );
+        }
         // An incomplete restored attempt is retained, not re-issued. Only
         // the original live handle can resolve its asynchronous owners.
         admissions.push(InstructionAdmission {
@@ -1809,6 +1870,7 @@ fn decode_assignment_material(
             retirement_cancellation: None,
             prepared_cold_results,
             control_result,
+            family_cohorts,
             handoff_streams: None,
             parent_fully_retired,
             resources_retired,
@@ -1867,6 +1929,33 @@ fn decode_assignment_material(
     }
     reader.finish().map_err(semantic)?;
     for (index, claim) in admissions.iter().enumerate() {
+        let learning = program.steps[claim.first as usize..claim.end as usize]
+            .iter()
+            .any(|step| {
+                matches!(
+                    step.kind,
+                    Some(SemanticTransitionKind::Update | SemanticTransitionKind::Control)
+                )
+            });
+        if learning
+            && matches!(
+                claim.state,
+                InstructionState::Bound | InstructionState::Completed
+            )
+            && program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_some()
+        {
+            for key in required_family_coordinates(program)? {
+                if admissions[..=index]
+                    .iter()
+                    .find_map(|source| source.family_cohorts.get(&key))
+                    .is_none_or(|frame| frame.saved.get().is_none())
+                {
+                    return Err(invalid_program());
+                }
+            }
+        }
+    }
+    for (index, claim) in admissions.iter().enumerate() {
         if let Some(result) = &claim.control_result {
             if !matches!(
                 claim.state,
@@ -1874,7 +1963,7 @@ fn decode_assignment_material(
             ) {
                 return Err(invalid_program());
             }
-            require_control_result(program, claim, result)?;
+            require_control_result(program, &admissions, claim, result)?;
         }
         if program.steps[claim.first as usize].kind == Some(SemanticTransitionKind::Control)
             && claim.state == InstructionState::Completed
@@ -3050,6 +3139,7 @@ impl SemanticTransitionSession {
             retirement_cancellation: None,
             prepared_cold_results: Vec::new(),
             control_result: None,
+            family_cohorts: BTreeMap::new(),
             handoff_streams: None,
             parent_fully_retired: false,
             resources_retired: false,
@@ -4202,10 +4292,19 @@ fn control_context(
 
 fn require_control_result(
     program: &ActorRefreshProgram,
+    admissions: &[InstructionAdmission],
     claim: &InstructionAdmission,
     result: &SemanticControlObservation,
 ) -> Result<(), SemanticTransitionError> {
     if result.context()? != control_context(program, claim)? || result.parent()? != claim.parent {
+        return Err(invalid_program());
+    }
+    let coordinates = control_view_coordinates(&json_value(&claim.instruction)?)?;
+    let frame = admissions
+        .iter()
+        .find_map(|source| source.family_cohorts.get(&coordinates))
+        .ok_or_else(invalid_program)?;
+    if result.selection_material()?.as_slice() != frame.selection_material()? {
         return Err(invalid_program());
     }
     Ok(())
@@ -4252,10 +4351,13 @@ impl SemanticTransitionSession {
             .as_ref()
             .and_then(|build| build.program_admission.clone())
             .ok_or_else(invalid_program)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
         require_control_result(
-            self.actor_refresh_program
-                .as_ref()
-                .ok_or_else(invalid_program)?,
+            program,
+            &program.admissions,
             self.instruction_admission(&admission)?,
             &result,
         )?;
@@ -4298,7 +4400,7 @@ impl SemanticTransitionSession {
             .iter()
             .find(|claim| claim.first == context.first)
             .ok_or_else(invalid_program)?;
-        require_control_result(program, claim, result)?;
+        require_control_result(program, &program.admissions, claim, result)?;
         if claim.control_result.as_ref() != Some(result) {
             return Err(invalid_program());
         }
@@ -4319,7 +4421,7 @@ impl SemanticTransitionSession {
         claim
             .control_result
             .as_ref()
-            .map(|result| result.projection(self.control_retirement_material(result)?))
+            .map(|result| self.control_observation_projection(result))
             .transpose()
     }
 }
@@ -4332,5 +4434,174 @@ pub(super) fn complete_retired_control_claim(claim: &mut InstructionAdmission) {
         && instruction_expense_retired(claim)
     {
         claim.state = InstructionState::Completed;
+    }
+}
+
+fn required_family_coordinates(
+    program: &ActorRefreshProgram,
+) -> Result<Vec<[u64; 5]>, SemanticTransitionError> {
+    let mut keys = BTreeSet::new();
+    for step in &program.steps {
+        let value = json_value(&step.instruction)?;
+        if step.kind == Some(SemanticTransitionKind::Control) {
+            keys.insert(control_view_coordinates(&value)?);
+
+        }
+    }
+    Ok(keys.into_iter().collect())
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn required_family_cohorts(
+        &self,
+    ) -> Result<Option<Vec<[u64; 5]>>, SemanticTransitionError> {
+        let Some(program) = self.actor_refresh_program.as_ref() else {
+            return Ok(None);
+        };
+        if program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(required_family_coordinates(program)?))
+    }
+
+    pub(super) fn original_family_cohort(
+        &self,
+        coordinates: [u64; 5],
+    ) -> Result<Option<Arc<super::family_cohort::FrozenFamilyCohort>>, SemanticTransitionError>
+    {
+        Ok(self
+            .actor_refresh_program
+            .as_ref()
+            .and_then(|program| {
+                program
+                    .admissions
+                    .iter()
+                    .find_map(|claim| claim.family_cohorts.get(&coordinates))
+            })
+            .map(Arc::clone))
+    }
+
+    pub(super) fn family_cohort_freeze_anchor(&self) -> Result<usize, SemanticTransitionError> {
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let (index, claim) = program
+            .admissions
+            .iter()
+            .enumerate()
+            .last()
+            .ok_or_else(invalid_program)?;
+        if !(claim.state == InstructionState::Completed
+            || (claim.state == InstructionState::Admitted && claim._issuer.is_some()))
+            || program.admissions.iter().any(|claim| {
+                claim.state != InstructionState::Admitted
+                    && program.steps[claim.first as usize..claim.end as usize]
+                        .iter()
+                        .any(|step| {
+                            matches!(
+                                step.kind,
+                                Some(
+                                    SemanticTransitionKind::Update
+                                        | SemanticTransitionKind::Control
+                                )
+                            )
+                        })
+            })
+            || program.admissions[..index]
+                .iter()
+                .any(|claim| !claim.family_cohorts.is_empty())
+        {
+            return Err(publication_input_error(
+                "freeze original cohorts after materialization and before learning",
+            ));
+        }
+        Ok(index)
+    }
+
+    pub(super) fn install_original_family_cohort(
+        &mut self,
+        frame: Arc<super::family_cohort::FrozenFamilyCohort>,
+    ) -> Result<(), SemanticTransitionError> {
+        let anchor = self.family_cohort_freeze_anchor()?;
+        if !self
+            .required_family_cohorts()?
+            .is_some_and(|keys| keys.contains(&frame.coordinates))
+        {
+            return Err(invalid_program());
+        }
+        let original = &mut self
+            .actor_refresh_program
+            .as_mut()
+            .ok_or_else(invalid_program)?
+            .admissions[anchor];
+        if original.family_cohorts.contains_key(&frame.coordinates) {
+            return Err(invalid_program());
+        }
+        original.family_cohorts.insert(frame.coordinates, frame);
+        Ok(())
+    }
+
+    pub(super) fn require_family_cohorts_ready(&self) -> Result<(), SemanticTransitionError> {
+        if let Some(keys) = self.required_family_cohorts()? {
+            for key in keys {
+                if self
+                    .original_family_cohort(key)?
+                    .is_none_or(|frame| frame.saved.get().is_none())
+                {
+                    return Err(publication_input_error(
+                        "freeze the complete original cohort before recording",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn control_source_projection(
+        &self,
+        observation: &SemanticControlObservation,
+    ) -> Result<serde_json::Value, SemanticTransitionError> {
+        let context = observation.context()?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let claim = program
+            .admissions
+            .iter()
+            .find(|claim| claim.first == context.first)
+            .ok_or_else(invalid_program)?;
+        require_control_result(program, &program.admissions, claim, observation)?;
+        let coordinates = control_view_coordinates(&json_value(&claim.instruction)?)?;
+        self.original_family_cohort(coordinates)?
+            .ok_or_else(invalid_program)?
+            .projection()
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn instruction_family_cohort_coordinates(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<Option<[u64; 5]>, SemanticTransitionError> {
+        let claim = self.instruction_admission(admission)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let step = program
+            .steps
+            .get(claim.first as usize)
+            .ok_or_else(invalid_program)?;
+        let instruction = json_value(&claim.instruction)?;
+        if step.kind == Some(SemanticTransitionKind::Control) {
+            Ok(Some(control_view_coordinates(&instruction)?))
+
+        } else {
+            Ok(None)
+        }
     }
 }

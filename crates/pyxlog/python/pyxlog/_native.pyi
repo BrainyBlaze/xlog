@@ -1479,6 +1479,12 @@ class SemanticTransitionController:
         allocation_owner: SemanticTensorOwner, consumer_stream: int,
     ) -> None: ...
 
+    def prepare_family_cohorts(
+        self, task_use: SemanticTransitionTaskUse, *, parent: SemanticPublishedParent,
+        instruction_admission: SemanticSegmentInstructionAdmission,
+        model_work: SemanticColdModelWork,
+    ) -> dict[str, Any] | None: ...
+
 # ---------------------------------------------------------------------------
 # Native relation provenance
 # ---------------------------------------------------------------------------

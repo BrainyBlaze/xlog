@@ -5807,7 +5807,7 @@ impl PySemanticSegmentInstructionAdmission {
             .owner()?
             .admitted_control_measurements(&self.inner.inner)
             .map_err(xlog_err)?
-            .map(|value| control_measurements_report(py, value))
+            .map(|value| native_observation_report(py, value))
             .transpose()
     }
 
@@ -19069,7 +19069,7 @@ impl PySemanticPreparedStep {
                 .prepared_control_measurements(&self.inner)
                 .map_err(xlog_err)?;
             let report = observation
-                .map(|observation| control_measurements_report(py, observation))
+                .map(|observation| native_observation_report(py, observation))
                 .transpose()?;
             if self.content_binding_with_owner(py, &owner)? != binding {
                 return Err(invalid(
@@ -26068,6 +26068,51 @@ impl PySemanticTransitionController {
             allocation_owner,
             consumer_stream,
         )
+    }
+
+    /// Freeze all original data cohorts inside the admitted cold preparation.
+    /// Restored material uploads the saved ports and never samples again.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, parent, instruction_admission, model_work))]
+    fn prepare_family_cohorts(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        instruction_admission: &PySemanticSegmentInstructionAdmission,
+        model_work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        self.require_read_issued(task_use)?;
+        parent.require_task(py, task_use)?;
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if instruction_admission.inner.session.as_ptr() != self.session.as_ptr() {
+            return Err(invalid(
+                "cohort preparation changed its original instruction Session",
+            ));
+        }
+        let active = session
+            .active_cold_model_work
+            .lock()
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+        if active
+            .as_ref()
+            .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), model_work))
+            || !model_work.active.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "cohort preparation requires its original active cold report",
+            ));
+        }
+        drop(active);
+        let work = model_work.custody(py)?.inner.clone();
+        let mut owner = session.owner()?;
+        let observation = owner
+            .prepare_family_cohorts(&*parent.lease()?, &instruction_admission.inner.inner, &work)
+            .map_err(xlog_err)?;
+        observation
+            .map(|value| native_observation_report(py, value))
+            .transpose()
     }
 
     /// Bind the full unchanged pending copy to its two original forward streams.
@@ -34361,7 +34406,7 @@ impl PySemanticTransitionController {
 }
 
 #[cfg(feature = "semantic-policy")]
-fn control_measurements_report(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyDict>> {
+fn native_observation_report(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyDict>> {
     Ok(py
         .import("json")?
         .call_method1("loads", (value.to_string(),))?
