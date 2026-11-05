@@ -544,11 +544,203 @@ pub(super) fn require_memory_history(
         {
             return Err(invalid("original backing observation changed its unit, native certificate or whole-device bound"));
         }
+        require_resource_interval(record, capacity)?;
     }
     Ok(())
 }
 
-fn observation_metadata(record: &Value) -> PyResult<(&Value, &Value, &Value)> {
+fn require_trace_metadata(trace: &Value, capacity: u64) -> PyResult<u64> {
+    const FIELDS: &[&str] = &[
+        "state",
+        "boundary_flags",
+        "requested_coverage",
+        "enabled_coverage",
+        "unsupported_coverage",
+        "process_dropped_records",
+        "process_errors",
+        "process_buffer_overflows",
+        "backing_baseline_bytes",
+        "backing_peak_bytes",
+    ];
+    require_fields(trace, FIELDS)?;
+    if FIELDS.iter().any(|field| trace[*field].as_u64().is_none()) {
+        return Err(invalid(
+            "resource trace status lost its exact original scalar fields",
+        ));
+    }
+    let peak = trace["backing_peak_bytes"]
+        .as_u64()
+        .expect("checked scalar");
+    if trace["state"].as_u64().expect("checked scalar") > 1
+        || trace["backing_baseline_bytes"]
+            .as_u64()
+            .expect("checked scalar")
+            > peak
+        || peak > capacity
+    {
+        return Err(invalid(
+            "resource trace changed its original state or backing extent",
+        ));
+    }
+    Ok(peak)
+}
+
+/// Recovery preserves the signed original clock and process, without replacing
+/// them with a fresh observer or interpreting capture handles as activity IDs.
+fn require_resource_interval(record: &Value, capacity: u64) -> PyResult<()> {
+    let certificate = &record["device_certificate"];
+    let interval = &record["resource_interval"];
+    require_fields(
+        interval,
+        &[
+            "original_attempt_nonce",
+            "operation_ordinal",
+            "timestamp_scale",
+            "start",
+            "end",
+            "observer_identity",
+            "process_id",
+            "device_uuid",
+            "cuda_context_handle",
+            "cancelled_roster",
+            "cancellation",
+            "steps",
+            "trace",
+        ],
+    )?;
+    let word = |object: &Value, field: &str| {
+        object[field]
+            .as_u64()
+            .ok_or_else(|| invalid("resource interval lost an exact original coordinate"))
+    };
+    let ordinal = word(interval, "operation_ordinal")?;
+    let start = word(interval, "start")?;
+    let end = word(interval, "end")?;
+    let cancelled = interval["cancelled_roster"]
+        .as_bool()
+        .ok_or_else(|| invalid("resource interval lost its original cancellation disposition"))?;
+    if unhex(&interval["original_attempt_nonce"])?.len() != 32
+        || interval["timestamp_scale"] != "activity-producer"
+        || interval["observer_identity"] != certificate["observer_identity"]
+        || interval["process_id"] != certificate["process_id"]
+        || interval["device_uuid"] != certificate["device_uuid"]
+        || word(interval, "cuda_context_handle")? == 0
+        || start == 0
+        || end < start
+    {
+        return Err(invalid(
+            "resource interval changed its original identity, process or clock",
+        ));
+    }
+    let group_peak = require_trace_metadata(&interval["trace"], capacity)?;
+    let steps = interval["steps"]
+        .as_array()
+        .ok_or_else(|| invalid("resource interval lost its original captured roster"))?;
+    let mut previous_end = Some(start);
+    let mut all_boundaries_known = true;
+    for (index, step) in steps.iter().enumerate() {
+        require_fields(
+            step,
+            &[
+                "operation_ordinal",
+                "capture_stream_handle",
+                "start_confirmed",
+                "end_attempted",
+                "capture_finished",
+                "boundaries",
+                "trace",
+            ],
+        )?;
+        let flags: Vec<_> = ["start_confirmed", "end_attempted", "capture_finished"]
+            .iter()
+            .map(|field| {
+                step[*field]
+                    .as_bool()
+                    .ok_or_else(|| invalid("resource step lost its original capture status"))
+            })
+            .collect::<PyResult<_>>()?;
+        if ordinal.checked_add(index as u64) != Some(word(step, "operation_ordinal")?)
+            || word(step, "capture_stream_handle")? == 0
+            || flags[2] && (!flags[0] || !flags[1])
+        {
+            return Err(invalid(
+                "resource step changed its original capture identity",
+            ));
+        }
+        if step["boundaries"].is_null() {
+            if !step["trace"].is_null() {
+                return Err(invalid(
+                    "unknown step boundaries cannot carry a completed trace",
+                ));
+            }
+            all_boundaries_known = false;
+            previous_end = None;
+            continue;
+        }
+        let boundaries = step["boundaries"]
+            .as_array()
+            .filter(|boundaries| boundaries.len() == 2)
+            .ok_or_else(|| invalid("resource step lacks its original boundary pair"))?;
+        let step_start = boundaries[0]
+            .as_u64()
+            .ok_or_else(|| invalid("resource step lost its original start"))?;
+        let step_end = boundaries[1]
+            .as_u64()
+            .ok_or_else(|| invalid("resource step lost its original end"))?;
+        if cancelled
+            || !flags.iter().all(|flag| *flag)
+            || step_start < start
+            || step_end < step_start
+            || step_end > end
+            || previous_end.is_some_and(|previous| previous != step_start)
+            || require_trace_metadata(&step["trace"], capacity)? > group_peak
+        {
+            return Err(invalid(
+                "resource step changed its authenticated execution interval",
+            ));
+        }
+        previous_end = Some(step_end);
+    }
+    if !steps.is_empty() && all_boundaries_known && previous_end != Some(end) {
+        return Err(invalid(
+            "resource steps lost their complete original group extent",
+        ));
+    }
+    let cancellation = &interval["cancellation"];
+    if cancelled {
+        require_fields(
+            cancellation,
+            &[
+                "operation_ordinal",
+                "planned_count",
+                "capture_stream_handle",
+                "status",
+            ],
+        )?;
+        let count = word(cancellation, "planned_count")?;
+        let stream = word(cancellation, "capture_stream_handle")?;
+        if word(cancellation, "operation_ordinal")? != ordinal
+            || count == 0
+            || count < steps.len() as u64
+            || stream == 0
+            || word(cancellation, "status")? != 0
+            || steps
+                .iter()
+                .any(|step| step["capture_stream_handle"].as_u64() != Some(stream))
+        {
+            return Err(invalid(
+                "resource cancellation changed its original planned roster",
+            ));
+        }
+    } else if !cancellation.is_null() {
+        return Err(invalid(
+            "resource interval lacks its original known cancellation handoff",
+        ));
+    }
+    Ok(())
+}
+
+fn observation_metadata(record: &Value) -> PyResult<(&Value, &Value, &Value, &Value)> {
     if record["memory_unit"] != resource_observer::MEMORY_UNIT
         || record["memory_admission"] != resource_observer::MEMORY_ADMISSION
     {
@@ -556,11 +748,13 @@ fn observation_metadata(record: &Value) -> PyResult<(&Value, &Value, &Value)> {
             "terminal observation lost its original memory interpretation",
         ));
     }
-    require_device_certificate(&record["device_certificate"])?;
+    let capacity = require_device_certificate(&record["device_certificate"])?;
+    require_resource_interval(record, capacity)?;
     Ok((
         &record["memory_unit"],
         &record["memory_admission"],
         &record["device_certificate"],
+        &record["resource_interval"],
     ))
 }
 
@@ -624,7 +818,8 @@ pub(super) fn require_terminal_history(
         .as_array()
         .and_then(|records| records.last())
         .ok_or_else(|| invalid("terminal refusal lost its actual original observation"))?;
-    let (memory_unit, memory_admission, device_certificate) = observation_metadata(actual)?;
+    let (memory_unit, memory_admission, device_certificate, resource_interval) =
+        observation_metadata(actual)?;
     let records = prefix["records"]
         .as_array_mut()
         .ok_or_else(|| invalid("terminal refusal lost its original prefix records"))?;
@@ -633,6 +828,7 @@ pub(super) fn require_terminal_history(
         "branch": branch, "resource_usage": usage, "refusal": host(reason)?,
         "memory_unit": memory_unit, "memory_admission": memory_admission,
         "device_certificate": device_certificate,
+        "resource_interval": resource_interval,
     });
     records.push(record);
     if prefix != history {
@@ -659,7 +855,7 @@ pub(super) fn require_segment_terminal_history(
         &["format", "program_sha256", "records", "terminal_cleanup"],
     )?;
     let history = json(history)?;
-    let (memory_unit, memory_admission, device_certificate) =
+    let (memory_unit, memory_admission, device_certificate, resource_interval) =
         observation_metadata(&history["terminal_cleanup"])?;
     let records = prefix["records"]
         .as_array()
@@ -689,6 +885,7 @@ pub(super) fn require_segment_terminal_history(
         "resource_usage": usage,
         "memory_unit": memory_unit, "memory_admission": memory_admission,
         "device_certificate": device_certificate,
+        "resource_interval": resource_interval,
     });
     if prefix != history {
         return Err(invalid(

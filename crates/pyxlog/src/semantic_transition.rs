@@ -34412,7 +34412,6 @@ impl PySemanticTransitionController {
     }
 }
 
-#[cfg(feature = "semantic-policy")]
 fn native_observation_report(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyDict>> {
     Ok(py
         .import("json")?
