@@ -30,6 +30,7 @@
 
 pub mod batch;
 pub mod bridge;
+pub mod causal_decoder;
 pub mod handle;
 pub mod registry;
 pub mod tensor_source;

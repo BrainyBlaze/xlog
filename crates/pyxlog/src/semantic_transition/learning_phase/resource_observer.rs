@@ -1149,7 +1149,9 @@ impl ResourceObserver {
         let status =
             unsafe { (self.finish)(self.context as *mut c_void, interval.handle as *mut c_void) };
         #[cfg(feature = "semantic-policy")]
-        interval.completion_status = Some(status);
+        {
+            interval.completion_status = Some(status);
+        }
         if status != COMPLETE && status != INCOMPLETE {
             return Err(invalid("original resource interval finish is unknown; read only the same interval without repeating finish"));
         }
@@ -1188,7 +1190,9 @@ impl ResourceObserver {
             )
         };
         #[cfg(feature = "semantic-policy")]
-        interval.completion_status = Some(status);
+        {
+            interval.completion_status = Some(status);
+        }
         if status != COMPLETE {
             return Err(invalid("original resource result is unknown; retain the original interval and completed source result"));
         }
@@ -1277,7 +1281,9 @@ impl ResourceObserver {
                     )
                 };
                 #[cfg(feature = "semantic-policy")]
-                interval.completion_status = Some(status);
+                {
+                    interval.completion_status = Some(status);
+                }
                 let required = START_VALID
                     | END_VALID
                     | DELIVERY_DRAINED

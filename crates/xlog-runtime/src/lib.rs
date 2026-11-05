@@ -4,6 +4,7 @@
 //! This crate provides the runtime execution engine for XLOG queries,
 //! managing GPU relation storage and query execution.
 
+pub mod causal_decoder;
 pub mod executor;
 pub mod ilp_registry;
 pub mod profiler;

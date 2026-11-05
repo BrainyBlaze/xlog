@@ -27,6 +27,7 @@ pub use semantic_transition::{
     SemanticEvaluationInterventionPreparation, SemanticEvaluationRuleLibrary,
     SemanticSelectedTaskFacts, SemanticSelectedTaskFactsObservation,
 };
+pub mod tensor;
 pub mod type_seam;
 pub mod wcoj_metadata;
 #[cfg(feature = "wcoj-phase-timing")]

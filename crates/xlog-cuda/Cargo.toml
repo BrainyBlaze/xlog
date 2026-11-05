@@ -22,6 +22,7 @@ include = [
 
 [dependencies]
 xlog-core.workspace = true
+xlog-ir.workspace = true
 cudarc.workspace = true
 libloading.workspace = true
 arrow = { version = "60", default-features = false, features = ["ffi", "ipc"] }

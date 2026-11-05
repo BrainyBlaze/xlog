@@ -30552,6 +30552,7 @@ impl SemanticTransitionSession {
     }
 
     /// Bind the complete unchanged copy and canaries under the original Control owner.
+    #[cfg(feature = "semantic-policy")]
     pub fn bind_prepared_control_output(
         &mut self,
         step: &SemanticPreparedStep,
@@ -30582,6 +30583,7 @@ impl SemanticTransitionSession {
         )
     }
 
+    #[cfg(feature = "semantic-policy")]
     fn bind_prepared_model_output(
         &mut self,
         step: &SemanticPreparedStep,

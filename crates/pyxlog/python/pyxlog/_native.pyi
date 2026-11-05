@@ -55,6 +55,36 @@ def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDevice
 
 _Path = Union[str, PathLike[str]]
 
+class NativeCausalModel:
+    """Checkpoint-backed native BF16 Qwen3 forward on an XLOG CUDA provider."""
+
+    @staticmethod
+    def from_checkpoint(
+        directory: _Path, *, device: int, memory_budget_bytes: int, max_context: int
+    ) -> NativeCausalModel: ...
+    def forward(
+        self, token_ids: Sequence[int], *, prediction_position: int
+    ) -> NativeLogits: ...
+    @property
+    def checkpoint_identity(self) -> str: ...
+    @property
+    def max_context(self) -> int: ...
+    @property
+    def vocabulary_size(self) -> int: ...
+
+class NativeLogits:
+    """One complete FP32 vocabulary row retaining its native allocation."""
+
+    def read(self, token_ids: Sequence[int]) -> list[float]:
+        """Copy requested logits in caller order; requires host-io."""
+        ...
+    @property
+    def prediction_position(self) -> int: ...
+    @property
+    def shape(self) -> tuple[int, int]: ...
+    def __dlpack_device__(self) -> tuple[int, int]: ...
+    def __dlpack__(self, stream: Optional[int] = None) -> Any: ...
+
 _PublishedIdentity = tuple[bytes, int, bytes]
 _NativeIdentityWords = tuple[int, int, int, int]
 _MeasurementAvailability = Literal["not_executed", "incomplete", "obtained"]
