@@ -717,7 +717,7 @@ fn epistemic_literal_for_assumption(assumption: &EpistemicAssumption) -> Result<
 
 fn epistemic_evidence_term_to_logic_term(term: &EpistemicEvidenceTerm) -> Term {
     match term {
-        EpistemicEvidenceTerm::Integer(value) => Term::Integer(*value),
+        EpistemicEvidenceTerm::Integer(value) => Term::Integer(i128::from(*value)),
         EpistemicEvidenceTerm::String(value) => Term::String(value.clone()),
         EpistemicEvidenceTerm::Symbol(value) => Term::Symbol(*value),
     }
@@ -1244,7 +1244,12 @@ fn evidence_term_from_ground_eir_term(
     assumption: &EpistemicAssumption,
 ) -> Result<EpistemicEvidenceTerm> {
     match term {
-        EirTerm::Integer(value) => Ok(EpistemicEvidenceTerm::Integer(*value)),
+        EirTerm::Integer(value) => i64::try_from(*value)
+            .map(EpistemicEvidenceTerm::Integer)
+            .map_err(|_| XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!("integer {value} exceeds exact evidence i64 range"),
+            }),
         EirTerm::String(value) => Ok(EpistemicEvidenceTerm::String(value.clone())),
         EirTerm::Symbol(value) => Ok(EpistemicEvidenceTerm::Symbol(*value)),
         EirTerm::Variable(_)

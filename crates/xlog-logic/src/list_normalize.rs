@@ -1372,7 +1372,7 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 let tail_items = self.clone_list_items(tail_id)?;
                 self.extend_list_items(&mut items, tail_items)?;
                 let id = self.register_list_terms(items.items, Some(elem_type))?;
-                Ok(Term::Integer(id as i64))
+                Ok(Term::Integer(id as i128))
             }
             _ => {
                 self.acquire_term(payload, term)?;
@@ -1411,7 +1411,7 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 let elem_type =
                     Self::list_by_id(&self.lists, id, &mut self.allocation_owner)?.elem_type;
                 Ok(ListArg {
-                    term: Term::Integer(id as i64),
+                    term: Term::Integer(id as i128),
                     id: Some(id),
                     elem_type,
                     is_literal: true,
@@ -1434,7 +1434,7 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 let elem_type =
                     Self::list_by_id(&self.lists, id, &mut self.allocation_owner)?.elem_type;
                 Ok(ListArg {
-                    term: Term::Integer(id as i64),
+                    term: Term::Integer(id as i128),
                     id: Some(id),
                     elem_type,
                     is_literal: true,
@@ -1534,23 +1534,28 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 Some(ScalarType::U32) => {
                     let value = u32::try_from(*i)
                         .map_err(|_| list_error(format_args!("{}", "integer list element is out of range for u32"), &mut self.allocation_owner))?;
-                    Ok((ScalarType::U32, Term::Integer(value as i64)))
+                    Ok((ScalarType::U32, Term::Integer(value as i128)))
                 }
                 Some(ScalarType::U64) => {
                     let value = u64::try_from(*i)
                         .map_err(|_| list_error(format_args!("{}", "integer list element is out of range for u64"), &mut self.allocation_owner))?;
-                    Ok((ScalarType::U64, Term::Integer(value as i64)))
+                    Ok((ScalarType::U64, Term::Integer(value as i128)))
                 }
                 Some(ScalarType::I32) => {
                     let value = i32::try_from(*i)
                         .map_err(|_| list_error(format_args!("{}", "integer list element is out of range for i32"), &mut self.allocation_owner))?;
-                    Ok((ScalarType::I32, Term::Integer(value as i64)))
+                    Ok((ScalarType::I32, Term::Integer(value as i128)))
                 }
-                Some(ScalarType::I64) | None if *i < 0 || *i > u32::MAX as i64 => {
-                    Ok((ScalarType::I64, Term::Integer(*i)))
+                Some(ScalarType::I64) => {
+                    let value = i64::try_from(*i).map_err(|_| list_error(
+                        format_args!("integer list element is out of range for i64"), &mut self.allocation_owner,
+                    ))?;
+                    Ok((ScalarType::I64, Term::Integer(i128::from(value))))
                 }
-                Some(ScalarType::I64) => Ok((ScalarType::I64, Term::Integer(*i))),
-                None => Ok((ScalarType::U32, Term::Integer(*i))),
+                None => {
+                    let typ = term.inferred_scalar_type();
+                    self.normalize_scalar_term_with_receipt(term, Some(typ), temporary_receipt, payload)
+                },
                 Some(ScalarType::F32) => Ok((ScalarType::F32, Term::Float(*i as f64))),
                 Some(ScalarType::F64) => Ok((ScalarType::F64, Term::Float(*i as f64))),
                 Some(ScalarType::Bool) if *i == 0 || *i == 1 => {
@@ -1593,7 +1598,7 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 if typ != LIST_ID_TYPE {
                     return Err(list_error(format_args!("{}", "nested list element requires list<list<T>> or list<u64> context"), &mut self.allocation_owner));
                 }
-                Ok((LIST_ID_TYPE, Term::Integer(id as i64)))
+                Ok((LIST_ID_TYPE, Term::Integer(id as i128)))
             }
             Term::Compound { .. } | Term::PredRef(_) | Term::Aggregate(_) => Err(list_error(format_args!("{}", "compound, predref, and aggregate list elements require meta-term normalization support"), &mut self.allocation_owner)),
         }
@@ -1861,8 +1866,8 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                 len_pred(),
                 RetainedOutput {
                     value: [
-                        Term::Integer(list.id as i64),
-                        Term::Integer(list.items.len() as i64),
+                        Term::Integer(list.id as i128),
+                        Term::Integer(list.items.len() as i128),
                     ],
                     custody: PayloadCustody::default(),
                     storage_owner: None,
@@ -1887,8 +1892,8 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                     &item_name,
                     RetainedOutput {
                         value: [
-                            Term::Integer(list.id as i64),
-                            Term::Integer(idx as i64),
+                            Term::Integer(list.id as i128),
+                            Term::Integer(idx as i128),
                             item.clone(),
                         ],
                         custody: payload,
@@ -1915,9 +1920,9 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
                     &cons_name,
                     RetainedOutput {
                         value: [
-                            Term::Integer(list.id as i64),
+                            Term::Integer(list.id as i128),
                             head.value,
-                            Term::Integer(tail_id as i64),
+                            Term::Integer(tail_id as i128),
                         ],
                         custody: head.custody,
                         storage_owner: None,
@@ -1974,7 +1979,7 @@ impl<'a, 'pool> ListNormalizer<'a, 'pool> {
             self.acquire(&mut payload, pred.len() as u64)?;
             self.acquire_vector::<Term>(&mut payload, ids.len())?;
             let mut terms = Vec::with_capacity(ids.len());
-            terms.extend(ids.into_iter().map(|id| Term::Integer(id as i64)));
+            terms.extend(ids.into_iter().map(|id| Term::Integer(id as i128)));
             let rule = RetainedOutput {
                 value: fact(&pred, terms),
                 custody: payload,
@@ -2289,7 +2294,7 @@ fn literal_key_with_owner(
         (ScalarType::U32, Term::Integer(v)) => Ok(LiteralKey::U32(*v as u32)),
         (ScalarType::U64, Term::Integer(v)) => Ok(LiteralKey::U64(*v as u64)),
         (ScalarType::I32, Term::Integer(v)) => Ok(LiteralKey::I32(*v as i32)),
-        (ScalarType::I64, Term::Integer(v)) => Ok(LiteralKey::I64(*v)),
+        (ScalarType::I64, Term::Integer(v)) => Ok(LiteralKey::I64(*v as i64)),
         (ScalarType::F32, Term::Float(v)) => Ok(LiteralKey::F32((*v as f32).to_bits())),
         (ScalarType::F64, Term::Float(v)) => Ok(LiteralKey::F64(v.to_bits())),
         (ScalarType::Bool, Term::Integer(v)) => Ok(LiteralKey::Bool(*v != 0)),

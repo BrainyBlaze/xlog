@@ -25,8 +25,8 @@ pub enum EirTerm {
     Variable(String),
     /// Anonymous wildcard.
     Anonymous,
-    /// Integer literal.
-    Integer(i64),
+    /// Integer literal in the inclusive range `i64::MIN..=u64::MAX`.
+    Integer(i128),
     /// Floating-point literal represented by its IEEE-754 bits.
     FloatBits(u64),
     /// Quoted string literal.

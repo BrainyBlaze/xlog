@@ -253,7 +253,7 @@ fn atom_ground_i64_row(atom: &Atom) -> Option<Row> {
     atom.terms
         .iter()
         .map(|term| match term {
-            Term::Integer(value) => Some(*value),
+            Term::Integer(value) => i64::try_from(*value).ok(),
             _ => None,
         })
         .collect()
@@ -263,7 +263,7 @@ fn instantiate_atom_i64(atom: &Atom, binding: &HashMap<String, i64>) -> Option<R
     atom.terms
         .iter()
         .map(|term| match term {
-            Term::Integer(value) => Some(*value),
+            Term::Integer(value) => i64::try_from(*value).ok(),
             Term::Variable(name) => binding.get(name).copied(),
             _ => None,
         })
@@ -281,7 +281,7 @@ fn match_atom_i64(
     let mut out = binding.clone();
     for (term, value) in atom.terms.iter().zip(row) {
         match term {
-            Term::Integer(expected) if expected == value => {}
+            Term::Integer(expected) if *expected == i128::from(*value) => {}
             Term::Integer(_) => return None,
             Term::Variable(name) => match out.get(name) {
                 Some(existing) if existing != value => return None,

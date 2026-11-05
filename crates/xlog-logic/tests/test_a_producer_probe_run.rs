@@ -29,7 +29,11 @@ use xlog_logic::parse_program;
 fn atom(pred: &str, args: &[i64]) -> Atom {
     Atom {
         predicate: pred.to_string(),
-        terms: args.iter().copied().map(Term::Integer).collect(),
+        terms: args
+            .iter()
+            .copied()
+            .map(|value| Term::Integer(i128::from(value)))
+            .collect(),
     }
 }
 
@@ -39,7 +43,7 @@ fn atom_key(a: &Atom) -> (String, Vec<i64>) {
         .terms
         .iter()
         .map(|t| match t {
-            Term::Integer(v) => *v,
+            Term::Integer(v) => i64::try_from(*v).expect("test value fits i64"),
             // probe atoms are ground integers; a non-int term is out-of-contract -> sentinel.
             _ => i64::MIN,
         })

@@ -3858,7 +3858,14 @@ impl Lowerer {
             Term::Anonymous => Err(allocations.compilation_error(format_args!(
                 "Anonymous wildcard '_' not allowed in comparisons"
             ))),
-            Term::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
+            Term::Integer(i) => Ok(Expr::Const(
+                term_to_typed_const_value_with_owner(
+                    term,
+                    crate::ast::integer_literal_type(*i),
+                    allocations,
+                )?
+                .expect("integer literal lowers to a constant"),
+            )),
             Term::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
             Term::String(s) => {
                 allocations.acquire(s.len() as u64)?;
@@ -4369,7 +4376,9 @@ impl Lowerer {
             match task {
                 ArithmeticTypeTask::Visit(expression) => match expression {
                     ArithExpr::Variable(name) => values.push(variable_type(name)),
-                    ArithExpr::Integer(_) => values.push(Some(ScalarType::I64)),
+                    ArithExpr::Integer(value) => {
+                        values.push(Some(crate::ast::integer_literal_type(*value)))
+                    }
                     ArithExpr::Float(_) => values.push(Some(ScalarType::F64)),
                     ArithExpr::Add(left, right)
                     | ArithExpr::Sub(left, right)
@@ -4679,7 +4688,14 @@ impl Lowerer {
                         values.push(Expr::Column(column));
                     }
                     ArithExpr::Integer(value) => {
-                        values.push(Expr::Const(ConstValue::I64(*value)));
+                        values.push(Expr::Const(
+                            term_to_typed_const_value_with_owner(
+                                &Term::Integer(*value),
+                                crate::ast::integer_literal_type(*value),
+                                allocations,
+                            )?
+                            .expect("integer literal lowers to a constant"),
+                        ));
                     }
                     ArithExpr::Float(value) => {
                         values.push(Expr::Const(ConstValue::F64(*value)));
@@ -5019,7 +5035,7 @@ fn term_to_typed_const_value_core(
     let const_val = match term {
         Term::Integer(i) => match expected {
             ScalarType::U32 => {
-                if *i >= 0 && *i <= u32::MAX as i64 {
+                if *i >= 0 && *i <= u32::MAX as i128 {
                     ConstValue::U32(*i as u32)
                 } else {
                     return Err(allocations.compilation_error(format_args!(
@@ -5029,7 +5045,7 @@ fn term_to_typed_const_value_core(
                 }
             }
             ScalarType::U64 => {
-                if *i >= 0 {
+                if *i >= 0 && *i <= u64::MAX as i128 {
                     ConstValue::U64(*i as u64)
                 } else {
                     return Err(allocations.compilation_error(format_args!(
@@ -5039,7 +5055,7 @@ fn term_to_typed_const_value_core(
                 }
             }
             ScalarType::I32 => {
-                if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                if *i >= i32::MIN as i128 && *i <= i32::MAX as i128 {
                     ConstValue::I32(*i as i32)
                 } else {
                     return Err(allocations.compilation_error(format_args!(
@@ -5048,7 +5064,12 @@ fn term_to_typed_const_value_core(
                     )));
                 }
             }
-            ScalarType::I64 => ConstValue::I64(*i),
+            ScalarType::I64 => ConstValue::I64(i64::try_from(*i).map_err(|_| {
+                allocations.compilation_error(format_args!(
+                    "Integer literal {} out of range for {:?}",
+                    i, expected
+                ))
+            })?),
             ScalarType::F32 => {
                 let value = *i as f64;
                 if value < f32::MIN as f64 || value > f32::MAX as f64 {
@@ -5811,7 +5832,7 @@ mod tests {
         );
         assert_eq!(Term::Integer(42).inferred_scalar_type(), ScalarType::U32);
         assert_eq!(
-            Term::Integer(i64::MAX).inferred_scalar_type(),
+            Term::Integer(i128::from(i64::MAX)).inferred_scalar_type(),
             ScalarType::I64
         );
         assert_eq!(Term::Float(3.25).inferred_scalar_type(), ScalarType::F64);

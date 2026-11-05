@@ -1573,10 +1573,8 @@ fn build_term(pair: Pair<'_, Rule>, symbol_owner: &mut SymbolAllocationOwner<'_>
         Rule::variable => Ok(Term::Variable(inner.as_str().to_string())),
         Rule::anonymous => Ok(Term::Anonymous),
         Rule::integer => {
-            let val: i64 = inner
-                .as_str()
-                .parse()
-                .map_err(|_| XlogError::Parse(format!("Invalid integer: {}", inner.as_str())))?;
+            let val = crate::ast::parse_integer_literal(inner.as_str())
+                .ok_or_else(|| XlogError::Parse(format!("Invalid integer: {}", inner.as_str())))?;
             Ok(Term::Integer(val))
         }
         Rule::float_num => {
@@ -1791,10 +1789,8 @@ fn build_arith_primary(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
         }
         Rule::variable => Ok(ArithExpr::Variable(first.as_str().to_string())),
         Rule::integer => {
-            let val: i64 = first
-                .as_str()
-                .parse()
-                .map_err(|_| XlogError::Parse(format!("Invalid integer: {}", first.as_str())))?;
+            let val = crate::ast::parse_integer_literal(first.as_str())
+                .ok_or_else(|| XlogError::Parse(format!("Invalid integer: {}", first.as_str())))?;
             Ok(ArithExpr::Integer(val))
         }
         Rule::float_num => {

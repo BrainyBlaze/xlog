@@ -149,7 +149,7 @@ impl ResidentRejection {
 /// the same constant in a rule and in a fact map to one domain index.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ConstKey {
-    Int(i64),
+    Int(i128),
     Sym(u32),
     Str(String),
     FloatBits(u64),
@@ -158,7 +158,7 @@ enum ConstKey {
 impl ConstKey {
     fn from_value(v: &Value) -> ConstKey {
         match v {
-            Value::I64(i) => ConstKey::Int(*i),
+            Value::I64(i) => ConstKey::Int(i128::from(*i)),
             Value::Symbol(s) => ConstKey::Sym(*s),
             Value::String(s) => ConstKey::Str(s.clone()),
             Value::F64(bits) => ConstKey::FloatBits(*bits),
@@ -870,7 +870,13 @@ fn ground_atom_from_atom(atom: &Atom) -> std::result::Result<GroundAtom, Residen
     let mut args = Vec::with_capacity(atom.terms.len());
     for t in &atom.terms {
         let v = match t {
-            Term::Integer(i) => Value::I64(*i),
+            Term::Integer(_) => crate::provenance::value_from_term(t).map_err(|error| {
+                ResidentRejection::err(
+                    ResidentRejectKind::UnboundedTerm,
+                    format!("{t:?}"),
+                    error.to_string(),
+                )
+            })?,
             Term::Symbol(s) => Value::Symbol(*s),
             Term::String(s) => Value::String(s.clone()),
             Term::Float(f) => Value::F64(f.to_bits()),
