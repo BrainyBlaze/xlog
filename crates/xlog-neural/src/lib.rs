@@ -31,8 +31,10 @@
 pub mod batch;
 pub mod bridge;
 pub mod causal_decoder;
+pub mod causal_snapshot;
 pub mod handle;
 pub mod registry;
+mod tensor_archive;
 pub mod tensor_source;
 
 pub use batch::{BatchCollector, BatchMapping, BatchResult, NeuralCall};

@@ -395,3 +395,16 @@ extern "C" __global__ void tensor_adam_f32(
     next_second[i] = v;
     forward[i] = to_bf16(value);
 }
+
+extern "C" __global__ void tensor_check_adam_state_f32(
+    const uint16_t* forward, const float* master, const float* first, const float* second,
+    uint32_t* invalid, uint64_t elements, uint64_t step
+) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= elements) return;
+    bool bad = !isfinite(master[i]) || !isfinite(first[i]) || !isfinite(second[i])
+        || !isfinite(from_bf16(forward[i])) || second[i] < 0.0f || to_bf16(master[i]) != forward[i];
+    if (step == 0) bad = bad || first[i] != 0.0f || second[i] != 0.0f
+        || __float_as_uint(master[i]) != (static_cast<uint32_t>(forward[i]) << 16);
+    if (bad) atomicOr(invalid, 1U);
+}

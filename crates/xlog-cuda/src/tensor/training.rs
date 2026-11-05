@@ -53,6 +53,18 @@ pub struct TensorAdamState {
     step: u64,
 }
 
+impl TensorAdamState {
+    /// Retained master, first and second moments in their durable storage order.
+    pub fn snapshot_tensors(&self) -> [&NativeTensor; 3] {
+        [&self.master, &self.first, &self.second]
+    }
+
+    /// Completed updates for the exact retained parameter version.
+    pub fn step(&self) -> u64 {
+        self.step
+    }
+}
+
 /// Scalars from a completed minibatch update, before publication by its owner.
 pub struct TensorTrainingResult {
     /// Mean pre-update loss across the supplied causal prefixes.
@@ -64,8 +76,72 @@ pub struct TensorTrainingResult {
 }
 
 impl TensorExecutor {
+    /// Restore optimizer bytes only when they agree with their actual BF16
+    /// forward view, have finite moments and satisfy the zero-step contract.
+    pub fn restore_linear_optimizer(
+        &self,
+        parameter: usize,
+        forward: &NativeTensor,
+        master: NativeTensor,
+        first: NativeTensor,
+        second: NativeTensor,
+        step: u64,
+    ) -> Result<TensorAdamState> {
+        if forward.shape.float32
+            || forward.device != self.provider.device().ordinal()
+            || [&master, &first, &second].iter().any(|tensor| {
+                !tensor.shape.float32
+                    || tensor.device != forward.device
+                    || tensor.shape.rows != forward.shape.rows
+                    || tensor.shape.columns != forward.shape.columns
+            })
+        {
+            return Err(failure(
+                "restored optimizer storage differs from its physical parameter",
+            ));
+        }
+        let mut invalid = self.provider.memory().alloc::<u32>(1)?;
+        self.provider
+            .htod_sync_copy_into_tracked(&[0u32], &mut invalid)?;
+        let mut recorder = LaunchRecorder::new_strict(self.stream);
+        for tensor in [forward, &master, &first, &second] {
+            recorder.read(tensor.storage.as_ref());
+        }
+        recorder.read_write(&invalid);
+        self.launch(
+            recorder,
+            "tensor_check_adam_state_f32",
+            grid(master.elements().div_ceil(256))?,
+            (
+                forward.pointer(),
+                master.pointer(),
+                first.pointer(),
+                second.pointer(),
+                invalid.device_ptr_value(),
+                master.elements() as u64,
+                step,
+            ),
+        )?;
+        let mut flag = [0u32];
+        self.provider
+            .dtoh_sync_copy_into_tracked(&invalid, &mut flag)?;
+        if flag[0] != 0 {
+            return Err(failure(
+                "snapshot optimizer/master/forward bytes violate the numerical state contract",
+            ));
+        }
+        Ok(TensorAdamState {
+            parameter,
+            forward: forward.clone(),
+            master,
+            first,
+            second,
+            step,
+        })
+    }
+
     fn float_shape(&self, shape: TensorValueShape) -> Result<NativeTensor> {
-        self.allocate(TensorValueShape {
+        self.allocate_tensor(TensorValueShape {
             float32: true,
             ..shape
         })
@@ -131,7 +207,7 @@ impl TensorExecutor {
         source_heads: usize,
         head_dim: usize,
     ) -> Result<NativeTensor> {
-        let output = self.allocate(TensorValueShape {
+        let output = self.allocate_tensor(TensorValueShape {
             rows: heads * input.shape.rows,
             columns: head_dim,
             float32: input.shape.float32,
@@ -193,7 +269,7 @@ impl TensorExecutor {
         sequence: usize,
         head_dim: usize,
     ) -> Result<NativeTensor> {
-        let output = self.allocate(scores.shape)?;
+        let output = self.allocate_tensor(scores.shape)?;
         self.launch(
             self.recorder(&[scores], &output),
             "tensor_causal_softmax_bf16",
@@ -222,7 +298,7 @@ impl TensorExecutor {
         let q = self.attention_pack(query, heads, heads, head_dim)?;
         let k = self.attention_pack(key, heads, kv_heads, head_dim)?;
         let v = self.attention_pack(value, heads, kv_heads, head_dim)?;
-        let scores = self.allocate(TensorValueShape {
+        let scores = self.allocate_tensor(TensorValueShape {
             rows: heads * sequence,
             columns: sequence,
             float32: false,
@@ -634,7 +710,7 @@ impl TensorExecutor {
         if !gradient_norm.is_finite() {
             return Err(failure("nonfinite global gradient norm"));
         }
-        let forward = self.allocate(parameter.shape)?;
+        let forward = self.allocate_tensor(parameter.shape)?;
         let next = TensorAdamState {
             parameter: state.parameter,
             forward: forward.clone(),

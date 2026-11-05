@@ -2,32 +2,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Component, Path};
 
-use safetensors::tensor::{Dtype, Metadata};
+use safetensors::tensor::Dtype;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use xlog_core::{Result, XlogError};
 use xlog_ir::tensor::{TensorOperation as Op, TensorParameter, TensorProgram};
 
-const MAX_JSON_BYTES: u64 = 100 * 1024 * 1024;
-const TRANSFER_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+use crate::tensor_archive::{TensorArchive, MAX_HEADER_BYTES as MAX_JSON_BYTES};
 
 /// The actual files and typed numerical program admitted before GPU allocation.
 pub struct CausalDecoderCheckpoint {
     /// Executable program whose indices preserve parameter sharing.
     pub program: TensorProgram,
-    shards: BTreeMap<String, Shard>,
+    shards: BTreeMap<String, TensorArchive>,
     locations: BTreeMap<String, String>,
     duplicated_head: bool,
     configuration: Vec<u8>,
-}
-
-struct Shard {
-    file: File,
-    metadata: Metadata,
-    data_start: u64,
 }
 
 fn invalid(message: impl Into<String>) -> XlogError {
@@ -421,28 +414,8 @@ impl CausalDecoderCheckpoint {
         let indexed = !locations.is_empty();
         let mut shards = BTreeMap::new();
         for name in files {
-            let mut file = File::open(directory.join(&name)).map_err(io_error)?;
-            let file_bytes = file.metadata().map_err(io_error)?.len();
-            let mut length = [0u8; 8];
-            file.read_exact(&mut length).map_err(io_error)?;
-            let header_bytes = u64::from_le_bytes(length);
-            if header_bytes > MAX_JSON_BYTES
-                || header_bytes.checked_add(8).is_none_or(|n| n > file_bytes)
-            {
-                return Err(invalid("invalid or oversized safetensors header"));
-            }
-            let mut header = vec![0u8; header_bytes as usize];
-            file.read_exact(&mut header).map_err(io_error)?;
-            // Metadata's Deserialize implementation validates dtype, shape, offsets and complete coverage.
-            let metadata: Metadata = serde_json::from_slice(&header)
-                .map_err(|error| invalid(format!("safetensors metadata: {error}")))?;
-            let data_start = 8 + header_bytes;
-            if data_start.checked_add(metadata.data_len() as u64) != Some(file_bytes) {
-                return Err(invalid(
-                    "safetensors payload length differs from its validated metadata",
-                ));
-            }
-            for tensor in metadata.offset_keys() {
+            let archive = TensorArchive::open(&directory.join(&name))?;
+            for tensor in archive.metadata.offset_keys() {
                 if indexed {
                     if locations.get(&tensor) != Some(&name) {
                         return Err(invalid(format!(
@@ -453,14 +426,7 @@ impl CausalDecoderCheckpoint {
                     locations.insert(tensor, name.clone());
                 }
             }
-            shards.insert(
-                name,
-                Shard {
-                    file,
-                    metadata,
-                    data_start,
-                },
-            );
+            shards.insert(name, archive);
         }
         let duplicated_head = locations.contains_key("lm_head.weight");
         let allowed: BTreeSet<_> = program
@@ -541,33 +507,13 @@ impl CausalDecoderCheckpoint {
         Ok(identity.finalize().into())
     }
 
-    fn read_parameter<F>(&mut self, name: &str, mut write: F) -> Result<[u8; 32]>
+    fn read_parameter<F>(&mut self, name: &str, write: F) -> Result<[u8; 32]>
     where
         F: FnMut(usize, &[u8]) -> Result<()>,
     {
-        let shard = self
-            .shards
+        self.shards
             .get_mut(&self.locations[name])
-            .expect("validated shard");
-        let info = shard.metadata.info(name).expect("validated tensor");
-        let (begin, end) = info.data_offsets;
-        shard
-            .file
-            .seek(SeekFrom::Start(shard.data_start + begin as u64))
-            .map_err(io_error)?;
-        let mut buffer = vec![0u8; TRANSFER_CHUNK_BYTES.min(end - begin)];
-        let mut offset = 0;
-        let mut digest = Sha256::new();
-        while offset < end - begin {
-            let bytes = buffer.len().min(end - begin - offset);
-            shard
-                .file
-                .read_exact(&mut buffer[..bytes])
-                .map_err(io_error)?;
-            digest.update(&buffer[..bytes]);
-            write(offset, &buffer[..bytes])?;
-            offset += bytes;
-        }
-        Ok(digest.finalize().into())
+            .expect("validated shard")
+            .read_tensor(name, write)
     }
 }

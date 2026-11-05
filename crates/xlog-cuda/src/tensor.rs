@@ -148,14 +148,15 @@ impl TensorExecutor {
 
     /// Allocate one BF16 parameter through the canonical memory manager.
     pub fn allocate_parameter(&self, rows: usize, columns: usize) -> Result<NativeTensor> {
-        self.allocate(TensorValueShape {
+        self.allocate_tensor(TensorValueShape {
             rows,
             columns,
             float32: false,
         })
     }
 
-    fn allocate(&self, shape: TensorValueShape) -> Result<NativeTensor> {
+    /// Allocate checked BF16/FP32 native storage for execution or unpublished restore.
+    pub fn allocate_tensor(&self, shape: TensorValueShape) -> Result<NativeTensor> {
         dimension(shape.rows)?;
         dimension(shape.columns)?;
         let bytes = shape
@@ -170,17 +171,15 @@ impl TensorExecutor {
         })
     }
 
-    /// Fill the unpublished parameter with a checked byte range from its checkpoint.
-    pub fn write_parameter(
+    /// Fill an unpublished allocation from a checked checkpoint or snapshot byte range.
+    pub fn write_tensor(
         &self,
         tensor: &mut NativeTensor,
         offset: usize,
         bytes: &[u8],
     ) -> Result<()> {
-        if tensor.device != self.provider.device().ordinal() || tensor.shape.float32 {
-            return Err(failure(
-                "parameter storage does not belong to this BF16 executor",
-            ));
+        if tensor.device != self.provider.device().ordinal() {
+            return Err(failure("tensor storage does not belong to this device"));
         }
         let end = offset
             .checked_add(bytes.len())
@@ -190,6 +189,24 @@ impl TensorExecutor {
             .ok_or_else(|| failure("cannot overwrite a published parameter alias"))?;
         let mut view = storage.slice_mut(offset..end);
         self.provider.htod_sync_copy_into_tracked(bytes, &mut view)
+    }
+
+    /// Read exact retained bytes through tracked host I/O for durable snapshots.
+    pub fn read_tensor(
+        &self,
+        tensor: &NativeTensor,
+        offset: usize,
+        bytes: &mut [u8],
+    ) -> Result<()> {
+        let end = offset
+            .checked_add(bytes.len())
+            .filter(|&end| end <= tensor.storage.len())
+            .ok_or_else(|| failure("snapshot read exceeds tensor allocation"))?;
+        if tensor.device != self.provider.device().ordinal() {
+            return Err(failure("snapshot tensor is on another device"));
+        }
+        self.provider
+            .dtoh_sync_copy_into_tracked(&tensor.storage.slice(offset..end), bytes)
     }
 
     fn recorder(&self, inputs: &[&NativeTensor], output: &NativeTensor) -> LaunchRecorder {
@@ -363,7 +380,7 @@ impl TensorExecutor {
         let q = self.attention_pack(query, heads, heads, head_dim)?;
         let k = self.attention_pack(key, heads, kv_heads, head_dim)?;
         let v = self.attention_pack(value, heads, kv_heads, head_dim)?;
-        let scores = self.allocate(TensorValueShape {
+        let scores = self.allocate_tensor(TensorValueShape {
             rows: heads * sequence,
             columns: sequence,
             float32: false,
@@ -375,7 +392,7 @@ impl TensorExecutor {
         drop(k);
         let probabilities = self.attention_probabilities(&scores, sequence, head_dim)?;
         drop(scores);
-        let attended = self.allocate(packed_shape)?;
+        let attended = self.allocate_tensor(packed_shape)?;
         self.gemm(
             &v,
             &probabilities,
@@ -461,7 +478,7 @@ impl TensorExecutor {
         }
         let mut values: Vec<Option<NativeTensor>> = vec![None; program.operations.len()];
         for (id, operation) in program.operations.iter().enumerate() {
-            let output = self.allocate(shapes[id])?;
+            let output = self.allocate_tensor(shapes[id])?;
             let input = |index: usize| -> Result<&NativeTensor> {
                 values[index]
                     .as_ref()

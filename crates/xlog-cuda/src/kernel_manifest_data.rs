@@ -86,6 +86,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "tensor_sum_squares_f32",
             "tensor_norm_f32",
             "tensor_adam_f32",
+            "tensor_check_adam_state_f32",
         ],
     },
     KernelModuleSpec {

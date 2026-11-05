@@ -2509,6 +2509,7 @@ dependencies = [
 name = "xlog-ir"
 version = "0.12.0"
 dependencies = [
+ "serde",
  "xlog-core",
 ]
 
@@ -2533,6 +2534,7 @@ version = "0.12.0"
 dependencies = [
  "pyo3",
  "safetensors",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
