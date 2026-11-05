@@ -4,18 +4,21 @@ use std::path::Path;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, XlogError};
-use xlog_cuda::tensor::{NativeTensor, TensorExecutor};
+use xlog_cuda::tensor::{
+    NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
+};
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::TensorProgram;
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
 
-/// Immutable weights and executable numerical definition on one native provider.
+/// Versioned weights and executable numerical definition on one native provider.
 pub struct NativeCausalModel {
     executor: Arc<TensorExecutor>,
     parameters: Vec<NativeTensor>,
     program: TensorProgram,
     checkpoint_identity: [u8; 32],
     device: usize,
+    optimizer: Option<(usize, TensorAdamState)>,
 }
 
 /// One complete vocabulary row, retaining its storage and original provider.
@@ -80,7 +83,120 @@ impl NativeCausalModel {
             program: checkpoint.program,
             checkpoint_identity,
             device,
+            optimizer: None,
         })
+    }
+
+    /// Fork a candidate with one trainable MLP down projection. Frozen weights
+    /// and existing optimizer versions share storage until a successful update.
+    pub fn fork_trainable(&self, down_projection_layer: usize) -> Result<Self> {
+        let name = format!("model.layers.{down_projection_layer}.mlp.down_proj.weight");
+        let parameter = self
+            .program
+            .parameters
+            .iter()
+            .position(|entry| entry.name == name)
+            .ok_or_else(|| XlogError::Compilation("trainable decoder layer is absent".into()))?;
+        let state = match &self.optimizer {
+            Some((old_parameter, state)) if *old_parameter == parameter => state.clone(),
+            Some(_) => {
+                return Err(XlogError::Compilation(
+                    "a trainable candidate retains its selected down projection".into(),
+                ))
+            }
+            None => self
+                .executor
+                .linear_optimizer(parameter, &self.parameters[parameter])?,
+        };
+        Ok(Self {
+            executor: Arc::clone(&self.executor),
+            parameters: self.parameters.clone(),
+            program: self.program.clone(),
+            checkpoint_identity: self.checkpoint_identity,
+            device: self.device,
+            optimizer: Some((parameter, state)),
+        })
+    }
+
+    /// One mean-minibatch binary NLL update, using only the supplied original IDs.
+    /// The caller owns data selection and the global attempt/update budget.
+    pub fn fit_binary(
+        &mut self,
+        token_ids: &[Vec<u32>],
+        prediction_positions: &[usize],
+        outcomes: &[bool],
+        negative_token_id: u32,
+        positive_token_id: u32,
+    ) -> Result<TensorTrainingResult> {
+        if outcomes.len() != token_ids.len() {
+            return Err(XlogError::Compilation(
+                "one outcome is required per training prefix".into(),
+            ));
+        }
+        let losses = outcomes
+            .iter()
+            .map(|&outcome| TensorLoss::Binary {
+                negative: negative_token_id,
+                positive: positive_token_id,
+                outcome,
+            })
+            .collect::<Vec<_>>();
+        self.fit(token_ids, prediction_positions, &losses)
+    }
+
+    /// One full-vocabulary next-token cross-entropy update. Every target is scored
+    /// against all original vocabulary entries, including for editor training.
+    pub fn fit_tokens(
+        &mut self,
+        token_ids: &[Vec<u32>],
+        prediction_positions: &[usize],
+        target_ids: &[u32],
+    ) -> Result<TensorTrainingResult> {
+        if target_ids.len() != token_ids.len() {
+            return Err(XlogError::Compilation(
+                "one next-token target is required per training prefix".into(),
+            ));
+        }
+        let losses = target_ids
+            .iter()
+            .map(|&target| TensorLoss::Token { target })
+            .collect::<Vec<_>>();
+        self.fit(token_ids, prediction_positions, &losses)
+    }
+
+    fn fit(
+        &mut self,
+        token_ids: &[Vec<u32>],
+        prediction_positions: &[usize],
+        losses: &[TensorLoss],
+    ) -> Result<TensorTrainingResult> {
+        if token_ids.is_empty()
+            || prediction_positions.len() != token_ids.len()
+            || losses.len() != token_ids.len()
+        {
+            return Err(XlogError::Compilation(
+                "training requires equally sized nonempty prefixes, positions and targets".into(),
+            ));
+        }
+        let (parameter, state) = self.optimizer.as_ref().ok_or_else(|| {
+            XlogError::Compilation(
+                "fork a trainable candidate before updating model parameters".into(),
+            )
+        })?;
+        let batch = token_ids
+            .iter()
+            .zip(prediction_positions)
+            .zip(losses)
+            .map(|((tokens, &position), &loss)| (tokens.as_slice(), position, loss))
+            .collect::<Vec<_>>();
+        let (forward, next, result) =
+            self.executor
+                .train_linear(&self.program, &self.parameters, state, &batch, 1.0e-5)?;
+        // All allocations and numerical checks completed before this exclusive
+        // publication. Old readers and forked models retain their original bytes.
+        self.parameters[*parameter] = forward;
+        self.optimizer = Some((*parameter, next));
+        Ok(result)
     }
 
     /// Recompute the supplied causal prefix and return its requested vocabulary row.

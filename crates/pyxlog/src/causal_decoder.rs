@@ -48,6 +48,57 @@ impl PyNativeCausalModel {
             .map_err(xlog_err)
     }
 
+    /// Fork a candidate; the source model and its retained outputs stay unchanged.
+    #[pyo3(signature = (*, down_projection_layer))]
+    fn fork_trainable(&self, py: Python<'_>, down_projection_layer: usize) -> PyResult<Self> {
+        py.detach(|| self.inner.fork_trainable(down_projection_layer))
+            .map(|inner| Self { inner })
+            .map_err(xlog_err)
+    }
+
+    /// One binary NLL minibatch update. Returns (mean_loss, gradient_norm, step).
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (token_ids, *, prediction_positions, outcomes, negative_token_id, positive_token_id))]
+    fn fit_binary(
+        &mut self,
+        py: Python<'_>,
+        token_ids: Vec<Vec<u32>>,
+        prediction_positions: Vec<usize>,
+        outcomes: Vec<bool>,
+        negative_token_id: u32,
+        positive_token_id: u32,
+    ) -> PyResult<(f32, f32, u64)> {
+        py.detach(|| {
+            self.inner.fit_binary(
+                &token_ids,
+                &prediction_positions,
+                &outcomes,
+                negative_token_id,
+                positive_token_id,
+            )
+        })
+        .map(|result| (result.mean_loss, result.gradient_norm, result.step))
+        .map_err(xlog_err)
+    }
+
+    /// One complete-vocabulary CE update. Returns (mean_loss, gradient_norm, step).
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (token_ids, *, prediction_positions, target_ids))]
+    fn fit_tokens(
+        &mut self,
+        py: Python<'_>,
+        token_ids: Vec<Vec<u32>>,
+        prediction_positions: Vec<usize>,
+        target_ids: Vec<u32>,
+    ) -> PyResult<(f32, f32, u64)> {
+        py.detach(|| {
+            self.inner
+                .fit_tokens(&token_ids, &prediction_positions, &target_ids)
+        })
+        .map(|result| (result.mean_loss, result.gradient_norm, result.step))
+        .map_err(xlog_err)
+    }
+
     #[getter]
     fn checkpoint_identity(&self) -> String {
         self.inner
