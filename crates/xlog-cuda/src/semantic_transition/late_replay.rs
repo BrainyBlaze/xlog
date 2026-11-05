@@ -2982,7 +2982,11 @@ impl SemanticTransitionSession {
             recorder.read_write(work);
         }
         if pending.eligible {
-            let (descriptors, raw) = pending._arena.append_storage();
+            let (arena, _) = pending
+                .training_publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            let (descriptors, raw) = arena.append_storage();
             recorder.write(&descriptors);
             recorder.write(&raw);
         }
