@@ -108,6 +108,14 @@ configurations are rejected. The checkpoint headers determine tensor shapes and
 byte extents; the index's descriptive `metadata.total_size` is not authoritative.
 Embedding and output projection reference the same parameter allocation.
 
+Import registers `model::forward` in XLOG's common `FunctionRegistry` as a
+`FuncDef` with a numerical body. Its signature accepts the bounded sequence of
+original `u32` token IDs and a prediction position, and returns an FP32
+`[1, vocabulary]` tensor. Forward and reverse execution resolve this same
+definition; forks retain the immutable registry and shared parameter identities.
+Scalar functions continue to use scalar invocation; a tensor-valued definition
+cannot be expanded as a scalar arithmetic expression.
+
 ```python
 import pyxlog
 
@@ -193,7 +201,8 @@ Acquired-function insertion is a separate capability not provided by these metho
 
 `save_snapshot(path, application_state=payload_bytes)` saves a complete cold model
 version in one self-contained SafeTensors file and returns its SHA256 identity.
-It includes the numerical graph, shared parameter indices and all actual BF16
+It includes the canonical function definitions and signatures, the named numerical
+entry point, shared parameter indices and all actual BF16
 weight bytes. Trainable candidates also include their FP32 master weights, Adam
 moments and completed step count. The application payload is covered by the same
 digest; XLOG preserves these bytes without interpreting the application's history,
@@ -218,6 +227,12 @@ replacing an existing destination. Temporary files created by a failed save are
 removed; cleanup or directory-sync failures report the affected path and whether
 publication occurred. Snapshot methods require the default `host-io` feature and
 perform cold host transfers.
+
+The native description uses `xlog.native-causal-snapshot.v2`. Restore reconstructs
+and validates the common function registry and resolves the saved entry point;
+it does not maintain an independent executable graph beside those definitions.
+Earlier numerical-plan-only snapshots require their producing version for restore;
+they are not silently reinterpreted as registered definitions.
 
 Restore requires the expected 64-digit SHA256 and verifies the actual streamed
 header and payload before returning the model or application bytes. It checks the

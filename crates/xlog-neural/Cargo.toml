@@ -26,7 +26,8 @@ python-tests = ["python"]
 [dependencies]
 xlog-core.workspace = true
 xlog-ir.workspace = true
-serde = { version = "1.0", features = ["derive"] }
+xlog-logic.workspace = true
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json.workspace = true
 safetensors = "0.7"
 sha2 = "0.11"

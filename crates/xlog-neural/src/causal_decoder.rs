@@ -4,19 +4,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 use safetensors::tensor::Dtype;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use xlog_core::{Result, XlogError};
 use xlog_ir::tensor::{TensorOperation as Op, TensorParameter, TensorProgram};
+use xlog_logic::ast::FuncDef;
+use xlog_logic::function::FunctionRegistry;
 
 use crate::tensor_archive::{TensorArchive, MAX_HEADER_BYTES as MAX_JSON_BYTES};
 
 /// The actual files and typed numerical program admitted before GPU allocation.
 pub struct CausalDecoderCheckpoint {
-    /// Executable program whose indices preserve parameter sharing.
-    pub program: TensorProgram,
+    functions: Arc<FunctionRegistry>,
+    entrypoint: String,
     shards: BTreeMap<String, TensorArchive>,
     locations: BTreeMap<String, String>,
     duplicated_head: bool,
@@ -376,6 +379,23 @@ fn lower(config: &Value, max_context: usize) -> Result<TensorProgram> {
 }
 
 impl CausalDecoderCheckpoint {
+    /// Canonical definitions, shared unchanged by import, execution and snapshots.
+    pub fn functions(&self) -> &Arc<FunctionRegistry> {
+        &self.functions
+    }
+
+    /// Registered function invoked by the decoder's public entry point.
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
+    /// The numerical body of the registered entry point, retaining parameter IDs.
+    pub fn program(&self) -> &TensorProgram {
+        self.functions
+            .numerical(&self.entrypoint)
+            .expect("validated immutable decoder definition")
+    }
+
     /// Read configuration and all headers, checking the entire parameter contract.
     /// File payloads remain on disk until the supplied native writer consumes them.
     pub fn open(directory: &Path, max_context: usize) -> Result<Self> {
@@ -465,8 +485,13 @@ impl CausalDecoderCheckpoint {
                 return Err(invalid("tied LM-head dtype/shape differs from embedding"));
             }
         }
+        let entrypoint = "model::forward".to_owned();
+        let mut functions = FunctionRegistry::new();
+        functions.register(FuncDef::numerical(entrypoint.clone(), program)?)?;
+        functions.validate()?;
         Ok(Self {
-            program,
+            functions: Arc::new(functions),
+            entrypoint,
             shards,
             locations,
             duplicated_head,
@@ -484,8 +509,8 @@ impl CausalDecoderCheckpoint {
         identity.update((self.configuration.len() as u64).to_le_bytes());
         identity.update(&self.configuration);
         let mut embedding_digest = None;
-        for id in 0..self.program.parameters.len() {
-            let name = self.program.parameters[id].name.clone();
+        for id in 0..self.program().parameters.len() {
+            let name = self.program().parameters[id].name.clone();
             identity.update((name.len() as u64).to_le_bytes());
             identity.update(name.as_bytes());
             let digest = self.read_parameter(&name, |offset, bytes| {

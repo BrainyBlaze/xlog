@@ -10,6 +10,7 @@ use xlog_cuda::tensor::{
 };
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::{TensorProgram, TensorValueShape};
+use xlog_logic::function::FunctionRegistry;
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
 use xlog_neural::causal_snapshot::{
     CausalDecoderSnapshot, CausalSnapshotDescription, OptimizerSnapshot,
@@ -36,7 +37,8 @@ fn native_executor(
 pub struct NativeCausalModel {
     executor: Arc<TensorExecutor>,
     parameters: Vec<NativeTensor>,
-    program: TensorProgram,
+    functions: Arc<FunctionRegistry>,
+    entrypoint: String,
     checkpoint_identity: [u8; 32],
     device: usize,
     optimizer: Option<(usize, TensorAdamState)>,
@@ -55,6 +57,12 @@ pub struct NativeLogits {
 }
 
 impl NativeCausalModel {
+    fn program(&self) -> &TensorProgram {
+        self.functions
+            .numerical(&self.entrypoint)
+            .expect("validated immutable decoder definition")
+    }
+
     /// Import local config.json and authentic SafeTensors shards, then publish
     /// the model only after every parameter and tied alias has been checked.
     pub fn from_checkpoint(
@@ -66,7 +74,7 @@ impl NativeCausalModel {
         let mut checkpoint = CausalDecoderCheckpoint::open(directory, max_context)?;
         let weight_bytes =
             checkpoint
-                .program
+                .program()
                 .parameters
                 .iter()
                 .try_fold(0u64, |total, parameter| {
@@ -75,8 +83,8 @@ impl NativeCausalModel {
                         .ok_or_else(|| XlogError::Compilation("checkpoint size overflow".into()))
                 })?;
         let executor = native_executor(device, memory_budget_bytes, weight_bytes)?;
-        let mut parameters = Vec::with_capacity(checkpoint.program.parameters.len());
-        for parameter in &checkpoint.program.parameters {
+        let mut parameters = Vec::with_capacity(checkpoint.program().parameters.len());
+        for parameter in &checkpoint.program().parameters {
             let (rows, columns) = match parameter.shape.as_slice() {
                 &[columns] => (1, columns),
                 &[rows, columns] => (rows, columns),
@@ -93,7 +101,8 @@ impl NativeCausalModel {
         Ok(Self {
             executor,
             parameters,
-            program: checkpoint.program,
+            functions: Arc::clone(checkpoint.functions()),
+            entrypoint: checkpoint.entrypoint().into(),
             checkpoint_identity,
             device,
             optimizer: None,
@@ -112,7 +121,8 @@ impl NativeCausalModel {
                 step: state.step(),
             });
         let description = CausalSnapshotDescription::new(
-            self.program.clone(),
+            Arc::clone(&self.functions),
+            self.entrypoint.clone(),
             self.checkpoint_identity,
             optimizer,
             application_state,
@@ -155,7 +165,7 @@ impl NativeCausalModel {
             .collect::<Result<Vec<_>>>()?;
         let description = snapshot
             .load(|id, offset, bytes| executor.write_tensor(&mut tensors[id], offset, bytes))?;
-        let state = tensors.split_off(description.program.parameters.len());
+        let state = tensors.split_off(description.program()?.parameters.len());
         let optimizer = if let Some(optimizer) = description.optimizer {
             let [master, first, second]: [NativeTensor; 3] = state.try_into().map_err(|_| {
                 XlogError::Compilation("snapshot optimizer roster is incomplete".into())
@@ -176,7 +186,8 @@ impl NativeCausalModel {
             Self {
                 executor,
                 parameters: tensors,
-                program: description.program,
+                functions: description.functions,
+                entrypoint: description.entrypoint,
                 checkpoint_identity: description.checkpoint_identity,
                 device,
                 optimizer,
@@ -190,7 +201,7 @@ impl NativeCausalModel {
     pub fn fork_trainable(&self, down_projection_layer: usize) -> Result<Self> {
         let name = format!("model.layers.{down_projection_layer}.mlp.down_proj.weight");
         let parameter = self
-            .program
+            .program()
             .parameters
             .iter()
             .position(|entry| entry.name == name)
@@ -209,7 +220,8 @@ impl NativeCausalModel {
         Ok(Self {
             executor: Arc::clone(&self.executor),
             parameters: self.parameters.clone(),
-            program: self.program.clone(),
+            functions: Arc::clone(&self.functions),
+            entrypoint: self.entrypoint.clone(),
             checkpoint_identity: self.checkpoint_identity,
             device: self.device,
             optimizer: Some((parameter, state)),
@@ -289,7 +301,7 @@ impl NativeCausalModel {
             .collect::<Vec<_>>();
         let (forward, next, result) =
             self.executor
-                .train_linear(&self.program, &self.parameters, state, &batch, 1.0e-5)?;
+                .train_linear(self.program(), &self.parameters, state, &batch, 1.0e-5)?;
         // All allocations and numerical checks completed before this exclusive
         // publication. Old readers and forked models retain their original bytes.
         self.parameters[*parameter] = forward;
@@ -300,7 +312,7 @@ impl NativeCausalModel {
     /// Recompute the supplied causal prefix and return its requested vocabulary row.
     pub fn forward(&self, token_ids: &[u32], prediction_position: usize) -> Result<NativeLogits> {
         let tensor = self.executor.execute(
-            &self.program,
+            self.program(),
             &self.parameters,
             token_ids,
             prediction_position,
@@ -309,7 +321,7 @@ impl NativeCausalModel {
             executor: Arc::clone(&self.executor),
             tensor,
             prediction_position,
-            vocabulary_size: self.program.vocabulary,
+            vocabulary_size: self.program().vocabulary,
             device: self.device,
         })
     }
@@ -326,7 +338,7 @@ impl NativeCausalModel {
             .iter()
             .map(|(parameter, state)| {
                 (
-                    self.program.parameters[*parameter].name.clone(),
+                    self.program().parameters[*parameter].name.clone(),
                     state.step(),
                 )
             })
@@ -335,12 +347,12 @@ impl NativeCausalModel {
 
     /// Maximum accepted input length; longer input is rejected without truncation.
     pub fn max_context(&self) -> usize {
-        self.program.max_context
+        self.program().max_context
     }
 
     /// Complete vocabulary width.
     pub fn vocabulary_size(&self) -> usize {
-        self.program.vocabulary
+        self.program().vocabulary
     }
 }
 

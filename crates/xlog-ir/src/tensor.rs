@@ -54,7 +54,7 @@ impl TensorParameter {
 
 /// Numerical operation. Value references address preceding operations.
 /// All intermediate results are BF16 except the explicit Float32 conversion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TensorOperation {
     /// Gather one embedding row for each input token.
@@ -163,7 +163,7 @@ pub struct TensorValueShape {
 }
 
 /// One numerical function, including its parameter identity table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TensorProgram {
     /// Parameters in canonical checkpoint order. Aliases reuse an index.

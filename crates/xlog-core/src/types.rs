@@ -1,7 +1,7 @@
 //! Core types for XLOG schemas and data
 
 /// Supported scalar types in XLOG relations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScalarType {
     /// Unsigned 32-bit integer.
     U32,

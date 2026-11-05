@@ -11,8 +11,8 @@ use serde::Serialize;
 use xlog_core::ScalarType;
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, EpistemicOp, FuncBody, NeuralLabel, Program,
-    ProgramMergeReport, Term, TypeRef,
+    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, EpistemicOp, FuncBody, FunctionType, NeuralLabel,
+    Program, ProgramMergeReport, Term, TypeRef,
 };
 use crate::stratify::analyze_stratification;
 
@@ -21,10 +21,10 @@ use super::{
     ResolvedSourceObjectKind,
 };
 
-const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v1";
+const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v2";
 
 /// Source inventory and executable dependency structure for one resolved program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResolvedProgramExtraction {
     pub schema_version: String,
     pub source_manifest: ResolvedProgramManifest,
@@ -32,7 +32,7 @@ pub struct ResolvedProgramExtraction {
 }
 
 /// Executable rule graph after module visibility and selection are applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExecutableProgram {
     pub domains: Vec<ExecutableDomain>,
     pub functions: Vec<ExecutableFunction>,
@@ -92,12 +92,15 @@ pub struct ExecutableDomain {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutableFunctionParameter {
     pub name: String,
-    pub scalar_type: Option<ExecutableScalarType>,
+    pub type_reference: Option<FunctionType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutableFunctionBody {
+    Numerical {
+        program: xlog_ir::tensor::TensorProgram,
+    },
     Arithmetic {
         expression: ExecutableArithmeticExpression,
     },
@@ -114,14 +117,14 @@ pub enum ExecutableFunctionBody {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExecutableFunction {
     pub function_id: String,
     pub module_id: String,
     pub source_object_id: String,
     pub name: String,
     pub parameters: Vec<ExecutableFunctionParameter>,
-    pub return_type: Option<ExecutableScalarType>,
+    pub return_type: Option<FunctionType>,
     pub body: ExecutableFunctionBody,
     pub is_private: bool,
 }
@@ -947,10 +950,10 @@ fn build_executable_program(
                 .iter()
                 .map(|parameter| ExecutableFunctionParameter {
                     name: parameter.name.clone(),
-                    scalar_type: parameter.typ.map(executable_scalar_type),
+                    type_reference: parameter.typ.clone(),
                 })
                 .collect(),
-            return_type: function.return_type.map(executable_scalar_type),
+            return_type: function.return_type.clone(),
             body: executable_function_body(&function.body),
             is_private: function.is_private,
         })
@@ -1462,6 +1465,9 @@ fn executable_type_reference(type_reference: &TypeRef) -> ExecutableTypeReferenc
 
 fn executable_function_body(body: &FuncBody) -> ExecutableFunctionBody {
     match body {
+        FuncBody::Numerical(program) => ExecutableFunctionBody::Numerical {
+            program: program.clone(),
+        },
         FuncBody::Arithmetic(expression) => ExecutableFunctionBody::Arithmetic {
             expression: executable_arithmetic_expression(expression),
         },

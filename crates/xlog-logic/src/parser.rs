@@ -756,6 +756,7 @@ fn parse_func_param(pair: Pair<'_, Rule>) -> Result<FuncParam> {
                     .expect("type_annotation must contain type_spec"),
                 "function parameter type annotation",
             )
+            .map(Into::into)
         })
         .transpose()?;
     Ok(FuncParam { name, typ })
@@ -908,12 +909,15 @@ fn parse_func_def(
                     .collect::<Result<Vec<_>>>()?;
             }
             Rule::return_type => {
-                return_type = Some(build_scalar_type_spec(
-                    p.into_inner()
-                        .next()
-                        .ok_or_else(|| XlogError::Parse("Missing return type".to_string()))?,
-                    "function return type annotation",
-                )?);
+                return_type = Some(
+                    build_scalar_type_spec(
+                        p.into_inner()
+                            .next()
+                            .ok_or_else(|| XlogError::Parse("Missing return type".to_string()))?,
+                        "function return type annotation",
+                    )?
+                    .into(),
+                );
             }
             Rule::func_body => {
                 body = Some(parse_func_body(p, symbol_owner)?);
