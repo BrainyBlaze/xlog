@@ -54,6 +54,7 @@ exclude = [
   "python/pyxlog/kernels/**",
 ]
 include = [
+  { path = "python/pyxlog/acquired_funcdef_wire_v1.schema.json", format = ["wheel", "sdist"] },
   { path = "*.portable.ptx", from = "out-dir", to = "pyxlog/kernels/", crate_name = "xlog-cuda" },
   { path = "*.cubin", from = "out-dir", to = "pyxlog/kernels/", crate_name = "xlog-cuda" },
   { path = "pyxlog/include/*.h", format = "wheel" },
