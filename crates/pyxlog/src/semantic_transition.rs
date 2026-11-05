@@ -34176,7 +34176,7 @@ impl PySemanticTransitionController {
     fn bind_prepared_model_output(
         &self,
         py: Python<'_>,
-        expected: SemanticTransitionKind,
+        expected_kind: SemanticTransitionKind,
         task_use: &PySemanticTransitionTaskUse,
         step: &PySemanticPreparedStep,
         bank: usize,
@@ -34210,7 +34210,7 @@ impl PySemanticTransitionController {
         }
         let storages = parse_model_storages(model_storages, &mut budget)?;
         let views = parse_model_views(model_views, &mut budget)?;
-        let expected = {
+        let expected_binding = {
             let session = self.session.borrow(py);
             let owner = session.owner()?;
             let state = self.continuation_state(py, task_use, parent, &owner, None)?;
@@ -34219,7 +34219,7 @@ impl PySemanticTransitionController {
             if owner
                 .prepared_transition_kind(&step.inner)
                 .map_err(xlog_err)?
-                != expected
+                != expected_kind
             {
                 return Err(invalid(
                     "pending model output changed its original transition",
@@ -34233,7 +34233,7 @@ impl PySemanticTransitionController {
             let state = self.continuation_state(py, task_use, parent, &owner, None)?;
             step.require_recording_stream(&owner, stream)?;
             self.require_continuation_owner(py, parent, allocation_owner)?;
-            if self.continuation_binding(&state, parent, false)? != expected {
+            if self.continuation_binding(&state, parent, false)? != expected_binding {
                 return Err(invalid(
                     "pending model authority changed during producer handoff",
                 ));
@@ -34316,12 +34316,12 @@ impl PySemanticTransitionController {
         let mut owner = session.owner()?;
         let state = self.continuation_state(py, task_use, parent, &owner, None)?;
         self.require_continuation_owner(py, parent, allocation_owner)?;
-        if self.continuation_binding(&state, parent, false)? != expected {
+        if self.continuation_binding(&state, parent, false)? != expected_binding {
             return Err(invalid(
                 "pending model authority changed during model output handoff",
             ));
         }
-        let bind = match expected {
+        let bind = match expected_kind {
             SemanticTransitionKind::Update => {
                 xlog_cuda::SemanticTransitionSession::bind_prepared_update_output
             }
