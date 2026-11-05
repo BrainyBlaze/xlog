@@ -1535,6 +1535,7 @@ dependencies = [
  "ed25519-dalek",
  "pyo3",
  "rand 0.8.6",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "xlog-core",

@@ -10,6 +10,9 @@ use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
 
+mod acquisition;
+pub(crate) use acquisition::PyNativeAcquisitionMask;
+
 /// Native BF16 causal decoder imported from a local SafeTensors checkpoint.
 #[pyclass(name = "NativeCausalModel", module = "pyxlog._native")]
 pub(crate) struct PyNativeCausalModel {
@@ -117,6 +120,12 @@ impl PyNativeCausalModel {
         Self {
             inner: self.inner.fork_candidate(),
         }
+    }
+
+    /// Contextual wire schema and ABI from this model's actual function registry.
+    #[pyo3(signature = (*, insertion_layer=17))]
+    fn acquisition_language(&self, insertion_layer: usize) -> PyResult<String> {
+        acquisition::language(self.inner.acquisition_context(insertion_layer).map_err(xlog_err)?)
     }
 
     /// Construct an acquired candidate from actual canonical definitions and FP32 arrays.

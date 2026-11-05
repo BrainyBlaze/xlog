@@ -17,7 +17,7 @@ use xlog_neural::causal_snapshot::{
     CausalDecoderSnapshot, CausalSnapshotDescription, NativeAdaptation, OptimizerSnapshot,
 };
 
-mod acquired;
+pub mod acquired;
 
 fn native_executor(
     device: usize,
