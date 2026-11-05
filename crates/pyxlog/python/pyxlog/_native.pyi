@@ -100,11 +100,21 @@ class NativeCausalModel:
     @property
     def vocabulary_size(self) -> int: ...
 
+class _GreedySelection(TypedDict):
+    raw_argmax: int
+    raw_score: float
+    selected: int
+    selected_score: float
+    logits_sha256: str
+
 class NativeLogits:
     """One complete FP32 vocabulary row retaining its native allocation."""
 
     def read(self, token_ids: Sequence[int]) -> list[float]:
         """Copy requested logits in caller order; requires host-io."""
+        ...
+    def select_greedy(self, allowed_mask: Optional[bytes] = None) -> _GreedySelection:
+        """CUDA maxima with minimum-ID ties and full-row SHA256; requires host-io."""
         ...
     @property
     def prediction_position(self) -> int: ...

@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::tensor::{
-    NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
+    GreedySelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss,
+    TensorTrainingResult,
 };
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::{TensorProgram, TensorValueShape};
@@ -489,6 +490,12 @@ impl NativeLogits {
     /// Read only the explicitly requested token logits, in caller order.
     pub fn read(&self, token_ids: &[u32]) -> Result<Vec<f32>> {
         self.executor.read_logits(&self.tensor, token_ids)
+    }
+
+    /// CUDA maxima with minimum-ID ties and the original full-row FP32 digest.
+    /// A supplied mask is an exact little-endian bitset; absent means every token.
+    pub fn select_greedy(&self, allowed_mask: Option<&[u8]>) -> Result<GreedySelection> {
+        self.executor.select_greedy(&self.tensor, allowed_mask)
     }
 
     /// Export the native [1, vocabulary] FP32 allocation with retained ownership.

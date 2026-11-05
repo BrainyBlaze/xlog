@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use cudarc::cublas::{result as blas_result, sys as blas_sys, CudaBlas};
+use sha2::{Digest, Sha256};
 use xlog_core::{Result, XlogError};
 use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorValueShape};
 
@@ -18,6 +19,20 @@ const BLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 mod functions;
 mod training;
 pub use training::{TensorAdamState, TensorLoss, TensorTrainingResult};
+
+/// CUDA-selected maxima and the digest of the complete original FP32 vocabulary row.
+pub struct GreedySelection {
+    /// Maximum over the whole vocabulary, with the lowest ID breaking ties.
+    pub raw_argmax: u32,
+    /// Original FP32 score of the unmasked maximum.
+    pub raw_score: f32,
+    /// Maximum among allowed tokens, with the same tie rule.
+    pub selected: u32,
+    /// Original FP32 score of the selected token, before masking.
+    pub selected_score: f32,
+    /// SHA256 of every original little-endian FP32 logit in vocabulary order.
+    pub logits_sha256: [u8; 32],
+}
 
 fn failure(error: impl std::fmt::Display) -> XlogError {
     XlogError::Kernel(format!("native numerical execution: {error}"))
@@ -728,5 +743,94 @@ impl TensorExecutor {
         self.provider
             .dtoh_sync_copy_into_tracked(&output, &mut values)?;
         Ok(values)
+    }
+
+    /// Select raw and masked maxima on CUDA, then hash the retained row's exact
+    /// little-endian FP32 bytes through tracked host I/O. No indices or Python
+    /// vocabulary vector are needed; the complete row still crosses to the host.
+    pub fn select_greedy(
+        &self,
+        tensor: &NativeTensor,
+        allowed_mask: Option<&[u8]>,
+    ) -> Result<GreedySelection> {
+        if !tensor.shape.float32
+            || tensor.shape.rows != 1
+            || tensor.device != self.provider.device().ordinal()
+        {
+            return Err(failure(
+                "greedy selection requires this device's FP32 vocabulary row",
+            ));
+        }
+        let vocabulary = dimension(tensor.shape.columns)?;
+        if let Some(mask) = allowed_mask {
+            let remainder = vocabulary % 8;
+            if mask.len() != tensor.shape.columns.div_ceil(8)
+                || (remainder != 0 && mask[mask.len() - 1] >> remainder != 0)
+                || !mask.iter().any(|&byte| byte != 0)
+            {
+                return Err(failure(
+                    "greedy mask must contain in-range tokens at the exact vocabulary extent",
+                ));
+            }
+        }
+        let mask = allowed_mask
+            .map(|bytes| {
+                let mut mask = self.provider.memory().alloc::<u8>(bytes.len())?;
+                self.provider
+                    .htod_sync_copy_into_tracked(bytes, &mut mask)?;
+                Ok::<_, XlogError>(mask)
+            })
+            .transpose()?;
+        let groups = tensor.shape.columns.div_ceil(256).min(1024);
+        let partials = self.provider.memory().alloc::<u32>(groups * 5)?;
+        let output = self.provider.memory().alloc::<u32>(5)?;
+        let mut recorder = LaunchRecorder::new_strict(self.stream);
+        recorder.read(tensor.storage.as_ref()).write(&partials);
+        if let Some(mask) = &mask {
+            recorder.read(mask);
+        }
+        self.launch(
+            recorder,
+            "tensor_greedy_partial_f32",
+            grid(groups)?,
+            (
+                tensor.pointer(),
+                mask.as_ref().map_or(0, |mask| mask.device_ptr_value()),
+                partials.device_ptr_value(),
+                vocabulary,
+            ),
+        )?;
+        let mut recorder = LaunchRecorder::new_strict(self.stream);
+        recorder.read(&partials).write(&output);
+        self.launch(
+            recorder,
+            "tensor_greedy_reduce_f32",
+            grid(1)?,
+            (
+                partials.device_ptr_value(),
+                output.device_ptr_value(),
+                groups as u32,
+            ),
+        )?;
+        let mut result = [0u32; 5];
+        self.provider
+            .dtoh_sync_copy_into_tracked(&output, &mut result)?;
+        if result[4] != 0 {
+            return Err(failure(
+                "greedy selection requires a finite full-vocabulary row",
+            ));
+        }
+        if result[0] >= vocabulary || result[2] >= vocabulary {
+            return Err(failure("greedy selection produced no admissible token"));
+        }
+        let mut bytes = vec![0u8; tensor.shape.columns * 4];
+        self.read_tensor(tensor, 0, &mut bytes)?;
+        Ok(GreedySelection {
+            raw_argmax: result[0],
+            raw_score: f32::from_bits(result[1]),
+            selected: result[2],
+            selected_score: f32::from_bits(result[3]),
+            logits_sha256: Sha256::digest(&bytes).into(),
+        })
     }
 }

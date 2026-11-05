@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "host-io")]
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
@@ -241,6 +241,30 @@ impl PyNativeLogits {
     #[cfg(feature = "host-io")]
     fn read(&self, py: Python<'_>, token_ids: Vec<u32>) -> PyResult<Vec<f32>> {
         py.detach(|| self.inner.read(&token_ids)).map_err(xlog_err)
+    }
+
+    /// Select on CUDA without materializing the vocabulary as Python floats.
+    /// Hashing still reads the original full row through tracked host I/O.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (allowed_mask=None))]
+    fn select_greedy(&self, py: Python<'_>, allowed_mask: Option<Vec<u8>>) -> PyResult<Py<PyDict>> {
+        let result = py
+            .detach(|| self.inner.select_greedy(allowed_mask.as_deref()))
+            .map_err(xlog_err)?;
+        let selected = PyDict::new(py);
+        selected.set_item("raw_argmax", result.raw_argmax)?;
+        selected.set_item("raw_score", result.raw_score)?;
+        selected.set_item("selected", result.selected)?;
+        selected.set_item("selected_score", result.selected_score)?;
+        selected.set_item(
+            "logits_sha256",
+            result
+                .logits_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        )?;
+        Ok(selected.unbind())
     }
 
     #[getter]

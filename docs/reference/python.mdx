@@ -154,6 +154,23 @@ and canonical parameter bytes actually imported, not a substitute for checking
 the publisher's file hashes. `model.max_context` and `model.vocabulary_size`
 expose the admitted dimensions.
 
+For greedy generation, `NativeLogits.select_greedy(allowed_mask=None)` reduces
+the actual vocabulary row on CUDA. An optional mask contains exactly
+`ceil(vocabulary_size / 8)` bytes: token `i` uses bit `i % 8` of byte `i // 8`.
+Unused bits in the last byte must be zero and at least one token must be allowed.
+Omitting the mask admits the entire vocabulary. Nonfinite logits anywhere in the
+row are errors even when their tokens are masked. Equal scores select the smallest
+token ID, including equal positive and negative zeros.
+
+The returned dictionary contains `raw_argmax`, `raw_score`, `selected`,
+`selected_score`, and `logits_sha256`. The digest covers the original contiguous
+little-endian FP32 row in vocabulary order, before masking. Selection does not
+perform another forward, change the model, or consume tokens. The caller owns the
+grammar, mask, per-token forward budget, and output provenance. This method requires
+`host-io`: it uploads only the supplied bitset and reads a small reduction result
+plus the full row for native SHA256 hashing. It creates no Python vocabulary list
+or identity-index gather, but it is not a device-resident or ZERO TRANSFER call.
+
 `fork_trainable(down_projection_layer=17)` returns an independent candidate with
 that zero-based decoder layer's MLP down projection trainable. Frozen parameters
 share the original allocations. The candidate owns FP32 master weights and Adam
