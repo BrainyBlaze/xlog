@@ -3,6 +3,28 @@
 use serde::{Deserialize, Serialize};
 use xlog_core::{Result, XlogError};
 
+// Internally tagged enums buffer their fields through Serde's Content. When the
+// application's serde_json enables arbitrary_precision, a fractional JSON number
+// arrives through Number's numeric carrier rather than deserialize_f32. Decode
+// that carrier at the owning field without changing the serialized decimal or
+// rounding it through f64 before restoring the actual FP32 coefficient.
+fn deserialize_f32<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let number = serde_json::Number::deserialize(deserializer)?;
+    let value = number
+        .to_string()
+        .parse::<f32>()
+        .map_err(serde::de::Error::custom)?;
+    if !value.is_finite() {
+        return Err(serde::de::Error::custom(
+            "numerical operation coefficient must be finite FP32",
+        ));
+    }
+    Ok(value)
+}
+
 /// A shared parameter allocation. Multiple operations may reference one index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +76,7 @@ pub enum TensorOperation {
         /// Shared normalization scale vector index.
         weight: usize,
         /// Positive constant added to the mean square.
+        #[serde(deserialize_with = "deserialize_f32")]
         epsilon: f32,
     },
     /// Rotate each attention head using absolute causal token positions.
@@ -65,6 +88,7 @@ pub enum TensorOperation {
         /// Even number of coordinates per head.
         head_dim: usize,
         /// Positive rotary frequency base.
+        #[serde(deserialize_with = "deserialize_f32")]
         theta: f32,
     },
     /// Causal grouped-query attention with FP32 softmax accumulation.
