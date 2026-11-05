@@ -1480,7 +1480,8 @@ impl FuncDef {
     /// Construct the typed public entry point of a causal numerical program.
     /// The body is retained here, rather than copied into a separate registry.
     pub fn numerical(name: String, program: TensorProgram) -> Result<Self> {
-        let (params, result) = Self::numerical_types(&program)?;
+        let (params, result) =
+            Self::numerical_types(&program.signature, program.vocabulary, program.max_context)?;
         let definition = Self {
             name,
             params,
@@ -1492,18 +1493,24 @@ impl FuncDef {
         Ok(definition)
     }
 
-    fn numerical_types(program: &TensorProgram) -> Result<(Vec<FuncParam>, FunctionType)> {
+    /// Canonical formal inputs and result for a numerical signature, before a
+    /// body is authored. Acquisition uses the same ABI as registration.
+    pub fn numerical_types(
+        signature: &xlog_ir::tensor::TensorSignature,
+        vocabulary: usize,
+        max_context: usize,
+    ) -> Result<(Vec<FuncParam>, FunctionType)> {
         use xlog_ir::tensor::TensorSignature;
         let tensor = |rows, width| FunctionType::Tensor {
             element: FunctionElement::F32,
             dimensions: vec![rows, FunctionDimension::Fixed { size: width }],
         };
         let sequence = FunctionDimension::CausalSequence {
-            maximum: program.max_context,
+            maximum: max_context,
         };
         let one = FunctionDimension::Fixed { size: 1 };
         let mut params = Vec::new();
-        if !matches!(program.signature, TensorSignature::Pure { .. }) {
+        if !matches!(signature, TensorSignature::Pure { .. }) {
             params.push(FuncParam {
                 name: "tokens".into(),
                 typ: Some(FunctionType::Tensor {
@@ -1512,13 +1519,13 @@ impl FuncDef {
                 }),
             });
         }
-        let result = match &program.signature {
+        let result = match signature {
             TensorSignature::Decoder => {
                 params.push(FuncParam {
                     name: "prediction_position".into(),
                     typ: Some(ScalarType::U32.into()),
                 });
-                tensor(one, program.vocabulary)
+                tensor(one, vocabulary)
             }
             TensorSignature::Causal {
                 input_width,
@@ -1543,8 +1550,8 @@ impl FuncDef {
                 tensor(one, *output_width)
             }
         };
-        program.signature.arguments(1)?;
-        program.signature.output(1, program.vocabulary)?;
+        signature.arguments(1)?;
+        signature.output(1, vocabulary)?;
         Ok((params, result))
     }
 
@@ -1552,7 +1559,8 @@ impl FuncDef {
         let FuncBody::Numerical(program) = &self.body else {
             return Ok(());
         };
-        let (params, result) = Self::numerical_types(program)?;
+        let (params, result) =
+            Self::numerical_types(&program.signature, program.vocabulary, program.max_context)?;
         let mut names = std::collections::HashSet::new();
         if self.name.is_empty()
             || self.params.len() != params.len()

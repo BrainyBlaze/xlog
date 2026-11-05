@@ -6,11 +6,89 @@ use xlog_ir::tensor::{TensorOperation as Op, TensorParameter, TensorSignature};
 use xlog_logic::ast::{FuncBody, FuncDef};
 use xlog_neural::causal_snapshot::AcquiredInsertion;
 
+/// Maximum bytes of an authored acquisition document.
+pub const ACQUIRED_SOURCE_BYTES: usize = 1_048_576;
+/// Total authored numerical operations across all new definitions.
+pub const ACQUIRED_NODES: usize = 64;
+/// Total unique new FP32 body scalars, excluding the native output projection.
+pub const ACQUIRED_SCALARS: usize = 65_536;
+/// Feature width at the native residual insertion.
+pub const ACQUIRED_WIDTH: usize = 16;
+
 fn invalid(message: impl Into<String>) -> XlogError {
     XlogError::Compilation(message.into())
 }
 
 impl NativeCausalModel {
+    fn acquisition_down_projection(&self, insertion_layer: usize) -> Result<usize> {
+        let name = format!("model.layers.{insertion_layer}.mlp.down_proj.weight");
+        self.program()
+            .parameters
+            .iter()
+            .position(|parameter| parameter.name == name)
+            .ok_or_else(|| invalid("insertion layer is absent"))
+    }
+
+    /// ABI and available identities for a proposal against this exact registry.
+    /// No function body or parameter values are supplied by this producer.
+    pub fn acquisition_context(&self, insertion_layer: usize) -> Result<serde_json::Value> {
+        use serde_json::json;
+        let program = self.program();
+        let hidden =
+            program.parameters[self.acquisition_down_projection(insertion_layer)?].shape[0];
+        let signature = TensorSignature::Causal {
+            input_width: hidden,
+            output_width: ACQUIRED_WIDTH,
+        };
+        let (params, result) =
+            FuncDef::numerical_types(&signature, program.vocabulary, program.max_context)?;
+        let mut ordinal = 0usize;
+        let entrypoint = loop {
+            let name = format!("acquired::{ordinal}");
+            let namespace = format!("{name}::");
+            if !self
+                .functions
+                .functions()
+                .any(|function| function.name == name || function.name.starts_with(&namespace))
+                && !program.parameters.iter().any(|parameter| {
+                    parameter.name == name || parameter.name.starts_with(&namespace)
+                })
+            {
+                break name;
+            }
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("acquisition identity overflow"))?;
+        };
+        let callees = self.functions.functions().filter_map(|function| {
+            let FuncBody::Numerical(body) = &function.body else {
+                return None;
+            };
+            if matches!(body.signature, TensorSignature::Decoder) {
+                return None;
+            }
+            Some((function.name.clone(), json!({
+                "signature": body.signature, "params": function.params, "return_type": function.return_type,
+            })))
+        }).collect::<BTreeMap<_, _>>();
+        let parameters = program
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.float32)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "version": 1, "entrypoint": entrypoint,
+            "function_prefix": format!("{entrypoint}::function::"),
+            "parameter_prefix": format!("{entrypoint}::constant::"),
+            "insertion_layer": insertion_layer, "signature": signature,
+            "params": params, "return_type": result,
+            "vocabulary": program.vocabulary, "max_context": program.max_context,
+            "parameters": parameters, "callees": callees,
+            "limits": {"source_bytes": ACQUIRED_SOURCE_BYTES, "nodes": ACQUIRED_NODES,
+                       "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH},
+        }))
+    }
+
     /// Register actual typed definitions, insert their causal feature call, and
     /// allocate new FP32 constants/P with independent zero-step Adam states.
     /// Original definitions, weights, aliases and optimizer versions remain intact.
@@ -21,7 +99,7 @@ impl NativeCausalModel {
         insertion_layer: usize,
         train_down_projection: bool,
     ) -> Result<Self> {
-        if definition_json.len() > 1_048_576 {
+        if definition_json.len() > ACQUIRED_SOURCE_BYTES {
             return Err(invalid(
                 "acquired definition exceeds the source byte budget",
             ));
@@ -42,13 +120,7 @@ impl NativeCausalModel {
         if !document.is_empty() || definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
-        let down_name = format!("model.layers.{insertion_layer}.mlp.down_proj.weight");
-        let down = self
-            .program()
-            .parameters
-            .iter()
-            .position(|parameter| parameter.name == down_name)
-            .ok_or_else(|| invalid("insertion layer is absent"))?;
+        let down = self.acquisition_down_projection(insertion_layer)?;
         let hidden = self.program().parameters[down].shape[0];
         let mut functions = (*self.functions).clone();
         let mut program = self.program().clone();
@@ -76,7 +148,7 @@ impl NativeCausalModel {
             nodes = nodes
                 .checked_add(body.operations.len())
                 .ok_or_else(|| invalid("acquired node count overflow"))?;
-            if nodes > 64 {
+            if nodes > ACQUIRED_NODES {
                 return Err(invalid("acquired definitions exceed 64 numerical nodes"));
             }
             body.validate_acquired_body()?;
@@ -110,7 +182,7 @@ impl NativeCausalModel {
         if functions.numerical(&entrypoint)?.signature
             != (TensorSignature::Causal {
                 input_width: hidden,
-                output_width: 16,
+                output_width: ACQUIRED_WIDTH,
             })
             || self.functions.contains(&entrypoint)
         {
@@ -154,7 +226,7 @@ impl NativeCausalModel {
                 .checked_add(parameter.bytes()? / 4)
                 .ok_or_else(|| invalid("constant extent overflow"))?;
         }
-        if constants > 65_536 || new_parameters.keys().ne(parameter_values.keys()) {
+        if constants > ACQUIRED_SCALARS || new_parameters.keys().ne(parameter_values.keys()) {
             return Err(invalid(
                 "new constants exceed the bound or initial array identities differ",
             ));
@@ -184,7 +256,7 @@ impl NativeCausalModel {
         }
         program.parameters.push(TensorParameter {
             name: projection_name,
-            shape: vec![hidden, 16],
+            shape: vec![hidden, ACQUIRED_WIDTH],
             float32: true,
         });
         let anchor = if let Some(insertion) = self
@@ -287,7 +359,7 @@ impl NativeCausalModel {
             &candidate.program().parameters[projection],
         )?)?;
         self.executor
-            .write_tensor(&mut tensor, 0, &vec![0u8; hidden * 16 * 4])?;
+            .write_tensor(&mut tensor, 0, &vec![0u8; hidden * ACQUIRED_WIDTH * 4])?;
         candidate
             .optimizers
             .insert(projection, self.executor.optimizer(projection, &tensor)?);

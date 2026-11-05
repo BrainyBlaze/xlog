@@ -20,6 +20,7 @@ from pyxlog._native import (
     SemanticTransitionTaskUse as SemanticTransitionTaskUse,
     NativeTensorAllocation as NativeTensorAllocation,
     NativeCausalModel as NativeCausalModel,
+    NativeAcquisitionMask as NativeAcquisitionMask,
     NativeLogits as NativeLogits,
     SemanticColdModelWork as SemanticColdModelWork,
     SemanticColdModelWorkOperation as SemanticColdModelWorkOperation,

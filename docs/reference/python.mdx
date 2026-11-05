@@ -261,6 +261,36 @@ parameter aliases, name ownership, and aggregate node/constant limits. Callers
 must pass the original generated JSON to that constructor and retain its outcome;
 the schema is not a compiler, an admission result, or permission to repair output.
 
+For a new contextual decoding policy, `model.acquisition_language(insertion_layer=17)`
+returns exact JSON containing `id: "xlog-contextual-acquisition-v1"`, `context`,
+and `schema`. The context comes from the actual native registry and insertion:
+fresh entry/helper/constant namespaces, causal formal types and return type,
+hidden width, vocabulary, maximum context, retained callable signatures and exact
+FP32 parameter declarations. The schema specializes the existing wire resource;
+it requires the entry definition first and leaves operation selection and
+connections to the proposer. It bounds declarations and indices, but does not
+establish helper ABI equality, preceding references, shape algebra or causality.
+
+`NativeAcquisitionMask(language_json, token_bytes)` complements that schema with
+cumulative resource admission. Supply one exact byte spelling per vocabulary
+token from the policy's pinned byte tokenizer; EOS spellings are empty because
+the grammar owns EOS eligibility. Before each token selection, intersect the
+grammar mask using `mask.filter(original_prefix_bytes, allowed_mask)`. The mask
+uses little-endian bits with whole-u32 padding. It counts new unique scalar
+storage across definitions as shape digits arrive, excludes retained aliases,
+and caps total new operations and source bytes using the same limits as
+`fork_acquired`. Preserve the schema's field order (parameter name precedes shape).
+An empty intersection is a decoding failure, not EOS or permission to repair a
+prefix. These restrictions do not guarantee a completable or semantically valid
+program; final admission still belongs to `fork_acquired`.
+
+Retain the exact language packet, its digest, compiled grammar, tokenizer and
+producing native version with each attempt and its original chosen token IDs.
+Reconstruct both masks from that retained packet for continuation; do not derive
+historical masks from a newer registry. The original static wire resource remains
+unchanged for policies pinned to it. Every selected token, including forced syntax
+and EOS, still requires the caller's real model selection and work accounting.
+
 The entry signature is `{"kind":"causal","input_width":hidden_width,
 "output_width":16}`. A scan cell uses `{"kind":"pure","input_widths":[state_width,
 input_width],"output_width":state_width}` and has only numeric arguments. Every
