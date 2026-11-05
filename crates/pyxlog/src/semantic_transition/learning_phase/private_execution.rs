@@ -4357,6 +4357,7 @@ impl PySemanticLearningPhaseTransition {
                     let transition = match transition {
                         SemanticTransitionKind::Proposal => "proposal",
                         SemanticTransitionKind::Update => "update",
+                        SemanticTransitionKind::Control => "control",
                         SemanticTransitionKind::Recompute => "recompute",
                         SemanticTransitionKind::Drain => "drain",
                     };

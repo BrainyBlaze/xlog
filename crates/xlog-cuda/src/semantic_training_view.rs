@@ -3534,6 +3534,7 @@ pub(crate) fn origin_record(
             SemanticTransitionKind::Recompute => 2,
             SemanticTransitionKind::Drain => 3,
             SemanticTransitionKind::Update => 4,
+            SemanticTransitionKind::Control => 5,
         },
         lineage_instance: identity_words(origin.predecessor.instance),
         predecessor_instance: identity_words(origin.predecessor.instance),

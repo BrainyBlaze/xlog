@@ -1124,12 +1124,9 @@ impl SemanticTransitionSession {
     ) -> Result<SemanticModelForwardStream, SemanticTransitionError> {
         self.check_prepared_cold(step)?;
         self.require_prepared_structure_mutable()?;
-        if bank > 1
-            || role > 1
-            || self.prepared_transition_kind(step)? != SemanticTransitionKind::Update
-        {
+        if bank > 1 || role > 1 || !self.prepared_transition_kind(step)?.uses_pending_model() {
             return Err(publication_input_error(
-                "model forward stream belongs to an original Update bank and role",
+                "model forward stream belongs to an original pending-model bank and role",
             ));
         }
         let prepared = self.steps[&step.token]

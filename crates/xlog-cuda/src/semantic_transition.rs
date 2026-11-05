@@ -12,6 +12,10 @@ mod acknowledgement_archive;
 mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 mod actor_refresh_program;
+#[cfg(feature = "semantic-policy")]
+mod model_control;
+#[cfg(feature = "semantic-policy")]
+pub use model_control::SemanticControlObservation;
 mod completed_action;
 use acknowledgement_archive::{acknowledgement_records, AcknowledgementEntry};
 mod receiver_outcome;
@@ -4735,6 +4739,8 @@ pub enum SemanticTransitionKind {
     Recompute,
     Drain,
     Update,
+    /// Full model-copy and canary work whose joined scratch is discarded.
+    Control,
 }
 
 impl SemanticTransitionKind {
@@ -4744,7 +4750,12 @@ impl SemanticTransitionKind {
             Self::Recompute => 2,
             Self::Drain => 3,
             Self::Update => 4,
+            Self::Control => 5,
         }
+    }
+
+    pub(super) fn uses_pending_model(self) -> bool {
+        matches!(self, Self::Update | Self::Control)
     }
 }
 
@@ -4948,7 +4959,7 @@ fn continuation_tensor_layout_for_kind(
     model: &SemanticTensorLayout,
     kind: SemanticTransitionKind,
 ) -> Result<SemanticTensorLayout, SemanticTransitionError> {
-    if kind != SemanticTransitionKind::Update || !matches!(model.role, 4 | 5) {
+    if !kind.uses_pending_model() || !matches!(model.role, 4 | 5) {
         return continuation_tensor_layout(actual, begin, end, model);
     }
     let expected = canonical_tensor_layout(*model)?;
@@ -14777,6 +14788,8 @@ struct StepContentStorage {
     aliases: Arc<()>,
     consumer_streams: BTreeSet<u64>,
     consumer_completion: Option<Arc<Mutex<OriginalStepConsumers>>>,
+    #[cfg(feature = "semantic-policy")]
+    control_receipt: Option<SemanticControlObservation>,
     inputs: Option<Arc<PreparedStepInputs>>,
     #[cfg(feature = "semantic-policy")]
     source_content: Option<Arc<prepared_source_content::PreparedSourceContentOwner>>,
@@ -14811,6 +14824,8 @@ impl StepContentStorage {
             aliases: Arc::new(()),
             consumer_streams: BTreeSet::new(),
             consumer_completion: None,
+            #[cfg(feature = "semantic-policy")]
+            control_receipt: None,
             inputs: None,
             #[cfg(feature = "semantic-policy")]
             source_content: None,
@@ -15017,6 +15032,14 @@ struct PreparedStepCompletionObservations {
     state: Option<Arc<Mutex<PublicationRead<DeviceState>>>>,
     components: Option<Arc<Mutex<PublicationRead<SemanticTransitionReceipt>>>>,
     canary_results: Option<Arc<Mutex<PublicationRead<SemanticTrainingCanaryResultRecord>>>>,
+    #[cfg(feature = "semantic-policy")]
+    control_selection: Option<Arc<Mutex<PublicationRead<SemanticTrainingViewSelection>>>>,
+    #[cfg(feature = "semantic-policy")]
+    control_canaries: Option<Arc<Mutex<PublicationRead<SemanticTrainingCanaryRecord>>>>,
+    #[cfg(feature = "semantic-policy")]
+    control_forwards: Option<Arc<Mutex<PublicationRead<ModelForwardReceipt>>>>,
+    #[cfg(feature = "semantic-policy")]
+    control_actual: Option<Arc<Mutex<PublicationRead<u64>>>>,
     canary_refusal: Option<Arc<Mutex<PublicationRead<SemanticTrainingCanaryRefusalRecord>>>>,
     capacity_refusal: Option<Arc<Mutex<PublicationRead<SemanticCapacityRefusalRecord>>>>,
     task_ground: Option<Arc<Mutex<PublicationRead<u8>>>>,
@@ -15486,6 +15509,7 @@ struct PreparedStepStorage {
     result: TrackedCudaSlice<PreparedStepResult>,
     training_origin: Option<DeviceMemoryView<SemanticTrainingViewOriginRecord>>,
     training_view: Option<SemanticSelectedTrainingView>,
+    control_coordinates: Option<TrackedCudaSlice<u64>>,
     #[cfg(feature = "semantic-policy")]
     policy_work: Option<policy_work::PolicyWorkBuffers>,
     #[cfg(feature = "semantic-policy")]
@@ -19660,6 +19684,8 @@ mod task_state_contract {
 pub enum SemanticTransitionOutcome {
     Published(SemanticTransitionObservation),
     Refused(SemanticTransitionRefusal),
+    #[cfg(feature = "semantic-policy")]
+    Discarded(SemanticControlObservation),
 }
 
 impl SemanticTransitionOutcome {
@@ -19669,6 +19695,8 @@ impl SemanticTransitionOutcome {
         match self {
             Self::Published(observation) => Ok(observation),
             Self::Refused(refusal) => Err(refusal.into_error()),
+            #[cfg(feature = "semantic-policy")]
+            Self::Discarded(_) => Err(SemanticTransitionError::NonPublishingControl),
         }
     }
 
@@ -19676,6 +19704,8 @@ impl SemanticTransitionOutcome {
         match self {
             Self::Published(observation) => Ok(observation),
             Self::Refused(refusal) => Err(refusal.into_error()),
+            #[cfg(feature = "semantic-policy")]
+            Self::Discarded(_) => Err(SemanticTransitionError::NonPublishingControl),
         }
     }
 }
@@ -19683,6 +19713,7 @@ impl SemanticTransitionOutcome {
 /// Ordinary device refusal after authentic parent and cleanup reconciliation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticTransitionRefusal {
+    ChangedControlState,
     InvalidFinalSupport {
         completed_draws: u64,
     },
@@ -19706,6 +19737,7 @@ pub enum SemanticTransitionRefusal {
 impl SemanticTransitionRefusal {
     fn into_error(self) -> SemanticTransitionError {
         match self {
+            Self::ChangedControlState => SemanticTransitionError::ChangedControlState,
             Self::InvalidFinalSupport { completed_draws } => {
                 SemanticTransitionError::InvalidFinalSupport { completed_draws }
             }
@@ -19846,7 +19878,10 @@ fn refused_terminal(
                 status: state.status - 11,
             })
         }
-        15 if state.execution_work.overflow == 0 && state.blocks == 0 => {
+        17 if state.execution_work.overflow == 0 && state.blocks == 0 => {
+            Ok(SemanticTransitionRefusal::ChangedControlState)
+        }
+        15 | 18 if state.execution_work.overflow == 0 && state.blocks == 0 => {
             Ok(SemanticTransitionRefusal::RejectedModelUpdate {
                 evidence: canary_refusal.ok_or(SemanticTransitionError::ObservationMismatch)?,
             })
@@ -20096,6 +20131,8 @@ pub enum SemanticTransitionError {
     UnconsumedPolicyTape,
     UnpublishedTask,
     NotBound,
+    NonPublishingControl,
+    ChangedControlState,
     NotCaptured,
     NoPendingLaunch,
     GenerationExhausted,
@@ -20756,6 +20793,7 @@ fn validate_prepared_completion(
         2 => Ok(SemanticTransitionKind::Recompute),
         3 => Ok(SemanticTransitionKind::Drain),
         4 => Ok(SemanticTransitionKind::Update),
+        5 => Ok(SemanticTransitionKind::Control),
         _ => Err(SemanticTransitionError::ObservationMismatch),
     }
 }
@@ -21901,7 +21939,10 @@ impl SemanticTransitionSession {
                     )
                 };
             let (canary_refusal, capacity_refusal) = match (transition, update_refusal_view) {
-                (SemanticTransitionKind::Update, Some((view, results, capacity))) => {
+                (
+                    SemanticTransitionKind::Update | SemanticTransitionKind::Control,
+                    Some((view, results, capacity)),
+                ) => {
                     let results = self.prepared_completion_read(results, |observations| {
                         &mut observations
                             .steps
@@ -21930,7 +21971,8 @@ impl SemanticTransitionSession {
                     };
                     (decode_canary_refusal(refusal, &results)?, capacity)
                 }
-                (SemanticTransitionKind::Update, None) | (_, Some(_)) => {
+                (SemanticTransitionKind::Update | SemanticTransitionKind::Control, None)
+                | (_, Some(_)) => {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
                 (_, None) => (None, None),
@@ -22369,6 +22411,19 @@ impl SemanticTransitionSession {
             canary_refusal,
             capacity_refusal,
         } = evidence;
+        if transition == SemanticTransitionKind::Control {
+            #[cfg(feature = "semantic-policy")]
+            return self.reconcile_control(
+                step,
+                parent,
+                result,
+                &state,
+                canary_refusal,
+                capacity_refusal,
+            );
+            #[cfg(not(feature = "semantic-policy"))]
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         if result.refusal != 0 || state.status == 10 {
             return Err(SemanticTransitionError::PublicationRefused {
                 status: result.refusal,
@@ -24258,7 +24313,7 @@ impl SemanticTransitionSession {
                     token,
                     ceiling,
                 )?;
-                if kind == SemanticTransitionKind::Update {
+                if kind.uses_pending_model() {
                     let canary = prepared.branches[bank].model_update.as_ref()
                         .and_then(|update| update.canary_stream.as_ref())
                         .ok_or_else(|| publication_input_error("structural freeze requires the original complete Update canary stream geometry"))?;
@@ -24498,19 +24553,43 @@ impl SemanticTransitionSession {
                 "evaluation forks admit only proposal and recompute transitions",
             ));
         }
+        if transitions.contains(&SemanticTransitionKind::Control)
+            && transitions != [SemanticTransitionKind::Control]
+        {
+            return Err(publication_input_error(
+                "Control requires its original single-step instruction",
+            ));
+        }
+        #[cfg(feature = "semantic-policy")]
+        let control_coordinates = if transitions == [SemanticTransitionKind::Control] {
+            Some(self.instruction_control_coordinates(
+                admission.ok_or(SemanticTransitionError::NotBound)?.0,
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let control_coordinates: Option<[u64; 5]> =
+            if transitions == [SemanticTransitionKind::Control] {
+                return Err(publication_input_error(
+                    "Control requires original Program admission",
+                ));
+            } else {
+                None
+            };
         if transitions.is_empty() || transitions.contains(&SemanticTransitionKind::Drain) {
             return Err(publication_input_error(
                 "a prepared segment requires frozen proposal, recompute, or update steps",
             ));
         }
-        let update_count = transitions
+        let pending_count = transitions
             .iter()
-            .filter(|kind| **kind == SemanticTransitionKind::Update)
+            .filter(|kind| kind.uses_pending_model())
             .count();
         #[cfg(feature = "semantic-policy")]
         if let PreparedSegmentSource::DormantModelContext(original) = &source {
             original.require_dormant_parent(self)?;
-            if update_count != 0 || transitions != [SemanticTransitionKind::Recompute] {
+            if pending_count != 0 || transitions != [SemanticTransitionKind::Recompute] {
                 return Err(publication_input_error(
                     "future context preparation requires its original Recompute",
                 ));
@@ -24532,14 +24611,14 @@ impl SemanticTransitionSession {
                         SemanticTransitionKind::Recompute,
                         SemanticTransitionKind::Proposal,
                     ]
-                || update_count != 0
+                || pending_count != 0
             {
                 return Err(publication_input_error(
                     "staged actor preparation requires its original Recompute and Proposal owners",
                 ));
             }
         }
-        let training_view = if update_count == 0 {
+        let training_view = if pending_count == 0 {
             None
         } else {
             if self
@@ -24619,7 +24698,7 @@ impl SemanticTransitionSession {
                 .ok_or(SemanticTransitionError::NotBound)?,
         );
         let transition_bound = transitions.len();
-        if update_count != 0 && storage.immutable_model_owners().is_some() {
+        if pending_count != 0 && storage.immutable_model_owners().is_some() {
             return Err(publication_input_error(
                 "historical replay model leases grant reads, not pending Update ownership",
             ));
@@ -24713,7 +24792,7 @@ impl SemanticTransitionSession {
         } else {
             BTreeSet::new()
         };
-        let replace_catalogue = update_count != 0 || !retired_model_slots.is_empty();
+        let replace_catalogue = pending_count != 0 || !retired_model_slots.is_empty();
         let replay_bytes = PreparedReplayCustody::allocation_bytes(
             &storage,
             self.graph.transition_arena_view().len(),
@@ -24777,7 +24856,7 @@ impl SemanticTransitionSession {
         let training_view_bytes = training_view.as_ref().map_or(Ok(0usize), |arena| {
             arena
                 .selection_bytes()?
-                .checked_mul(update_count)
+                .checked_mul(pending_count)
                 .ok_or(SemanticTransitionError::GenerationExhausted)
         })?;
         #[cfg(feature = "semantic-policy")]
@@ -24801,14 +24880,16 @@ impl SemanticTransitionSession {
             .filter(|kind| {
                 !matches!(
                     kind,
-                    SemanticTransitionKind::Update | SemanticTransitionKind::Drain
+                    SemanticTransitionKind::Update
+                        | SemanticTransitionKind::Control
+                        | SemanticTransitionKind::Drain
                 )
             })
             .count();
         #[cfg(feature = "semantic-policy")]
         let policy_work_bytes = u64::try_from(
             policy_work::PolicyWorkBuffers::bytes(policy_work_capacity)?
-                .checked_mul(update_count)
+                .checked_mul(pending_count)
                 .and_then(|bytes| {
                     policy_work::PolicyWorkBuffers::bytes(1)
                         .ok()
@@ -24825,18 +24906,18 @@ impl SemanticTransitionSession {
             + size_of::<SemanticTrainingCanaryRefusalRecord>()
             + size_of::<SemanticCapacityRefusalRecord>()
             + 2 * size_of::<ModelForwardReceipt>();
-        let update_binding_bytes = update_count
+        let update_binding_bytes = pending_count
             .checked_mul(2)
             .and_then(|count| count.checked_mul(storage.model_slots.len()))
             .and_then(|count| count.checked_mul(size_of::<ModelUpdateBinding>()))
             .and_then(|bytes| {
-                update_count
+                pending_count
                     .checked_mul(2)
                     .and_then(|count| count.checked_mul(model_update_bank_metadata_bytes))
                     .and_then(|metadata| bytes.checked_add(metadata))
             })
             .and_then(|bytes| {
-                update_count
+                pending_count
                     .checked_mul(transition_bound)
                     .and_then(|count| count.checked_mul(size_of::<ModelUpdateEvidenceSource>()))
                     .and_then(|evidence| bytes.checked_add(evidence))
@@ -24846,6 +24927,12 @@ impl SemanticTransitionSession {
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
         let base_bytes =
             prepared_segment_allocation_bytes(step_bytes, transition_bound, training_origin_bytes)?
+                .checked_add(if control_coordinates.is_some() {
+                    5 * size_of::<u64>() as u64
+                } else {
+                    0
+                })
+                .ok_or(SemanticTransitionError::GenerationExhausted)?
                 .checked_add(
                     u64::try_from(training_view_bytes)
                         .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
@@ -24865,12 +24952,12 @@ impl SemanticTransitionSession {
                     sum.checked_add(bytes)
                         .ok_or(SemanticTransitionError::GenerationExhausted)
                 })?
-                .checked_mul(update_count as u64)
+                .checked_mul(pending_count as u64)
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
             let entries = storage
                 .model_slots
                 .len()
-                .checked_mul(update_count)
+                .checked_mul(pending_count)
                 .and_then(|count| count.checked_add(storage.allocations.len()))
                 .and_then(|count| count.checked_mul(size_of::<PublicationStorageEntry>()))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
@@ -24910,7 +24997,7 @@ impl SemanticTransitionSession {
             (storage, Vec::new(), BTreeMap::new())
         } else {
             let (expanded, pending, owners) =
-                storage.allocate_model_generations(update_count, &mut reservation)?;
+                storage.allocate_model_generations(pending_count, &mut reservation)?;
             (Arc::new(expanded), pending, owners)
         };
         let training_origins = if training_origin_bytes == 0 {
@@ -24978,7 +25065,7 @@ impl SemanticTransitionSession {
                     false,
                 )?);
             }
-            let mut update_ordinal = 0;
+            let mut pending_ordinal = 0;
             for (ordinal, (handle, kind)) in handles.iter().zip(&transitions).enumerate() {
                 let reader = reservation
                     .alloc(1)
@@ -24986,9 +25073,7 @@ impl SemanticTransitionSession {
                 let result = reservation
                     .alloc(1)
                     .map_err(|error| runtime_error("prepared result allocation", error))?;
-                let (update_evidence, update_evidence_owners) = if *kind
-                    == SemanticTransitionKind::Update
-                {
+                let (update_evidence, update_evidence_owners) = if kind.uses_pending_model() {
                     #[cfg(feature = "semantic-policy")]
                     let mut values = vec![ModelUpdateEvidenceSource::default(); transition_bound];
                     #[cfg(not(feature = "semantic-policy"))]
@@ -25050,7 +25135,7 @@ impl SemanticTransitionSession {
                     (None, None)
                 };
                 let mut allocate_model_update = || {
-                    if *kind != SemanticTransitionKind::Update {
+                    if !kind.uses_pending_model() {
                         return Ok(None);
                     }
                     let bindings = reservation
@@ -25114,8 +25199,8 @@ impl SemanticTransitionSession {
                     )?);
                     Ok(Some(PreparedModelUpdate {
                         canaries: None,
-                        pending_slots: pending_generations[update_ordinal].clone(),
-                        _model_owners: pending_generations[update_ordinal]
+                        pending_slots: pending_generations[pending_ordinal].clone(),
+                        _model_owners: pending_generations[pending_ordinal]
                             .iter()
                             .map(|slot| {
                                 storage.allocations[*slot]
@@ -25158,8 +25243,10 @@ impl SemanticTransitionSession {
                     &mut reservation,
                 )?);
                 if *kind == SemanticTransitionKind::Update {
-                    source_model_slots = pending_generations[update_ordinal].clone();
-                    update_ordinal += 1;
+                    source_model_slots = pending_generations[pending_ordinal].clone();
+                }
+                if kind.uses_pending_model() {
+                    pending_ordinal += 1;
                 }
                 let feedback = FeedbackBuffers::allocate_reserved(
                     &self.provider,
@@ -25285,7 +25372,21 @@ impl SemanticTransitionSession {
                     training_origin: training_origins
                         .as_ref()
                         .and_then(|origins| origins.view().try_slice(ordinal..ordinal + 1)),
-                    training_view: if *kind == SemanticTransitionKind::Update {
+                    control_coordinates: if let Some(coordinates) = control_coordinates {
+                        let owned = reservation
+                            .alloc::<u64>(5)
+                            .map_err(|e| runtime_error("Control coordinates allocation", e))?;
+                        writes.push(state_restoration::OriginalDeviceWrite::new(
+                            &self.stream,
+                            &coordinates,
+                            owned.view(),
+                            false,
+                        )?);
+                        Some(owned)
+                    } else {
+                        None
+                    },
+                    training_view: if kind.uses_pending_model() {
                         let mut selected = training_view
                             .as_ref()
                             .expect("validated update training-view owner")
@@ -25305,7 +25406,7 @@ impl SemanticTransitionSession {
                     policy_work: if *kind != SemanticTransitionKind::Drain {
                         Some(policy_work::PolicyWorkBuffers::allocate(
                             &mut reservation,
-                            if *kind == SemanticTransitionKind::Update {
+                            if kind.uses_pending_model() {
                                 policy_work_capacity
                             } else {
                                 1
@@ -26209,7 +26310,7 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
     ) -> Result<DlpackManagedTensor, SemanticTransitionError> {
         self.check_prepared_cold(step)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+        if !self.prepared_transition_kind(step)?.uses_pending_model() {
             return Err(publication_input_error(
                 "native selected training views belong only to prepared updates",
             ));
@@ -26373,7 +26474,7 @@ impl SemanticTransitionSession {
         consumer_stream: u64,
     ) -> Result<(DeviceAllocationProvenance, DlpackManagedTensor), SemanticTransitionError> {
         self.check_prepared_cold(step)?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+        if !self.prepared_transition_kind(step)?.uses_pending_model() {
             return Err(publication_input_error(
                 "pending model export requires original Update construction",
             ));
@@ -27328,6 +27429,7 @@ impl SemanticTransitionSession {
             SemanticTransitionKind::Proposal => 1,
             SemanticTransitionKind::Recompute => 2,
             SemanticTransitionKind::Update => 3,
+            SemanticTransitionKind::Control => 5,
             SemanticTransitionKind::Drain => 4,
         };
         let (header_view, result_view, actual_view, events) = {
@@ -30065,7 +30167,7 @@ impl SemanticTransitionSession {
         let mut service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
         if capacity_admission.inputs.is_some() {
-            if kind != SemanticTransitionKind::Update || physical_blocks.is_some() {
+            if !kind.uses_pending_model() || physical_blocks.is_some() {
                 return Err(publication_input_error(
                     "capacity refusal requires a prepared Update",
                 ));
@@ -30327,8 +30429,10 @@ impl SemanticTransitionSession {
                 .training_view
                 .as_ref(),
         ) {
-            (SemanticTransitionKind::Update, Some(view)) => Some(view.selection()),
-            (SemanticTransitionKind::Update, None) => {
+            (SemanticTransitionKind::Update | SemanticTransitionKind::Control, Some(view)) => {
+                Some(view.selection())
+            }
+            (SemanticTransitionKind::Update | SemanticTransitionKind::Control, None) => {
                 return Err(publication_input_error(
                     "prepared update continuation has no native training selection",
                 ));
@@ -30414,10 +30518,73 @@ impl SemanticTransitionSession {
         reason = "the native update handoff binds model geometry, numerical validity and canary evidence"
     )]
     #[cfg(feature = "semantic-policy")]
+    /// Bind the complete numerical successor under the original Update owner.
     pub fn bind_prepared_update_output(
         &mut self,
         step: &SemanticPreparedStep,
         bank: usize,
+        model_memory: SemanticModelMemory,
+        tensors: Vec<SemanticTensorInput>,
+        admissibility: SemanticTensorInput,
+        slab_backing: SemanticTensorInput,
+        baseline_forward: &SemanticModelForwardWitness,
+        candidate_forward: &SemanticModelForwardWitness,
+        canary_comparison: &SemanticModelCanaryWitness,
+        witness: &SemanticTensorOwner,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.bind_prepared_model_output(
+            step,
+            bank,
+            SemanticTransitionKind::Update,
+            model_memory,
+            tensors,
+            admissibility,
+            slab_backing,
+            baseline_forward,
+            candidate_forward,
+            canary_comparison,
+            witness,
+            consumer_stream,
+        )
+    }
+
+    /// Bind the complete unchanged copy and canaries under the original Control owner.
+    pub fn bind_prepared_control_output(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        model_memory: SemanticModelMemory,
+        tensors: Vec<SemanticTensorInput>,
+        admissibility: SemanticTensorInput,
+        slab_backing: SemanticTensorInput,
+        baseline_forward: &SemanticModelForwardWitness,
+        candidate_forward: &SemanticModelForwardWitness,
+        canary_comparison: &SemanticModelCanaryWitness,
+        witness: &SemanticTensorOwner,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.bind_prepared_model_output(
+            step,
+            bank,
+            SemanticTransitionKind::Control,
+            model_memory,
+            tensors,
+            admissibility,
+            slab_backing,
+            baseline_forward,
+            candidate_forward,
+            canary_comparison,
+            witness,
+            consumer_stream,
+        )
+    }
+
+    fn bind_prepared_model_output(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        expected: SemanticTransitionKind,
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
@@ -30444,9 +30611,9 @@ impl SemanticTransitionSession {
             witness,
             consumer_stream,
         )?;
-        if self.prepared_transition_kind(step)? != SemanticTransitionKind::Update {
+        if !expected.uses_pending_model() || self.prepared_transition_kind(step)? != expected {
             return Err(publication_input_error(
-                "model update output belongs only to a prepared update",
+                "model output differs from its original prepared effect",
             ));
         }
         if self.steps[&step.token]
@@ -30909,11 +31076,22 @@ impl SemanticTransitionSession {
                 .ok_or_else(|| {
                     publication_input_error("prepared update has no acquired training-view input")
                 })?;
-            let coordinates = owner
-                .inputs
-                .as_ref()
-                .expect("fixed input owner")
-                .training_coordinates_view()?;
+            let coordinates = match self.prepared_transition_kind(step)? {
+                SemanticTransitionKind::Control => owner
+                    .prepared
+                    .as_ref()
+                    .expect("prepared selection owner")
+                    .control_coordinates
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                    .view(),
+                SemanticTransitionKind::Update => owner
+                    .inputs
+                    .as_ref()
+                    .expect("fixed input owner")
+                    .training_coordinates_view()?,
+                _ => return Err(SemanticTransitionError::ObservationMismatch),
+            };
             selected.enqueue_device_selection(selected_view, coordinates)
         } else {
             Ok(())
@@ -38755,7 +38933,7 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
         self.checked_reader(lease)?;
-        if kind == SemanticTransitionKind::Update {
+        if kind.uses_pending_model() {
             return Err(publication_input_error(
                 "updates require a prepared step with native training and pending-output owners",
             ));
@@ -42522,7 +42700,7 @@ impl SemanticTransitionSession {
             || branch.continuation.is_none()
             || (kind == SemanticTransitionKind::Proposal && branch.policy.is_none())
             || (kind != SemanticTransitionKind::Proposal && branch.policy.is_some())
-            || (kind == SemanticTransitionKind::Update
+            || (kind.uses_pending_model()
                 && branch
                     .model_update
                     .as_ref()
@@ -42546,7 +42724,7 @@ impl SemanticTransitionSession {
         )?;
 
         let result = (|| {
-            let canary_work = if kind == SemanticTransitionKind::Update {
+            let canary_work = if kind.uses_pending_model() {
                 Some(self.prepared_policy_work_counter(
                     step,
                     bank,

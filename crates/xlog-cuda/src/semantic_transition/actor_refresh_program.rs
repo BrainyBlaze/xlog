@@ -180,6 +180,7 @@ pub(super) struct InstructionAdmission {
     pub(super) cold_result: Option<SemanticColdModelWorkResult>,
     pub(super) retirement_work: Option<SemanticColdModelWork>,
     pub(super) retirement_result: Option<SemanticColdModelWorkResult>,
+    pub(super) control_result: Option<SemanticControlObservation>,
     pub(super) retirement_cancellation: Option<SemanticPreparedSegmentNonSubmission>,
     pub(super) prepared_cold_results: Vec<(u64, Option<SemanticColdModelWorkResult>)>,
     handoff_streams: Option<Vec<u64>>,
@@ -493,6 +494,19 @@ fn require_completed_instruction_prefix(
     {
         return Err(invalid_program());
     }
+    for claim in admissions {
+        if claim
+            .control_result
+            .as_ref()
+            .map(SemanticControlObservation::refused)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Err(publication_input_error(
+                "refused Control terminates its original arm",
+            ));
+        }
+    }
     for previous in &program.steps[..start] {
         if previous.kind.is_none()
             || (original.evaluation.is_some()
@@ -556,7 +570,21 @@ fn validate_segment(value: &Value) -> Result<(), SemanticTransitionError> {
         "proposal_views",
         "sealed",
     ];
-    let segment = object(value, &fields[..if evaluation.is_some() { 8 } else { 7 }])?;
+    let control = value
+        .get("transitions")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| steps.len() == 1 && steps[0].as_str() == Some("control"));
+    let mut expected = fields[..if evaluation.is_some() { 8 } else { 7 }].to_vec();
+    if control {
+        expected.push("control_view");
+    }
+    let segment = object(value, &expected)?;
+    if control && (evaluation.is_some() || operation(&segment["operation"])? != "training") {
+        return Err(invalid_program());
+    }
+    if control {
+        control_view_coordinates(value)?;
+    }
     let mode = operation(&segment["operation"])?;
     if !matches!(mode, "inference" | "training") {
         return Err(invalid_program());
@@ -572,10 +600,11 @@ fn validate_segment(value: &Value) -> Result<(), SemanticTransitionError> {
             "proposal" => proposals += 1,
             "recompute" => (),
             "update" if mode == "training" => updates += 1,
+            "control" if control && mode == "training" => (),
             _ => return Err(invalid_program()),
         }
     }
-    if mode == "training" && updates == 0 {
+    if mode == "training" && updates == 0 && !control {
         return Err(invalid_program());
     }
     if evaluation.is_some()
@@ -734,9 +763,48 @@ fn kind(operation: &str) -> Option<SemanticTransitionKind> {
         "proposal" => Some(SemanticTransitionKind::Proposal),
         "recompute" => Some(SemanticTransitionKind::Recompute),
         "update" => Some(SemanticTransitionKind::Update),
+        "control" => Some(SemanticTransitionKind::Control),
         "drain" => Some(SemanticTransitionKind::Drain),
         _ => None,
     }
+}
+
+fn program_family_binding(
+    value: &Value,
+) -> Result<Option<(Identity256, u64)>, SemanticTransitionError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let fields = object(value, &["roster_sha256", "member_ordinal"])?;
+    digest(&fields["roster_sha256"])?;
+    let text = operation(&fields["roster_sha256"])?;
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| invalid_program())?;
+    }
+    Ok(Some((
+        Identity256::from_bytes(bytes),
+        integer(&fields["member_ordinal"])?,
+    )))
+}
+
+fn control_view_coordinates(value: &Value) -> Result<[u64; 5], SemanticTransitionError> {
+    let fields = object(
+        value.get("control_view").ok_or_else(invalid_program)?,
+        &["cursor", "rng"],
+    )?;
+    let rng = array(&fields["rng"])?;
+    if rng.len() != 4 {
+        return Err(invalid_program());
+    }
+    Ok([
+        integer(&fields["cursor"])?,
+        integer(&rng[0])?,
+        integer(&rng[1])?,
+        integer(&rng[2])?,
+        integer(&rng[3])?,
+    ])
 }
 
 fn digest(value: &Value) -> Result<(), SemanticTransitionError> {
@@ -768,14 +836,16 @@ impl ActorRefreshProgram {
                 "frozen_run_sha256",
                 "schedule",
                 "budgets",
+                "family_binding",
             ],
         )?;
-        if operation(&root["kind"])? != "dlm-new.original-self-source-program/1" {
+        if operation(&root["kind"])? != "dlm-new.original-self-source-program/2" {
             return Err(invalid_program());
         }
         for field in ["run_sha256", "resources_sha256", "frozen_run_sha256"] {
             digest(&root[field])?;
         }
+        program_family_binding(&root["family_binding"])?;
         let budgets = object(
             &root["budgets"],
             &[
@@ -785,6 +855,7 @@ impl ActorRefreshProgram {
                 "proposal",
                 "recompute",
                 "update",
+                "control",
                 "evaluation",
                 "checkpoint",
                 "retire",
@@ -1254,20 +1325,23 @@ impl ActorRefreshProgram {
     }
 }
 
+fn instruction_expense_retired(claim: &InstructionAdmission) -> bool {
+    claim.parent_fully_retired
+        && claim.resources_retired
+        && claim.cold_result.is_some()
+        && claim.retirement_result.is_some()
+        && claim
+            .prepared_cold_results
+            .iter()
+            .all(|(_, result)| result.is_some())
+}
+
 fn require_retired_instruction_expense(
     claim: &InstructionAdmission,
 ) -> Result<(), SemanticTransitionError> {
-    if !claim.parent_fully_retired
-        || !claim.resources_retired
-        || claim.cold_result.is_none()
-        || claim.retirement_result.is_none()
-        || claim
-            .prepared_cold_results
-            .iter()
-            .any(|(_, result)| result.is_none())
-    {
+    if !instruction_expense_retired(claim) {
         return Err(publication_input_error(
-            "cancelled instruction lacks its complete original retirement and expense",
+            "instruction lacks its complete original retirement and expense",
         ));
     }
     Ok(())
@@ -1341,7 +1415,7 @@ fn assignment_material(
     assignments: &[&MainActorAssignment],
 ) -> Vec<u8> {
     let mut bytes = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0".to_vec();
-    material_u64(&mut bytes, 6);
+    material_u64(&mut bytes, 7);
     bytes.extend_from_slice(program.as_bytes());
     bytes.extend_from_slice(initial_index.as_bytes());
     material_u64(&mut bytes, u64::from(rng.is_some()));
@@ -1388,6 +1462,11 @@ fn assignment_material(
             material_u64(&mut bytes, *ordinal);
             write_instruction_cold_result(&mut bytes, *result);
         }
+        material_u64(&mut bytes, u64::from(claim.control_result.is_some()));
+        if let Some(result) = &claim.control_result {
+            material_u64(&mut bytes, result.bytes.len() as u64);
+            bytes.extend_from_slice(&result.bytes);
+        }
     }
     material_u64(&mut bytes, assignments.len() as u64);
     let mut assignments = assignments.to_vec();
@@ -1431,6 +1510,10 @@ fn assignment_material_allocation_bound(
         }
         add(cold_result(claim.cold_result)?)?;
         add(cold_result(claim.retirement_result)?)?;
+        add(8)?;
+        if let Some(result) = &claim.control_result {
+            add(8 + result.bytes.len() as u64)?;
+        }
         for (_, result) in &claim.prepared_cold_results {
             add(8 + cold_result(*result)?)?;
         }
@@ -1531,7 +1614,7 @@ fn decode_assignment_material(
     let magic = b"XLOG-ACTOR-REFRESH-ASSIGNMENTS\0";
     let semantic = SemanticTransitionError::Semantic;
     if reader.take(magic.len()).map_err(semantic)? != magic
-        || reader.u64().map_err(semantic)? != 6
+        || reader.u64().map_err(semantic)? != 7
         || reader.take(32).map_err(semantic)? != program.identity.as_bytes()
         || reader.take(32).map_err(semantic)? != initial_index.as_bytes()
     {
@@ -1671,7 +1754,9 @@ fn decode_assignment_material(
             let ordinal = reader.u64().map_err(semantic)?;
             if ordinal < first
                 || ordinal >= end
-                || program.steps[ordinal as usize].kind != Some(SemanticTransitionKind::Update)
+                || !program.steps[ordinal as usize]
+                    .kind
+                    .is_some_and(SemanticTransitionKind::uses_pending_model)
                 || prepared_cold_results
                     .iter()
                     .any(|(previous, _)| *previous == ordinal)
@@ -1679,6 +1764,23 @@ fn decode_assignment_material(
                 return Err(invalid_program());
             }
             prepared_cold_results.push((ordinal, read_instruction_cold_result(&mut reader)?));
+        }
+        let control_result = match reader.u64().map_err(semantic)? {
+            0 => None,
+            1 => {
+                let length = usize::try_from(reader.u64().map_err(semantic)?)
+                    .map_err(|_| invalid_program())?;
+                if length > super::model_control::CONTROL_BYTES {
+                    return Err(invalid_program());
+                }
+                Some(SemanticControlObservation::from_bytes(Arc::from(
+                    reader.take(length).map_err(semantic)?,
+                ))?)
+            }
+            _ => return Err(invalid_program()),
+        };
+        if original.kind != Some(SemanticTransitionKind::Control) && control_result.is_some() {
+            return Err(invalid_program());
         }
         // An incomplete restored attempt is retained, not re-issued. Only
         // the original live handle can resolve its asynchronous owners.
@@ -1706,6 +1808,7 @@ fn decode_assignment_material(
             retirement_result,
             retirement_cancellation: None,
             prepared_cold_results,
+            control_result,
             handoff_streams: None,
             parent_fully_retired,
             resources_retired,
@@ -1764,6 +1867,23 @@ fn decode_assignment_material(
     }
     reader.finish().map_err(semantic)?;
     for (index, claim) in admissions.iter().enumerate() {
+        if let Some(result) = &claim.control_result {
+            if !matches!(
+                claim.state,
+                InstructionState::Bound | InstructionState::Completed
+            ) {
+                return Err(invalid_program());
+            }
+            require_control_result(program, claim, result)?;
+        }
+        if program.steps[claim.first as usize].kind == Some(SemanticTransitionKind::Control)
+            && claim.state == InstructionState::Completed
+        {
+            if claim.control_result.is_none() {
+                return Err(invalid_program());
+            }
+            require_retired_instruction_expense(claim)?;
+        }
         if claim.state == InstructionState::Cancelled {
             require_cancelled_instruction_material(claim)?;
             if index + 1 != admissions.len()
@@ -2929,6 +3049,7 @@ impl SemanticTransitionSession {
             retirement_result: None,
             retirement_cancellation: None,
             prepared_cold_results: Vec::new(),
+            control_result: None,
             handoff_streams: None,
             parent_fully_retired: false,
             resources_retired: false,
@@ -3335,6 +3456,29 @@ impl SemanticTransitionSession {
             .collect())
     }
 
+    pub(super) fn instruction_control_coordinates(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<[u64; 5], SemanticTransitionError> {
+        let claim = self.instruction_admission(admission)?;
+        let instruction = json_value(&claim.instruction)?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let step = program
+            .steps
+            .get(claim.first as usize)
+            .ok_or_else(invalid_program)?;
+        if step.kind != Some(SemanticTransitionKind::Control)
+            || claim.end != claim.first + 1
+            || program_family_binding(&json_value(&program.bytes)?["family_binding"])?.is_none()
+        {
+            return Err(invalid_program());
+        }
+        control_view_coordinates(&instruction)
+    }
+
     pub(super) fn complete_segment_instruction(&mut self) -> Result<(), SemanticTransitionError> {
         if let Some(admission) = self
             .prepared_segment
@@ -3361,6 +3505,7 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        self.complete_retired_controls();
     }
 
     pub(super) fn retire_instruction_resources(&mut self) -> Result<(), SemanticTransitionError> {
@@ -3377,6 +3522,7 @@ impl SemanticTransitionSession {
             claim._publication = None;
             claim._model_owners.clear();
         }
+        self.complete_retired_controls();
         Ok(())
     }
 
@@ -4026,5 +4172,165 @@ impl SemanticTransitionSession {
         program.original_rng = rng;
         program.admissions = admissions;
         Ok(())
+    }
+}
+
+fn control_context(
+    program: &ActorRefreshProgram,
+    claim: &InstructionAdmission,
+) -> Result<super::model_control::ControlContext, SemanticTransitionError> {
+    let step = program
+        .steps
+        .get(claim.first as usize)
+        .ok_or_else(invalid_program)?;
+    if step.kind != Some(SemanticTransitionKind::Control)
+        || claim.first.checked_add(1) != Some(claim.end)
+    {
+        return Err(invalid_program());
+    }
+    let family = program_family_binding(&json_value(&program.bytes)?["family_binding"])?
+        .ok_or_else(invalid_program)?;
+    Ok(super::model_control::ControlContext {
+        program_identity: program.identity,
+        first: claim.first,
+        end: claim.end,
+        family,
+        plan_identity: claim.instruction_identity,
+        budget: step.budget,
+    })
+}
+
+fn require_control_result(
+    program: &ActorRefreshProgram,
+    claim: &InstructionAdmission,
+    result: &SemanticControlObservation,
+) -> Result<(), SemanticTransitionError> {
+    if result.context()? != control_context(program, claim)? || result.parent()? != claim.parent {
+        return Err(invalid_program());
+    }
+    Ok(())
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn control_receipt_context(
+        &self,
+        step: &SemanticPreparedStep,
+        parent: &PublicationHeader,
+    ) -> Result<super::model_control::ControlContext, SemanticTransitionError> {
+        self.checked_prepared_step(step, false)?;
+        let build = self.prepared_segment.as_ref().ok_or_else(invalid_program)?;
+        if build.tokens.as_slice() != [step.token] {
+            return Err(invalid_program());
+        }
+        let admission = build
+            .program_admission
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let claim = self.instruction_admission(admission)?;
+        if claim.state != InstructionState::Bound
+            || claim.parent.instance != parent.instance
+            || claim.parent.word != parent.publication_word
+            || claim.parent.logical_digest != parent.logical_digest
+        {
+            return Err(invalid_program());
+        }
+        control_context(
+            self.actor_refresh_program
+                .as_ref()
+                .ok_or_else(invalid_program)?,
+            claim,
+        )
+    }
+
+    pub(super) fn retain_control_result(
+        &mut self,
+        step: &SemanticPreparedStep,
+        result: SemanticControlObservation,
+    ) -> Result<(), SemanticTransitionError> {
+        let admission = self
+            .prepared_segment
+            .as_ref()
+            .and_then(|build| build.program_admission.clone())
+            .ok_or_else(invalid_program)?;
+        require_control_result(
+            self.actor_refresh_program
+                .as_ref()
+                .ok_or_else(invalid_program)?,
+            self.instruction_admission(&admission)?,
+            &result,
+        )?;
+        let claim = self.instruction_admission_mut(&admission)?;
+        if claim
+            .control_result
+            .as_ref()
+            .is_some_and(|original| original != &result)
+        {
+            return Err(invalid_program());
+        }
+        claim.control_result = Some(result.clone());
+        self.steps
+            .get_mut(&step.token)
+            .ok_or_else(invalid_program)?
+            .control_receipt = Some(result);
+        self.complete_retired_controls();
+        Ok(())
+    }
+
+    pub(super) fn complete_retired_controls(&mut self) {
+        if let Some(program) = self.actor_refresh_program.as_mut() {
+            for claim in &mut program.admissions {
+                complete_retired_control_claim(claim);
+            }
+        }
+    }
+
+    pub(super) fn control_retirement_material(
+        &self,
+        result: &SemanticControlObservation,
+    ) -> Result<Option<Vec<u8>>, SemanticTransitionError> {
+        let context = result.context()?;
+        let program = self
+            .actor_refresh_program
+            .as_ref()
+            .ok_or_else(invalid_program)?;
+        let claim = program
+            .admissions
+            .iter()
+            .find(|claim| claim.first == context.first)
+            .ok_or_else(invalid_program)?;
+        require_control_result(program, claim, result)?;
+        if claim.control_result.as_ref() != Some(result) {
+            return Err(invalid_program());
+        }
+        if !instruction_expense_retired(claim) {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        write_instruction_cold_result(&mut bytes, claim.retirement_result);
+        Ok(Some(bytes))
+    }
+
+    /// Read the same retained receipt after original storage retirement.
+    pub fn admitted_control_measurements(
+        &self,
+        admission: &SemanticSegmentInstructionAdmission,
+    ) -> Result<Option<serde_json::Value>, SemanticTransitionError> {
+        let claim = self.instruction_admission(admission)?;
+        claim
+            .control_result
+            .as_ref()
+            .map(|result| result.projection(self.control_retirement_material(result)?))
+            .transpose()
+    }
+}
+
+/// Called only where the original cold report or retirement owner commits.
+pub(super) fn complete_retired_control_claim(claim: &mut InstructionAdmission) {
+    if claim._issuer.is_some()
+        && claim.state == InstructionState::Bound
+        && claim.control_result.is_some()
+        && instruction_expense_retired(claim)
+    {
+        claim.state = InstructionState::Completed;
     }
 }

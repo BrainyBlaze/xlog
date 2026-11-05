@@ -275,6 +275,9 @@ class SemanticPreparedStep:
         self, *, consumer_streams: Sequence[int]
     ) -> SemanticCompletedActionProjection: ...
 
+    @property
+    def control_measurements(self) -> dict[str, Any] | None: ...
+
 _SemanticTensorLayout = tuple[
     int, int, int, int, int, int, tuple[int, ...], tuple[int, ...]
 ]
@@ -508,6 +511,9 @@ class SemanticSegmentInstructionAdmission:
     ]]: ...
     @property
     def budgets(self) -> tuple[tuple[int, int, int], ...]: ...
+
+    @property
+    def control_measurements(self) -> dict[str, Any] | None: ...
 
 class SemanticPrivateReplayChild:
     """One original selected replay child retained by its instruction owner."""
@@ -1452,6 +1458,26 @@ class SemanticTransitionController:
         cancellation raises SemanticPreparedSegmentCancelled for retirement.
         """
         ...
+
+    def bind_prepared_update_output(
+        self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
+        bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
+        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
+        candidate_forward: SemanticModelForwardWitness,
+        canary_comparison: SemanticModelCanaryWitness,
+        allocation_owner: SemanticTensorOwner, consumer_stream: int,
+    ) -> None: ...
+
+    def bind_prepared_control_output(
+        self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
+        bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
+        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
+        candidate_forward: SemanticModelForwardWitness,
+        canary_comparison: SemanticModelCanaryWitness,
+        allocation_owner: SemanticTensorOwner, consumer_stream: int,
+    ) -> None: ...
 
 # ---------------------------------------------------------------------------
 # Native relation provenance
@@ -3026,3 +3052,12 @@ def import_arrow_device(
     Requires the ``arrow-device-import`` feature.
     """
     ...
+
+
+class SemanticModelForwardWitness:
+    """Opaque receipt issued by finishing an original full forward stream."""
+    pass
+
+class SemanticModelCanaryWitness:
+    """Opaque receipt issued by the original paired canary comparison."""
+    pass

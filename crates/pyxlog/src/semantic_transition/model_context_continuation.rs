@@ -2070,6 +2070,7 @@ impl PySemanticModelContextContinuation {
                 SemanticTransitionKind::Proposal => Ok("proposal"),
                 SemanticTransitionKind::Recompute => Ok("recompute"),
                 SemanticTransitionKind::Update => Ok("update"),
+                SemanticTransitionKind::Control => Ok("control"),
                 SemanticTransitionKind::Drain => Err(invalid(
                     "ordinary frozen instruction cannot request an explicit drain",
                 )),

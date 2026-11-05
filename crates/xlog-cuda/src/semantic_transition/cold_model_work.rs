@@ -330,6 +330,7 @@ impl CompletedModelContextColdResult {
         assert_eq!(original.instruction.as_ref(), self.instruction.as_ref());
         assert!(original.cold_result.is_none());
         original.cold_result = Some(self.result);
+        actor_refresh_program::complete_retired_control_claim(original);
     }
 }
 
@@ -2562,8 +2563,9 @@ impl SemanticTransitionSession {
             .program_admission
             .as_ref()
             .is_none_or(|original| !original.same_handle(admission))
-            || build.requested_kind(step, &self.publication_issuer)?
-                != SemanticTransitionKind::Update
+            || !build
+                .requested_kind(step, &self.publication_issuer)?
+                .uses_pending_model()
             || !parent.active
         {
             return Err(publication_input_error(
@@ -2678,6 +2680,7 @@ impl SemanticTransitionSession {
             ));
         }
         original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2694,7 +2697,9 @@ impl SemanticTransitionSession {
             streams,
             SemanticColdModelWorkDisposition::Complete,
         )?;
-        self.instruction_admission_mut(admission)?.cold_result = Some(result);
+        let original = self.instruction_admission_mut(admission)?;
+        original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2777,7 +2782,9 @@ impl SemanticTransitionSession {
             streams,
             SemanticColdModelWorkDisposition::KnownRefusal,
         )?;
-        self.instruction_admission_mut(admission)?.cold_result = Some(result);
+        let original = self.instruction_admission_mut(admission)?;
+        original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2986,17 +2993,21 @@ impl SemanticTransitionSession {
         // Only the canonical resource-retirement path removes the prepared
         // owner, after graph destruction and every joined step/alias release.
         // Admission custody also proves full retirement when its parent is gone.
+        let joined_control = original.state == actor_refresh_program::InstructionState::Bound
+            && original.control_result.is_some()
+            && original.retirement_cancellation.is_none();
         if self.prepared_segment.is_some()
             || self.captured.is_some()
             || self.steps.contains_key(&parent.token)
-            || !matches!(
-                (original.state, original.retirement_cancellation.is_some()),
-                (actor_refresh_program::InstructionState::Completed, false)
-                    | (actor_refresh_program::InstructionState::Bound, true)
-                    | (actor_refresh_program::InstructionState::Admitted, true)
-                    | (actor_refresh_program::InstructionState::Released, true)
-                    | (actor_refresh_program::InstructionState::BuildEntered, true)
-            )
+            || (!joined_control
+                && !matches!(
+                    (original.state, original.retirement_cancellation.is_some()),
+                    (actor_refresh_program::InstructionState::Completed, false)
+                        | (actor_refresh_program::InstructionState::Bound, true)
+                        | (actor_refresh_program::InstructionState::Admitted, true)
+                        | (actor_refresh_program::InstructionState::Released, true)
+                        | (actor_refresh_program::InstructionState::BuildEntered, true)
+                ))
         {
             return Err(publication_input_error(
                 "shared retirement report requires fully retired original native storage",
@@ -3015,6 +3026,7 @@ impl SemanticTransitionSession {
             ));
         }
         self.instruction_admission_mut(admission)?.retirement_result = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
@@ -3087,6 +3099,7 @@ impl SemanticTransitionSession {
             disposition,
         )?;
         self.instruction_admission_mut(admission)?.retirement_result = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
@@ -3981,8 +3994,9 @@ impl SemanticTransitionSession {
             .program_admission
             .as_ref()
             .is_none_or(|original| !original.same_handle(admission))
-            || build.requested_kind(step, &self.publication_issuer)?
-                != SemanticTransitionKind::Update
+            || !build
+                .requested_kind(step, &self.publication_issuer)?
+                .uses_pending_model()
         {
             return Err(publication_input_error(
                 "prepared cold work changed its admitted Update",
@@ -4122,6 +4136,7 @@ impl SemanticTransitionSession {
             .find(|(address, _)| *address == ordinal)
             .expect("retained original prepared report")
             .1 = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
