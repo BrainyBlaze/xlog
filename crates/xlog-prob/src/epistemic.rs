@@ -1506,7 +1506,7 @@ fn assumption_terms_match_binding(
             |((assumption_term, binding_term), bound_output_column)| match binding_term {
                 EirTerm::Variable(_) => bound_output_column.is_some(),
                 EirTerm::Integer(value) => {
-                    matches!(assumption_term, EpistemicEvidenceTerm::Integer(v) if v == value)
+                    matches!(assumption_term, EpistemicEvidenceTerm::Integer(v) if i128::from(*v) == *value)
                 }
                 EirTerm::String(value) => {
                     matches!(assumption_term, EpistemicEvidenceTerm::String(v) if v == value)
