@@ -248,7 +248,7 @@ relative to that root, and accept colon-separated `--module-path` directories.
 `manifest` prints its source and module manifest as JSON. Source-loading,
 resolution, extraction, and serialization failures are command errors.
 
-The extraction schema is `xlog.resolved-program-extraction.v2`. Function parameters
+The extraction schema is `xlog.resolved-program-extraction.v3`. Function parameters
 carry `type_reference` and results carry `return_type`, each describing a scalar
 or a tensor with explicit element representation and dimensions. Numerical bodies
 retain their operations and shared parameter indices alongside ordinary function

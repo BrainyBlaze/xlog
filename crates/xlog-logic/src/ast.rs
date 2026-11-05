@@ -1321,7 +1321,31 @@ impl<'a> AstAllocationSize<'a> {
                     self.text(&parameter.name)?;
                     self.vector(&parameter.shape)?;
                 }
-                self.vector(&program.operations)
+                self.vector(&program.operations)?;
+                if let xlog_ir::tensor::TensorSignature::Pure { input_widths, .. } =
+                    &program.signature
+                {
+                    self.vector(input_widths)?;
+                }
+                for operation in &program.operations {
+                    use xlog_ir::tensor::TensorOperation as Op;
+                    match operation {
+                        Op::TokenIndicators { token_ids } => self.vector(token_ids)?,
+                        Op::GatherColumns { indices, .. } | Op::Stack { inputs: indices } => {
+                            self.vector(indices)?
+                        }
+                        Op::Call {
+                            function,
+                            arguments,
+                        } => {
+                            self.text(function)?;
+                            self.vector(arguments)?;
+                        }
+                        Op::Scan { function, .. } => self.text(function)?,
+                        _ => {}
+                    }
+                }
+                Ok(())
             }
             FuncBody::Arithmetic(expression) => self.expression(expression),
             FuncBody::Conditional(condition) => {
@@ -1456,32 +1480,11 @@ impl FuncDef {
     /// Construct the typed public entry point of a causal numerical program.
     /// The body is retained here, rather than copied into a separate registry.
     pub fn numerical(name: String, program: TensorProgram) -> Result<Self> {
+        let (params, result) = Self::numerical_types(&program)?;
         let definition = Self {
             name,
-            params: vec![
-                FuncParam {
-                    name: "tokens".into(),
-                    typ: Some(FunctionType::Tensor {
-                        element: FunctionElement::U32,
-                        dimensions: vec![FunctionDimension::CausalSequence {
-                            maximum: program.max_context,
-                        }],
-                    }),
-                },
-                FuncParam {
-                    name: "prediction_position".into(),
-                    typ: Some(ScalarType::U32.into()),
-                },
-            ],
-            return_type: Some(FunctionType::Tensor {
-                element: FunctionElement::F32,
-                dimensions: vec![
-                    FunctionDimension::Fixed { size: 1 },
-                    FunctionDimension::Fixed {
-                        size: program.vocabulary,
-                    },
-                ],
-            }),
+            params,
+            return_type: Some(result),
             body: FuncBody::Numerical(program),
             is_private: false,
         };
@@ -1489,45 +1492,83 @@ impl FuncDef {
         Ok(definition)
     }
 
+    fn numerical_types(program: &TensorProgram) -> Result<(Vec<FuncParam>, FunctionType)> {
+        use xlog_ir::tensor::TensorSignature;
+        let tensor = |rows, width| FunctionType::Tensor {
+            element: FunctionElement::F32,
+            dimensions: vec![rows, FunctionDimension::Fixed { size: width }],
+        };
+        let sequence = FunctionDimension::CausalSequence {
+            maximum: program.max_context,
+        };
+        let one = FunctionDimension::Fixed { size: 1 };
+        let mut params = Vec::new();
+        if !matches!(program.signature, TensorSignature::Pure { .. }) {
+            params.push(FuncParam {
+                name: "tokens".into(),
+                typ: Some(FunctionType::Tensor {
+                    element: FunctionElement::U32,
+                    dimensions: vec![sequence.clone()],
+                }),
+            });
+        }
+        let result = match &program.signature {
+            TensorSignature::Decoder => {
+                params.push(FuncParam {
+                    name: "prediction_position".into(),
+                    typ: Some(ScalarType::U32.into()),
+                });
+                tensor(one, program.vocabulary)
+            }
+            TensorSignature::Causal {
+                input_width,
+                output_width,
+            } => {
+                params.push(FuncParam {
+                    name: "hidden".into(),
+                    typ: Some(tensor(sequence.clone(), *input_width)),
+                });
+                tensor(sequence, *output_width)
+            }
+            TensorSignature::Pure {
+                input_widths,
+                output_width,
+            } => {
+                for (id, &width) in input_widths.iter().enumerate() {
+                    params.push(FuncParam {
+                        name: format!("argument_{id}"),
+                        typ: Some(tensor(one.clone(), width)),
+                    });
+                }
+                tensor(one, *output_width)
+            }
+        };
+        program.signature.arguments(1)?;
+        program.signature.output(1, program.vocabulary)?;
+        Ok((params, result))
+    }
+
     pub(crate) fn validate_numerical(&self) -> Result<()> {
         let FuncBody::Numerical(program) = &self.body else {
             return Ok(());
         };
-        let invalid = || {
-            XlogError::Compilation(format!(
-                "numerical function {} has a signature inconsistent with its body",
-                self.name
-            ))
-        };
-        let output = program.shapes(1, 0)?[program.output];
+        let (params, result) = Self::numerical_types(program)?;
+        let mut names = std::collections::HashSet::new();
         if self.name.is_empty()
-            || self.params.len() != 2
-            || self.params[0].name.is_empty()
-            || self.params[1].name.is_empty()
-            || self.params[0].name == self.params[1].name
-            || self.params[0].typ
-                != Some(FunctionType::Tensor {
-                    element: FunctionElement::U32,
-                    dimensions: vec![FunctionDimension::CausalSequence {
-                        maximum: program.max_context,
-                    }],
-                })
-            || self.params[1].typ != Some(ScalarType::U32.into())
-            || self.return_type
-                != Some(FunctionType::Tensor {
-                    element: FunctionElement::F32,
-                    dimensions: vec![
-                        FunctionDimension::Fixed { size: 1 },
-                        FunctionDimension::Fixed {
-                            size: program.vocabulary,
-                        },
-                    ],
-                })
-            || output.rows != 1
-            || output.columns != program.vocabulary
-            || !output.float32
+            || self.params.len() != params.len()
+            || self.params.iter().zip(params).any(|(actual, expected)| {
+                actual.name.is_empty() || !names.insert(&actual.name) || actual.typ != expected.typ
+            })
+            || self.return_type.as_ref() != Some(&result)
+            || program.operations.is_empty()
+            || program.output >= program.operations.len()
+            || program.max_context == 0
+            || program.vocabulary == 0
         {
-            return Err(invalid());
+            return Err(XlogError::Compilation(format!(
+                "numerical function {} has an inconsistent signature or body",
+                self.name
+            )));
         }
         Ok(())
     }

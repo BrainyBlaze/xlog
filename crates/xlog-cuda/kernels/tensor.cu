@@ -372,16 +372,16 @@ extern "C" __global__ void tensor_sum_squares_f32(
     if (threadIdx.x == 0) partials[blockIdx.x] = sum;
 }
 
-extern "C" __global__ void tensor_norm_f32(const float* partials, float* output, uint64_t elements) {
+extern "C" __global__ void tensor_sum_f32(const float* partials, float* output, uint64_t elements) {
     float sum = 0.0f;
     for (uint64_t i = threadIdx.x; i < elements; i += blockDim.x) sum += partials[i];
     sum = block_sum(sum);
-    if (threadIdx.x == 0) output[0] = sqrtf(sum);
+    if (threadIdx.x == 0) output[0] = sum;
 }
 
 extern "C" __global__ void tensor_adam_f32(
     const float* master, const float* first, const float* second, const float* gradient,
-    float* next_master, float* next_first, float* next_second, uint16_t* forward,
+    float* next_master, float* next_first, float* next_second,
     uint64_t elements, float rate, float clip, float first_correction, float second_correction
 ) {
     const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -393,18 +393,95 @@ extern "C" __global__ void tensor_adam_f32(
     next_master[i] = value;
     next_first[i] = m;
     next_second[i] = v;
-    forward[i] = to_bf16(value);
 }
 
 extern "C" __global__ void tensor_check_adam_state_f32(
-    const uint16_t* forward, const float* master, const float* first, const float* second,
-    uint32_t* invalid, uint64_t elements, uint64_t step
+    const void* forward, const float* master, const float* first, const float* second,
+    uint32_t* invalid, uint64_t elements, uint64_t step, uint32_t float32
 ) {
     const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= elements) return;
+    const float view = float32 ? static_cast<const float*>(forward)[i] : from_bf16(static_cast<const uint16_t*>(forward)[i]);
+    const bool same = float32 ? __float_as_uint(master[i]) == __float_as_uint(view)
+        : to_bf16(master[i]) == static_cast<const uint16_t*>(forward)[i];
     bool bad = !isfinite(master[i]) || !isfinite(first[i]) || !isfinite(second[i])
-        || !isfinite(from_bf16(forward[i])) || second[i] < 0.0f || to_bf16(master[i]) != forward[i];
+        || !isfinite(view) || second[i] < 0.0f || !same;
     if (step == 0) bad = bad || first[i] != 0.0f || second[i] != 0.0f
-        || __float_as_uint(master[i]) != (static_cast<uint32_t>(forward[i]) << 16);
+        || __float_as_uint(master[i]) != __float_as_uint(view);
     if (bad) atomicOr(invalid, 1U);
+}
+
+extern "C" __global__ void tensor_token_indicators_f32(
+    const uint32_t* tokens, const uint32_t* ids, float* output, uint64_t elements, uint32_t columns, uint32_t start, uint32_t end
+) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = i / columns >= start && i / columns < end && tokens[i / columns] == ids[i % columns] ? 1.0f : 0.0f;
+}
+
+extern "C" __global__ void tensor_broadcast_f32(const float* input, float* output, uint64_t elements, uint32_t columns) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = input[i % columns];
+}
+
+extern "C" __global__ void tensor_broadcast_vjp_f32(const float* dy, float* dx, uint32_t rows, uint32_t columns) {
+    const uint64_t column = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (column >= columns) return;
+    float sum = 0.0f;
+    for (uint32_t row = 0; row < rows; ++row) sum += dy[static_cast<uint64_t>(row) * columns + column];
+    dx[column] = sum;
+}
+
+extern "C" __global__ void tensor_tanh_f32(const float* input, float* output, uint64_t elements) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = tanhf(input[i]);
+}
+
+extern "C" __global__ void tensor_tanh_vjp_f32(const float* input, const float* dy, float* dx, uint64_t elements) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) { const float t = tanhf(input[i]); dx[i] = dy[i] * (1.0f - t * t); }
+}
+
+extern "C" __global__ void tensor_f32_to_bf16(const float* input, uint16_t* output, uint64_t elements) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = to_bf16(input[i]);
+}
+
+extern "C" __global__ void tensor_binary_f32(const float* left, const float* right, float* output, uint64_t elements, uint32_t kind) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = kind == 0 ? left[i] * right[i] : (kind == 1 ? left[i] - right[i] : left[i] / right[i]);
+}
+
+extern "C" __global__ void tensor_mask_f32(const float* condition, const float* positive, const float* negative, float* output, uint64_t elements) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = condition[i] > 0.0f ? positive[i] : negative[i];
+}
+
+extern "C" __global__ void tensor_mask_vjp_f32(const float* condition, const float* dy, float* dx, uint64_t elements, uint32_t positive) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) dx[i] = (condition[i] > 0.0f) == (positive != 0) ? dy[i] : 0.0f;
+}
+
+extern "C" __global__ void tensor_gather_columns_f32(const float* input, const uint32_t* indices, float* output,
+    uint64_t elements, uint32_t input_columns, uint32_t output_columns) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) output[i] = input[(i / output_columns) * input_columns + indices[i % output_columns]];
+}
+
+extern "C" __global__ void tensor_gather_columns_vjp_f32(const float* dy, const uint32_t* indices, float* dx,
+    uint64_t elements, uint32_t input_columns, uint32_t output_columns) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements) atomicAdd(&dx[(i / output_columns) * input_columns + indices[i % output_columns]], dy[i]);
+}
+
+extern "C" __global__ void tensor_copy_row_f32(const float* input, float* output, uint32_t columns, uint32_t source, uint32_t destination) {
+    const uint64_t column = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (column < columns) output[static_cast<uint64_t>(destination) * columns + column] = input[static_cast<uint64_t>(source) * columns + column];
+}
+
+extern "C" __global__ void tensor_binary_vjp_f32(const float* left, const float* right, const float* dy,
+    float* dx, float* dz, uint64_t elements, uint32_t kind) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= elements) return;
+    dx[i] = kind == 0 ? dy[i] * right[i] : (kind == 1 ? dy[i] : dy[i] / right[i]);
+    dz[i] = kind == 0 ? dy[i] * left[i] : (kind == 1 ? -dy[i] : -dy[i] * left[i] / (right[i] * right[i]));
 }

@@ -178,7 +178,8 @@ updated_logits = candidate.forward(token_ids, prediction_position=len(token_ids)
 the same prefixes and `prediction_positions`, with `target_ids` replacing the
 binary arguments, and minimizes cross entropy over the entire vocabulary. Both
 return pre-update mean loss, the norm of the mean gradient before clipping, and
-the completed per-parameter update count. Prefixes are recomputed against the
+the completed minibatch-update count on this model lineage (`completed_updates`).
+Individual Adam counters are reported separately by `optimizer_steps`. Prefixes are recomputed against the
 same pre-update weights; input lists must have equal nonzero length. The caller
 owns minibatch selection, replay, attempt limits and the overall compute budget.
 
@@ -189,7 +190,9 @@ addition use an explicit straight-through surrogate; this is not the mathematica
 derivative of quantization. Softmax uses probabilities before their BF16 cast in
 its VJP. Token IDs and discrete choices have no derivative.
 
-The update uses learning rate `1e-5`, AdamW betas `(0.9, 0.999)`, epsilon `1e-8`,
+The down projection uses learning rate `1e-5`; new acquired constants and their
+projection use `1e-3`. All selected parameters share one gradient norm and clipping
+factor. The update uses AdamW betas `(0.9, 0.999)`, epsilon `1e-8`,
 zero weight decay and global gradient norm clipping at one. New moments start at
 zero. Each successful update replaces the weight and optimizer version together;
 an exception leaves both unchanged. Training uses the same memory budget as
@@ -197,13 +200,78 @@ forward, including retained activations, FP32 reverse temporaries and optimizer
 state. It also reads loss/norm scalars to the host. `checkpoint_identity` continues
 to identify the imported checkpoint, not the subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
-Acquired-function insertion is a separate capability not provided by these methods.
+`fork_acquired(definition_json, parameter_values, insertion_layer=17,
+train_down_projection=True)` constructs an independent acquired candidate. The JSON
+object has exactly `entrypoint` (a new registry name) and `definitions` (canonical
+`FuncDef` records). Each definition includes its actual `params`, `return_type`,
+`body: {"Numerical": ...}`, and `is_private`. Numerical bodies carry `signature`,
+`parameters`, `operations`, `output`, `vocabulary`, and `max_context`.
+`function_definitions` exposes the exact retained registry JSON for subsequent
+proposals. Definitions cannot replace old names; calls resolve the original
+bodies and parameter identities from that registry.
+
+The entry signature is `{"kind":"causal","input_width":hidden_width,
+"output_width":16}`. A scan cell uses `{"kind":"pure","input_widths":[state_width,
+input_width],"output_width":state_width}` and has only numeric arguments. Every
+parameter declaration contains `name`, `shape`, and `float32: true`.
+`parameter_values` supplies the actual finite FP32 arrays for new identities;
+references to existing identities retain their bytes. The combined new bodies
+admit at most 64 operations and 65,536 new scalar constants. The caller owns the
+proposal token limit and provenance; this constructor does not generate or label
+successful proposals.
+
+Operations use a snake-case `operation` tag. `argument` reads the indexed numeric
+argument; `parameter` reads a shared parameter; `linear` multiplies by a named
+parameter's indexed matrix; `add`, `subtract`, `multiply`, `divide`, and `tanh` provide FP32 arithmetic.
+`zeros` creates a fixed single row, including a nontrainable zero scan state.
+`gather_columns` retains its explicit index order and accumulates repeated-index
+gradients. `select` chooses its positive or negative numeric input according to
+`condition > 0`, with no derivative of that discrete condition. `token_indicators`
+reads declared original token IDs, `broadcast` repeats a single constant row,
+`call` supplies numeric `arguments` to an existing definition, and `scan` supplies
+`input`, `initial`, `function`, and `max_steps`. Value indices address preceding
+operations; weight indices address the definition's parameter references.
+
+A scan cell receives `(previous_state, current_raw_input)` and returns one state
+row. It processes the entire available raw history, rejects a history longer than
+`max_steps`, and preserves input/parameter VJPs through every step. Prefix scans
+operate on raw-token features independently of hidden states; the feature body
+can combine their states with the current hidden row afterward. Pure cells cannot
+read tokens. Compiler row/stack operations are not accepted as authored acquisition
+operations, so a function cannot gather future hidden rows.
+
+The inserted call computes `z[j]` from the raw prefix available at position `j`
+and that position's hidden row. A new zero FP32 projection `[hidden_width,16]`
+produces a delta, which is rounded to BF16 and added to the layer residual.
+`forward(..., history_span=(start,end))` is mandatory with active insertions;
+`fit_binary` and `fit_tokens` require corresponding `history_spans` per example.
+The available raw prefix at position `j` is exactly
+`token_ids[start:min(end,j+1)]`. Framing, proposed probes, and teacher-forced AST
+outside that span are excluded. Scans return their initial state before `start`
+and retain their final state after `end`; no last-position feature is broadcast
+backward to earlier positions.
+
+`fit_binary` updates new constants/P and the explicitly enabled down projection.
+`fit_tokens` updates only that down projection, preserving input VJPs through
+fixed acquired functions/P. Setting `train_down_projection=False` keeps the
+control's down projection frozen; a down-only fit then raises an error.
+`fork_candidate()` is exact continuation of the current trainable set, definitions,
+aliases, and every master/moment/counter. It does not recreate P or enable a frozen
+down projection. A later `fork_acquired` retains all old definitions and optimizer
+states, freezes old constants/P, and creates zero-step states for new identities.
+
+`adaptation_manifest` is read-only JSON with schema `xlog.native-adaptation.v1`.
+It includes the numerical entrypoint, physical parameter IDs/names/shapes/dtypes/
+roles/counters, and `adaptation`: retained insertions, active `trainable` IDs,
+optional `down_projection`, and lineage `completed_updates`. Applications should
+use these actual roles and per-parameter counters for continuation and selection,
+including when a trained candidate becomes a frozen evaluation base.
 
 `save_snapshot(path, application_state=payload_bytes)` saves a complete cold model
 version in one self-contained SafeTensors file and returns its SHA256 identity.
 It includes the canonical function definitions and signatures, the named numerical
-entry point, shared parameter indices and all actual BF16
-weight bytes. Trainable candidates also include their FP32 master weights, Adam
+entry point, shared parameter indices and all actual BF16/FP32
+parameter bytes, insertion metadata and active trainable IDs. Trainable candidates also include their FP32 master weights, Adam
 moments and completed step count. The application payload is covered by the same
 digest; XLOG preserves these bytes without interpreting the application's history,
 random generator states, data cursors or budgets. The application owner must
@@ -228,16 +296,16 @@ removed; cleanup or directory-sync failures report the affected path and whether
 publication occurred. Snapshot methods require the default `host-io` feature and
 perform cold host transfers.
 
-The native description uses `xlog.native-causal-snapshot.v2`. Restore reconstructs
+The native description uses `xlog.native-causal-snapshot.v3`. Restore reconstructs
 and validates the common function registry and resolves the saved entry point;
 it does not maintain an independent executable graph beside those definitions.
-Earlier numerical-plan-only snapshots require their producing version for restore;
-they are not silently reinterpreted as registered definitions.
+Earlier snapshot schemas require their producing version for restore; they are
+not silently reinterpreted as acquired-state snapshots.
 
 Restore requires the expected 64-digit SHA256 and verifies the actual streamed
 header and payload before returning the model or application bytes. It checks the
 graph, tensor roster and layouts, and the optimizer's finite values, nonnegative
-second moments and BF16/master agreement. Original checkpoint shards are not
+second moments and forward/master agreement in the actual storage type. Original checkpoint shards are not
 needed. Parameter aliases, context bound and optimizer step are retained. The next
 `forward` or `fit_*` recomputes the supplied causal prefix; no KV cache or unfinished
 gradient accumulation is serialized. Each restore uses a fresh native provider
@@ -251,8 +319,9 @@ a candidate file alone does not preserve the paired base model. The returned
 snapshot identity describes the saved complete bytes, while `checkpoint_identity`
 continues to describe the original import even after training or restoration.
 The read-only `optimizer_steps` property returns a copy of the mapping from each
-canonical trainable parameter name to its completed native optimizer step. Frozen
-models return an empty mapping; a newly trainable down projection has step zero.
+canonical optimizer-owned parameter name to its completed native optimizer step.
+An unadapted import returns an empty mapping; a trained model retains counters
+even when used as a frozen base. Newly created parameter states have step zero.
 Use these native values to check application metadata after restore, rather than
 treating an application's candidate identifier as optimizer evidence.
 

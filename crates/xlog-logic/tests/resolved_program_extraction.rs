@@ -41,7 +41,7 @@ fn resolved_program_extraction_builds_the_executable_dependency_graph() {
 
     assert_eq!(
         extraction.schema_version,
-        "xlog.resolved-program-extraction.v2"
+        "xlog.resolved-program-extraction.v3"
     );
     assert_eq!(extraction.source_manifest.modules.len(), 2);
 

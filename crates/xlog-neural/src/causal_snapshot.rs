@@ -19,17 +19,196 @@ use crate::tensor_archive::{
     invalid, io_error, TensorArchive, MAX_HEADER_BYTES, TRANSFER_CHUNK_BYTES,
 };
 
-const SCHEMA: &str = "xlog.native-causal-snapshot.v2";
+const SCHEMA: &str = "xlog.native-causal-snapshot.v3";
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
-/// The physical down projection and its completed optimizer update count.
-#[derive(Clone, Serialize, Deserialize)]
+/// A physical parameter and its completed optimizer update count.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimizerSnapshot {
     /// Index into the numerical program's shared parameter table.
     pub parameter: usize,
     /// Completed Adam steps; all snapshots occur between complete updates.
     pub step: u64,
+}
+
+/// A retained acquired definition and its exact insertion in the canonical decoder.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquiredInsertion {
+    /// Registry name of the feature-producing definition.
+    pub function: String,
+    /// Zero-based decoder layer after which the residual is inserted.
+    pub layer: usize,
+    /// Shared physical ID of the FP32 projection.
+    pub projection: usize,
+    /// Shared physical IDs created by this definition bundle, excluding projection.
+    pub parameters: Vec<usize>,
+    /// Actual residual operation index in the entry definition.
+    pub output: usize,
+}
+
+/// Continuation roles are explicit and independent of per-parameter Adam counters.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAdaptation {
+    /// All retained insertion generations, including frozen predecessors.
+    pub insertions: Vec<AcquiredInsertion>,
+    /// Parameters updated by numerical outcome fitting in this owner.
+    pub trainable: Vec<usize>,
+    /// The permitted down projection, also the sole behavior-cloning parameter.
+    pub down_projection: Option<usize>,
+    /// Number of successfully published minibatch updates on this model lineage.
+    pub completed_updates: u64,
+}
+
+impl NativeAdaptation {
+    fn validate(
+        &self,
+        program: &TensorProgram,
+        functions: &FunctionRegistry,
+        optimizer_ids: &std::collections::BTreeSet<usize>,
+    ) -> Result<()> {
+        use xlog_ir::tensor::{TensorOperation as Op, TensorSignature};
+        let mut owned = std::collections::BTreeSet::new();
+        let mut outputs = std::collections::BTreeSet::new();
+        for insertion in &self.insertions {
+            let projection = program
+                .parameters
+                .get(insertion.projection)
+                .ok_or_else(|| invalid("insertion projection is absent"))?;
+            let &[hidden, width] = projection.shape.as_slice() else {
+                return Err(invalid("insertion projection must be a matrix"));
+            };
+            if !projection.float32
+                || width != 16
+                || !owned.insert(insertion.projection)
+                || !outputs.insert(insertion.output)
+                || functions.numerical(&insertion.function)?.signature
+                    != (TensorSignature::Causal {
+                        input_width: hidden,
+                        output_width: width,
+                    })
+            {
+                return Err(invalid("insertion type or physical identity differs"));
+            }
+            let offset = insertion
+                .output
+                .checked_sub(4)
+                .ok_or_else(|| invalid("insertion body is incomplete"))?;
+            let body = program
+                .operations
+                .get(offset..=insertion.output)
+                .ok_or_else(|| invalid("insertion body is absent"))?;
+            let [Op::Float32 { input }, Op::Call {
+                function,
+                arguments,
+            }, Op::Linear {
+                input: feature,
+                weight,
+            }, Op::Bfloat16 { input: delta }, Op::Add { left, right }] = body
+            else {
+                return Err(invalid(
+                    "insertion does not match its actual numerical call path",
+                ));
+            };
+            if function != &insertion.function
+                || arguments != &[offset]
+                || *feature != offset + 1
+                || *weight != insertion.projection
+                || *delta != offset + 2
+                || *left != *input
+                || *right != offset + 3
+            {
+                return Err(invalid("insertion operands differ from the saved roles"));
+            }
+            if let Some(previous) = self
+                .insertions
+                .iter()
+                .find(|previous| previous.output == *input)
+            {
+                if previous.layer != insertion.layer || previous.output >= insertion.output {
+                    return Err(invalid("insertion layer chain is inconsistent"));
+                }
+            } else {
+                let Some(Op::Add {
+                    right: projected, ..
+                }) = program.operations.get(*input)
+                else {
+                    return Err(invalid(
+                        "insertion does not follow a decoder layer residual",
+                    ));
+                };
+                let Some(Op::Linear { weight, .. }) = program.operations.get(*projected) else {
+                    return Err(invalid("insertion residual has no down projection"));
+                };
+                if program.parameters[*weight].name
+                    != format!("model.layers.{}.mlp.down_proj.weight", insertion.layer)
+                {
+                    return Err(invalid(
+                        "insertion's declared layer differs from its actual caller",
+                    ));
+                }
+            }
+            for &id in &insertion.parameters {
+                if !owned.insert(id)
+                    || !program
+                        .parameters
+                        .get(id)
+                        .is_some_and(|parameter| parameter.float32)
+                {
+                    return Err(invalid(
+                        "acquired parameter ownership is duplicated or has a different type",
+                    ));
+                }
+            }
+        }
+        for &id in optimizer_ids {
+            let parameter = &program.parameters[id];
+            if parameter.float32 {
+                if !owned.contains(&id) {
+                    return Err(invalid("FP32 optimizer has no acquired owner"));
+                }
+            } else if !parameter.name.starts_with("model.layers.")
+                || !parameter.name.ends_with(".mlp.down_proj.weight")
+                || !program.operations.iter().any(
+                    |operation| matches!(operation, Op::Linear { weight, .. } if *weight == id),
+                )
+            {
+                return Err(invalid(
+                    "BF16 optimizer does not own a decoder down projection",
+                ));
+            }
+        }
+        if owned.iter().any(|id| !optimizer_ids.contains(id)) {
+            return Err(invalid("acquired optimizer state is incomplete"));
+        }
+        let mut expected = std::collections::BTreeSet::new();
+        if let Some(last) = self.insertions.last() {
+            expected.extend(last.parameters.iter().copied());
+            expected.insert(last.projection);
+        }
+        if let Some(id) = self.down_projection {
+            if !optimizer_ids.contains(&id) || program.parameters[id].float32 {
+                return Err(invalid("trainable down projection role is invalid"));
+            }
+            expected.insert(id);
+        }
+        let actual = self
+            .trainable
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual.len() != self.trainable.len()
+            || expected != actual
+            || actual.iter().any(|id| !optimizer_ids.contains(id))
+        {
+            return Err(invalid(
+                "active trainable IDs differ from their retained roles",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// All native definitions and caller-owned continuation bytes in one snapshot.
@@ -43,8 +222,10 @@ pub struct CausalSnapshotDescription {
     pub entrypoint: String,
     /// Provenance of the original import, distinct from this file's identity.
     pub checkpoint_identity: [u8; 32],
-    /// Present only for a trainable candidate.
-    pub optimizer: Option<OptimizerSnapshot>,
+    /// All retained optimizer owners, including frozen predecessor definitions.
+    pub optimizers: Vec<OptimizerSnapshot>,
+    /// Actual insertion and update roles for continuation and consumer inspection.
+    pub adaptation: NativeAdaptation,
     /// Application-owned history, RNG, cursors and budgets, interpreted by that owner.
     pub application_state: Vec<u8>,
 }
@@ -55,7 +236,8 @@ impl CausalSnapshotDescription {
         functions: Arc<FunctionRegistry>,
         entrypoint: String,
         checkpoint_identity: [u8; 32],
-        optimizer: Option<OptimizerSnapshot>,
+        optimizers: Vec<OptimizerSnapshot>,
+        adaptation: NativeAdaptation,
         application_state: Vec<u8>,
     ) -> Self {
         Self {
@@ -63,7 +245,8 @@ impl CausalSnapshotDescription {
             functions,
             entrypoint,
             checkpoint_identity,
-            optimizer,
+            optimizers,
+            adaptation,
             application_state,
         }
     }
@@ -82,7 +265,8 @@ impl CausalSnapshotDescription {
         }
         self.functions.validate()?;
         let program = self.program()?;
-        program.shapes(1, 0)?;
+        self.functions
+            .compile_numerical(&self.entrypoint, 1, 0, Some((0, 1)))?;
         let mut tensors = Vec::with_capacity(program.parameters.len() + 3);
         for (id, parameter) in program.parameters.iter().enumerate() {
             let (rows, columns) = match parameter.shape.as_slice() {
@@ -94,28 +278,26 @@ impl CausalSnapshotDescription {
                 name: format!("parameter.{id}"),
                 rows,
                 columns,
-                float32: false,
+                float32: parameter.float32,
             });
         }
-        if let Some(optimizer) = &self.optimizer {
+        let mut optimizer_ids = std::collections::BTreeSet::new();
+        for optimizer in &self.optimizers {
+            if !optimizer_ids.insert(optimizer.parameter)
+                || optimizer.step > self.adaptation.completed_updates
+            {
+                return Err(invalid(
+                    "snapshot optimizer identities or counters are inconsistent",
+                ));
+            }
             let parameter = program
                 .parameters
                 .get(optimizer.parameter)
                 .ok_or_else(|| invalid("snapshot optimizer parameter is absent"))?;
-            // Restore the same trainable role accepted by fork_trainable.
-            let layer = parameter
-                .name
-                .strip_prefix("model.layers.")
-                .and_then(|name| name.strip_suffix(".mlp.down_proj.weight"))
-                .and_then(|name| name.parse::<usize>().ok())
-                .ok_or_else(|| invalid("snapshot optimizer must name a decoder down projection"))?;
-            if parameter.name != format!("model.layers.{layer}.mlp.down_proj.weight") {
-                return Err(invalid(
-                    "snapshot optimizer parameter name is not canonical",
-                ));
-            }
-            let &[rows, columns] = parameter.shape.as_slice() else {
-                return Err(invalid("snapshot optimizer requires a matrix parameter"));
+            let (rows, columns) = match parameter.shape.as_slice() {
+                &[columns] => (1, columns),
+                &[rows, columns] => (rows, columns),
+                _ => return Err(invalid("snapshot optimizer requires a vector or matrix")),
             };
             for name in [
                 "optimizer.master",
@@ -123,13 +305,15 @@ impl CausalSnapshotDescription {
                 "optimizer.second_moment",
             ] {
                 tensors.push(SnapshotTensor {
-                    name: name.into(),
+                    name: format!("{name}.{}", optimizer.parameter),
                     rows,
                     columns,
                     float32: true,
                 });
             }
         }
+        self.adaptation
+            .validate(program, &self.functions, &optimizer_ids)?;
         Ok(tensors)
     }
 }

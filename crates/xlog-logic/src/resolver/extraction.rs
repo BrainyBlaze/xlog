@@ -21,7 +21,7 @@ use super::{
     ResolvedSourceObjectKind,
 };
 
-const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v2";
+const EXTRACTION_SCHEMA_VERSION: &str = "xlog.resolved-program-extraction.v3";
 
 /// Source inventory and executable dependency structure for one resolved program.
 #[derive(Debug, Clone, PartialEq, Serialize)]

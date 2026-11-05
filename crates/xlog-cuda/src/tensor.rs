@@ -15,6 +15,7 @@ use crate::{CudaFunction, CudaKernelProvider, LaunchAsync, LaunchConfig};
 
 const BLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 
+mod functions;
 mod training;
 pub use training::{TensorAdamState, TensorLoss, TensorTrainingResult};
 
@@ -427,9 +428,16 @@ impl TensorExecutor {
         parameters: &[NativeTensor],
         token_ids: &[u32],
         prediction_position: usize,
+        history_span: Option<(usize, usize)>,
     ) -> Result<NativeTensor> {
-        let mut values =
-            self.execute_retaining(program, parameters, token_ids, prediction_position, &[])?;
+        let mut values = self.execute_retaining(
+            program,
+            parameters,
+            token_ids,
+            prediction_position,
+            history_span,
+            &[],
+        )?;
         values[program.output]
             .take()
             .ok_or_else(|| failure("missing numerical output"))
@@ -441,6 +449,7 @@ impl TensorExecutor {
         parameters: &[NativeTensor],
         token_ids: &[u32],
         prediction_position: usize,
+        history_span: Option<(usize, usize)>,
         retained: &[bool],
     ) -> Result<Vec<Option<NativeTensor>>> {
         let shapes = program.shapes(token_ids.len(), prediction_position)?;
@@ -455,7 +464,7 @@ impl TensorExecutor {
         }
         for (parameter, expected) in parameters.iter().zip(&program.parameters) {
             if parameter.storage.len() != expected.bytes()?
-                || parameter.shape.float32
+                || parameter.shape.float32 != expected.float32
                 || parameter.device != self.provider.device().ordinal()
             {
                 return Err(failure(
@@ -588,7 +597,11 @@ impl TensorExecutor {
                 } => {
                     let (left, right) = (input(left)?, input(right)?);
                     let name = if matches!(operation, Op::Add { .. }) {
-                        "tensor_add_bf16"
+                        if output.shape.float32 {
+                            "tensor_accumulate_f32"
+                        } else {
+                            "tensor_add_bf16"
+                        }
                     } else {
                         "tensor_silu_gate_bf16"
                     };
@@ -622,6 +635,14 @@ impl TensorExecutor {
                         (source.pointer(), output.pointer(), count),
                     )?;
                 }
+                _ => self.function_operation(
+                    operation,
+                    parameters,
+                    &values,
+                    &tokens,
+                    history_span,
+                    &output,
+                )?,
             }
             values[id] = Some(output);
             for source in operation.inputs() {

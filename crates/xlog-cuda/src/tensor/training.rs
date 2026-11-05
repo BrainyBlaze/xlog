@@ -71,14 +71,14 @@ pub struct TensorTrainingResult {
     pub mean_loss: f32,
     /// L2 norm of the mean FP32 gradient, before clipping to one.
     pub gradient_norm: f32,
-    /// Completed Adam update count for this physical parameter.
+    /// Completed update count supplied by the publishing model owner.
     pub step: u64,
 }
 
 impl TensorExecutor {
-    /// Restore optimizer bytes only when they agree with their actual BF16
+    /// Restore optimizer bytes only when they agree with their actual typed
     /// forward view, have finite moments and satisfy the zero-step contract.
-    pub fn restore_linear_optimizer(
+    pub fn restore_optimizer(
         &self,
         parameter: usize,
         forward: &NativeTensor,
@@ -87,8 +87,7 @@ impl TensorExecutor {
         second: NativeTensor,
         step: u64,
     ) -> Result<TensorAdamState> {
-        if forward.shape.float32
-            || forward.device != self.provider.device().ordinal()
+        if forward.device != self.provider.device().ordinal()
             || [&master, &first, &second].iter().any(|tensor| {
                 !tensor.shape.float32
                     || tensor.device != forward.device
@@ -120,6 +119,7 @@ impl TensorExecutor {
                 invalid.device_ptr_value(),
                 master.elements() as u64,
                 step,
+                u32::from(forward.shape.float32),
             ),
         )?;
         let mut flag = [0u32];
@@ -140,14 +140,14 @@ impl TensorExecutor {
         })
     }
 
-    fn float_shape(&self, shape: TensorValueShape) -> Result<NativeTensor> {
+    pub(super) fn float_shape(&self, shape: TensorValueShape) -> Result<NativeTensor> {
         self.allocate_tensor(TensorValueShape {
             float32: true,
             ..shape
         })
     }
 
-    fn as_float(&self, input: &NativeTensor) -> Result<NativeTensor> {
+    pub(super) fn as_float(&self, input: &NativeTensor) -> Result<NativeTensor> {
         if input.shape.float32 {
             return Ok(input.clone());
         }
@@ -161,7 +161,7 @@ impl TensorExecutor {
         Ok(output)
     }
 
-    fn zeros(&self, shape: TensorValueShape) -> Result<NativeTensor> {
+    pub(super) fn zeros(&self, shape: TensorValueShape) -> Result<NativeTensor> {
         let output = self.float_shape(shape)?;
         self.launch(
             self.recorder(&[], &output),
@@ -172,7 +172,7 @@ impl TensorExecutor {
         Ok(output)
     }
 
-    fn accumulate(
+    pub(super) fn accumulate(
         &self,
         slot: &mut Option<NativeTensor>,
         contribution: NativeTensor,
@@ -359,19 +359,22 @@ impl TensorExecutor {
         ))
     }
 
-    fn linear_gradient(
+    fn gradients(
         &self,
         program: &TensorProgram,
         parameters: &[NativeTensor],
-        parameter: usize,
+        trainable: &[usize],
         token_ids: &[u32],
         prediction_position: usize,
+        history_span: Option<(usize, usize)>,
         loss: TensorLoss,
-    ) -> Result<(NativeTensor, f32)> {
+    ) -> Result<(Vec<NativeTensor>, f32)> {
         let mut active = vec![false; program.operations.len()];
         let mut retained = vec![false; program.operations.len()];
         for (id, operation) in program.operations.iter().enumerate() {
-            active[id] = matches!(operation, Op::Linear { weight, .. } if *weight == parameter)
+            active[id] = operation
+                .parameter()
+                .is_some_and(|parameter| trainable.contains(&parameter))
                 || operation.inputs().iter().any(|&input| active[input]);
             if active[id] {
                 for input in operation.inputs() {
@@ -387,6 +390,7 @@ impl TensorExecutor {
             parameters,
             token_ids,
             prediction_position,
+            history_span,
             &retained,
         )?;
         let logits = values[program.output]
@@ -422,7 +426,7 @@ impl TensorExecutor {
         }
         let mut cotangents: Vec<Option<NativeTensor>> = vec![None; program.operations.len()];
         cotangents[program.output] = Some(seed);
-        let mut parameter_gradient = None;
+        let mut parameter_gradients: Vec<Option<NativeTensor>> = vec![None; trainable.len()];
         for id in (0..program.operations.len()).rev() {
             let Some(dy) = cotangents[id].take() else {
                 continue;
@@ -439,7 +443,7 @@ impl TensorExecutor {
                     weight,
                 } => {
                     let shape = input(source)?.shape;
-                    if weight == parameter {
+                    if let Some(slot) = trainable.iter().position(|&id| id == weight) {
                         let x = self.as_float(input(source)?)?;
                         let dw = self.float_shape(parameters[weight].shape)?;
                         self.gemm(
@@ -453,7 +457,7 @@ impl TensorExecutor {
                             shape.rows,
                             1,
                         )?;
-                        self.accumulate(&mut parameter_gradient, dw)?;
+                        self.accumulate(&mut parameter_gradients[slot], dw)?;
                     }
                     if active[source] {
                         let w = self.as_float(&parameters[weight])?;
@@ -574,11 +578,21 @@ impl TensorExecutor {
                     contributions.push((source, dx));
                 }
                 Op::Float32 { input: source } => contributions.push((source, dy)),
+                Op::Parameter { weight } => {
+                    if let Some(slot) = trainable.iter().position(|&id| id == weight) {
+                        self.accumulate(&mut parameter_gradients[slot], dy)?;
+                    }
+                }
                 Op::Embedding { .. } => {
                     return Err(failure(
                         "linear training reached an unsupported embedding gradient",
                     ))
                 }
+                _ => contributions.extend(self.function_vjp(
+                    &program.operations[id],
+                    &values,
+                    &dy,
+                )?),
             }
             for (source, contribution) in contributions {
                 if active[source] {
@@ -588,20 +602,25 @@ impl TensorExecutor {
             // Every reverse consumer has a larger operation index.
             values[id] = None;
         }
-        let gradient =
-            parameter_gradient.ok_or_else(|| failure("missing physical parameter gradient"))?;
-        self.require_finite(&gradient)?;
-        Ok((gradient, loss))
+        let gradients = parameter_gradients
+            .into_iter()
+            .zip(trainable)
+            .map(|(gradient, &id)| {
+                let gradient = match gradient {
+                    Some(gradient) => gradient,
+                    None => self.zeros(parameters[id].shape)?,
+                };
+                self.require_finite(&gradient)?;
+                Ok(gradient)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((gradients, loss))
     }
 
-    /// Initialize FP32 master and zero moments from a real BF16 parameter.
-    pub fn linear_optimizer(
-        &self,
-        parameter: usize,
-        value: &NativeTensor,
-    ) -> Result<TensorAdamState> {
-        if value.shape.float32 || value.device != self.provider.device().ordinal() {
-            return Err(failure("optimizer requires this provider's BF16 parameter"));
+    /// Initialize an FP32 master and zero moments from the actual physical parameter.
+    pub fn optimizer(&self, parameter: usize, value: &NativeTensor) -> Result<TensorAdamState> {
+        if value.device != self.provider.device().ordinal() {
+            return Err(failure("optimizer requires this provider's parameter"));
         }
         let master = self.as_float(value)?;
         self.require_finite(&master)?;
@@ -615,149 +634,193 @@ impl TensorExecutor {
         })
     }
 
-    /// Differentiate a minibatch and prepare one AdamW update (zero weight decay).
-    /// Old parameters and moments are never overwritten, including on failure.
-    pub fn train_linear(
+    /// Differentiate all selected parameters in one reverse pass per prefix,
+    /// clip their joint mean gradient, and prepare an atomic set of Adam updates.
+    pub fn train_parameters(
         &self,
-        program: &TensorProgram,
         parameters: &[NativeTensor],
-        state: &TensorAdamState,
-        batch: &[(&[u32], usize, TensorLoss)],
-        rate: f32,
-    ) -> Result<(NativeTensor, TensorAdamState, TensorTrainingResult)> {
-        if batch.is_empty() || !rate.is_finite() || rate <= 0.0 {
-            return Err(failure(
-                "training requires a nonempty minibatch and finite positive rate",
-            ));
+        states: &[(&TensorAdamState, f32)],
+        batch: &[(
+            &TensorProgram,
+            &[u32],
+            usize,
+            Option<(usize, usize)>,
+            TensorLoss,
+        )],
+    ) -> Result<(
+        Vec<(usize, NativeTensor, TensorAdamState)>,
+        TensorTrainingResult,
+    )> {
+        if batch.is_empty() || states.is_empty() {
+            return Err(failure("training requires data and selected parameters"));
         }
-        let parameter = parameters
-            .get(state.parameter)
-            .ok_or_else(|| failure("optimizer parameter is absent"))?;
-        if !Arc::ptr_eq(&parameter.storage, &state.forward.storage)
-            || parameter.shape.rows != state.master.shape.rows
-            || parameter.shape.columns != state.master.shape.columns
-            || parameter.device != state.master.device
-        {
-            return Err(failure("optimizer and physical parameter disagree"));
-        }
-        for &(tokens, position, loss) in batch {
-            program.shapes(tokens.len(), position)?;
-            loss.arguments(program.vocabulary)?;
-            if tokens.iter().any(|&id| id as usize >= program.vocabulary) {
-                return Err(failure("training input token is outside the vocabulary"));
+        let ids = states
+            .iter()
+            .map(|(state, _)| state.parameter)
+            .collect::<Vec<_>>();
+        let mut unique = std::collections::HashSet::new();
+        for (state, rate) in states {
+            let parameter = parameters
+                .get(state.parameter)
+                .ok_or_else(|| failure("optimizer parameter is absent"))?;
+            if !unique.insert(state.parameter)
+                || !rate.is_finite()
+                || *rate <= 0.0
+                || !Arc::ptr_eq(&parameter.storage, &state.forward.storage)
+            {
+                return Err(failure(
+                    "optimizer identity, uniqueness or learning rate differs",
+                ));
             }
+            state
+                .step
+                .checked_add(1)
+                .ok_or_else(|| failure("optimizer step overflow"))?;
         }
-        let step = state
-            .step
-            .checked_add(1)
-            .ok_or_else(|| failure("optimizer step overflow"))?;
-        let mut sum = None;
+        let mut sums: Vec<Option<NativeTensor>> = vec![None; ids.len()];
         let mut mean_loss = 0.0f32;
-        for &(tokens, position, loss) in batch {
-            let (gradient, loss) =
-                self.linear_gradient(program, parameters, state.parameter, tokens, position, loss)?;
-            self.accumulate(&mut sum, gradient)?;
+        for &(program, tokens, position, history_span, loss) in batch {
+            let (gradients, loss) = self.gradients(
+                program,
+                parameters,
+                &ids,
+                tokens,
+                position,
+                history_span,
+                loss,
+            )?;
+            for (sum, gradient) in sums.iter_mut().zip(gradients) {
+                self.accumulate(sum, gradient)?;
+            }
             mean_loss += loss / batch.len() as f32;
         }
         if !mean_loss.is_finite() {
             return Err(failure("nonfinite minibatch loss"));
         }
-        let sum = sum.ok_or_else(|| failure("empty gradient accumulation"))?;
-        let gradient = self.float_shape(sum.shape)?;
-        self.launch(
-            self.recorder(&[&sum], &gradient),
-            "tensor_scale_f32",
-            grid(sum.elements().div_ceil(256))?,
-            (
-                sum.pointer(),
-                gradient.pointer(),
-                sum.elements() as u64,
-                1.0f32 / batch.len() as f32,
-            ),
-        )?;
-        drop(sum);
-        let partials = self.float_shape(TensorValueShape {
-            rows: 1,
-            columns: gradient.elements().div_ceil(256),
-            float32: true,
-        })?;
-        self.launch(
-            self.recorder(&[&gradient], &partials),
-            "tensor_sum_squares_f32",
-            grid(partials.elements())?,
-            (
-                gradient.pointer(),
-                partials.pointer(),
-                gradient.elements() as u64,
-            ),
-        )?;
-        let norm = self.float_shape(TensorValueShape {
-            rows: 1,
-            columns: 1,
-            float32: true,
-        })?;
-        self.launch(
-            self.recorder(&[&partials], &norm),
-            "tensor_norm_f32",
-            grid(1)?,
-            (
-                partials.pointer(),
-                norm.pointer(),
-                partials.elements() as u64,
-            ),
-        )?;
-        let gradient_norm = self.read_logits(&norm, &[0])?[0];
+        let mut gradients = Vec::with_capacity(ids.len());
+        let mut squared_norm = 0.0f32;
+        for sum in sums {
+            let sum = sum.ok_or_else(|| failure("empty gradient accumulation"))?;
+            let gradient = self.float_shape(sum.shape)?;
+            self.launch(
+                self.recorder(&[&sum], &gradient),
+                "tensor_scale_f32",
+                grid(sum.elements().div_ceil(256))?,
+                (
+                    sum.pointer(),
+                    gradient.pointer(),
+                    sum.elements() as u64,
+                    1.0f32 / batch.len() as f32,
+                ),
+            )?;
+            let partials = self.float_shape(TensorValueShape {
+                rows: 1,
+                columns: gradient.elements().div_ceil(256),
+                float32: true,
+            })?;
+            self.launch(
+                self.recorder(&[&gradient], &partials),
+                "tensor_sum_squares_f32",
+                grid(partials.elements())?,
+                (
+                    gradient.pointer(),
+                    partials.pointer(),
+                    gradient.elements() as u64,
+                ),
+            )?;
+            let sum = self.float_shape(TensorValueShape {
+                rows: 1,
+                columns: 1,
+                float32: true,
+            })?;
+            self.launch(
+                self.recorder(&[&partials], &sum),
+                "tensor_sum_f32",
+                grid(1)?,
+                (
+                    partials.pointer(),
+                    sum.pointer(),
+                    partials.elements() as u64,
+                ),
+            )?;
+            squared_norm += self.read_logits(&sum, &[0])?[0];
+            gradients.push(gradient);
+        }
+        let gradient_norm = squared_norm.sqrt();
         if !gradient_norm.is_finite() {
             return Err(failure("nonfinite global gradient norm"));
         }
-        let forward = self.allocate_tensor(parameter.shape)?;
-        let next = TensorAdamState {
-            parameter: state.parameter,
-            forward: forward.clone(),
-            master: self.float_shape(state.master.shape)?,
-            first: self.float_shape(state.first.shape)?,
-            second: self.float_shape(state.second.shape)?,
-            step,
-        };
-        let mut recorder = self.recorder(
-            &[&state.master, &state.first, &state.second, &gradient],
-            &next.master,
-        );
-        recorder
-            .write(next.first.storage.as_ref())
-            .write(next.second.storage.as_ref())
-            .write(forward.storage.as_ref());
-        self.launch(
-            recorder,
-            "tensor_adam_f32",
-            grid(gradient.elements().div_ceil(256))?,
-            (
-                state.master.pointer(),
-                state.first.pointer(),
-                state.second.pointer(),
-                gradient.pointer(),
-                next.master.pointer(),
-                next.first.pointer(),
-                next.second.pointer(),
-                forward.pointer(),
-                gradient.elements() as u64,
-                rate,
-                1.0f32 / gradient_norm.max(1.0),
-                1.0f32 - 0.9f32.powf(step as f32),
-                1.0f32 - 0.999f32.powf(step as f32),
-            ),
-        )?;
-        self.require_finite(&next.master)?;
-        self.require_finite(&next.first)?;
-        self.require_finite(&next.second)?;
-        self.require_finite(&self.as_float(&forward)?)?;
+        let mut updates = Vec::with_capacity(states.len());
+        for ((state, rate), gradient) in states.iter().zip(gradients) {
+            let step = state.step + 1;
+            let master = self.float_shape(state.master.shape)?;
+            let forward = if parameters[state.parameter].shape.float32 {
+                master.clone()
+            } else {
+                self.allocate_tensor(parameters[state.parameter].shape)?
+            };
+            let next = TensorAdamState {
+                parameter: state.parameter,
+                forward: forward.clone(),
+                master,
+                first: self.float_shape(state.first.shape)?,
+                second: self.float_shape(state.second.shape)?,
+                step,
+            };
+            let mut recorder = self.recorder(
+                &[&state.master, &state.first, &state.second, &gradient],
+                &next.master,
+            );
+            recorder
+                .write(next.first.storage.as_ref())
+                .write(next.second.storage.as_ref());
+            self.launch(
+                recorder,
+                "tensor_adam_f32",
+                grid(gradient.elements().div_ceil(256))?,
+                (
+                    state.master.pointer(),
+                    state.first.pointer(),
+                    state.second.pointer(),
+                    gradient.pointer(),
+                    next.master.pointer(),
+                    next.first.pointer(),
+                    next.second.pointer(),
+                    gradient.elements() as u64,
+                    *rate,
+                    1.0f32 / gradient_norm.max(1.0),
+                    1.0f32 - 0.9f32.powf(step as f32),
+                    1.0f32 - 0.999f32.powf(step as f32),
+                ),
+            )?;
+            if !forward.shape.float32 {
+                self.launch(
+                    self.recorder(&[&next.master], &forward),
+                    "tensor_f32_to_bf16",
+                    grid(forward.elements().div_ceil(256))?,
+                    (
+                        next.master.pointer(),
+                        forward.pointer(),
+                        forward.elements() as u64,
+                    ),
+                )?;
+            }
+            self.require_finite(&next.master)?;
+            self.require_finite(&next.first)?;
+            self.require_finite(&next.second)?;
+            self.require_finite(&self.as_float(&forward)?)?;
+            updates.push((state.parameter, forward, next));
+        }
         Ok((
-            forward,
-            next,
+            updates,
             TensorTrainingResult {
                 mean_loss,
                 gradient_norm,
-                step,
+                step: states
+                    .iter()
+                    .map(|(state, _)| state.step + 1)
+                    .max()
+                    .unwrap_or(0),
             },
         ))
     }

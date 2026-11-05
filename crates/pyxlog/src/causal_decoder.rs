@@ -88,16 +88,20 @@ impl PyNativeCausalModel {
 
     /// Use original token IDs and a zero-based prediction position. This computes
     /// next-token logits at that position, with full-prefix causal attention.
-    #[pyo3(signature = (token_ids, *, prediction_position))]
+    #[pyo3(signature = (token_ids, *, prediction_position, history_span=None))]
     fn forward(
         &self,
         py: Python<'_>,
         token_ids: Vec<u32>,
         prediction_position: usize,
+        history_span: Option<(usize, usize)>,
     ) -> PyResult<PyNativeLogits> {
-        py.detach(|| self.inner.forward(&token_ids, prediction_position))
-            .map(|inner| PyNativeLogits { inner })
-            .map_err(xlog_err)
+        py.detach(|| {
+            self.inner
+                .forward(&token_ids, prediction_position, history_span)
+        })
+        .map(|inner| PyNativeLogits { inner })
+        .map_err(xlog_err)
     }
 
     /// Fork a candidate; the source model and its retained outputs stay unchanged.
@@ -108,9 +112,51 @@ impl PyNativeCausalModel {
             .map_err(xlog_err)
     }
 
+    /// Exact continuation retaining definitions, trainable roles and all Adam states.
+    fn fork_candidate(&self) -> Self {
+        Self {
+            inner: self.inner.fork_candidate(),
+        }
+    }
+
+    /// Construct an acquired candidate from actual canonical definitions and FP32 arrays.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (definition_json, parameter_values, *, insertion_layer=17, train_down_projection=true))]
+    fn fork_acquired(
+        &self,
+        py: Python<'_>,
+        definition_json: String,
+        parameter_values: std::collections::BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> PyResult<Self> {
+        py.detach(|| {
+            self.inner.fork_acquired(
+                &definition_json,
+                parameter_values,
+                insertion_layer,
+                train_down_projection,
+            )
+        })
+        .map(|inner| Self { inner })
+        .map_err(xlog_err)
+    }
+
+    /// Versioned JSON with actual insertion, parameter and optimizer roles.
+    #[getter]
+    fn adaptation_manifest(&self) -> PyResult<String> {
+        self.inner.adaptation_manifest().map_err(xlog_err)
+    }
+
+    /// Canonical JSON definitions available to subsequent acquisition proposals.
+    #[getter]
+    fn function_definitions(&self) -> PyResult<String> {
+        self.inner.function_definitions().map_err(xlog_err)
+    }
+
     /// One binary NLL minibatch update. Returns (mean_loss, gradient_norm, step).
     #[cfg(feature = "host-io")]
-    #[pyo3(signature = (token_ids, *, prediction_positions, outcomes, negative_token_id, positive_token_id))]
+    #[pyo3(signature = (token_ids, *, prediction_positions, outcomes, negative_token_id, positive_token_id, history_spans=None))]
     fn fit_binary(
         &mut self,
         py: Python<'_>,
@@ -119,6 +165,7 @@ impl PyNativeCausalModel {
         outcomes: Vec<bool>,
         negative_token_id: u32,
         positive_token_id: u32,
+        history_spans: Option<Vec<(usize, usize)>>,
     ) -> PyResult<(f32, f32, u64)> {
         py.detach(|| {
             self.inner.fit_binary(
@@ -127,6 +174,7 @@ impl PyNativeCausalModel {
                 &outcomes,
                 negative_token_id,
                 positive_token_id,
+                history_spans.as_deref(),
             )
         })
         .map(|result| (result.mean_loss, result.gradient_norm, result.step))
@@ -135,17 +183,22 @@ impl PyNativeCausalModel {
 
     /// One complete-vocabulary CE update. Returns (mean_loss, gradient_norm, step).
     #[cfg(feature = "host-io")]
-    #[pyo3(signature = (token_ids, *, prediction_positions, target_ids))]
+    #[pyo3(signature = (token_ids, *, prediction_positions, target_ids, history_spans=None))]
     fn fit_tokens(
         &mut self,
         py: Python<'_>,
         token_ids: Vec<Vec<u32>>,
         prediction_positions: Vec<usize>,
         target_ids: Vec<u32>,
+        history_spans: Option<Vec<(usize, usize)>>,
     ) -> PyResult<(f32, f32, u64)> {
         py.detach(|| {
-            self.inner
-                .fit_tokens(&token_ids, &prediction_positions, &target_ids)
+            self.inner.fit_tokens(
+                &token_ids,
+                &prediction_positions,
+                &target_ids,
+                history_spans.as_deref(),
+            )
         })
         .map(|result| (result.mean_loss, result.gradient_norm, result.step))
         .map_err(xlog_err)

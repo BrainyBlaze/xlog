@@ -56,7 +56,7 @@ def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDevice
 _Path = Union[str, PathLike[str]]
 
 class NativeCausalModel:
-    """Native BF16 Qwen3 forward and candidate down-projection training."""
+    """Native decoder with canonical acquired definitions and atomic candidate training."""
 
     @staticmethod
     def from_checkpoint(
@@ -68,16 +68,28 @@ class NativeCausalModel:
         path: _Path, *, snapshot_identity: str, device: int, memory_budget_bytes: int,
     ) -> tuple[NativeCausalModel, bytes]: ...
     def forward(
-        self, token_ids: Sequence[int], *, prediction_position: int
+        self, token_ids: Sequence[int], *, prediction_position: int,
+        history_span: Optional[tuple[int, int]] = None,
     ) -> NativeLogits: ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
+    def fork_candidate(self) -> NativeCausalModel: ...
+    def fork_acquired(
+        self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
+        insertion_layer: int = 17, train_down_projection: bool = True,
+    ) -> NativeCausalModel: ...
+    @property
+    def adaptation_manifest(self) -> str: ...
+    @property
+    def function_definitions(self) -> str: ...
     def fit_binary(
         self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
         outcomes: Sequence[bool], negative_token_id: int, positive_token_id: int,
+        history_spans: Optional[Sequence[tuple[int, int]]] = None,
     ) -> tuple[float, float, int]: ...
     def fit_tokens(
         self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
         target_ids: Sequence[int],
+        history_spans: Optional[Sequence[tuple[int, int]]] = None,
     ) -> tuple[float, float, int]: ...
     @property
     def checkpoint_identity(self) -> str: ...
