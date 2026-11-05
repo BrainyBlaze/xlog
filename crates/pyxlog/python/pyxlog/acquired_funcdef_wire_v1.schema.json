@@ -1,0 +1,340 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlog.md/schemas/acquired-funcdef-wire/v1",
+  "title": "Acquired numerical function wire format",
+  "description": "Canonical JSON structure for NativeCausalModel.fork_acquired. Native admission additionally checks numerical types, shapes, references, identities, causal access and resource bounds.",
+  "type": "object",
+  "properties": {
+    "entrypoint": { "type": "string" },
+    "definitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/FuncDef" }
+    }
+  },
+  "required": ["entrypoint", "definitions"],
+  "additionalProperties": false,
+  "$defs": {
+    "Index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "TokenId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "ScalarType": {
+      "type": "string",
+      "enum": ["U32", "U64", "I32", "I64", "F32", "F64", "Bool", "Symbol"]
+    },
+    "FunctionElement": {
+      "type": "string",
+      "enum": ["u32", "bf16", "f32"]
+    },
+    "FunctionDimension": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "fixed" },
+            "size": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["kind", "size"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "causal_sequence" },
+            "maximum": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["kind", "maximum"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "FunctionType": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "scalar" },
+            "scalar_type": { "$ref": "#/$defs/ScalarType" }
+          },
+          "required": ["kind", "scalar_type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "tensor" },
+            "element": { "$ref": "#/$defs/FunctionElement" },
+            "dimensions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/FunctionDimension" }
+            }
+          },
+          "required": ["kind", "element", "dimensions"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "OptionalFunctionType": {
+      "anyOf": [
+        { "$ref": "#/$defs/FunctionType" },
+        { "type": "null" }
+      ]
+    },
+    "FuncParam": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "typ": { "$ref": "#/$defs/OptionalFunctionType" }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "FuncDef": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FuncParam" }
+        },
+        "return_type": { "$ref": "#/$defs/OptionalFunctionType" },
+        "body": {
+          "type": "object",
+          "properties": {
+            "Numerical": { "$ref": "#/$defs/TensorProgram" }
+          },
+          "required": ["Numerical"],
+          "additionalProperties": false
+        },
+        "is_private": { "type": "boolean" }
+      },
+      "required": ["name", "params", "body", "is_private"],
+      "additionalProperties": false
+    },
+    "TensorSignature": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "causal" },
+            "input_width": { "$ref": "#/$defs/Index" },
+            "output_width": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["kind", "input_width", "output_width"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "pure" },
+            "input_widths": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Index" }
+            },
+            "output_width": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["kind", "input_widths", "output_width"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TensorParameter": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "shape": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Index" }
+        },
+        "float32": { "type": "boolean" }
+      },
+      "required": ["name", "shape", "float32"],
+      "additionalProperties": false
+    },
+    "TensorProgram": {
+      "type": "object",
+      "properties": {
+        "signature": { "$ref": "#/$defs/TensorSignature" },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TensorParameter" }
+        },
+        "operations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TensorOperation" }
+        },
+        "output": { "$ref": "#/$defs/Index" },
+        "vocabulary": { "$ref": "#/$defs/Index" },
+        "max_context": { "$ref": "#/$defs/Index" }
+      },
+      "required": ["signature", "parameters", "operations", "output", "vocabulary", "max_context"],
+      "additionalProperties": false
+    },
+    "TensorOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "zeros" },
+            "columns": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "columns"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "argument" },
+            "argument": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "argument"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "parameter" },
+            "weight": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "weight"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "token_indicators" },
+            "token_ids": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/TokenId" }
+            }
+          },
+          "required": ["operation", "token_ids"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "broadcast" },
+            "input": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "input"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "tanh" },
+            "input": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "input"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "multiply" },
+            "left": { "$ref": "#/$defs/Index" },
+            "right": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "left", "right"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "subtract" },
+            "left": { "$ref": "#/$defs/Index" },
+            "right": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "left", "right"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "divide" },
+            "left": { "$ref": "#/$defs/Index" },
+            "right": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "left", "right"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "gather_columns" },
+            "input": { "$ref": "#/$defs/Index" },
+            "indices": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Index" }
+            }
+          },
+          "required": ["operation", "input", "indices"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "select" },
+            "condition": { "$ref": "#/$defs/Index" },
+            "positive": { "$ref": "#/$defs/Index" },
+            "negative": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "condition", "positive", "negative"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "call" },
+            "function": { "type": "string" },
+            "arguments": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Index" }
+            }
+          },
+          "required": ["operation", "function", "arguments"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "scan" },
+            "input": { "$ref": "#/$defs/Index" },
+            "initial": { "$ref": "#/$defs/Index" },
+            "function": { "type": "string" },
+            "max_steps": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "input", "initial", "function", "max_steps"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "linear" },
+            "input": { "$ref": "#/$defs/Index" },
+            "weight": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "input", "weight"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": { "const": "add" },
+            "left": { "$ref": "#/$defs/Index" },
+            "right": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "left", "right"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

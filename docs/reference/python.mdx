@@ -210,6 +210,40 @@ object has exactly `entrypoint` (a new registry name) and `definitions` (canonic
 proposals. Definitions cannot replace old names; calls resolve the original
 bodies and parameter identities from that registry.
 
+The wheel and source distribution include the canonical JSON Schema resource
+`pyxlog/acquired_funcdef_wire_v1.schema.json`. On Python 3.9 or later, read its
+original bytes with `importlib.resources`:
+
+```python
+from hashlib import sha256
+from importlib.resources import files
+import json
+
+schema_bytes = files("pyxlog").joinpath("acquired_funcdef_wire_v1.schema.json").read_bytes()
+schema_digest = sha256(schema_bytes).hexdigest()
+schema = json.loads(schema_bytes)
+```
+
+The schema uses JSON Schema draft 2020-12 and the language identifier
+`https://xlog.md/schemas/acquired-funcdef-wire/v1` in `$id`. All references are
+internal; reading the resource requires no network access. It describes the
+canonical `FuncDef`, function types and dimensions, `Numerical` body, both `causal`
+and `pure` signatures, parameter declarations, and the 15 authored acquisition
+operations. It contains no generated definition, selected graph, parameter values,
+or default program. Fields with Rust `Option` types retain their optional/null
+wire form; numerical admission still requires their exact concrete types. Integer
+indices and extents describe the native 64-bit unsigned representation; token IDs
+use unsigned 32-bit integers.
+
+A constrained decoder must preserve schema property order and pin these exact
+bytes and their digest with the producing source and wheel identities. Whitespace,
+tokenizer, stop-token handling and selection rules belong to the caller's explicit
+decoder policy. Schema conformance establishes structure only: `fork_acquired`
+still checks types, dimensions, causal access, preceding references, the call DAG,
+parameter aliases, name ownership, and aggregate node/constant limits. Callers
+must pass the original generated JSON to that constructor and retain its outcome;
+the schema is not a compiler, an admission result, or permission to repair output.
+
 The entry signature is `{"kind":"causal","input_width":hidden_width,
 "output_width":16}`. A scan cell uses `{"kind":"pure","input_widths":[state_width,
 input_width],"output_width":state_width}` and has only numeric arguments. Every
