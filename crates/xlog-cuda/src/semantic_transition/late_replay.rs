@@ -160,7 +160,10 @@ pub(super) struct PendingReplayDelivery {
     eligible: bool,
     lease_token: u64,
     completion: Option<SemanticPublishedIdentity>,
-    training_publication: crate::semantic_training_view::PreparedTrainingAppendPublication,
+    training_publication: Option<(
+        Arc<SemanticTrainingViewArena>,
+        crate::semantic_training_view::PreparedTrainingAppendPublication,
+    )>,
     #[cfg(feature = "semantic-policy")]
     context_acknowledgement: Option<
         Arc<std::sync::Mutex<model_context_continuation::OriginalModelContextAcknowledgement>>,
@@ -179,7 +182,6 @@ pub(super) struct PendingReplayDelivery {
     header: Arc<std::sync::Mutex<PublicationRead<PublicationHeader>>>,
     kernel_entered: bool,
     kernel_submitted: bool,
-    _arena: Arc<SemanticTrainingViewArena>,
     _row_custody: Option<Arc<dyn Send + Sync>>,
     _material_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
     _support_allocation_owner: Option<Arc<SemanticReplayMaterialReservation>>,
@@ -1326,6 +1328,13 @@ impl SemanticTransitionSession {
             })
             .transpose()?;
         let rows = append_rows_from_ranges(&entries, &payload)?;
+        let observation_only = matches!(&ground, SemanticTaskGround::Coding { .. })
+            && self.coding_delivery_is_observation()?;
+        if observation_only && (!rows.is_empty() || !acquisitions.is_empty()) {
+            return Err(publication_input_error(
+                "evaluation coding observations cannot restore training append rows",
+            ));
+        }
         if rows.len() != acquisitions.len() {
             return Err(publication_input_error(
                 "append authentication requires the complete original committed roster",
@@ -1496,7 +1505,8 @@ impl SemanticTransitionSession {
                 .count();
             let common =
                 if outcome.disposition == super::receiver_outcome::ReceiverDisposition::Completed {
-                    if batch_rows == 0
+                    if !observation_only
+                        && batch_rows == 0
                         && !intent_lineage::contributor_indices(
                             contract,
                             lease.header,
@@ -1908,6 +1918,44 @@ impl SemanticTransitionSession {
         Ok((writes, reservation))
     }
 
+    /// Only an original evaluation fork can observe coding results without appending training.
+    pub fn coding_delivery_is_observation(&self) -> Result<bool, SemanticTransitionError> {
+        let Some(origin) = &self.evaluation_fork else {
+            return Ok(false);
+        };
+        let contract = self
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .contract_value;
+        let task = &self
+            .task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0;
+        if origin.member() < 2
+            || self.training_views.is_some()
+            || self.task_training_domain().is_some()
+            || !matches!(&task.spec.task_ground, SemanticTaskGround::Coding { .. })
+            || contract.nonterminal_intent_mode != 1
+            || contract.replay_row_capacity != 0
+            || contract.replay_original_slot_boundary != 0
+            || contract.replay_raw_capacity_bytes != 0
+            || contract.replay_payload_capacity_bytes != 0
+            || contract.replay_metadata_bytes != 0
+            || contract.replay_max_material_bytes != 0
+            || contract.replay_total_material_bytes != 0
+            || contract.replay_max_evidence_bytes != 0
+            || contract.replay_reservation_identity
+                != crate::semantic_training_view::replay_reservation_identity(None, None)
+        {
+            return Err(publication_input_error(
+                "evaluation coding delivery changed its original observation contract",
+            ));
+        }
+        Ok(true)
+    }
+
     /// Original finite transport limits, sealed before any publication or result acquisition.
     pub fn replay_append_limits(
         &self,
@@ -1956,19 +2004,32 @@ impl SemanticTransitionSession {
             + 'static,
     {
         self.checked_reader(lease)?;
-        let arena = self
-            .training_views
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        arena
-            .replay_capacity()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        if acquisitions.len() != result_receipts.len()
-            || acquisitions.len() > arena.row_capacity() - arena.original_slot_boundary()
+        let observation_only = self.coding_delivery_is_observation()?;
+        if observation_only
+            && (!proposals.is_empty() || !acquisitions.is_empty() || !result_receipts.is_empty())
         {
+            return Err(publication_input_error(
+                "evaluation coding observations cannot carry training append material",
+            ));
+        }
+        if acquisitions.len() != result_receipts.len() {
             return Err(publication_input_error(
                 "replay delivery requires one complete bounded contributor batch",
             ));
+        }
+        if !observation_only {
+            let arena = self
+                .training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            arena
+                .replay_capacity()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            if acquisitions.len() > arena.row_capacity() - arena.original_slot_boundary() {
+                return Err(publication_input_error(
+                    "replay delivery requires one complete bounded contributor batch",
+                ));
+            }
         }
         let budget = self.replay_material_budget.as_ref().ok_or_else(|| {
             publication_input_error("loaded replay delivery requires its original material pool")
@@ -2127,17 +2188,32 @@ impl SemanticTransitionSession {
                 "restored observations require current trusted receiver authentication",
             ));
         }
-        let arena = Arc::clone(
-            self.training_views
-                .as_ref()
-                .ok_or(SemanticTransitionError::NotBound)?,
-        );
-        let capacity = arena
-            .replay_capacity()
-            .ok_or_else(|| publication_input_error("replay append was not reserved cold"))?;
-        if !acquisitions.is_empty() && !arena.is_materialized() {
-            return Err(publication_input_error("acquired results remain in durable custody until original training materialization"));
+        let observation_only = self.coding_delivery_is_observation()?;
+        if observation_only
+            && (!original_proposals.is_empty()
+                || !acquisitions.is_empty()
+                || !result_receipts.is_empty())
+        {
+            return Err(publication_input_error(
+                "evaluation coding observations cannot carry training append material",
+            ));
         }
+        let arena = if observation_only {
+            None
+        } else {
+            let arena = Arc::clone(
+                self.training_views
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            );
+            arena
+                .replay_capacity()
+                .ok_or_else(|| publication_input_error("replay append was not reserved cold"))?;
+            if !acquisitions.is_empty() && !arena.is_materialized() {
+                return Err(publication_input_error("acquired results remain in durable custody until original training materialization"));
+            }
+            Some(arena)
+        };
         let entries = self.read_published_control_record_with_custody(
             lease,
             30,
@@ -2215,14 +2291,18 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
             .contract_value;
-        let contributing = intent_lineage::contributor_indices(
-            contract,
-            lease.header,
-            intent,
-            &prefix,
-            &provenance,
-            &proposals,
-        )?;
+        let contributing = if observation_only {
+            Vec::new()
+        } else {
+            intent_lineage::contributor_indices(
+                contract,
+                lease.header,
+                intent,
+                &prefix,
+                &provenance,
+                &proposals,
+            )?
+        };
         let completed =
             outcome.disposition == super::receiver_outcome::ReceiverDisposition::Completed;
         if (completed && contributing.len() != acquisitions.len())
@@ -2283,6 +2363,10 @@ impl SemanticTransitionSession {
             &contributor,
         ) in acquisitions.iter().zip(result_receipts).zip(&contributing)
         {
+            let arena = arena.as_ref().ok_or(SemanticTransitionError::NotBound)?;
+            let capacity = arena
+                .replay_capacity()
+                .ok_or(SemanticTransitionError::NotBound)?;
             let proposal = &original_proposals[contributor].0;
             if row.basis != SemanticTrainingViewBasis::Episode
                 || replay.predecessor_identity().logical_digest
@@ -2415,6 +2499,7 @@ impl SemanticTransitionSession {
                     .zip(result_receipts)
                     .zip(authenticated.iter().zip(&result_digests))
             {
+                let arena = arena.as_ref().ok_or(SemanticTransitionError::NotBound)?;
                 let descriptor = if verification.disposition == 1 {
                     arena.prepare_append_row(
                         usize::try_from(item.entry.row_ordinal)
@@ -2440,13 +2525,16 @@ impl SemanticTransitionSession {
             return Ok(lease.identity);
         }
         let queue_header = append_header(&queue.bytes)?;
+        let append_capacity = match &arena {
+            Some(arena) => (arena.row_capacity() - arena.original_slot_boundary()) as u64,
+            None => 0,
+        };
         if lease.header.fuel == 0
             || queue_header
                 .count
                 .checked_add(acquisitions.len() as u64)
                 .is_none_or(|count| count > queue_header.capacity)
-            || queue_header.capacity
-                != (arena.row_capacity() - arena.original_slot_boundary()) as u64
+            || queue_header.capacity != append_capacity
         {
             return Err(publication_input_error(
                 "complete replay batch exceeds the original append or acknowledgement reservation",
@@ -2476,6 +2564,7 @@ impl SemanticTransitionSession {
                 .zip(&authenticated)
                 .zip(&result_digests)
         {
+            let arena = arena.as_ref().ok_or(SemanticTransitionError::NotBound)?;
             let descriptor = if verification.disposition == 1 {
                 let ordinal = arena
                     .original_count()
@@ -2610,7 +2699,18 @@ impl SemanticTransitionSession {
         let native_work = self.cold_native_work(lease.token)?;
         #[cfg(not(feature = "semantic-policy"))]
         let native_work: Option<DeviceMemoryView<u64>> = None;
-        let (descriptors, raw) = arena.append_storage();
+        let (arena_descriptors, arena_descriptor_count, arena_raw, arena_raw_bytes) = match &arena {
+            Some(arena) => {
+                let (descriptors, raw) = arena.append_storage();
+                (
+                    *descriptors.device_ptr(),
+                    descriptors.len() as u64,
+                    *raw.device_ptr(),
+                    raw.len() as u64,
+                )
+            }
+            None => (0, 0, 0, 0),
+        };
         let input = PublicationReplayDeliveryInput {
             delivery: PublicationDeliveryInput {
                 lease: self.readers[&lease.token].device.device_ptr_value(),
@@ -2625,10 +2725,10 @@ impl SemanticTransitionSession {
             receiver_disposition: if completed { 1 } else { 2 },
             rows: rows.device.device_ptr_value(),
             row_count: acquisitions.len() as u64,
-            arena_descriptors: *descriptors.device_ptr(),
-            arena_descriptor_count: descriptors.len() as u64,
-            arena_raw: *raw.device_ptr(),
-            arena_raw_bytes: raw.len() as u64,
+            arena_descriptors,
+            arena_descriptor_count,
+            arena_raw,
+            arena_raw_bytes,
             observations: observations.device.device_ptr_value(),
             observation_count: source_count as u64,
             statements: statements.device.device_ptr_value(),
@@ -2688,12 +2788,17 @@ impl SemanticTransitionSession {
             }
         }
         let eligible = authenticated.iter().any(|result| result.disposition == 1);
-        let training_publication = arena.prepare_training_appends(
-            queue_header.count,
-            queue_header.count + acquisitions.len() as u64,
-            training_chain,
-            training_rows,
-        )?;
+        let training_publication = arena
+            .map(|arena| {
+                let publication = arena.prepare_training_appends(
+                    queue_header.count,
+                    queue_header.count + acquisitions.len() as u64,
+                    training_chain,
+                    training_rows,
+                )?;
+                Ok::<_, SemanticTransitionError>((arena, publication))
+            })
+            .transpose()?;
         self.pending_replay_delivery = Some(PendingReplayDelivery {
             base: lease.identity,
             fuel: lease.header.fuel,
@@ -2717,7 +2822,6 @@ impl SemanticTransitionSession {
             header,
             kernel_entered: false,
             kernel_submitted: false,
-            _arena: arena,
             _row_custody: row_custody,
             _material_reservation: material_reservation,
             _support_allocation_owner: prepared.allocation_owner,
@@ -2878,7 +2982,11 @@ impl SemanticTransitionSession {
             recorder.read_write(work);
         }
         if pending.eligible {
-            let (descriptors, raw) = pending._arena.append_storage();
+            let (arena, _) = pending
+                .training_publication
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?;
+            let (descriptors, raw) = arena.append_storage();
             recorder.write(&descriptors);
             recorder.write(&raw);
         }
@@ -3041,9 +3149,11 @@ impl SemanticTransitionSession {
             .as_ref()
             .ok_or(SemanticTransitionError::NoPendingLaunch)?;
         if pending
-            ._arena
-            .publish_training_appends(&pending.training_publication)
-            .is_err()
+            .training_publication
+            .as_ref()
+            .is_some_and(|(arena, publication)| {
+                arena.publish_training_appends(publication).is_err()
+            })
         {
             self.poisoned = true;
             return Err(SemanticTransitionError::Poisoned);
