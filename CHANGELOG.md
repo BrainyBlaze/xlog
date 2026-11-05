@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- *(neural, python)* import dense tied-weight BF16 Qwen3 SafeTensors checkpoints
+  into a typed numerical program executed by XLOG's CUDA provider and cuBLAS.
+  `NativeCausalModel.forward` consumes original token IDs and returns a retained
+  full-vocabulary `NativeLogits` row, with selected host reads and DLPack export.
+
 ### Changed
 
 - Epistemic execution classifies modal dependencies before single-pass planning.
