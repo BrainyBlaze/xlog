@@ -1,7 +1,4 @@
-//! Data-driven kernel module loading.
-//!
-//! Replaces the 812-line hand-unrolled `new()` constructor with a loop over
-//! `KERNEL_MODULES`, reducing ~800 LOC to ~30.
+//! Load the owning consumer's required modules from the canonical kernel manifest.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,18 +10,39 @@ use super::{CudaKernelProvider, KernelModuleSource, PtxLoadProfile};
 use crate::kernel_manifest_data::KERNEL_MODULES;
 use crate::CudaDevice;
 
+#[derive(Clone, Copy)]
+pub(super) enum KernelModuleSet {
+    All,
+    Tensor,
+}
+
 impl CudaKernelProvider {
-    /// Load every kernel module listed in `KERNEL_MODULES` into `device`.
+    /// Load the selected manifest modules without replacing existing complete images.
     ///
-    /// Returns `Some(PtxLoadProfile)` when `profiling` is true, `None` otherwise.
-    pub(crate) fn load_all_kernel_modules(
+    /// The builder serializes this operation on the canonical device registry.
+    /// Returns a profile only when profiling is enabled and modules were loaded.
+    pub(super) fn load_kernel_modules(
         device: &Arc<CudaDevice>,
+        modules: KernelModuleSet,
         profiling: bool,
     ) -> Result<Option<PtxLoadProfile>> {
         let cc = super::detect_compute_capability(device)?;
         let mut profile = PtxLoadProfile::default();
 
         for spec in KERNEL_MODULES {
+            if matches!(modules, KernelModuleSet::Tensor) && spec.module_name != "xlog_tensor" {
+                continue;
+            }
+            // Module insertion publishes only after all symbols resolve. Reuse
+            // that same image when another provider requests a larger set, also
+            // after a previous load stopped at a different module's error.
+            if spec
+                .kernels
+                .iter()
+                .all(|name| device.inner().has_func(spec.module_name, name))
+            {
+                continue;
+            }
             let t0 = if profiling {
                 Some(Instant::now())
             } else {
@@ -129,6 +147,10 @@ impl CudaKernelProvider {
             }
         }
 
-        Ok(if profiling { Some(profile) } else { None })
+        Ok(if profiling && !profile.per_module_sec.is_empty() {
+            Some(profile)
+        } else {
+            None
+        })
     }
 }
