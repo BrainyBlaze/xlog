@@ -189,9 +189,9 @@ impl PhaseEvaluationAndTerminal {
     }
 }
 
-struct EvaluationColdVisibility<'a> {
-    session: &'a PySemanticTransitionSession,
-    py: Python<'a>,
+pub(in crate::semantic_transition) struct EvaluationColdVisibility<'a> {
+    pub(in crate::semantic_transition) session: &'a PySemanticTransitionSession,
+    pub(in crate::semantic_transition) py: Python<'a>,
 }
 
 impl Drop for EvaluationColdVisibility<'_> {
@@ -3206,7 +3206,7 @@ impl PySemanticLearningPhaseTransition {
         let receipt = receipt.extract::<PyRef<'_, PySemanticCompletedModelEvaluation>>()?;
         let cohort = row.get_item(2)?;
         let cohort = cohort.extract::<PyRef<'_, PySemanticEvaluationCohort>>()?;
-        let measured = receipt.require_phase_observation(py, &parent, &cohort)?;
+        let measured = receipt.require_original_observation(py, &parent, &cohort)?;
         if branch == "source" {
             verify_phase_checkpoint(py, &task, &parent, &manifest, &saved_snapshot)?;
         }

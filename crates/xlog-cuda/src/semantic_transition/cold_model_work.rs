@@ -330,6 +330,7 @@ impl CompletedModelContextColdResult {
         assert_eq!(original.instruction.as_ref(), self.instruction.as_ref());
         assert!(original.cold_result.is_none());
         original.cold_result = Some(self.result);
+        actor_refresh_program::complete_retired_control_claim(original);
     }
 }
 
@@ -469,7 +470,7 @@ struct ColdReportCompletion {
     poisoned: bool,
 }
 
-fn cold_completion_is_pending(error: &SemanticTransitionError) -> bool {
+pub(super) fn cold_completion_is_pending(error: &SemanticTransitionError) -> bool {
     match error {
         SemanticTransitionError::NativeCompletionPending { .. } => true,
         SemanticTransitionError::NativeExecutionFailure { status, .. } => {
@@ -2562,8 +2563,9 @@ impl SemanticTransitionSession {
             .program_admission
             .as_ref()
             .is_none_or(|original| !original.same_handle(admission))
-            || build.requested_kind(step, &self.publication_issuer)?
-                != SemanticTransitionKind::Update
+            || !build
+                .requested_kind(step, &self.publication_issuer)?
+                .uses_pending_model()
             || !parent.active
         {
             return Err(publication_input_error(
@@ -2678,6 +2680,7 @@ impl SemanticTransitionSession {
             ));
         }
         original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2694,7 +2697,9 @@ impl SemanticTransitionSession {
             streams,
             SemanticColdModelWorkDisposition::Complete,
         )?;
-        self.instruction_admission_mut(admission)?.cold_result = Some(result);
+        let original = self.instruction_admission_mut(admission)?;
+        original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2777,7 +2782,9 @@ impl SemanticTransitionSession {
             streams,
             SemanticColdModelWorkDisposition::KnownRefusal,
         )?;
-        self.instruction_admission_mut(admission)?.cold_result = Some(result);
+        let original = self.instruction_admission_mut(admission)?;
+        original.cold_result = Some(result);
+        actor_refresh_program::complete_retired_control_claim(original);
         Ok(result)
     }
 
@@ -2986,17 +2993,21 @@ impl SemanticTransitionSession {
         // Only the canonical resource-retirement path removes the prepared
         // owner, after graph destruction and every joined step/alias release.
         // Admission custody also proves full retirement when its parent is gone.
+        let joined_control = original.state == actor_refresh_program::InstructionState::Bound
+            && original.control_result.is_some()
+            && original.retirement_cancellation.is_none();
         if self.prepared_segment.is_some()
             || self.captured.is_some()
             || self.steps.contains_key(&parent.token)
-            || !matches!(
-                (original.state, original.retirement_cancellation.is_some()),
-                (actor_refresh_program::InstructionState::Completed, false)
-                    | (actor_refresh_program::InstructionState::Bound, true)
-                    | (actor_refresh_program::InstructionState::Admitted, true)
-                    | (actor_refresh_program::InstructionState::Released, true)
-                    | (actor_refresh_program::InstructionState::BuildEntered, true)
-            )
+            || (!joined_control
+                && !matches!(
+                    (original.state, original.retirement_cancellation.is_some()),
+                    (actor_refresh_program::InstructionState::Completed, false)
+                        | (actor_refresh_program::InstructionState::Bound, true)
+                        | (actor_refresh_program::InstructionState::Admitted, true)
+                        | (actor_refresh_program::InstructionState::Released, true)
+                        | (actor_refresh_program::InstructionState::BuildEntered, true)
+                ))
         {
             return Err(publication_input_error(
                 "shared retirement report requires fully retired original native storage",
@@ -3015,6 +3026,7 @@ impl SemanticTransitionSession {
             ));
         }
         self.instruction_admission_mut(admission)?.retirement_result = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
@@ -3087,6 +3099,7 @@ impl SemanticTransitionSession {
             disposition,
         )?;
         self.instruction_admission_mut(admission)?.retirement_result = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
@@ -3981,8 +3994,9 @@ impl SemanticTransitionSession {
             .program_admission
             .as_ref()
             .is_none_or(|original| !original.same_handle(admission))
-            || build.requested_kind(step, &self.publication_issuer)?
-                != SemanticTransitionKind::Update
+            || !build
+                .requested_kind(step, &self.publication_issuer)?
+                .uses_pending_model()
         {
             return Err(publication_input_error(
                 "prepared cold work changed its admitted Update",
@@ -4122,6 +4136,7 @@ impl SemanticTransitionSession {
             .find(|(address, _)| *address == ordinal)
             .expect("retained original prepared report")
             .1 = Some(result);
+        self.complete_retired_controls();
         Ok(result)
     }
 
@@ -4160,6 +4175,18 @@ impl SemanticTransitionSession {
             }
             _ => None,
         };
+        let mut allowance = native_work_bound::ColdNativeAllowance::new(purpose);
+        if let Some(ColdWorkAdmission::Instruction(original, InstructionColdRole::Preparation)) =
+            &instruction
+        {
+            if let Some(coordinates) = self.instruction_family_cohort_coordinates(original)? {
+                let frame = self.original_family_cohort(coordinates)?.ok_or_else(|| {
+                    publication_input_error("freeze the original cohort before cold admission")
+                })?;
+                let (source, dma) = frame.hydration_dma_ceiling()?;
+                allowance.freeze_original_cohort_dma(source, dma)?;
+            }
+        }
         if let SemanticColdModelWorkAdmission::Loaded(bytes) = &admission {
             bytes.require_budget(
                 self.replay_material_budget
@@ -4257,9 +4284,7 @@ impl SemanticTransitionSession {
             model_context,
             operation_ordinal,
             admission,
-            allowance: Arc::new(Mutex::new(native_work_bound::ColdNativeAllowance::new(
-                purpose,
-            ))),
+            allowance: Arc::new(Mutex::new(allowance)),
             source_geometry: Vec::new(),
             capacity_limit,
             work: None,
@@ -7296,6 +7321,114 @@ impl SemanticTransitionSession {
                 .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
         }
         completion.read.read.retire_completed_values();
+        Ok(result)
+    }
+}
+
+impl SemanticTransitionSession {
+    pub fn prepare_evaluation_instruction_work(
+        &mut self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if !matches!(
+            original.state,
+            actor_refresh_program::InstructionState::Admitted
+                | actor_refresh_program::InstructionState::Bound
+        ) {
+            return Err(publication_input_error(
+                "evaluation cannot replace its original cold attempt",
+            ));
+        }
+        if let Some(work) = original.cold_work.clone() {
+            self.continue_cold_model_work_initialization(&work)?;
+            return Ok(work);
+        }
+        let instruction = Arc::clone(&original.instruction);
+        let ordinal = self.admitted_segment_first_program_ordinal(&admission.inner)?;
+        self.prepare_cold_model_work_inner(
+            parent,
+            None,
+            ordinal,
+            instruction.into(),
+            SemanticColdModelWorkPurpose::SourceEvaluation,
+            Some((&admission.inner, InstructionColdRole::Preparation)),
+        )
+    }
+
+    pub fn require_evaluation_instruction_cold_work(
+        &self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if !matches!(
+            original.state,
+            actor_refresh_program::InstructionState::Admitted
+                | actor_refresh_program::InstructionState::Bound
+        ) || original
+            .cold_work
+            .as_ref()
+            .is_none_or(|retained| !retained.same_invocation(work))
+        {
+            return Err(publication_input_error(
+                "evaluation cold callback changed its original claim",
+            ));
+        }
+        self.check_cold_work_completion_reader(ColdWorkReader::Published(parent), work)?;
+        if self.original_cold_model_work(work)?.purpose
+            != SemanticColdModelWorkPurpose::SourceEvaluation
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.ensure_quiescent()
+    }
+
+    pub fn finish_evaluation_instruction_work(
+        &mut self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+        disposition: SemanticColdModelWorkDisposition,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if original
+            .cold_work
+            .as_ref()
+            .is_none_or(|retained| !retained.same_invocation(work))
+            || original.evaluation_result.is_none()
+        {
+            return Err(publication_input_error(
+                "evaluation expense lacks its original terminal proof",
+            ));
+        }
+        if let Some(result) = original.cold_result {
+            return Ok(result);
+        }
+        self.require_evaluation_instruction_cold_work(admission, parent, work)?;
+        let result = self.finish_cold_model_work(parent, work, streams, disposition)?;
+        let original = self.original_cold_model_work(work)?;
+        if original.state != RecordingState::Completed || Arc::strong_count(&original.aliases) != 1
+        {
+            return Err(publication_input_error(
+                "evaluation cold storage retains unjoined scratch aliases",
+            ));
+        }
+        self.steps
+            .get_mut(&parent.token)
+            .ok_or(SemanticTransitionError::NotBound)?
+            .cold_model_work = None;
+        self.instruction_admission_mut(&admission.inner)?
+            .cold_result = Some(result);
         Ok(result)
     }
 }

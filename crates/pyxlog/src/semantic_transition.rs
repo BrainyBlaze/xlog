@@ -56,6 +56,8 @@ pub(crate) mod cold_task;
 mod evaluation_authority;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod evaluation_fork;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod evaluation_instruction;
 mod evaluation_rule_library;
 mod evaluation_source_checkpoint;
 mod feedback_projection;
@@ -555,6 +557,9 @@ pub(crate) struct PySemanticTransitionSession {
     producer_operation: Arc<AtomicBool>,
     #[cfg(feature = "semantic-policy")]
     pending_evaluation_preparation: Mutex<Option<model_evaluation::PendingEvaluationPreparation>>,
+    #[cfg(feature = "semantic-policy")]
+    evaluation_instruction:
+        Mutex<Option<Arc<evaluation_instruction::EvaluationInstructionCustody>>>,
     #[cfg(feature = "semantic-policy")]
     prepared_task_import: Mutex<Option<Py<prepared_import::PySemanticPreparedTaskImport>>>,
     #[cfg(feature = "semantic-policy")]
@@ -1535,6 +1540,8 @@ impl PySemanticTransitionSession {
             producer_operation: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "semantic-policy")]
             pending_evaluation_preparation: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            evaluation_instruction: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             prepared_task_import: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
@@ -4917,8 +4924,9 @@ fn transition_refusal(
 ) -> Option<(&'static str, u64)> {
     use xlog_cuda::{SemanticTransitionOutcome, SemanticTransitionRefusal};
     match outcome {
-        SemanticTransitionOutcome::Published(_) => None,
+        SemanticTransitionOutcome::Published(_) | SemanticTransitionOutcome::Discarded(_) => None,
         SemanticTransitionOutcome::Refused(refusal) => Some(match refusal {
+            SemanticTransitionRefusal::ChangedControlState => ("changed_control_state", 0),
             SemanticTransitionRefusal::InvalidFinalSupport { completed_draws } => {
                 ("invalid_final_support", *completed_draws)
             }
@@ -5278,8 +5286,9 @@ fn transition_kind(value: &ColdValue) -> PyResult<SemanticTransitionKind> {
         "recompute" => Ok(SemanticTransitionKind::Recompute),
         "drain" => Ok(SemanticTransitionKind::Drain),
         "update" => Ok(SemanticTransitionKind::Update),
+        "control" => Ok(SemanticTransitionKind::Control),
         _ => Err(invalid(
-            "transition must be proposal, recompute, update, or drain",
+            "transition must be proposal, recompute, update, control, or drain",
         )),
     }
 }
@@ -5290,7 +5299,7 @@ fn prepared_transition(
 ) -> PyResult<SemanticTransitionKind> {
     if !value.is_exact_instance_of::<PyString>() {
         return Err(invalid(
-            "a prepared transition must be an exact proposal, recompute, or update string",
+            "a prepared transition must be an exact proposal, recompute, update, or control string",
         ));
     }
     let kind = transition_kind(&ColdValue::read(value, budget, 0)?)?;
@@ -5307,7 +5316,7 @@ fn prepared_transitions<'py>(
 ) -> PyResult<impl ExactSizeIterator<Item = SemanticTransitionKind> + Clone + 'py> {
     if !value.is_exact_instance_of::<PyTuple>() {
         return Err(invalid(
-            "segment transitions must be an exact tuple of proposal, recompute, or update modes",
+            "segment transitions must be an exact tuple of proposal, recompute, update, or control modes",
         ));
     }
     let values = value.cast::<PyTuple>()?.clone();
@@ -5537,11 +5546,15 @@ impl SegmentInstructionCustody {
                 .iter()
                 .position(|issued| issued.same_handle(&step.inner))
                 .ok_or_else(|| invalid("initialization lost its native-issued Update"))?;
-            if self.transitions.get(position) != Some(&SemanticTransitionKind::Update)
-                || preparation
-                    .scope
-                    .as_ref()
-                    .is_none_or(|scope| !Arc::ptr_eq(scope, &step.scope))
+            if !self.transitions.get(position).is_some_and(|kind| {
+                matches!(
+                    kind,
+                    SemanticTransitionKind::Update | SemanticTransitionKind::Control
+                )
+            }) || preparation
+                .scope
+                .as_ref()
+                .is_none_or(|scope| !Arc::ptr_eq(scope, &step.scope))
             {
                 return Err(invalid("initialization changed its original Update scope"));
             }
@@ -5555,11 +5568,16 @@ impl SegmentInstructionCustody {
             != self
                 .transitions
                 .iter()
-                .filter(|kind| **kind == SemanticTransitionKind::Update)
+                .filter(|kind| {
+                    matches!(
+                        kind,
+                        SemanticTransitionKind::Update | SemanticTransitionKind::Control
+                    )
+                })
                 .count()
         {
             return Err(invalid(
-                "every original Update requires its retained preparation and initialization pair",
+                "every pending-model transition requires its retained preparation and initialization pair",
             ));
         }
         let mut pending = Vec::new();
@@ -5779,6 +5797,27 @@ impl SegmentInstructionCustody {
 #[cfg(feature = "semantic-policy")]
 #[pymethods]
 impl PySemanticSegmentInstructionAdmission {
+    /// Read the same receipt after its genuine original resources retire.
+    #[getter]
+    fn control_measurements(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let session = self.inner.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "Control observation cannot overlap recording, import or retirement",
+            ));
+        }
+        session
+            .owner()?
+            .admitted_control_measurements(&self.inner.inner)
+            .map_err(xlog_err)?
+            .map(|value| native_observation_report(py, value))
+            .transpose()
+    }
+
     /// The charged terminal capsule is available only after genuine retirement.
     #[getter]
     fn cancelled_checkpoint(
@@ -17544,9 +17583,14 @@ impl PySemanticPreparedStep {
                 .iter()
                 .position(|original| original.same_handle(&step.inner))
                 .ok_or_else(|| invalid("prepared cold callback lost its native-issued roster"))?;
-            if instruction.transitions.get(position) != Some(&SemanticTransitionKind::Update) {
+            if !instruction.transitions.get(position).is_some_and(|kind| {
+                matches!(
+                    kind,
+                    SemanticTransitionKind::Update | SemanticTransitionKind::Control
+                )
+            }) {
                 return Err(invalid(
-                    "prepared model preparation requires the original Update",
+                    "prepared model preparation requires its original Update or Control",
                 ));
             }
             let mut existing = None;
@@ -17914,6 +17958,7 @@ impl PySemanticPreparedStep {
             SemanticTransitionKind::Proposal => Ok("proposal"),
             SemanticTransitionKind::Recompute => Ok("recompute"),
             SemanticTransitionKind::Update => Ok("update"),
+            SemanticTransitionKind::Control => Ok("control"),
             SemanticTransitionKind::Drain => {
                 Err(invalid("drain is not a cold scheduled transition"))
             }
@@ -18992,6 +19037,50 @@ impl PySemanticPreparedStep {
             if self.content_binding_with_owner(py, &owner)? != binding {
                 return Err(invalid(
                     "original Update authority changed during observation",
+                ));
+            }
+            Ok(report)
+        }
+    }
+
+    /// Project the original no-learning receipt without performing numerical work.
+    #[getter]
+    fn control_measurements(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        if session.importing.load(Ordering::Acquire)
+            || session.recording.load(Ordering::Acquire)
+            || session.retiring.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "Control observation cannot overlap recording, import or retirement",
+            ));
+        }
+        let mut owner = session.owner()?;
+        let binding = self.content_binding_with_owner(py, &owner)?;
+        if binding.0.is_none() {
+            return Err(invalid(
+                "Control observation requires the admitted original operation",
+            ));
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = &mut owner;
+            Err(invalid(
+                "Control observation requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let observation = owner
+                .prepared_control_measurements(&self.inner)
+                .map_err(xlog_err)?;
+            let report = observation
+                .map(|observation| native_observation_report(py, observation))
+                .transpose()?;
+            if self.content_binding_with_owner(py, &owner)? != binding {
+                return Err(invalid(
+                    "original Control authority changed during observation",
                 ));
             }
             Ok(report)
@@ -20344,6 +20433,10 @@ impl PySemanticPolicyInvocation {
     fn published_observation(&self) -> PyResult<&xlog_cuda::SemanticTransitionObservation> {
         match &self.outcome {
             xlog_cuda::SemanticTransitionOutcome::Published(observation) => Ok(observation),
+            #[cfg(feature = "semantic-policy")]
+            xlog_cuda::SemanticTransitionOutcome::Discarded(_) => {
+                Err(invalid("Control has no published observation"))
+            }
             xlog_cuda::SemanticTransitionOutcome::Refused(_) => Err(invalid(
                 "refused policy invocation has no published result or differentiable receipts",
             )),
@@ -22051,11 +22144,13 @@ impl PySemanticTransitionController {
                 if transitions.clone().any(|kind| {
                     matches!(
                         kind,
-                        SemanticTransitionKind::Proposal | SemanticTransitionKind::Update
+                        SemanticTransitionKind::Proposal
+                            | SemanticTransitionKind::Update
+                            | SemanticTransitionKind::Control
                     )
                 }) {
                     return Err(invalid(
-                        "Proposal and Update recording require the original Program",
+                        "Proposal, Update and Control recording require the original Program",
                     ));
                 }
                 None
@@ -25961,161 +26056,117 @@ impl PySemanticTransitionController {
         allocation_owner: &PySemanticTensorOwner,
         consumer_stream: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let _operation = TensorProducerOperation::begin(&self.session.borrow(py))?;
-        self.session.borrow(py).require_creator()?;
+        self.bind_prepared_model_output(
+            py,
+            SemanticTransitionKind::Update,
+            task_use,
+            step,
+            bank,
+            tensors,
+            model_allocations,
+            model_storages,
+            model_views,
+            numerical_admissibility,
+            slab_backing,
+            slab_bytes,
+            baseline_forward,
+            candidate_forward,
+            canary_comparison,
+            allocation_owner,
+            consumer_stream,
+        )
+    }
+
+    /// Freeze all original data cohorts inside the admitted cold preparation.
+    /// Restored material uploads the saved ports and never samples again.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, parent, instruction_admission, model_work))]
+    fn prepare_family_cohorts(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        parent: &PySemanticPublishedParent,
+        instruction_admission: &PySemanticSegmentInstructionAdmission,
+        model_work: &learning_phase::cold_model_work::PySemanticColdModelWork,
+    ) -> PyResult<Option<Py<PyDict>>> {
         self.require_read_issued(task_use)?;
-        if bank > 1 {
-            return Err(invalid("prepared model update bank must be zero or one"));
-        }
-        let parent = ContentStepRef::Prepared(step);
-        let mut budget = 16 * 1024 * 1024;
-        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
-        let slab_bytes = ColdValue::read(slab_bytes, &mut budget, 0)?.unsigned()?;
-        if slab_bytes == 0 || slab_bytes > i64::MAX as u64 {
-            return Err(invalid(
-                "model update slab has no supported exact byte extent",
-            ));
-        }
-        let storages = parse_model_storages(model_storages, &mut budget)?;
-        let views = parse_model_views(model_views, &mut budget)?;
-        let expected = {
-            let session = self.session.borrow(py);
-            let owner = session.owner()?;
-            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
-            step.require_recording_stream(&owner, stream)?;
-            self.require_continuation_owner(py, parent, allocation_owner)?;
-            if owner
-                .prepared_transition_kind(&step.inner)
-                .map_err(xlog_err)?
-                != SemanticTransitionKind::Update
-            {
-                return Err(invalid(
-                    "model update output belongs only to a prepared update",
-                ));
-            }
-            self.continuation_binding(&state, parent, false)?
-        };
-        let check = || -> PyResult<()> {
-            let session = self.session.borrow(py);
-            let owner = session.owner()?;
-            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
-            step.require_recording_stream(&owner, stream)?;
-            self.require_continuation_owner(py, parent, allocation_owner)?;
-            if self.continuation_binding(&state, parent, false)? != expected {
-                return Err(invalid(
-                    "prepared update authority changed during producer handoff",
-                ));
-            }
-            Ok(())
-        };
-        let device = self.session.borrow(py).device_ordinal;
-        let ParsedTensorInputs {
-            handoff: allocation_handoff,
-            producers: allocation_producers,
-        } = parse_tensor_inputs_guarded(model_allocations, &mut budget, device, stream, &check)?;
-        let mut producer_owners = TensorHandoff(vec![
-            allocation_owner._inputs.clone_ref(py),
-            model_allocations.clone().unbind(),
-            tensors.clone().unbind(),
-        ]);
-        producer_owners.0.extend(
-            allocation_owner
-                ._producers
-                .iter()
-                .map(|producer| producer.clone_ref(py)),
-        );
-        producer_owners.0.extend(allocation_producers);
-        let ParsedTensorInputs {
-            handoff: tensor_handoff,
-            producers: tensor_producers,
-        } = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
-        producer_owners.0.extend(tensor_producers);
-        validate_producer_device_guarded(numerical_admissibility, device, &check)?;
-        producer_owners
-            .0
-            .push(numerical_admissibility.clone().unbind());
-        let allocation_index = u64::try_from(allocation_handoff.0.len())
-            .map_err(|_| invalid("model update allocation roster is too large"))?;
-        let numerical_admissibility = SemanticTensorInput {
-            tensor: crate::dlpack_from_py_for_stream_guarded(
-                numerical_admissibility,
-                i64::try_from(stream)
-                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
-                &check,
-            )?,
-            layout: SemanticTensorLayout {
-                role: 0,
-                index: allocation_index,
-                element_bytes: 1,
-                scalar_type: 8,
-                rank: 1,
-                logical_axis: u64::MAX,
-                dimensions: [1, 0, 0, 0],
-                strides_bytes: [1, 0, 0, 0],
-            },
-            logical_begin: 0,
-            logical_end: 0,
-            native_allocation: None,
-        };
-        validate_producer_device_guarded(slab_backing, device, &check)?;
-        producer_owners.0.push(slab_backing.clone().unbind());
-        let slab_backing = SemanticTensorInput {
-            tensor: crate::dlpack_from_py_for_stream_guarded(
-                slab_backing,
-                i64::try_from(stream)
-                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
-                &check,
-            )?,
-            layout: SemanticTensorLayout {
-                role: 0,
-                index: 0,
-                element_bytes: 1,
-                scalar_type: 1,
-                rank: 1,
-                logical_axis: u64::MAX,
-                dimensions: [slab_bytes, 0, 0, 0],
-                strides_bytes: [1, 0, 0, 0],
-            },
-            logical_begin: 0,
-            logical_end: 0,
-            native_allocation: None,
-        };
+        parent.require_task(py, task_use)?;
         let session = self.session.borrow(py);
-        let mut owner = session.owner()?;
-        let state = self.continuation_state(py, task_use, parent, &owner, None)?;
-        self.require_continuation_owner(py, parent, allocation_owner)?;
-        if self.continuation_binding(&state, parent, false)? != expected {
+        session.require_creator()?;
+        if instruction_admission.inner.session.as_ptr() != self.session.as_ptr() {
             return Err(invalid(
-                "prepared update authority changed during model output handoff",
+                "cohort preparation changed its original instruction Session",
             ));
         }
-        owner
-            .bind_prepared_update_output(
-                &step.inner,
-                bank,
-                SemanticModelMemory {
-                    allocations: allocation_handoff.into_native(),
-                    storages,
-                    views,
-                },
-                tensor_handoff.into_native(),
-                numerical_admissibility,
-                slab_backing,
-                &baseline_forward.inner,
-                &candidate_forward.inner,
-                &canary_comparison.inner,
-                &allocation_owner.inner,
-                stream,
-            )
-            .map_err(xlog_err)?;
-        drop(state);
-        drop(owner);
-        drop(session);
-        step.continuation_producers
+        let active = session
+            .active_cold_model_work
             .lock()
-            .map_err(|_| invalid("prepared update producer ownership mutex is poisoned"))?[bank]
-            .append(&mut producer_owners.0);
-        Ok(())
+            .map_err(|_| invalid("active cold callback custody mutex is poisoned"))?;
+        if active
+            .as_ref()
+            .is_none_or(|original| !std::ptr::eq(&*original.borrow(py), model_work))
+            || !model_work.active.load(Ordering::Acquire)
+        {
+            return Err(invalid(
+                "cohort preparation requires its original active cold report",
+            ));
+        }
+        drop(active);
+        let work = model_work.custody(py)?.inner.clone();
+        let mut owner = session.owner()?;
+        let observation = owner
+            .prepare_family_cohorts(&*parent.lease()?, &instruction_admission.inner.inner, &work)
+            .map_err(xlog_err)?;
+        observation
+            .map(|value| native_observation_report(py, value))
+            .transpose()
+    }
+
+    /// Bind the full unchanged pending copy to its two original forward streams.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, slab_backing, slab_bytes, baseline_forward, candidate_forward, canary_comparison, allocation_owner, consumer_stream))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "complete original pending-model handoff"
+    )]
+    fn bind_prepared_control_output(
+        &self,
+        py: Python<'_>,
+        task_use: &PySemanticTransitionTaskUse,
+        step: &PySemanticPreparedStep,
+        bank: usize,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        model_storages: &Bound<'_, PyAny>,
+        model_views: &Bound<'_, PyAny>,
+        numerical_admissibility: &Bound<'_, PyAny>,
+        slab_backing: &Bound<'_, PyAny>,
+        slab_bytes: &Bound<'_, PyAny>,
+        baseline_forward: &PySemanticModelForwardWitness,
+        candidate_forward: &PySemanticModelForwardWitness,
+        canary_comparison: &PySemanticModelCanaryWitness,
+        allocation_owner: &PySemanticTensorOwner,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.bind_prepared_model_output(
+            py,
+            SemanticTransitionKind::Control,
+            task_use,
+            step,
+            bank,
+            tensors,
+            model_allocations,
+            model_storages,
+            model_views,
+            numerical_admissibility,
+            slab_backing,
+            slab_bytes,
+            baseline_forward,
+            candidate_forward,
+            canary_comparison,
+            allocation_owner,
+            consumer_stream,
+        )
     }
 
     /// Bind the original policy producers while this genuine step is recording.
@@ -28544,6 +28595,7 @@ impl PySemanticTransitionController {
                         SemanticTransitionKind::Proposal => "proposal",
                         SemanticTransitionKind::Recompute => "recompute",
                         SemanticTransitionKind::Update => "update",
+                        SemanticTransitionKind::Control => "control",
                         SemanticTransitionKind::Drain => "drain",
                     };
                     let refusal = transition_refusal_report(py, outcome)
@@ -29109,6 +29161,7 @@ impl PySemanticTransitionController {
                 SemanticTransitionKind::Proposal => "proposal",
                 SemanticTransitionKind::Recompute => "recompute",
                 SemanticTransitionKind::Update => "update",
+                SemanticTransitionKind::Control => "control",
                 SemanticTransitionKind::Drain => "drain",
             };
             let restored = {
@@ -34164,4 +34217,206 @@ assert first.policy_layout() == first_layout
 "#,
         );
     }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl PySemanticTransitionController {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "complete original pending-model handoff"
+    )]
+    fn bind_prepared_model_output(
+        &self,
+        py: Python<'_>,
+        expected_kind: SemanticTransitionKind,
+        task_use: &PySemanticTransitionTaskUse,
+        step: &PySemanticPreparedStep,
+        bank: usize,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        model_storages: &Bound<'_, PyAny>,
+        model_views: &Bound<'_, PyAny>,
+        numerical_admissibility: &Bound<'_, PyAny>,
+        slab_backing: &Bound<'_, PyAny>,
+        slab_bytes: &Bound<'_, PyAny>,
+        baseline_forward: &PySemanticModelForwardWitness,
+        candidate_forward: &PySemanticModelForwardWitness,
+        canary_comparison: &PySemanticModelCanaryWitness,
+        allocation_owner: &PySemanticTensorOwner,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let _operation = TensorProducerOperation::begin(&self.session.borrow(py))?;
+        self.session.borrow(py).require_creator()?;
+        self.require_read_issued(task_use)?;
+        if bank > 1 {
+            return Err(invalid("pending model bank must be zero or one"));
+        }
+        let parent = ContentStepRef::Prepared(step);
+        let mut budget = 16 * 1024 * 1024;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut budget)?;
+        let slab_bytes = ColdValue::read(slab_bytes, &mut budget, 0)?.unsigned()?;
+        if slab_bytes == 0 || slab_bytes > i64::MAX as u64 {
+            return Err(invalid(
+                "pending model slab has no supported exact byte extent",
+            ));
+        }
+        let storages = parse_model_storages(model_storages, &mut budget)?;
+        let views = parse_model_views(model_views, &mut budget)?;
+        let expected_binding = {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            self.require_continuation_owner(py, parent, allocation_owner)?;
+            if owner
+                .prepared_transition_kind(&step.inner)
+                .map_err(xlog_err)?
+                != expected_kind
+            {
+                return Err(invalid(
+                    "pending model output changed its original transition",
+                ));
+            }
+            self.continuation_binding(&state, parent, false)?
+        };
+        let check = || -> PyResult<()> {
+            let session = self.session.borrow(py);
+            let owner = session.owner()?;
+            let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+            step.require_recording_stream(&owner, stream)?;
+            self.require_continuation_owner(py, parent, allocation_owner)?;
+            if self.continuation_binding(&state, parent, false)? != expected_binding {
+                return Err(invalid(
+                    "pending model authority changed during producer handoff",
+                ));
+            }
+            Ok(())
+        };
+        let device = self.session.borrow(py).device_ordinal;
+        let ParsedTensorInputs {
+            handoff: allocation_handoff,
+            producers: allocation_producers,
+        } = parse_tensor_inputs_guarded(model_allocations, &mut budget, device, stream, &check)?;
+        let mut producer_owners = TensorHandoff(vec![
+            allocation_owner._inputs.clone_ref(py),
+            model_allocations.clone().unbind(),
+            tensors.clone().unbind(),
+        ]);
+        producer_owners.0.extend(
+            allocation_owner
+                ._producers
+                .iter()
+                .map(|producer| producer.clone_ref(py)),
+        );
+        producer_owners.0.extend(allocation_producers);
+        let ParsedTensorInputs {
+            handoff: tensor_handoff,
+            producers: tensor_producers,
+        } = parse_tensor_inputs_guarded(tensors, &mut budget, device, stream, &check)?;
+        producer_owners.0.extend(tensor_producers);
+        validate_producer_device_guarded(numerical_admissibility, device, &check)?;
+        producer_owners
+            .0
+            .push(numerical_admissibility.clone().unbind());
+        let allocation_index = u64::try_from(allocation_handoff.0.len())
+            .map_err(|_| invalid("pending model allocation roster is too large"))?;
+        let numerical_admissibility = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                numerical_admissibility,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: allocation_index,
+                element_bytes: 1,
+                scalar_type: 8,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [1, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
+        validate_producer_device_guarded(slab_backing, device, &check)?;
+        producer_owners.0.push(slab_backing.clone().unbind());
+        let slab_backing = SemanticTensorInput {
+            tensor: crate::dlpack_from_py_for_stream_guarded(
+                slab_backing,
+                i64::try_from(stream)
+                    .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                &check,
+            )?,
+            layout: SemanticTensorLayout {
+                role: 0,
+                index: 0,
+                element_bytes: 1,
+                scalar_type: 1,
+                rank: 1,
+                logical_axis: u64::MAX,
+                dimensions: [slab_bytes, 0, 0, 0],
+                strides_bytes: [1, 0, 0, 0],
+            },
+            logical_begin: 0,
+            logical_end: 0,
+            native_allocation: None,
+        };
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        let state = self.continuation_state(py, task_use, parent, &owner, None)?;
+        self.require_continuation_owner(py, parent, allocation_owner)?;
+        if self.continuation_binding(&state, parent, false)? != expected_binding {
+            return Err(invalid(
+                "pending model authority changed during model output handoff",
+            ));
+        }
+        let bind = match expected_kind {
+            SemanticTransitionKind::Update => {
+                xlog_cuda::SemanticTransitionSession::bind_prepared_update_output
+            }
+            SemanticTransitionKind::Control => {
+                xlog_cuda::SemanticTransitionSession::bind_prepared_control_output
+            }
+            _ => return Err(invalid("pending-model output requires Update or Control")),
+        };
+        bind(
+            &mut owner,
+            &step.inner,
+            bank,
+            SemanticModelMemory {
+                allocations: allocation_handoff.into_native(),
+                storages,
+                views,
+            },
+            tensor_handoff.into_native(),
+            numerical_admissibility,
+            slab_backing,
+            &baseline_forward.inner,
+            &candidate_forward.inner,
+            &canary_comparison.inner,
+            &allocation_owner.inner,
+            stream,
+        )
+        .map_err(xlog_err)?;
+        drop(state);
+        drop(owner);
+        drop(session);
+        step.continuation_producers
+            .lock()
+            .map_err(|_| invalid("pending model producer ownership mutex is poisoned"))?[bank]
+            .append(&mut producer_owners.0);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+fn native_observation_report(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyDict>> {
+    Ok(py
+        .import("json")?
+        .call_method1("loads", (value.to_string(),))?
+        .cast_into::<PyDict>()?
+        .unbind())
 }

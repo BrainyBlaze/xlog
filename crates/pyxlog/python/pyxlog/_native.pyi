@@ -275,6 +275,9 @@ class SemanticPreparedStep:
         self, *, consumer_streams: Sequence[int]
     ) -> SemanticCompletedActionProjection: ...
 
+    @property
+    def control_measurements(self) -> dict[str, Any] | None: ...
+
 _SemanticTensorLayout = tuple[
     int, int, int, int, int, int, tuple[int, ...], tuple[int, ...]
 ]
@@ -508,6 +511,36 @@ class SemanticSegmentInstructionAdmission:
     ]]: ...
     @property
     def budgets(self) -> tuple[tuple[int, int, int], ...]: ...
+
+    @property
+    def control_measurements(self) -> dict[str, Any] | None: ...
+
+class SemanticEvaluationInstructionAdmission:
+    """Original public read-only Evaluation; retained across genuine Pending."""
+
+    @property
+    def cohort(self) -> SemanticEvaluationCohort:
+        """The frozen cohort, available only in the preparation callback."""
+        ...
+
+    def execute(
+        self, callback: Callable[[], SemanticCompletedModelEvaluation],
+    ) -> SemanticCompletedModelEvaluation:
+        """Continue this original callback and retire its actual joined expense."""
+        ...
+
+    @property
+    def observation(self) -> dict[str, Any] | None:
+        """Authentic observation, visible after complete native and observer retirement."""
+        ...
+
+    @property
+    def cold_work_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+
+    @property
+    def resources_retired(self) -> bool: ...
 
 class SemanticPrivateReplayChild:
     """One original selected replay child retained by its instruction owner."""
@@ -1452,6 +1485,40 @@ class SemanticTransitionController:
         cancellation raises SemanticPreparedSegmentCancelled for retirement.
         """
         ...
+
+    def admit_evaluation_instruction(
+        self, task_use: SemanticTransitionTaskUse, *,
+        parent: SemanticPublishedParent, instruction_bytes: bytes,
+        program_ordinal: int, resource_observer: Any,
+    ) -> SemanticEvaluationInstructionAdmission:
+        """Admit the exact outer Program instruction, with the original observer capsule."""
+        ...
+
+    def bind_prepared_update_output(
+        self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
+        bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
+        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
+        candidate_forward: SemanticModelForwardWitness,
+        canary_comparison: SemanticModelCanaryWitness,
+        allocation_owner: SemanticTensorOwner, consumer_stream: int,
+    ) -> None: ...
+
+    def bind_prepared_control_output(
+        self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
+        bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
+        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
+        candidate_forward: SemanticModelForwardWitness,
+        canary_comparison: SemanticModelCanaryWitness,
+        allocation_owner: SemanticTensorOwner, consumer_stream: int,
+    ) -> None: ...
+
+    def prepare_family_cohorts(
+        self, task_use: SemanticTransitionTaskUse, *, parent: SemanticPublishedParent,
+        instruction_admission: SemanticSegmentInstructionAdmission,
+        model_work: SemanticColdModelWork,
+    ) -> dict[str, Any] | None: ...
 
 # ---------------------------------------------------------------------------
 # Native relation provenance
@@ -3026,3 +3093,12 @@ def import_arrow_device(
     Requires the ``arrow-device-import`` feature.
     """
     ...
+
+
+class SemanticModelForwardWitness:
+    """Opaque receipt issued by finishing an original full forward stream."""
+    pass
+
+class SemanticModelCanaryWitness:
+    """Opaque receipt issued by the original paired canary comparison."""
+    pass

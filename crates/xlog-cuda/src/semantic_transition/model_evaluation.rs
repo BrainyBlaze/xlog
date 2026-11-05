@@ -103,7 +103,7 @@ enum EvaluationExecution {
 /// source Runtime's lifetime. Final evaluations borrow this same allocation.
 pub struct SemanticEvaluationCohort {
     issuance: Arc<()>,
-    selected: SemanticSelectedTrainingView,
+    pub(super) selected: Arc<SemanticSelectedTrainingView>,
     content: TensorContentBuffers,
     domain: Identity256,
     task: SemanticTaskContentIdentity,
@@ -112,6 +112,13 @@ pub struct SemanticEvaluationCohort {
 }
 
 impl SemanticEvaluationCohort {
+    pub(super) fn source_task(&self) -> SemanticTaskContentIdentity {
+        SemanticTaskContentIdentity {
+            query: self.task.query,
+            theory_program: self.task.theory_program,
+            result: self.task.result,
+        }
+    }
     pub(super) fn content_tensors(&self) -> &[PreparedSemanticTensor] {
         &self.content.tensors
     }
@@ -165,6 +172,12 @@ pub struct SemanticCompletedModelEvaluation {
 }
 
 impl SemanticCompletedModelEvaluation {
+    pub fn belongs_to_original(&self, original: &SemanticModelEvaluation) -> bool {
+        Arc::ptr_eq(&self.issuer, &original.issuer)
+            && Arc::ptr_eq(&self.invocation, &original.invocation)
+            && Arc::ptr_eq(&self.cohort_issuance, &original.cohort.issuance)
+    }
+
     pub fn result(&self) -> SemanticModelEvaluationResult {
         self.result
     }
@@ -907,18 +920,6 @@ impl SemanticTransitionSession {
                 "evaluation effects require its original complete nonempty capture plan",
             ));
         }
-        let arena = self
-            .training_views
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?;
-        let domain = arena.training_domain_identity();
-        let task = self
-            .task
-            .as_ref()
-            .ok_or(SemanticTransitionError::NotBound)?
-            .0
-            .content_identity();
-        let device = self.provider.device().ordinal();
         if submit && !original.started {
             if let Some(allowance) = self.cold_native_allowance(lease.token)? {
                 let handle = original
@@ -936,56 +937,16 @@ impl SemanticTransitionSession {
         }
         let cold_work = self.cold_native_work(lease.token)?;
         if original.cohort.is_none() {
-            let (arena, selected_view) = self.training_view_selection_basis(lease)?;
-            let selected =
-                arena.prepare_selection(self.training_origins.as_ref().map(Arc::clone))?;
-            let mut tensors = Vec::with_capacity(17);
-            for (index, port) in SemanticTrainingViewPort::ALL.into_iter().enumerate() {
-                let (view, shape, strides, dtype) = selected.port(port)?;
-                let mut layout = SemanticTensorLayout {
-                    role: 0,
-                    index: index as u64,
-                    element_bytes: u64::from(dtype.1 / 8),
-                    scalar_type: match dtype {
-                        (1, 64) => 3,
-                        (0, 64) => 7,
-                        (2, 32) => 6,
-                        _ => return Err(SemanticTransitionError::ObservationMismatch),
-                    },
-                    rank: shape.len() as u64,
-                    logical_axis: u64::MAX,
-                    dimensions: [0; 4],
-                    strides_bytes: [0; 4],
-                };
-                for (axis, (extent, stride)) in shape.iter().zip(&strides).enumerate() {
-                    layout.dimensions[axis] = *extent as u64;
-                    layout.strides_bytes[axis] = *stride as u64 * layout.element_bytes;
-                }
-                tensors.push(PreparedSemanticTensor {
-                    layout,
-                    logical_begin: 0,
-                    logical_end: 0,
-                    data: *view.device_ptr(),
-                    native_allocation: view.allocation_provenance(),
-                    source: Some(view),
-                    _empty_owner: None,
-                });
-            }
-            let content = TensorContentBuffers {
-                tensors,
-                bound_inputs: Vec::new(),
-                model_bank: None,
-            };
+            let coordinates = [
+                lease.header.training_cursor,
+                lease.header.training_rng[0],
+                lease.header.training_rng[1],
+                lease.header.training_rng[2],
+                lease.header.training_rng[3],
+            ];
+            let (selected_view, cohort) = self.prepare_evaluation_cohort(lease, coordinates)?;
             original.selection = Some((selected_view, None));
-            original.cohort = Some(Arc::new(SemanticEvaluationCohort {
-                issuance: Arc::new(()),
-                selected,
-                content,
-                domain,
-                task,
-                device,
-                provider: Arc::clone(&self.provider),
-            }));
+            original.cohort = Some(cohort);
         }
         let cohort = Arc::clone(original.cohort.as_ref().expect("retained original cohort"));
         if submit && original.source_material.is_none() {
@@ -2647,6 +2608,127 @@ impl SemanticTransitionSession {
                 .get_mut(&lease.token)
                 .expect("checked original reader")
                 .evaluation = None;
+            self.steps
+                .get_mut(&lease.token)
+                .expect("checked original reader")
+                .evaluation_preparation = None;
+        }
+        Ok(())
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn prepare_evaluation_cohort(
+        &self,
+        lease: &SemanticPublishedLease,
+        coordinates: [u64; 5],
+    ) -> Result<(DeviceMemoryView<u8>, Arc<SemanticEvaluationCohort>), SemanticTransitionError>
+    {
+        self.checked_reader(lease)?;
+        let arena = Arc::clone(
+            self.training_views
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
+        );
+        if !arena.is_materialized() {
+            return Err(publication_input_error(
+                "materialize the complete original training source before freezing a cohort",
+            ));
+        }
+        let reservation = self
+            .replay_material_budget
+            .as_ref()
+            .map(|budget| {
+                budget
+                    .reserve_auxiliary(arena.training_roster_allocation_bound()?)
+                    .map(Arc::new)
+            })
+            .transpose()?;
+        let roster = arena.freeze_training_roster(reservation)?;
+        let selected_view = arena.source_view_for_cursor(coordinates[0], &roster)?;
+        let mut selected =
+            arena.prepare_selection(self.training_origins.as_ref().map(Arc::clone))?;
+        selected.bind_training_roster(roster)?;
+        let cohort = self.evaluation_cohort_from_selected(lease, Arc::new(selected))?;
+        Ok((selected_view, cohort))
+    }
+
+    pub(super) fn evaluation_cohort_from_selected(
+        &self,
+        lease: &SemanticPublishedLease,
+        selected: Arc<SemanticSelectedTrainingView>,
+    ) -> Result<Arc<SemanticEvaluationCohort>, SemanticTransitionError> {
+        self.checked_reader(lease)?;
+        let arena = self
+            .training_views
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        let mut tensors = Vec::with_capacity(17);
+        for (index, port) in SemanticTrainingViewPort::ALL.into_iter().enumerate() {
+            let (view, shape, strides, dtype) = selected.port(port)?;
+            let mut layout = SemanticTensorLayout {
+                role: 0,
+                index: index as u64,
+                element_bytes: u64::from(dtype.1 / 8),
+                scalar_type: match dtype {
+                    (1, 64) => 3,
+                    (0, 64) => 7,
+                    (2, 32) => 6,
+                    _ => return Err(SemanticTransitionError::ObservationMismatch),
+                },
+                rank: shape.len() as u64,
+                logical_axis: u64::MAX,
+                dimensions: [0; 4],
+                strides_bytes: [0; 4],
+            };
+            for (axis, (extent, stride)) in shape.iter().zip(&strides).enumerate() {
+                layout.dimensions[axis] = *extent as u64;
+                layout.strides_bytes[axis] = *stride as u64 * layout.element_bytes;
+            }
+            tensors.push(PreparedSemanticTensor {
+                layout,
+                logical_begin: 0,
+                logical_end: 0,
+                data: *view.device_ptr(),
+                native_allocation: view.allocation_provenance(),
+                source: Some(view),
+                _empty_owner: None,
+            });
+        }
+        let content = TensorContentBuffers {
+            tensors,
+            bound_inputs: Vec::new(),
+            model_bank: None,
+        };
+        Ok(Arc::new(SemanticEvaluationCohort {
+            issuance: Arc::new(()),
+            selected,
+            content,
+            domain: arena.training_domain_identity(),
+            task: self
+                .task
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .0
+                .content_identity(),
+            device: self.provider.device().ordinal(),
+            provider: Arc::clone(&self.provider),
+        }))
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn require_model_evaluation_invocation(
+        &self,
+        parent: &SemanticPublishedLease,
+        evaluation: &SemanticModelEvaluation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        self.original_evaluation(evaluation)?;
+        if evaluation.token != parent.token {
+            return Err(publication_input_error(
+                "evaluation changed its actual acquired parent",
+            ));
         }
         Ok(())
     }

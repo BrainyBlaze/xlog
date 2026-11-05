@@ -1587,6 +1587,10 @@ __device__ PublicationBank* publication_acquired_bank(const PublicationControl& 
 }
 // The gate only closes the acquire-load/count-increment race. The PublicationWord
 // remains the sole canonical selector; no reader derives a bank from this gate.
+__device__ bool publication_pending_model(uint64_t kind) {
+    return kind==4 || kind==5;
+}
+
 __device__ uint64_t publication_header_eligibility(const PublicationControl& control,
         const PublicationBank& bank,uint64_t word,uint64_t transition_kind,
         semantic_graph::NativeWorkTally* work=nullptr) {
@@ -1594,7 +1598,7 @@ __device__ uint64_t publication_header_eligibility(const PublicationControl& con
     if(control.reader_counts[(word&1)^1])return 2;
     if((word>>1)==(UINT64_MAX>>1))return 5;
     if(bank.header.terminal>1)return 4;
-    if(transition_kind<1 || transition_kind>4 ||
+    if(transition_kind<1 || transition_kind>5 ||
        (bank.header.terminal==1)!=(transition_kind==3))return 1;
     // Absorption changes the effective model generation without pretending to
     // recompute old caches. Only the real Recompute can make them usable again.
@@ -2111,7 +2115,7 @@ __device__ bool publication_capacity_refusal_valid(const SemanticCapacityRefusal
 
 __device__ uint64_t publication_validate_model_update(const PublicationControl& control,
         const PublicationBank& base,const PendingContinuation& pending,semantic_graph::NativeWorkTally* work) {
-    if(pending.transition_kind!=4)
+    if(!publication_pending_model(pending.transition_kind))
         return pending.model_update_bindings || pending.model_update_binding_count ||
             pending.model_update_admissibility || pending.model_update_refusal ||
             pending.model_update_canary_results || pending.model_update_canaries || pending.capacity_refusal;
@@ -2252,7 +2256,7 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
         }
         if(r.role==1 && (r.logical_begin!=base.header.prefix_extent || r.logical_end!=end))return 1;
         if((r.role==4 || r.role==5) &&
-           (r.logical_begin!=(pending.transition_kind==4 ? 0 : base.header.prefix_extent) ||
+           (r.logical_begin!=(publication_pending_model(pending.transition_kind) ? 0 : base.header.prefix_extent) ||
             r.logical_end!=end))return 1;
         if(r.role>=6 && r.role<=13 && (r.logical_begin || r.logical_end))return 1;
         if(active && (r.logical_begin!=0 || r.logical_end!=table.header->active_row_count))return 1;
@@ -2289,7 +2293,7 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
             PublicationTensorView view{};uint64_t bytes=0;
             if(publication_tensor_view(control,r,from,&view,&bytes,&table,work))return 1;
             if(r.role==4 || r.role==5) {
-                const uint64_t expected_rows=pending.transition_kind==4 ? contract.prefix_capacity : 32;
+                const uint64_t expected_rows=publication_pending_model(pending.transition_kind) ? contract.prefix_capacity : 32;
                 if(from->logical_axis!=2 || from->dimensions[2]!=expected_rows ||
                    to->logical_axis!=2 || to->dimensions[2]!=contract.prefix_capacity ||
                    original->logical_begin || original->logical_end!=base.header.prefix_extent)return 1;
@@ -2301,10 +2305,10 @@ __device__ uint64_t publication_validate_continuation(const PublicationControl& 
 __device__ uint64_t publication_prepare_continuation(PublicationControl& control,
         const PublicationLease& lease,ContinuationInputs inputs,semantic_graph::NativeWorkTally* work) {
     const uint64_t requested_kind=inputs.transition_kind;
-    if((requested_kind==4)!=(inputs.training_selection!=0) ||
+    if((publication_pending_model(requested_kind))!=(inputs.training_selection!=0) ||
        (inputs.capacity_refusal_source==0)!=(inputs.capacity_refusal==0) ||
        (!inputs.capacity_refusal_source && (inputs.capacity_allocation_ordinal || inputs.capacity_bytes)) ||
-       (inputs.capacity_refusal_source && (requested_kind!=4 ||
+       (inputs.capacity_refusal_source && (!publication_pending_model(requested_kind) ||
         !publication_pointer_span(inputs.capacity_refusal_source,sizeof(SemanticCapacityRefusalRecord),
             alignof(SemanticCapacityRefusalRecord)) ||
         !publication_pointer_span(inputs.capacity_refusal,sizeof(SemanticCapacityRefusalRecord),
@@ -2312,17 +2316,17 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
        (inputs.training_selection && (inputs.training_selection%alignof(uint64_t) ||
         inputs.training_selection>UINT64_MAX-sizeof(uint64_t))) ||
        (inputs.model_update_bindings==0)!=(inputs.model_update_binding_count==0) ||
-        (requested_kind==4)!=(inputs.model_update_bindings!=0) ||
-        (requested_kind==4)!=(inputs.model_update_admissibility!=0) ||
-        (requested_kind==4)!=(inputs.model_update_refusal!=0) ||
-        (requested_kind==4)!=(inputs.model_update_canary_results!=0) ||
-        (requested_kind==4)!=(inputs.model_update_canaries!=0) ||
+        (publication_pending_model(requested_kind))!=(inputs.model_update_bindings!=0) ||
+        (publication_pending_model(requested_kind))!=(inputs.model_update_admissibility!=0) ||
+        (publication_pending_model(requested_kind))!=(inputs.model_update_refusal!=0) ||
+        (publication_pending_model(requested_kind))!=(inputs.model_update_canary_results!=0) ||
+        (publication_pending_model(requested_kind))!=(inputs.model_update_canaries!=0) ||
        (inputs.model_update_bindings &&
         (inputs.model_update_bindings%alignof(ModelUpdateBinding) ||
          inputs.model_update_binding_count>
              (UINT64_MAX-inputs.model_update_bindings)/sizeof(ModelUpdateBinding))))return 1;
     if(lease.transition_kind)inputs.transition_kind=lease.transition_kind;
-    if(inputs.capacity_refusal_source && inputs.transition_kind!=4)return 1;
+    if(inputs.capacity_refusal_source && !publication_pending_model(inputs.transition_kind))return 1;
     if(!publication_acquired_bank(control,lease,work) ||
        !control.directories[lease.bank] || !control.contract || !control.continuation ||
        control.contract%alignof(PublicationContract) || control.continuation%alignof(PendingContinuation) ||
@@ -2335,7 +2339,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     if(!publication_bank_matches(control,base,lease.word,work) || contract.abi!=1 ||
        base.header.range_count>contract.range_capacity || publication_validate_selected_model(control,base,work) ||
        base.header.authority_generation!=contract.authority_generation || pending.abi!=1 ||
-       inputs.transition_kind<1 || inputs.transition_kind>4 || !inputs.authority_bytes || !pending.ranges ||
+       inputs.transition_kind<1 || inputs.transition_kind>5 || !inputs.authority_bytes || !pending.ranges ||
        pending.ranges%alignof(PublicationRange) || pending.range_count>contract.range_capacity ||
        pending.range_count>(UINT64_MAX-pending.ranges)/sizeof(PublicationRange) ||
        !semantic_graph::checked_add(32,contract.feedback_capacity,&capacity) ||
@@ -2456,20 +2460,20 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
     pending.physical_blocks=inputs.physical_blocks;
     semantic_graph::copy_identity(pending.model_schema_digest,inputs.model_schema_digest);
     semantic_graph::copy_identity(pending.model_identity,inputs.model_identity);
-    pending.training_selection=inputs.transition_kind==4 ? inputs.training_selection : 0;
-    pending.model_update_bindings=inputs.transition_kind==4 ? inputs.model_update_bindings : 0;
-    pending.model_update_binding_count=inputs.transition_kind==4 ? inputs.model_update_binding_count : 0;
-    pending.model_update_admissibility=inputs.transition_kind==4 ? inputs.model_update_admissibility : 0;
-    pending.model_update_refusal=inputs.transition_kind==4 ? inputs.model_update_refusal : 0;
-    pending.model_update_canary_results=inputs.transition_kind==4 ? inputs.model_update_canary_results : 0;
-    pending.model_update_canaries=inputs.transition_kind==4 ? inputs.model_update_canaries : 0;
-    pending.capacity_refusal=inputs.transition_kind==4 ? inputs.capacity_refusal : 0;
+    pending.training_selection=publication_pending_model(inputs.transition_kind) ? inputs.training_selection : 0;
+    pending.model_update_bindings=publication_pending_model(inputs.transition_kind) ? inputs.model_update_bindings : 0;
+    pending.model_update_binding_count=publication_pending_model(inputs.transition_kind) ? inputs.model_update_binding_count : 0;
+    pending.model_update_admissibility=publication_pending_model(inputs.transition_kind) ? inputs.model_update_admissibility : 0;
+    pending.model_update_refusal=publication_pending_model(inputs.transition_kind) ? inputs.model_update_refusal : 0;
+    pending.model_update_canary_results=publication_pending_model(inputs.transition_kind) ? inputs.model_update_canary_results : 0;
+    pending.model_update_canaries=publication_pending_model(inputs.transition_kind) ? inputs.model_update_canaries : 0;
+    pending.capacity_refusal=publication_pending_model(inputs.transition_kind) ? inputs.capacity_refusal : 0;
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PendingContinuation)-3*sizeof(uint64_t));
     for(uint64_t i=0;i<pending.range_count;++i) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         auto& range=ranges[i];
         if(range.role==1 || range.role==4 || range.role==5) {
-            range.logical_begin=(inputs.transition_kind==4 && (range.role==4 || range.role==5)) ?
+            range.logical_begin=(publication_pending_model(inputs.transition_kind) && (range.role==4 || range.role==5)) ?
                 0 : base.header.prefix_extent;
             range.logical_end=end;
         } else if(range.role>=51 && range.role<=54) {
@@ -2964,7 +2968,7 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
         if(old[i].role==1 || old[i].role==2 || old[i].role==31) {
             to[i]=old[i];semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
         }
-        if((old[i].role==4 || old[i].role==5) && pending.transition_kind!=4) {
+        if((old[i].role==4 || old[i].role==5) && !publication_pending_model(pending.transition_kind)) {
             const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
             if(old[i].storage_slot>=control.storage_count || to[i].storage_slot>=control.storage_count ||
                old[i].storage_slot==to[i].storage_slot)return 1;
@@ -2979,7 +2983,7 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
            old[i].role==semantic_task_ground::kPublicationRole)
             if(publication_preserve_range(control,old,base.header.range_count,old[i],to[i],work))return 1;
         if(old[i].role>=18 && old[i].role<=25) {
-            if(pending.transition_kind!=4) {
+            if(!publication_pending_model(pending.transition_kind)) {
                 to[i]=old[i];
                 semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(PublicationRange));
                 continue;
@@ -3041,7 +3045,7 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
                     if(source.role>=51 && source.role<=54 && uint64_t(axis)==source_layout->logical_axis)
                         coordinate=pending_table.rows[coordinate].physical_row;
                     source_offset+=coordinate*source_layout->strides_bytes[axis];
-                    if((source.role==4 || source.role==5) && pending.transition_kind!=4 &&
+                    if((source.role==4 || source.role==5) && !publication_pending_model(pending.transition_kind) &&
                        uint64_t(axis)==source_layout->logical_axis)coordinate+=base.header.prefix_extent;
                     offset+=coordinate*destination_layout->strides_bytes[axis];
                 }
@@ -7137,7 +7141,7 @@ __device__ uint64_t publication_update_work_record_bytes(bool refused) {
 }
 __device__ bool publication_update_work_admits(const PendingContinuation& pending,const ExecutionWork& whole,
         semantic_graph::NativeWorkTally* work) {
-    if(pending.transition_kind!=4)return true;
+    if(!publication_pending_model(pending.transition_kind))return true;
     const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(pending.model_update_canaries);
     const auto* results=reinterpret_cast<const SemanticTrainingCanaryResultRecord*>(pending.model_update_canary_results);
     bool admitted=!whole.overflow;
@@ -7157,7 +7161,7 @@ __device__ bool publication_update_work_admits(const PendingContinuation& pendin
 }
 __device__ void publication_write_update_work(const PendingContinuation& pending,const ExecutionWork& whole,
         semantic_graph::NativeWorkTally* work) {
-    if(pending.transition_kind!=4)return;
+    if(!publication_pending_model(pending.transition_kind))return;
     const auto* canaries=reinterpret_cast<const SemanticTrainingCanaryRecord*>(pending.model_update_canaries);
     auto* results=reinterpret_cast<SemanticTrainingCanaryResultRecord*>(pending.model_update_canary_results);
     SemanticTrainingCanaryRefusalRecord refusal{};refusal.abi=1;
@@ -7196,8 +7200,8 @@ __device__ void publication_write_update_work(const PendingContinuation& pending
     *admissible=uint8_t(*admissible && !winner);
 }
 
-__device__ void publication_finish_refused_update(const PendingContinuation& pending,ExecutionWork& execution) {
-    if(pending.transition_kind!=4)return;
+__device__ void publication_finish_unpublished_model_work(const PendingContinuation& pending,ExecutionWork& execution) {
+    if(!publication_pending_model(pending.transition_kind))return;
     semantic_graph::NativeWorkTally actual{},remaining{};
     semantic_graph::charge_native(&remaining,semantic_graph::NativeWorkEvent::TableSlot,10);
     semantic_graph::charge_native(&remaining,semantic_graph::NativeWorkEvent::CanonicalByte,publication_update_work_record_bytes(false));
@@ -7289,6 +7293,33 @@ __device__ bool publication_predict_attempt(const PublicationControl& control,co
     return cost.record(control,*target);
 }
 
+
+__device__ uint64_t publication_discard_control(const Descriptor& descriptor,PublicationBank& base,
+        uint64_t word,uint64_t end,State* state) {
+    PublicationAttemptWork attempt(state->execution_work);
+    auto* work=&attempt.actual;
+    auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+    const auto& pending=*reinterpret_cast<const PendingContinuation*>(control.continuation);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
+    if(pending.transition_kind!=5 || state->blocks || end!=base.header.prefix_extent ||
+       publication_load(control.word)!=word)return 1;
+    auto& scratch=*publication_bank(control,word^1);
+    scratch=base;scratch.header.abi=0;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
+        sizeof(PublicationBank)+sizeof(uint64_t));
+    if(publication_apply_continuation(control,base,scratch,pending,work))return 1;
+    // No selector CAS, origin, RNG or learning counter is written. Invalidate
+    // the unreachable bank before the original terminal join can expose it.
+    scratch.header.abi=0;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
+    attempt.flush();
+    publication_finish_unpublished_model_work(pending,state->execution_work);
+    if(state->execution_work.overflow)state->status=11;
+    else if(*reinterpret_cast<const uint8_t*>(pending.model_update_admissibility)!=1)
+        state->status=18;
+    if(state->status)state->importance_weight=0.0;
+    return 0;
+}
 
 __device__ uint64_t publication_publish(const Descriptor& descriptor,PublicationBank& base,uint64_t word,uint64_t end,
         const semantic_graph::ResidentHandle& base_root,State* state,const Receipt* receipts,bool no_draw=false,bool drain=false) {
@@ -7969,7 +8000,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
             const SemanticTrainingCanaryRefusalRecord* update_refusal=nullptr;
             bool capacity_refused=false;
-            if(pending.transition_kind==4) {
+            if(publication_pending_model(pending.transition_kind)) {
                 if(!pending.training_selection || pending.training_selection%alignof(uint64_t) ||
                     pending.training_selection>UINT64_MAX-sizeof(uint64_t) ||
                     !pending.model_update_bindings || !pending.model_update_binding_count ||
@@ -8007,7 +8038,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                    (update_admissibility && update_refusal->reason)) {
                     semantic_content_integrity_trap();return;
                 }
-                numerical &= update_admissibility;
+                numerical &= update_admissibility==1;
             } else if(pending.training_selection || pending.model_update_bindings ||
                       pending.model_update_binding_count || pending.model_update_admissibility ||
                       pending.model_update_refusal || pending.model_update_canary_results || pending.model_update_canaries ||
@@ -8036,7 +8067,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 if(header.semantic_owner!=descriptor.arena[1] || publication_validate_selected_model(control,*acquired_bank,&admission_work.actual) ||
                    header.authority_generation!=contract.authority_generation ||
                    pending.model_generation!=header.model_generation || pending.authority_generation!=header.authority_generation ||
-                   pending.transition_kind<1 || pending.transition_kind>4 ||
+                   pending.transition_kind<1 || pending.transition_kind>5 ||
                    header.model_generation>UINT32_MAX || header.proposal>UINT32_MAX ||
                    header.stream_serial>(UINT64_MAX>>8) || header.family_id>255) {
                     semantic_content_integrity_trap();return;
@@ -8060,9 +8091,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     }
     __syncthreads();
     if(numerical_refused) {
-        if(threadIdx.x==0 && transition_kind==4) {
+        if(threadIdx.x==0 && publication_pending_model(transition_kind)) {
             const auto& control=*reinterpret_cast<const PublicationControl*>(descriptor.publication.control);
-            publication_finish_refused_update(
+            publication_finish_unpublished_model_work(
                 *reinterpret_cast<const PendingContinuation*>(control.continuation),state->execution_work);
         }
         return;
@@ -8127,6 +8158,50 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         input_bank_admitted=!failed && transition_kind==1;
     }
     __syncthreads();
+    if(acquired_bank && transition_kind==5 && !failed) {
+        if(threadIdx.x==0) {
+            auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+            semantic_graph::NativeWorkTally validation{};
+            invalid=publication_validate_model_update(control,*acquired_bank,
+                *reinterpret_cast<const PendingContinuation*>(control.continuation),&validation) ? 1 : 0;
+            execution_work_merge_native(state->execution_work,validation);
+        }
+        __syncthreads();
+        semantic_graph::NativeWorkTally copy_work{};
+        bool changed=false;
+        if(!invalid) {
+            const auto& control=*reinterpret_cast<const PublicationControl*>(descriptor.publication.control);
+            const auto& pending=*reinterpret_cast<const PendingContinuation*>(control.continuation);
+            const auto* bindings=reinterpret_cast<const ModelUpdateBinding*>(pending.model_update_bindings);
+            const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+            for(uint64_t item=0;item<pending.model_update_binding_count;++item) {
+                const auto& binding=bindings[item];
+                const auto* original=reinterpret_cast<const uint8_t*>(storage[binding.slots[0]].pointer);
+                const auto* candidate=reinterpret_cast<const uint8_t*>(binding.candidate);
+                semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::TableSlot,2);
+                uint64_t verified=0;
+                for(uint64_t byte=threadIdx.x;byte<binding.bytes;byte+=blockDim.x) {
+                    changed|=original[byte]!=candidate[byte];++verified;
+                }
+                semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::CanonicalByte,2*verified);
+                semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::Category,verified);
+            }
+            if(changed) {
+                atomicExch(&invalid,2U);
+                semantic_graph::charge_native(&copy_work,semantic_graph::NativeWorkEvent::TableSlot,1);
+            }
+        }
+        execution_work_merge_parallel(state->execution_work,copy_work);
+        if(threadIdx.x==0 && invalid) {
+            failed=1;state->status=invalid==2 ? 17 : 10;
+            if(invalid!=2) {
+                auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
+                control.refusal=1;
+            }
+            publication_refusal_snapshot(descriptor,base,acquired_bank,state);
+        }
+        __syncthreads();
+    }
     if(acquired_bank && transition_kind!=1) {
         if(threadIdx.x==0) {
             auto& control=*reinterpret_cast<PublicationControl*>(descriptor.publication.control);
@@ -8139,7 +8214,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             }
             if(!failed) {
                 state->importance_weight=1.0;
-                control.refusal=publication_publish(descriptor,*acquired_bank,acquired_word,structural_end,base,state,receipts,true,transition_kind==3);
+                control.refusal=transition_kind==5 ?
+                    publication_discard_control(descriptor,*acquired_bank,acquired_word,structural_end,state) :
+                    publication_publish(descriptor,*acquired_bank,acquired_word,structural_end,base,state,receipts,true,transition_kind==3);
                 if(control.refusal){failed=1;state->status=state->execution_work.overflow ? 11 : 10;}
             }
             if(failed && publication_staged) {
@@ -8148,7 +8225,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 semantic_graph::charge_native(&invalidation,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
                 execution_work_merge_native(state->execution_work,invalidation);
             }
-            if(failed && transition_kind==4)publication_finish_refused_update(
+            if(failed && publication_pending_model(transition_kind))publication_finish_unpublished_model_work(
                 *reinterpret_cast<const PendingContinuation*>(control.continuation),state->execution_work);
             if(publication_held)publication_store(control.reader_gate,0);
         }
@@ -8620,9 +8697,9 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             if(failed && publication_staged)publication_bank(control,acquired_word^1)->header.abi=0;
             publication_store(control.reader_gate,0);
         }
-        if(failed && transition_kind==4 && descriptor.publication.control) {
+        if(failed && publication_pending_model(transition_kind) && descriptor.publication.control) {
             const auto& control=*reinterpret_cast<const PublicationControl*>(descriptor.publication.control);
-            publication_finish_refused_update(
+            publication_finish_unpublished_model_work(
                 *reinterpret_cast<const PendingContinuation*>(control.continuation),state->execution_work);
         }
     }

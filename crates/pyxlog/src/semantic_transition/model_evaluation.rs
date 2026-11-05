@@ -101,7 +101,11 @@ impl PySemanticCompletedModelEvaluation {
 }
 
 impl PySemanticCompletedModelEvaluation {
-    pub(super) fn require_phase_observation(
+    pub(super) fn original_receipt(&self) -> &SemanticCompletedModelEvaluation {
+        &self.inner
+    }
+
+    pub(super) fn require_original_observation(
         &self,
         py: Python<'_>,
         parent: &PySemanticPublishedParent,
@@ -117,7 +121,9 @@ impl PySemanticCompletedModelEvaluation {
                     .map_err(xlog_err)?
             || self.binding != parent.content_binding_with_owner(py, &owner)?
         {
-            return Err(invalid("phase evaluation changed its original completed native observation, parent or cohort"));
+            return Err(invalid(
+                "evaluation changed its original completed native observation, parent or cohort",
+            ));
         }
         Ok(self.inner.result())
     }
@@ -127,7 +133,7 @@ impl PySemanticCompletedModelEvaluation {
 /// It does not retain a source Runtime, grant or mutable model generation.
 #[pyclass(name = "SemanticEvaluationCohort", module = "pyxlog._native", frozen)]
 pub(crate) struct PySemanticEvaluationCohort {
-    inner: Arc<SemanticEvaluationCohort>,
+    pub(super) inner: Arc<SemanticEvaluationCohort>,
 }
 
 /// Single original forward/objective recording; no backward or publication.
@@ -161,7 +167,7 @@ pub(super) struct PendingEvaluationPreparation {
     cohort: Option<Py<PySemanticEvaluationCohort>>,
     result: Option<Py<PySemanticModelEvaluation>>,
     phase_entered: bool,
-    phase_bound: bool,
+    operation_bound: bool,
 }
 
 #[pymethods]
@@ -263,7 +269,9 @@ impl PySemanticModelEvaluation {
     ) -> PyResult<()> {
         let parent = self.parent.borrow(py);
         let session = parent.session.borrow(py);
-        if let Some(original) = private_execution_owner(py, &session)? {
+        if let Some(instruction) = super::evaluation_instruction::current(&session)? {
+            instruction.cold_boundary(py, self, from, to)?;
+        } else if let Some(original) = private_execution_owner(py, &session)? {
             original
                 .borrow(py)
                 .evaluation_cold_boundary(py, self, from, to)?;
@@ -403,11 +411,11 @@ impl PySemanticModelEvaluation {
         };
         state.phase = *original;
         self.closed.store(true, Ordering::Release);
-        parent
-            .session
-            .borrow(py)
+        let session = parent.session.borrow(py);
+        let retained_instruction = super::evaluation_instruction::current(&session)?.is_some();
+        session
             .recording
-            .store(false, Ordering::Release);
+            .store(retained_instruction, Ordering::Release);
         Ok(())
     }
 
@@ -899,6 +907,9 @@ impl PySemanticModelEvaluation {
         }
         *retained = Some(output_owner.clone_ref(py));
         drop(retained);
+        if let Some(instruction) = super::evaluation_instruction::current(&session)? {
+            instruction.retain_consumer_streams(py, self, &streams)?;
+        }
         use learning_phase::phase_evaluation::EvaluationColdStage;
         self.phase_cold_boundary(
             py,
@@ -990,6 +1001,9 @@ impl PySemanticModelEvaluation {
             .map_err(|_| {
                 invalid("unknown evaluation cancellation cannot repeat its original invocation")
             })?;
+        if let Some(instruction) = super::evaluation_instruction::current(&session)? {
+            instruction.retain_consumer_streams(py, self, &streams)?;
+        }
         let cancelled = owner
             .cancel_model_evaluation(&*parent.lease()?, &self.inner, &streams)
             .map_err(xlog_err)?;
@@ -1003,6 +1017,9 @@ impl PySemanticModelEvaluation {
             .lock()
             .map_err(|_| invalid("evaluation capture owner is poisoned"))?
             .take();
+        if let Some(instruction) = super::evaluation_instruction::current(&session)? {
+            instruction.cancel_evaluation(py, self, &cancelled)?;
+        }
         if let Some(original) = private_execution_owner(py, &session)? {
             original.borrow(py).cancel_phase_evaluation(
                 py,
@@ -1080,6 +1097,17 @@ impl PySemanticTransitionController {
             .lock()
             .map_err(|_| invalid("evaluation preparation owner is poisoned"))?
             .is_some();
+        let public_instruction = super::evaluation_instruction::current(&session)?;
+        if let Some(instruction) = &public_instruction {
+            instruction.require_preparation(
+                py,
+                self,
+                &issued,
+                &acquired,
+                cohort.as_ref(),
+                continuing,
+            )?;
+        }
         if !continuing {
             let public_use = issued.state()?.require_public_use();
             if let Err(public_error) = public_use {
@@ -1163,7 +1191,7 @@ impl PySemanticTransitionController {
         }
         if !continuing {
             let binding = acquired.content_binding_with_owner(py, &owner)?;
-            if session.recording.swap(true, Ordering::AcqRel) {
+            if session.recording.swap(true, Ordering::AcqRel) && public_instruction.is_none() {
                 return Err(invalid(
                     "read-only evaluation cannot overlap an original recording",
                 ));
@@ -1178,7 +1206,7 @@ impl PySemanticTransitionController {
                 cohort: None,
                 result: None,
                 phase_entered: false,
-                phase_bound: false,
+                operation_bound: false,
             });
         }
         let original = pending.as_mut().expect("retained preparation inputs");
@@ -1205,7 +1233,9 @@ impl PySemanticTransitionController {
                         return Err(pending);
                     }
                     pending.take();
-                    session.recording.store(false, Ordering::Release);
+                    session
+                        .recording
+                        .store(public_instruction.is_some(), Ordering::Release);
                     return Err(error);
                 }
             }
@@ -1258,14 +1288,17 @@ impl PySemanticTransitionController {
         // The phase binder acquires the same Session owner; release this guard
         // before it and retain the issued object across a binder failure.
         drop(owner);
-        if !original.phase_bound {
-            if let Some(phase) = private_execution_owner(py, &session)? {
+        if !original.operation_bound {
+            if let Some(instruction) = &public_instruction {
+                let result = original.result.as_ref().expect("retained evaluation");
+                instruction.bind_evaluation(py, result, &result.borrow(py).inner)?;
+            } else if let Some(phase) = private_execution_owner(py, &session)? {
                 let result = original.result.as_ref().expect("retained evaluation");
                 phase
                     .borrow(py)
                     .bind_phase_evaluation(py, result, &result.borrow(py).inner)?;
             }
-            original.phase_bound = true;
+            original.operation_bound = true;
         }
         let result = original
             .result

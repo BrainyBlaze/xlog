@@ -265,6 +265,7 @@ pub(crate) struct ColdNativeAllowance {
     resident_reads: Option<FrozenColdResidentReads>,
     submitted_dma: [u64; 9],
     submitted_dma_ceiling: [u64; 9],
+    original_cohort_dma: Option<(Identity256, [u64; 9])>,
     native_initialization_claimed: bool,
     model_input_generations:
         Option<std::sync::Weak<prepared_source_content::OriginalModelInputGenerations>>,
@@ -650,6 +651,37 @@ pub(super) struct FrozenEvaluationNativePreparation {
 }
 
 impl ColdNativeAllowance {
+    /// Declare only this original saved cohort before the cold owner initializes.
+    /// The normal reached-DMA ledger still records every actual submission.
+    pub(super) fn freeze_original_cohort_dma(
+        &mut self,
+        source: Identity256,
+        dma: [u64; 9],
+    ) -> Result<(), SemanticTransitionError> {
+        if let Some(original) = self.original_cohort_dma {
+            return if original == (source, dma) {
+                Ok(())
+            } else {
+                Err(SemanticTransitionError::ObservationMismatch)
+            };
+        }
+        if self.native_initialization_claimed
+            || !matches!(
+                self.purpose,
+                SemanticColdModelWorkPurpose::PrivatePrefix
+                    | SemanticColdModelWorkPurpose::SourceEvaluation
+            )
+        {
+            return Err(publication_input_error(
+                "cohort DMA must belong to its original uninitialized cold owner",
+            ));
+        }
+        native_work_ceiling_units(dma)?;
+        add_native_work_ceiling(&mut self.submitted_dma_ceiling, dma)?;
+        self.original_cohort_dma = Some((source, dma));
+        Ok(())
+    }
+
     pub(super) fn freeze_evaluation_preparation(
         &mut self,
         preparation: FrozenEvaluationNativePreparation,
@@ -683,6 +715,7 @@ impl ColdNativeAllowance {
             resident_reads: None,
             submitted_dma: [0; 9],
             submitted_dma_ceiling: [0; 9],
+            original_cohort_dma: None,
             native_initialization_claimed: false,
             model_input_generations: None,
             model_scratch_ceiling: None,
@@ -1292,6 +1325,9 @@ impl ColdNativeAllowance {
         add_native_work_ceiling(&mut ceiling, self.prepared_scratch_initialization)?;
         if let Some(context) = self.model_context_ceiling {
             add_native_work_ceiling(&mut ceiling, context)?;
+        }
+        if let Some((_, dma)) = self.original_cohort_dma {
+            add_native_work_ceiling(&mut ceiling, dma)?;
         }
         native_work_ceiling_units(ceiling)?;
         Ok(ceiling)

@@ -1637,6 +1637,8 @@ pub(crate) struct SemanticTrainingViewArena {
     materialized: bool,
     protected_member_count: usize,
     prefix_identity: Identity256,
+    #[cfg(feature = "semantic-policy")]
+    original_sources: Vec<(u64, u64)>,
     row_bytes: usize,
     publication: Option<TrainingPublicationBinding>,
     replay_capacity: Option<SemanticReplayAppendBinding>,
@@ -1864,6 +1866,13 @@ impl SemanticTrainingViewArena {
     }
 
     pub(crate) fn finish_materialization(&mut self, prepared: PreparedOriginalTrainingRoster) {
+        #[cfg(feature = "semantic-policy")]
+        {
+            self.original_sources = prepared.descriptors[..prepared.initial_row_count]
+                .iter()
+                .map(|row| (row.raw_offset, row.raw_bytes))
+                .collect();
+        }
         self.material_reservation = prepared.material_reservation;
         self.initial_row_count = prepared.initial_row_count;
         self.materialized = true;
@@ -1979,7 +1988,8 @@ impl SemanticTrainingViewArena {
                 .try_fold(0u64, |total, &value| add(total, value))
         };
         let rows = extent(self.row_count)?;
-        let original_rows = extent(self.initial_row_count)?;
+        // The reserved finite roster also covers deferred materialization.
+        let original_rows = rows;
         let append_slots = rows
             .checked_sub(extent(self.original_slot_boundary)?)
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -1990,7 +2000,7 @@ impl SemanticTrainingViewArena {
         let table_slots = sum(&[
             extent(publication.directories[0].len() / 16)?,
             members,
-            extent(self.row_bytes)?,
+            extent(self.raw.len())?,
             rows,
             multiply(original_rows, candidates)?,
             multiply(append_slots, append_slots)?,
@@ -2837,6 +2847,11 @@ impl SemanticTrainingViewArena {
             materialized,
             protected_member_count,
             prefix_identity,
+            #[cfg(feature = "semantic-policy")]
+            original_sources: descriptors[..initial_row_count]
+                .iter()
+                .map(|row| (row.raw_offset, row.raw_bytes))
+                .collect(),
             row_bytes,
             publication: None,
             replay_capacity: replay_binding,
@@ -3534,6 +3549,7 @@ pub(crate) fn origin_record(
             SemanticTransitionKind::Recompute => 2,
             SemanticTransitionKind::Drain => 3,
             SemanticTransitionKind::Update => 4,
+            SemanticTransitionKind::Control => 5,
         },
         lineage_instance: identity_words(origin.predecessor.instance),
         predecessor_instance: identity_words(origin.predecessor.instance),
@@ -3581,4 +3597,92 @@ fn map_enqueue_error<E: std::fmt::Display>(
     error: LaunchEnqueueError<E>,
 ) -> SemanticTransitionError {
     runtime_error("training-view device selection", error)
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticTrainingViewArena {
+    /// Borrow the original canonical row bytes for the requested frozen member.
+    /// The GPU selector still checks those bytes against its own descriptor.
+    pub(crate) fn source_view_for_cursor(
+        self: &Arc<Self>,
+        cursor: u64,
+        roster: &FrozenTrainingRoster,
+    ) -> Result<DeviceMemoryView<u8>, SemanticTransitionError> {
+        if !roster
+            .arena
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, self))
+        {
+            return Err(input_error("cohort source changed its original arena"));
+        }
+        let ordinal =
+            usize::try_from(cursor).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let (offset, bytes) = if ordinal < self.initial_row_count {
+            *self
+                .original_sources
+                .get(ordinal)
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
+        } else {
+            let row = roster
+                .rows
+                .get(ordinal - self.initial_row_count)
+                .ok_or_else(|| {
+                    input_error("cohort cursor is outside its original source snapshot")
+                })?;
+            (row.descriptor.raw_offset, row.descriptor.raw_bytes)
+        };
+        let begin =
+            usize::try_from(offset).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let length =
+            usize::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let end = begin
+            .checked_add(length)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        self.raw
+            .view()
+            .try_slice(begin..end)
+            .ok_or(SemanticTransitionError::ObservationMismatch)
+    }
+
+    pub(crate) fn frozen_source_metadata(
+        self: &Arc<Self>,
+        roster: &FrozenTrainingRoster,
+    ) -> Result<(Identity256, u64, u64, Identity256), SemanticTransitionError> {
+        if !roster
+            .arena
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, self))
+        {
+            return Err(input_error("cohort metadata changed its original arena"));
+        }
+        Ok((
+            self.prefix_identity,
+            roster.archive_count,
+            roster.rows.len() as u64,
+            roster.chain_head,
+        ))
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticSelectedTrainingView {
+    pub(crate) fn frozen_source_metadata(
+        &self,
+    ) -> Result<(Identity256, u64, u64, Identity256), SemanticTransitionError> {
+        self.arena.frozen_source_metadata(
+            self.training_roster
+                .as_ref()
+                .ok_or_else(|| input_error("cohort lost its original source snapshot"))?,
+        )
+    }
+}
+
+#[cfg(feature = "semantic-policy")]
+impl SemanticTrainingViewArena {
+    pub(crate) fn original_source_prefix(&self) -> Identity256 {
+        self.prefix_identity
+    }
+    pub(crate) fn original_source_count(&self) -> u64 {
+        self.initial_row_count as u64
+    }
 }

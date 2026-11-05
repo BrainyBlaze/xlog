@@ -712,6 +712,13 @@ impl PySemanticColdModelWork {
             return Ok(());
         }
         #[cfg(feature = "semantic-policy")]
+        if let Some(instruction) =
+            crate::semantic_transition::evaluation_instruction::current(&source)?
+        {
+            instruction.require_cold_callback(py, self)?;
+            return Ok(());
+        }
+        #[cfg(feature = "semantic-policy")]
         if match access {
             ColdCallbackAccess::Active => require_admitted_cold_callback(py, &source, self)?,
             ColdCallbackAccess::OriginalCounter => {
@@ -2168,6 +2175,12 @@ impl PySemanticTransitionTaskUse {
     ) -> PyResult<Py<PySemanticColdModelWork>> {
         let issuing_session = self.session.borrow(py);
         issuing_session.require_creator()?;
+        #[cfg(feature = "semantic-policy")]
+        if let Some(instruction) =
+            crate::semantic_transition::evaluation_instruction::current(&issuing_session)?
+        {
+            return instruction.current_work(py, self, false);
+        }
         let pending = issuing_session
             .learning_transition
             .lock()
@@ -2307,6 +2320,16 @@ impl PySemanticTransitionTaskUse {
     /// The original owner is available inside the callback, before prepare
     /// returns. Another task or a stale retained handle cannot borrow its rights.
     fn active_cold_model_work(&self, py: Python<'_>) -> PyResult<Py<PySemanticColdModelWork>> {
+        #[cfg(feature = "semantic-policy")]
+        {
+            let session = self.session.borrow(py);
+            if let Some(instruction) =
+                crate::semantic_transition::evaluation_instruction::current(&session)?
+            {
+                return instruction.current_work(py, self, true);
+            }
+        }
+
         #[cfg(feature = "semantic-policy")]
         {
             let source = self.session.borrow(py);

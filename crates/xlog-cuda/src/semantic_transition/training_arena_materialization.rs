@@ -29,6 +29,7 @@ impl OriginalTrainingMaterializationWork {
         storage: &PublicationStorage,
         directory: &[PublicationRange],
         packed_bytes: usize,
+        cohort_preparation: [[u64; 9]; 2],
     ) -> Result<Self, SemanticTransitionError> {
         let n = u64::try_from(directory.len())
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -92,7 +93,7 @@ impl OriginalTrainingMaterializationWork {
             ],
         )?;
         add_native_work_ceiling(&mut native, publication_hash_ceiling(212)?)?;
-        let dma = [
+        let mut dma = [
             14,
             0,
             0,
@@ -114,6 +115,8 @@ impl OriginalTrainingMaterializationWork {
                 32 * size_of::<SourceSlot>() as u64,
             ])?,
         ];
+        add_native_work_ceiling(&mut native, cohort_preparation[0])?;
+        add_native_work_ceiling(&mut dma, cohort_preparation[1])?;
         native_work_report::native_work_ceiling_units(native)?;
         native_work_report::native_work_ceiling_units(dma)?;
         Ok(Self {
