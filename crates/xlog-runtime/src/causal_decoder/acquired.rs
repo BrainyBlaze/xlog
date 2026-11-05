@@ -1,0 +1,357 @@
+//! Candidate construction through the canonical function and physical tensor owners.
+
+use super::*;
+use std::collections::BTreeSet;
+use xlog_ir::tensor::{TensorOperation as Op, TensorParameter, TensorSignature};
+use xlog_logic::ast::{FuncBody, FuncDef};
+use xlog_neural::causal_snapshot::AcquiredInsertion;
+
+fn invalid(message: impl Into<String>) -> XlogError {
+    XlogError::Compilation(message.into())
+}
+
+impl NativeCausalModel {
+    /// Register actual typed definitions, insert their causal feature call, and
+    /// allocate new FP32 constants/P with independent zero-step Adam states.
+    /// Original definitions, weights, aliases and optimizer versions remain intact.
+    pub fn fork_acquired(
+        &self,
+        definition_json: &str,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> Result<Self> {
+        if definition_json.len() > 1_048_576 {
+            return Err(invalid(
+                "acquired definition exceeds the source byte budget",
+            ));
+        }
+        let mut document: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(definition_json)
+                .map_err(|error| invalid(format!("acquired definition JSON: {error}")))?;
+        let entrypoint = document
+            .remove("entrypoint")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| invalid("acquired definition requires an entrypoint"))?;
+        let definitions: Vec<FuncDef> = serde_json::from_value(
+            document
+                .remove("definitions")
+                .ok_or_else(|| invalid("acquired definition requires canonical definitions"))?,
+        )
+        .map_err(|error| invalid(format!("acquired definitions: {error}")))?;
+        if !document.is_empty() || definitions.is_empty() {
+            return Err(invalid("unknown acquired fields or empty definitions"));
+        }
+        let down_name = format!("model.layers.{insertion_layer}.mlp.down_proj.weight");
+        let down = self
+            .program()
+            .parameters
+            .iter()
+            .position(|parameter| parameter.name == down_name)
+            .ok_or_else(|| invalid("insertion layer is absent"))?;
+        let hidden = self.program().parameters[down].shape[0];
+        let mut functions = (*self.functions).clone();
+        let mut program = self.program().clone();
+        let mut new_parameters = BTreeMap::<String, TensorParameter>::new();
+        let mut nodes = 0usize;
+        let mut new_names = BTreeSet::new();
+        for definition in definitions {
+            if definition.name.starts_with("model::") || functions.contains(&definition.name) {
+                return Err(invalid(
+                    "acquired definition cannot replace an existing identity",
+                ));
+            }
+            new_names.insert(definition.name.clone());
+            let FuncBody::Numerical(body) = &definition.body else {
+                return Err(invalid("acquired definitions require numerical bodies"));
+            };
+            if body.vocabulary != program.vocabulary
+                || body.max_context != program.max_context
+                || matches!(body.signature, TensorSignature::Decoder)
+            {
+                return Err(invalid(
+                    "acquired definition has a different causal contract",
+                ));
+            }
+            nodes = nodes
+                .checked_add(body.operations.len())
+                .ok_or_else(|| invalid("acquired node count overflow"))?;
+            if nodes > 64 {
+                return Err(invalid("acquired definitions exceed 64 numerical nodes"));
+            }
+            body.validate_acquired_body()?;
+            for parameter in &body.parameters {
+                if parameter.name.is_empty() || !parameter.float32 {
+                    return Err(invalid("acquired constants require named FP32 storage"));
+                }
+                parameter.bytes()?;
+                if let Some(existing) = program
+                    .parameters
+                    .iter()
+                    .find(|value| value.name == parameter.name)
+                {
+                    if existing != parameter {
+                        return Err(invalid(
+                            "shared parameter name has a different physical type",
+                        ));
+                    }
+                } else if let Some(existing) =
+                    new_parameters.insert(parameter.name.clone(), parameter.clone())
+                {
+                    if existing != *parameter {
+                        return Err(invalid("new parameter declarations disagree"));
+                    }
+                }
+            }
+            functions
+                .register(definition)
+                .map_err(|error| invalid(error.to_string()))?;
+        }
+        if functions.numerical(&entrypoint)?.signature
+            != (TensorSignature::Causal {
+                input_width: hidden,
+                output_width: 16,
+            })
+            || self.functions.contains(&entrypoint)
+        {
+            return Err(invalid(
+                "new entrypoint must map this layer's hidden rows to 16 FP32 features",
+            ));
+        }
+        let mut reached = BTreeSet::new();
+        let mut pending = vec![entrypoint.clone()];
+        let mut used_parameters = BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if !reached.insert(name.clone()) {
+                continue;
+            }
+            let body = functions.numerical(&name)?;
+            for operation in &body.operations {
+                if let Some(callee) = operation.callee() {
+                    pending.push(callee.to_owned());
+                }
+                if let Some(id) = operation.parameter() {
+                    let parameter = body
+                        .parameters
+                        .get(id)
+                        .ok_or_else(|| invalid("unknown acquired parameter reference"))?;
+                    used_parameters.insert(parameter.name.clone());
+                }
+            }
+        }
+        if !new_names.is_subset(&reached)
+            || new_parameters
+                .keys()
+                .any(|name| !used_parameters.contains(name))
+        {
+            return Err(invalid(
+                "new definitions and constants must have actual callers",
+            ));
+        }
+        let mut constants = 0usize;
+        for parameter in new_parameters.values() {
+            constants = constants
+                .checked_add(parameter.bytes()? / 4)
+                .ok_or_else(|| invalid("constant extent overflow"))?;
+        }
+        if constants > 65_536 || new_parameters.keys().ne(parameter_values.keys()) {
+            return Err(invalid(
+                "new constants exceed the bound or initial array identities differ",
+            ));
+        }
+        for (name, parameter) in &new_parameters {
+            let values = &parameter_values[name];
+            if values.len() != parameter.bytes()? / 4
+                || values.iter().any(|value| !value.is_finite())
+            {
+                return Err(invalid("initial FP32 array extent or finiteness differs"));
+            }
+        }
+        let mut candidate = self.fork_candidate();
+        let mut ids = Vec::new();
+        for parameter in new_parameters.values() {
+            ids.push(program.parameters.len());
+            program.parameters.push(parameter.clone());
+        }
+        let projection = program.parameters.len();
+        let projection_name = format!("{entrypoint}::projection");
+        if program
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == projection_name)
+        {
+            return Err(invalid("projection identity already exists"));
+        }
+        program.parameters.push(TensorParameter {
+            name: projection_name,
+            shape: vec![hidden, 16],
+            float32: true,
+        });
+        let anchor = if let Some(insertion) = self
+            .adaptation
+            .insertions
+            .iter()
+            .rev()
+            .find(|insertion| insertion.layer == insertion_layer)
+        {
+            insertion.output
+        } else {
+            let projected = program
+                .operations
+                .iter()
+                .position(
+                    |operation| matches!(operation, Op::Linear { weight, .. } if *weight == down),
+                )
+                .ok_or_else(|| invalid("down projection has no numerical caller"))?;
+            program
+                .operations
+                .iter()
+                .position(
+                    |operation| matches!(operation, Op::Add { right, .. } if *right == projected),
+                )
+                .ok_or_else(|| invalid("decoder layer residual is absent"))?
+        };
+        let old = std::mem::take(&mut program.operations);
+        let parameter_ids = (0..program.parameters.len()).collect::<Vec<_>>();
+        let mut mapped = Vec::with_capacity(old.len());
+        let mut original_positions = Vec::with_capacity(old.len());
+        let mut insertion_output = None;
+        for (id, operation) in old.iter().enumerate() {
+            let value = emit(&mut program, operation.remap(&mapped, &parameter_ids));
+            mapped.push(value);
+            original_positions.push(value);
+            if id == anchor {
+                let hidden = emit(&mut program, Op::Float32 { input: value });
+                let features = emit(
+                    &mut program,
+                    Op::Call {
+                        function: entrypoint.clone(),
+                        arguments: vec![hidden],
+                    },
+                );
+                let delta = emit(
+                    &mut program,
+                    Op::Linear {
+                        input: features,
+                        weight: projection,
+                    },
+                );
+                let rounded = emit(&mut program, Op::Bfloat16 { input: delta });
+                let output = emit(
+                    &mut program,
+                    Op::Add {
+                        left: value,
+                        right: rounded,
+                    },
+                );
+                mapped[id] = output;
+                insertion_output = Some(output);
+            }
+        }
+        program.output = mapped[program.output];
+        for insertion in &mut candidate.adaptation.insertions {
+            insertion.output = original_positions[insertion.output];
+        }
+        candidate.adaptation.insertions.push(AcquiredInsertion {
+            function: entrypoint,
+            layer: insertion_layer,
+            projection,
+            parameters: ids.clone(),
+            output: insertion_output.ok_or_else(|| invalid("insertion anchor is absent"))?,
+        });
+        candidate.entrypoint = format!(
+            "model::forward::acquired_{}",
+            candidate.adaptation.insertions.len()
+        );
+        functions
+            .register(FuncDef::numerical(candidate.entrypoint.clone(), program)?)
+            .map_err(|error| invalid(error.to_string()))?;
+        functions.compile_numerical(&candidate.entrypoint, 1, 0, Some((0, 1)))?;
+        candidate.functions = Arc::new(functions);
+        // Definitions and all physical extents have been admitted before creating
+        // any native state. Failed allocation leaves only this unpublished fork.
+        for &id in &ids {
+            let parameter = &candidate.program().parameters[id];
+            let mut tensor = self.executor.allocate_tensor(parameter_shape(parameter)?)?;
+            let bytes = parameter_values[&parameter.name]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>();
+            self.executor.write_tensor(&mut tensor, 0, &bytes)?;
+            candidate
+                .optimizers
+                .insert(id, self.executor.optimizer(id, &tensor)?);
+            candidate.parameters.push(tensor);
+        }
+        let mut tensor = self.executor.allocate_tensor(parameter_shape(
+            &candidate.program().parameters[projection],
+        )?)?;
+        self.executor
+            .write_tensor(&mut tensor, 0, &vec![0u8; hidden * 16 * 4])?;
+        candidate
+            .optimizers
+            .insert(projection, self.executor.optimizer(projection, &tensor)?);
+        candidate.parameters.push(tensor);
+        candidate.adaptation.trainable = ids;
+        candidate.adaptation.trainable.push(projection);
+        candidate.adaptation.down_projection = train_down_projection.then_some(down);
+        if train_down_projection {
+            if !candidate.optimizers.contains_key(&down) {
+                candidate.optimizers.insert(
+                    down,
+                    self.executor.optimizer(down, &candidate.parameters[down])?,
+                );
+            }
+            candidate.adaptation.trainable.push(down);
+        }
+        Ok(candidate)
+    }
+
+    /// Versioned, read-only physical roles for callers and continuation validation.
+    pub fn adaptation_manifest(&self) -> Result<String> {
+        let owned = self
+            .adaptation
+            .insertions
+            .iter()
+            .flat_map(|insertion| insertion.parameters.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let projections = self
+            .adaptation
+            .insertions
+            .iter()
+            .map(|insertion| insertion.projection)
+            .collect::<BTreeSet<_>>();
+        let parameters = self.program().parameters.iter().enumerate().map(|(id, parameter)| serde_json::json!({
+            "id": id, "name": parameter.name, "shape": parameter.shape, "dtype": if parameter.float32 { "f32" } else { "bf16" },
+            "role": if projections.contains(&id) { "projection" } else if owned.contains(&id) { "acquired_constant" }
+                else if self.optimizers.contains_key(&id) { "backbone_down_projection" } else { "frozen_backbone" },
+            "optimizer_step": self.optimizers.get(&id).map(TensorAdamState::step),
+        })).collect::<Vec<_>>();
+        serde_json::to_string(&serde_json::json!({"schema": "xlog.native-adaptation.v1", "entrypoint": self.entrypoint,
+            "parameters": parameters, "adaptation": self.adaptation})).map_err(|error| invalid(error.to_string()))
+    }
+
+    /// The actual definitions available to a proposer, including older callable bodies.
+    pub fn function_definitions(&self) -> Result<String> {
+        serde_json::to_string(&self.functions).map_err(|error| invalid(error.to_string()))
+    }
+}
+
+fn emit(program: &mut TensorProgram, operation: Op) -> usize {
+    let id = program.operations.len();
+    program.operations.push(operation);
+    id
+}
+
+fn parameter_shape(parameter: &TensorParameter) -> Result<TensorValueShape> {
+    let (rows, columns) = match parameter.shape.as_slice() {
+        &[columns] => (1, columns),
+        &[rows, columns] => (rows, columns),
+        _ => return Err(invalid("acquired parameter must be a vector or matrix")),
+    };
+    Ok(TensorValueShape {
+        rows,
+        columns,
+        float32: true,
+    })
+}

@@ -45,7 +45,7 @@ fn xlog_extract_emits_the_resolved_executable_program() {
     let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON extraction");
     assert_eq!(
         payload["schema_version"],
-        "xlog.resolved-program-extraction.v2"
+        "xlog.resolved-program-extraction.v3"
     );
     assert_eq!(
         payload["source_manifest"]["modules"]

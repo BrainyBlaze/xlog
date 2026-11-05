@@ -150,6 +150,7 @@ fn lower(config: &Value, max_context: usize) -> Result<TensorProgram> {
         .checked_mul(head_dim)
         .ok_or_else(|| invalid("key/value width overflow"))?;
     let mut program = TensorProgram {
+        signature: xlog_ir::tensor::TensorSignature::Decoder,
         parameters: Vec::new(),
         operations: Vec::new(),
         output: 0,
@@ -158,7 +159,11 @@ fn lower(config: &Value, max_context: usize) -> Result<TensorProgram> {
     };
     fn parameter(program: &mut TensorProgram, name: String, shape: Vec<usize>) -> usize {
         let id = program.parameters.len();
-        program.parameters.push(TensorParameter { name, shape });
+        program.parameters.push(TensorParameter {
+            name,
+            shape,
+            float32: false,
+        });
         id
     }
     fn emit(program: &mut TensorProgram, operation: Op) -> usize {

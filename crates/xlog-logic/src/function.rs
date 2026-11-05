@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xlog_ir::tensor::TensorProgram;
 
+mod numerical;
+
 /// Errors related to functions
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -185,7 +187,7 @@ impl std::fmt::Display for RecursionWarning {
 }
 
 /// Registry of user-defined functions
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FunctionRegistry {
     functions: HashMap<String, FuncDef>,
     call_graph: HashMap<String, Vec<String>>,
@@ -356,7 +358,14 @@ impl FunctionRegistry {
 
     fn extract_calls_from_body(body: &FuncBody, calls: &mut Vec<String>) {
         match body {
-            FuncBody::Numerical(_) => {}
+            FuncBody::Numerical(program) => {
+                calls.extend(
+                    program
+                        .operations
+                        .iter()
+                        .filter_map(|operation| operation.callee().map(str::to_owned)),
+                );
+            }
             FuncBody::Arithmetic(expr) => Self::extract_calls_from_expr(expr, calls),
             FuncBody::Conditional(cond) => {
                 Self::extract_calls_from_expr(&cond.cond_left, calls);
@@ -454,6 +463,13 @@ impl FunctionRegistry {
     /// Validate all functions
     pub fn validate(&self) -> Result<(), FunctionError> {
         for name in &self.registration_order {
+            if let FuncBody::Numerical(program) = &self.functions[name].body {
+                self.validate_numerical_program(program).map_err(|cause| {
+                    FunctionError::InvalidNumericalDefinition {
+                        cause: Arc::new(cause),
+                    }
+                })?;
+            }
             // Check that all called functions exist
             if let Some(calls) = self.call_graph.get(name) {
                 for call in calls {

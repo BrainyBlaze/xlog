@@ -13,8 +13,10 @@ use xlog_ir::tensor::{TensorProgram, TensorValueShape};
 use xlog_logic::function::FunctionRegistry;
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
 use xlog_neural::causal_snapshot::{
-    CausalDecoderSnapshot, CausalSnapshotDescription, OptimizerSnapshot,
+    CausalDecoderSnapshot, CausalSnapshotDescription, NativeAdaptation, OptimizerSnapshot,
 };
+
+mod acquired;
 
 fn native_executor(
     device: usize,
@@ -41,7 +43,8 @@ pub struct NativeCausalModel {
     entrypoint: String,
     checkpoint_identity: [u8; 32],
     device: usize,
-    optimizer: Option<(usize, TensorAdamState)>,
+    optimizers: BTreeMap<usize, TensorAdamState>,
+    adaptation: NativeAdaptation,
 }
 
 /// One complete vocabulary row, retaining its storage and original provider.
@@ -105,7 +108,8 @@ impl NativeCausalModel {
             entrypoint: checkpoint.entrypoint().into(),
             checkpoint_identity,
             device,
-            optimizer: None,
+            optimizers: BTreeMap::new(),
+            adaptation: NativeAdaptation::default(),
         })
     }
 
@@ -113,22 +117,24 @@ impl NativeCausalModel {
     /// application payload. Existing paths are never overwritten. The returned
     /// identity is SHA256 of this entire self-contained SafeTensors snapshot.
     pub fn save_snapshot(&self, path: &Path, application_state: Vec<u8>) -> Result<[u8; 32]> {
-        let optimizer = self
-            .optimizer
-            .as_ref()
+        let optimizers = self
+            .optimizers
+            .iter()
             .map(|(parameter, state)| OptimizerSnapshot {
                 parameter: *parameter,
                 step: state.step(),
-            });
+            })
+            .collect();
         let description = CausalSnapshotDescription::new(
             Arc::clone(&self.functions),
             self.entrypoint.clone(),
             self.checkpoint_identity,
-            optimizer,
+            optimizers,
+            self.adaptation.clone(),
             application_state,
         );
         let mut tensors = self.parameters.iter().collect::<Vec<_>>();
-        if let Some((_, state)) = &self.optimizer {
+        for state in self.optimizers.values() {
             tensors.extend(state.snapshot_tensors());
         }
         CausalDecoderSnapshot::write(path, &description, |id, offset, bytes| {
@@ -166,22 +172,24 @@ impl NativeCausalModel {
         let description = snapshot
             .load(|id, offset, bytes| executor.write_tensor(&mut tensors[id], offset, bytes))?;
         let state = tensors.split_off(description.program()?.parameters.len());
-        let optimizer = if let Some(optimizer) = description.optimizer {
-            let [master, first, second]: [NativeTensor; 3] = state.try_into().map_err(|_| {
-                XlogError::Compilation("snapshot optimizer roster is incomplete".into())
-            })?;
-            let state = executor.restore_linear_optimizer(
+        let mut state = state.into_iter();
+        let mut optimizers = BTreeMap::new();
+        for optimizer in &description.optimizers {
+            let mut take = || {
+                state.next().ok_or_else(|| {
+                    XlogError::Compilation("snapshot optimizer roster is incomplete".into())
+                })
+            };
+            let restored = executor.restore_optimizer(
                 optimizer.parameter,
                 &tensors[optimizer.parameter],
-                master,
-                first,
-                second,
+                take()?,
+                take()?,
+                take()?,
                 optimizer.step,
             )?;
-            Some((optimizer.parameter, state))
-        } else {
-            None
-        };
+            optimizers.insert(optimizer.parameter, restored);
+        }
         Ok((
             Self {
                 executor,
@@ -190,7 +198,8 @@ impl NativeCausalModel {
                 entrypoint: description.entrypoint,
                 checkpoint_identity: description.checkpoint_identity,
                 device,
-                optimizer,
+                optimizers,
+                adaptation: description.adaptation,
             },
             description.application_state,
         ))
@@ -206,26 +215,49 @@ impl NativeCausalModel {
             .iter()
             .position(|entry| entry.name == name)
             .ok_or_else(|| XlogError::Compilation("trainable decoder layer is absent".into()))?;
-        let state = match &self.optimizer {
-            Some((old_parameter, state)) if *old_parameter == parameter => state.clone(),
-            Some(_) => {
+        if !self.adaptation.insertions.is_empty() {
+            if self.adaptation.down_projection != Some(parameter) {
                 return Err(XlogError::Compilation(
-                    "a trainable candidate retains its selected down projection".into(),
-                ))
+                    "fork_candidate preserves an acquired model's actual trainable roles".into(),
+                ));
             }
-            None => self
-                .executor
-                .linear_optimizer(parameter, &self.parameters[parameter])?,
-        };
-        Ok(Self {
+            return Ok(self.fork_candidate());
+        }
+        if self
+            .adaptation
+            .down_projection
+            .is_some_and(|id| id != parameter)
+        {
+            return Err(XlogError::Compilation(
+                "a candidate retains its selected down projection".into(),
+            ));
+        }
+        let mut candidate = self.fork_candidate();
+        if !candidate.optimizers.contains_key(&parameter) {
+            candidate.optimizers.insert(
+                parameter,
+                self.executor
+                    .optimizer(parameter, &self.parameters[parameter])?,
+            );
+        }
+        candidate.adaptation.down_projection = Some(parameter);
+        candidate.adaptation.trainable = vec![parameter];
+        Ok(candidate)
+    }
+
+    /// Continue an immutable model version with exactly the same active roles,
+    /// definitions, physical aliases and optimizer states, including frozen controls.
+    pub fn fork_candidate(&self) -> Self {
+        Self {
             executor: Arc::clone(&self.executor),
             parameters: self.parameters.clone(),
             functions: Arc::clone(&self.functions),
             entrypoint: self.entrypoint.clone(),
             checkpoint_identity: self.checkpoint_identity,
             device: self.device,
-            optimizer: Some((parameter, state)),
-        })
+            optimizers: self.optimizers.clone(),
+            adaptation: self.adaptation.clone(),
+        }
     }
 
     /// One mean-minibatch binary NLL update, using only the supplied original IDs.
@@ -237,6 +269,7 @@ impl NativeCausalModel {
         outcomes: &[bool],
         negative_token_id: u32,
         positive_token_id: u32,
+        history_spans: Option<&[(usize, usize)]>,
     ) -> Result<TensorTrainingResult> {
         if outcomes.len() != token_ids.len() {
             return Err(XlogError::Compilation(
@@ -251,7 +284,13 @@ impl NativeCausalModel {
                 outcome,
             })
             .collect::<Vec<_>>();
-        self.fit(token_ids, prediction_positions, &losses)
+        self.fit(
+            token_ids,
+            prediction_positions,
+            &losses,
+            history_spans,
+            false,
+        )
     }
 
     /// One full-vocabulary next-token cross-entropy update. Every target is scored
@@ -261,6 +300,7 @@ impl NativeCausalModel {
         token_ids: &[Vec<u32>],
         prediction_positions: &[usize],
         target_ids: &[u32],
+        history_spans: Option<&[(usize, usize)]>,
     ) -> Result<TensorTrainingResult> {
         if target_ids.len() != token_ids.len() {
             return Err(XlogError::Compilation(
@@ -271,7 +311,13 @@ impl NativeCausalModel {
             .iter()
             .map(|&target| TensorLoss::Token { target })
             .collect::<Vec<_>>();
-        self.fit(token_ids, prediction_positions, &losses)
+        self.fit(
+            token_ids,
+            prediction_positions,
+            &losses,
+            history_spans,
+            true,
+        )
     }
 
     fn fit(
@@ -279,6 +325,8 @@ impl NativeCausalModel {
         token_ids: &[Vec<u32>],
         prediction_positions: &[usize],
         losses: &[TensorLoss],
+        history_spans: Option<&[(usize, usize)]>,
+        down_only: bool,
     ) -> Result<TensorTrainingResult> {
         if token_ids.is_empty()
             || prediction_positions.len() != token_ids.len()
@@ -288,34 +336,115 @@ impl NativeCausalModel {
                 "training requires equally sized nonempty prefixes, positions and targets".into(),
             ));
         }
-        let (parameter, state) = self.optimizer.as_ref().ok_or_else(|| {
-            XlogError::Compilation(
-                "fork a trainable candidate before updating model parameters".into(),
-            )
-        })?;
+        if history_spans.is_some_and(|spans| spans.len() != token_ids.len()) {
+            return Err(XlogError::Compilation(
+                "one raw history span is required per prefix".into(),
+            ));
+        }
+        let ids = if down_only {
+            self.adaptation
+                .down_projection
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            self.adaptation.trainable.clone()
+        };
+        let states = ids
+            .iter()
+            .map(|id| {
+                self.optimizers
+                    .get(id)
+                    .map(|state| {
+                        (
+                            state,
+                            if self.program().parameters[*id].float32 {
+                                1.0e-3
+                            } else {
+                                1.0e-5
+                            },
+                        )
+                    })
+                    .ok_or_else(|| {
+                        XlogError::Compilation("trainable parameter has no optimizer".into())
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next_step = self
+            .adaptation
+            .completed_updates
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("completed update counter overflow".into()))?;
+        let mut programs = Vec::with_capacity(token_ids.len());
+        for (index, (tokens, &position)) in token_ids.iter().zip(prediction_positions).enumerate() {
+            let span = history_spans.map(|spans| spans[index]);
+            self.validate_history_span(tokens.len(), span)?;
+            programs.push(self.functions.compile_numerical(
+                &self.entrypoint,
+                tokens.len(),
+                position,
+                span,
+            )?);
+        }
         let batch = token_ids
             .iter()
             .zip(prediction_positions)
             .zip(losses)
-            .map(|((tokens, &position), &loss)| (tokens.as_slice(), position, loss))
+            .enumerate()
+            .map(|(index, ((tokens, &position), &loss))| {
+                (
+                    &programs[index],
+                    tokens.as_slice(),
+                    position,
+                    history_spans.map(|spans| spans[index]),
+                    loss,
+                )
+            })
             .collect::<Vec<_>>();
-        let (forward, next, result) =
+        let (updates, mut result) =
             self.executor
-                .train_linear(self.program(), &self.parameters, state, &batch, 1.0e-5)?;
-        // All allocations and numerical checks completed before this exclusive
-        // publication. Old readers and forked models retain their original bytes.
-        self.parameters[*parameter] = forward;
-        self.optimizer = Some((*parameter, next));
+                .train_parameters(&self.parameters, &states, &batch)?;
+        // Publish only after every new parameter and optimizer version is finite.
+        for (id, forward, state) in updates {
+            self.parameters[id] = forward;
+            self.optimizers.insert(id, state);
+        }
+        self.adaptation.completed_updates = next_step;
+        result.step = next_step;
         Ok(result)
     }
 
+    fn validate_history_span(&self, tokens: usize, span: Option<(usize, usize)>) -> Result<()> {
+        if (!self.adaptation.insertions.is_empty() && span.is_none())
+            || span.is_some_and(|(start, end)| start > end || end > tokens)
+        {
+            return Err(XlogError::Compilation(
+                "acquired execution requires an explicit raw history span within this prefix"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Recompute the supplied causal prefix and return its requested vocabulary row.
-    pub fn forward(&self, token_ids: &[u32], prediction_position: usize) -> Result<NativeLogits> {
+    pub fn forward(
+        &self,
+        token_ids: &[u32],
+        prediction_position: usize,
+        history_span: Option<(usize, usize)>,
+    ) -> Result<NativeLogits> {
+        self.validate_history_span(token_ids.len(), history_span)?;
+        let program = self.functions.compile_numerical(
+            &self.entrypoint,
+            token_ids.len(),
+            prediction_position,
+            history_span,
+        )?;
         let tensor = self.executor.execute(
-            self.program(),
+            &program,
             &self.parameters,
             token_ids,
             prediction_position,
+            history_span,
         )?;
         Ok(NativeLogits {
             executor: Arc::clone(&self.executor),
@@ -332,9 +461,9 @@ impl NativeCausalModel {
     }
 
     /// Canonical parameter names and completed native optimizer updates.
-    /// Frozen models return an empty map; newly trainable parameters have step zero.
+    /// Imported models return an empty map; frozen trained versions retain their counters.
     pub fn optimizer_steps(&self) -> BTreeMap<String, u64> {
-        self.optimizer
+        self.optimizers
             .iter()
             .map(|(parameter, state)| {
                 (
