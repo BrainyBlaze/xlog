@@ -97,6 +97,150 @@ python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
   --features extension-module,host-io,arrow-device-import
 ```
 
+### Native causal decoder
+
+`NativeCausalModel` imports a local dense Qwen3 checkpoint and executes its
+numerical program through XLOG's CUDA provider. The directory must contain
+`config.json` and either `model.safetensors` or `model.safetensors.index.json`
+with its named shards. The admitted configuration uses BF16 weights, tied word
+embeddings, SiLU, full causal grouped-query attention, and unscaled RoPE. Other
+configurations are rejected. The checkpoint headers determine tensor shapes and
+byte extents; the index's descriptive `metadata.total_size` is not authoritative.
+Embedding and output projection reference the same parameter allocation.
+
+```python
+import pyxlog
+
+model = pyxlog.NativeCausalModel.from_checkpoint(
+    checkpoint_directory,
+    device=0,
+    memory_budget_bytes=16 * 1024**3,
+    max_context=2048,
+)
+logits = model.forward(token_ids, prediction_position=len(token_ids) - 1)
+selected_logits = logits.read(requested_token_ids)
+```
+
+`token_ids` contains the original integer vocabulary IDs; XLOG does not
+retokenize text or truncate history. `prediction_position` is a zero-based
+position within that input. Its output is the next-token vocabulary row at that
+position, with shape `(1, model.vocabulary_size)`. Each forward recomputes the
+supplied prefix with a causal mask. A position cannot attend to later tokens.
+The explicit byte budget covers parameters, intermediate allocations and the
+cuBLAS workspace. Execution requires compute capability 8.0 or newer and cuBLAS.
+
+Matrix products accumulate in FP32 and return BF16. Normalization and softmax
+use FP32 reductions, with BF16 operation boundaries. The final BF16 output
+projection is converted to FP32 for observation. Invalid token IDs, context
+lengths, checkpoint shapes or nonfinite final logits raise an exception. Numerical
+agreement and performance must be qualified on the actual checkpoint and GPU;
+successful source compilation is not execution evidence.
+
+`NativeLogits.read(ids)` returns Python floats in the requested order, including
+repeated IDs. It requires the default `host-io` feature and performs a tracked
+device-to-host transfer. `NativeLogits` also implements the legacy DLPack
+protocol for the complete native FP32 allocation. Export synchronizes recorded
+producer writes and retains the storage; it is valid after the model object is
+released. `model.checkpoint_identity` is the SHA256 digest of the configuration
+and canonical parameter bytes actually imported, not a substitute for checking
+the publisher's file hashes. `model.max_context` and `model.vocabulary_size`
+expose the admitted dimensions.
+
+`fork_trainable(down_projection_layer=17)` returns an independent candidate with
+that zero-based decoder layer's MLP down projection trainable. Frozen parameters
+share the original allocations. The candidate owns FP32 master weights and Adam
+first/second moments; its BF16 forward view changes only after a complete update.
+Forking an already trainable model preserves its optimizer version and selected
+layer. Source models, other forks and retained logits keep their original bytes.
+
+```python
+candidate = model.fork_trainable(down_projection_layer=17)
+mean_loss, gradient_norm, step = candidate.fit_binary(
+    training_prefixes,
+    prediction_positions=training_positions,
+    outcomes=observed_bits,  # Python bool values, one per prefix
+    negative_token_id=15,
+    positive_token_id=16,
+)
+updated_logits = candidate.forward(token_ids, prediction_position=len(token_ids) - 1)
+```
+
+`fit_binary` minimizes the mean Bernoulli NLL of
+`sigmoid(logit[positive_token_id] - logit[negative_token_id])`. `fit_tokens` takes
+the same prefixes and `prediction_positions`, with `target_ids` replacing the
+binary arguments, and minimizes cross entropy over the entire vocabulary. Both
+return pre-update mean loss, the norm of the mean gradient before clipping, and
+the completed per-parameter update count. Prefixes are recomputed against the
+same pre-update weights; input lists must have equal nonzero length. The caller
+owns minibatch selection, replay, attempt limits and the overall compute budget.
+
+Reverse execution follows the forward graph through frozen upper layers, including
+causal attention and grouped key/value accumulation. Cotangents and matrix
+products in the reverse pass are FP32, with TF32 disabled. BF16 casts and residual
+addition use an explicit straight-through surrogate; this is not the mathematical
+derivative of quantization. Softmax uses probabilities before their BF16 cast in
+its VJP. Token IDs and discrete choices have no derivative.
+
+The update uses learning rate `1e-5`, AdamW betas `(0.9, 0.999)`, epsilon `1e-8`,
+zero weight decay and global gradient norm clipping at one. New moments start at
+zero. Each successful update replaces the weight and optimizer version together;
+an exception leaves both unchanged. Training uses the same memory budget as
+forward, including retained activations, FP32 reverse temporaries and optimizer
+state. It also reads loss/norm scalars to the host. `checkpoint_identity` continues
+to identify the imported checkpoint, not the subsequently trained parameter bytes.
+The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
+Acquired-function insertion is a separate capability not provided by these methods.
+
+`save_snapshot(path, application_state=payload_bytes)` saves a complete cold model
+version in one self-contained SafeTensors file and returns its SHA256 identity.
+It includes the numerical graph, shared parameter indices and all actual BF16
+weight bytes. Trainable candidates also include their FP32 master weights, Adam
+moments and completed step count. The application payload is covered by the same
+digest; XLOG preserves these bytes without interpreting the application's history,
+random generator states, data cursors or budgets. The application owner must
+serialize and validate that state at a consistent boundary between operations.
+
+```python
+snapshot_identity = candidate.save_snapshot(
+    snapshot_path, application_state=serialized_application_state
+)
+restored, restored_application_state = pyxlog.NativeCausalModel.from_snapshot(
+    snapshot_path,
+    snapshot_identity=snapshot_identity,
+    device=0,
+    memory_budget_bytes=32 * 1024**3,
+)
+```
+
+The destination must be a new file. Saving streams tracked device reads in bounded
+chunks, syncs the completed temporary file, and publishes it atomically without
+replacing an existing destination. Temporary files created by a failed save are
+removed; cleanup or directory-sync failures report the affected path and whether
+publication occurred. Snapshot methods require the default `host-io` feature and
+perform cold host transfers.
+
+Restore requires the expected 64-digit SHA256 and verifies the actual streamed
+header and payload before returning the model or application bytes. It checks the
+graph, tensor roster and layouts, and the optimizer's finite values, nonnegative
+second moments and BF16/master agreement. Original checkpoint shards are not
+needed. Parameter aliases, context bound and optimizer step are retained. The next
+`forward` or `fit_*` recomputes the supplied causal prefix; no KV cache or unfinished
+gradient accumulation is serialized. Each restore uses a fresh native provider
+with the explicitly supplied memory budget. Hardware equivalence and continuation
+must be qualified on the actual GPU, separately from source compilation.
+
+Applications comparing a base model with a candidate must retain both model
+snapshots or a durable identity-checked reference to the immutable base. Publish
+the application's joint manifest only after all required snapshots succeed;
+a candidate file alone does not preserve the paired base model. The returned
+snapshot identity describes the saved complete bytes, while `checkpoint_identity`
+continues to describe the original import even after training or restoration.
+The read-only `optimizer_steps` property returns a copy of the mapping from each
+canonical trainable parameter name to its completed native optimizer step. Frozen
+models return an empty mapping; a newly trainable down projection has step zero.
+Use these native values to check application metadata after restore, rather than
+treating an application's candidate identifier as optimizer evidence.
+
 ### Semantic task binding
 
 `SemanticTransitionColdTask` retains the full admitted `statements` roster and

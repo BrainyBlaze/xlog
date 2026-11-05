@@ -9725,7 +9725,22 @@ impl ReplayRow {
                 origin,
             )
             .map_err(xlog_err)?;
-        actor_refresh::qualify_edit_demonstration(self, training_row)
+        #[cfg(feature = "semantic-policy")]
+        {
+            actor_refresh::qualify_edit_demonstration(self, training_row)
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            if matches!(self.basis, ReplayBasis::Episode { .. }) {
+                let trace = replay_json_object(replay_json_field(&self.record, "action_trace")?)?;
+                if !replay_json_value(replay_json_field(&trace, "edit_solution")?)?.is_null() {
+                    return Err(invalid(
+                        "edit demonstration training requires semantic-policy qualification",
+                    ));
+                }
+            }
+            Ok(training_row)
+        }
     }
 
     fn native_replay(&self) -> PyResult<NativeReplayBinding> {

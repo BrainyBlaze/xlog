@@ -6,6 +6,7 @@ pub mod epistemic_plan;
 pub mod metadata;
 pub mod plan;
 pub mod rir;
+pub mod tensor;
 
 pub use eir::{
     EirAtom, EirBodyLiteral, EirConstraint, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp,

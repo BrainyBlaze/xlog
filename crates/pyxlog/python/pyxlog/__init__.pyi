@@ -19,6 +19,8 @@ from pyxlog._native import (
     resource_observer_device_certificate as resource_observer_device_certificate,
     SemanticTransitionTaskUse as SemanticTransitionTaskUse,
     NativeTensorAllocation as NativeTensorAllocation,
+    NativeCausalModel as NativeCausalModel,
+    NativeLogits as NativeLogits,
     SemanticColdModelWork as SemanticColdModelWork,
     SemanticColdModelWorkOperation as SemanticColdModelWorkOperation,
     SemanticTransitionController as SemanticTransitionController,

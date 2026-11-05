@@ -9,6 +9,7 @@
 /// Module names matching the .cu filenames (without extension).
 /// Order matches provider/mod.rs load order.
 pub const KERNEL_CU_NAMES: &[&str] = &[
+    "tensor",
     "join",
     "dedup",
     "groupby",
@@ -55,6 +56,39 @@ pub struct KernelModuleSpec {
 /// All kernel modules with their entry-point function names.
 /// Order and cu_names match `KERNEL_CU_NAMES`.
 pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
+    KernelModuleSpec {
+        cu_name: "tensor",
+        module_name: "xlog_tensor",
+        kernels: &[
+            "tensor_embedding_bf16",
+            "tensor_rms_norm_bf16",
+            "tensor_rotary_bf16",
+            "tensor_add_bf16",
+            "tensor_silu_gate_bf16",
+            "tensor_attention_pack_bf16",
+            "tensor_attention_unpack_bf16",
+            "tensor_causal_softmax_bf16",
+            "tensor_prediction_row_bf16",
+            "tensor_bf16_to_f32",
+            "tensor_select_f32",
+            "tensor_check_finite_f32",
+            "tensor_fill_f32",
+            "tensor_accumulate_f32",
+            "tensor_scale_f32",
+            "tensor_rms_norm_vjp_f32",
+            "tensor_rotary_vjp_f32",
+            "tensor_silu_gate_vjp_f32",
+            "tensor_prediction_row_vjp_f32",
+            "tensor_attention_pack_f32",
+            "tensor_attention_reduce_f32",
+            "tensor_causal_softmax_vjp_f32",
+            "tensor_loss_f32",
+            "tensor_sum_squares_f32",
+            "tensor_norm_f32",
+            "tensor_adam_f32",
+            "tensor_check_adam_state_f32",
+        ],
+    },
     KernelModuleSpec {
         cu_name: "join",
         module_name: "xlog_join",
