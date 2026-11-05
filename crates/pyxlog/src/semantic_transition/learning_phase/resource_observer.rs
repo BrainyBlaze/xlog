@@ -585,7 +585,7 @@ impl ResourceObserver {
         )
     }
 
-    pub(super) fn observation_arguments(
+    pub(in crate::semantic_transition) fn observation_arguments(
         &self,
         py: Python<'_>,
         arguments: &Bound<'_, PyDict>,

@@ -1375,6 +1375,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticEvaluationCohort>()?;
         m.add_class::<semantic_transition::model_evaluation::PySemanticModelEvaluation>()?;
+        m.add_class::<semantic_transition::evaluation_instruction::PySemanticEvaluationInstructionAdmission>()?;
         m.add_class::<semantic_transition::evaluation_fork::PySemanticEvaluationFork>()?;
         m.add(
             "SemanticEvaluationForkPending",

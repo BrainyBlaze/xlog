@@ -515,6 +515,33 @@ class SemanticSegmentInstructionAdmission:
     @property
     def control_measurements(self) -> dict[str, Any] | None: ...
 
+class SemanticEvaluationInstructionAdmission:
+    """Original public read-only Evaluation; retained across genuine Pending."""
+
+    @property
+    def cohort(self) -> SemanticEvaluationCohort:
+        """The frozen cohort, available only in the preparation callback."""
+        ...
+
+    def execute(
+        self, callback: Callable[[], SemanticCompletedModelEvaluation],
+    ) -> SemanticCompletedModelEvaluation:
+        """Continue this original callback and retire its actual joined expense."""
+        ...
+
+    @property
+    def observation(self) -> dict[str, Any] | None:
+        """Authentic observation, visible after complete native and observer retirement."""
+        ...
+
+    @property
+    def cold_work_result(self) -> Optional[tuple[
+        int, int, int, int, int, tuple[int, int, int, int, int, int, int, int, int]
+    ]]: ...
+
+    @property
+    def resources_retired(self) -> bool: ...
+
 class SemanticPrivateReplayChild:
     """One original selected replay child retained by its instruction owner."""
 
@@ -1457,6 +1484,14 @@ class SemanticTransitionController:
         attempt raises SemanticPreparedSegmentPending. A proved pre-graph
         cancellation raises SemanticPreparedSegmentCancelled for retirement.
         """
+        ...
+
+    def admit_evaluation_instruction(
+        self, task_use: SemanticTransitionTaskUse, *,
+        parent: SemanticPublishedParent, instruction_bytes: bytes,
+        program_ordinal: int, resource_observer: Any,
+    ) -> SemanticEvaluationInstructionAdmission:
+        """Admit the exact outer Program instruction, with the original observer capsule."""
         ...
 
     def bind_prepared_update_output(

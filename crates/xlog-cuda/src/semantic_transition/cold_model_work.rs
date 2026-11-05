@@ -470,7 +470,7 @@ struct ColdReportCompletion {
     poisoned: bool,
 }
 
-fn cold_completion_is_pending(error: &SemanticTransitionError) -> bool {
+pub(super) fn cold_completion_is_pending(error: &SemanticTransitionError) -> bool {
     match error {
         SemanticTransitionError::NativeCompletionPending { .. } => true,
         SemanticTransitionError::NativeExecutionFailure { status, .. } => {
@@ -7321,6 +7321,114 @@ impl SemanticTransitionSession {
                 .map_err(|_| SemanticTransitionError::ObservationMismatch)?;
         }
         completion.read.read.retire_completed_values();
+        Ok(result)
+    }
+}
+
+impl SemanticTransitionSession {
+    pub fn prepare_evaluation_instruction_work(
+        &mut self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+    ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if !matches!(
+            original.state,
+            actor_refresh_program::InstructionState::Admitted
+                | actor_refresh_program::InstructionState::Bound
+        ) {
+            return Err(publication_input_error(
+                "evaluation cannot replace its original cold attempt",
+            ));
+        }
+        if let Some(work) = original.cold_work.clone() {
+            self.continue_cold_model_work_initialization(&work)?;
+            return Ok(work);
+        }
+        let instruction = Arc::clone(&original.instruction);
+        let ordinal = self.admitted_segment_first_program_ordinal(&admission.inner)?;
+        self.prepare_cold_model_work_inner(
+            parent,
+            None,
+            ordinal,
+            instruction.into(),
+            SemanticColdModelWorkPurpose::SourceEvaluation,
+            Some((&admission.inner, InstructionColdRole::Preparation)),
+        )
+    }
+
+    pub fn require_evaluation_instruction_cold_work(
+        &self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+    ) -> Result<(), SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if !matches!(
+            original.state,
+            actor_refresh_program::InstructionState::Admitted
+                | actor_refresh_program::InstructionState::Bound
+        ) || original
+            .cold_work
+            .as_ref()
+            .is_none_or(|retained| !retained.same_invocation(work))
+        {
+            return Err(publication_input_error(
+                "evaluation cold callback changed its original claim",
+            ));
+        }
+        self.check_cold_work_completion_reader(ColdWorkReader::Published(parent), work)?;
+        if self.original_cold_model_work(work)?.purpose
+            != SemanticColdModelWorkPurpose::SourceEvaluation
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        self.ensure_quiescent()
+    }
+
+    pub fn finish_evaluation_instruction_work(
+        &mut self,
+        admission: &SemanticEvaluationInstructionAdmission,
+        parent: &SemanticPublishedLease,
+        work: &SemanticColdModelWork,
+        streams: &[u64],
+        disposition: SemanticColdModelWorkDisposition,
+    ) -> Result<SemanticColdModelWorkResult, SemanticTransitionError> {
+        self.require_segment_instruction_admission(&admission.inner, parent)?;
+        self.evaluation_instruction_info(admission)?;
+        let original = self.instruction_admission(&admission.inner)?;
+        if original
+            .cold_work
+            .as_ref()
+            .is_none_or(|retained| !retained.same_invocation(work))
+            || original.evaluation_result.is_none()
+        {
+            return Err(publication_input_error(
+                "evaluation expense lacks its original terminal proof",
+            ));
+        }
+        if let Some(result) = original.cold_result {
+            return Ok(result);
+        }
+        self.require_evaluation_instruction_cold_work(admission, parent, work)?;
+        let result = self.finish_cold_model_work(parent, work, streams, disposition)?;
+        let original = self.original_cold_model_work(work)?;
+        if original.state != RecordingState::Completed || Arc::strong_count(&original.aliases) != 1
+        {
+            return Err(publication_input_error(
+                "evaluation cold storage retains unjoined scratch aliases",
+            ));
+        }
+        self.steps
+            .get_mut(&parent.token)
+            .ok_or(SemanticTransitionError::NotBound)?
+            .cold_model_work = None;
+        self.instruction_admission_mut(&admission.inner)?
+            .cold_result = Some(result);
         Ok(result)
     }
 }

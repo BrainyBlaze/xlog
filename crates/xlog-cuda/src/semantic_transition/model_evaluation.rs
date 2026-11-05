@@ -172,6 +172,12 @@ pub struct SemanticCompletedModelEvaluation {
 }
 
 impl SemanticCompletedModelEvaluation {
+    pub fn belongs_to_original(&self, original: &SemanticModelEvaluation) -> bool {
+        Arc::ptr_eq(&self.issuer, &original.issuer)
+            && Arc::ptr_eq(&self.invocation, &original.invocation)
+            && Arc::ptr_eq(&self.cohort_issuance, &original.cohort.issuance)
+    }
+
     pub fn result(&self) -> SemanticModelEvaluationResult {
         self.result
     }
@@ -2602,6 +2608,10 @@ impl SemanticTransitionSession {
                 .get_mut(&lease.token)
                 .expect("checked original reader")
                 .evaluation = None;
+            self.steps
+                .get_mut(&lease.token)
+                .expect("checked original reader")
+                .evaluation_preparation = None;
         }
         Ok(())
     }
@@ -2625,11 +2635,15 @@ impl SemanticTransitionSession {
                 "materialize the complete original training source before freezing a cohort",
             ));
         }
-        let reservation = self.replay_material_budget.as_ref()
+        let reservation = self
+            .replay_material_budget
+            .as_ref()
             .map(|budget| {
-                budget.reserve_auxiliary(arena.training_roster_allocation_bound()?)
+                budget
+                    .reserve_auxiliary(arena.training_roster_allocation_bound()?)
                     .map(Arc::new)
-            }).transpose()?;
+            })
+            .transpose()?;
         let roster = arena.freeze_training_roster(reservation)?;
         let selected_view = arena.source_view_for_cursor(coordinates[0], &roster)?;
         let mut selected =
@@ -2700,5 +2714,22 @@ impl SemanticTransitionSession {
             device: self.provider.device().ordinal(),
             provider: Arc::clone(&self.provider),
         }))
+    }
+}
+
+impl SemanticTransitionSession {
+    pub(super) fn require_model_evaluation_invocation(
+        &self,
+        parent: &SemanticPublishedLease,
+        evaluation: &SemanticModelEvaluation,
+    ) -> Result<(), SemanticTransitionError> {
+        self.checked_reader(parent)?;
+        self.original_evaluation(evaluation)?;
+        if evaluation.token != parent.token {
+            return Err(publication_input_error(
+                "evaluation changed its actual acquired parent",
+            ));
+        }
+        Ok(())
     }
 }

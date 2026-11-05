@@ -13,6 +13,10 @@ mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 mod actor_refresh_program;
 #[cfg(feature = "semantic-policy")]
+mod evaluation_instruction;
+#[cfg(feature = "semantic-policy")]
+pub use evaluation_instruction::SemanticEvaluationInstructionAdmission;
+#[cfg(feature = "semantic-policy")]
 mod family_cohort;
 #[cfg(feature = "semantic-policy")]
 mod model_control;

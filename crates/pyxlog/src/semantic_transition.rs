@@ -56,6 +56,8 @@ pub(crate) mod cold_task;
 mod evaluation_authority;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod evaluation_fork;
+#[cfg(feature = "semantic-policy")]
+pub(crate) mod evaluation_instruction;
 mod evaluation_rule_library;
 mod evaluation_source_checkpoint;
 mod feedback_projection;
@@ -555,6 +557,9 @@ pub(crate) struct PySemanticTransitionSession {
     producer_operation: Arc<AtomicBool>,
     #[cfg(feature = "semantic-policy")]
     pending_evaluation_preparation: Mutex<Option<model_evaluation::PendingEvaluationPreparation>>,
+    #[cfg(feature = "semantic-policy")]
+    evaluation_instruction:
+        Mutex<Option<Arc<evaluation_instruction::EvaluationInstructionCustody>>>,
     #[cfg(feature = "semantic-policy")]
     prepared_task_import: Mutex<Option<Py<prepared_import::PySemanticPreparedTaskImport>>>,
     #[cfg(feature = "semantic-policy")]
@@ -1535,6 +1540,8 @@ impl PySemanticTransitionSession {
             producer_operation: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "semantic-policy")]
             pending_evaluation_preparation: Mutex::new(None),
+            #[cfg(feature = "semantic-policy")]
+            evaluation_instruction: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
             prepared_task_import: Mutex::new(None),
             #[cfg(feature = "semantic-policy")]
