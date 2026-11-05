@@ -2452,7 +2452,7 @@ impl PySemanticLearningPhaseTransition {
     }
 
     /// The trusted durable owner implements commit(destination, bytes, sha256)
-    /// and resolve(destination, sha256). Only exact durable readback accepts it.
+    /// and resolve(destination, sha256, writer). Only exact durable readback accepts it.
     fn commit_checkpoint(
         &self,
         py: Python<'_>,
@@ -2548,9 +2548,25 @@ impl PySemanticLearningPhaseTransition {
             return self.activate(py).map(Some);
         }
         let (_, checkpoint) = self.candidate(py)?;
+        let budget = self
+            .task_use
+            .borrow(py)
+            .checkpoint
+            .material_sources
+            .native_budget()?;
+        let output = budget
+            .prepare_material_comparison(&checkpoint)
+            .map_err(xlog_err)?;
+        // The durable owner streams through its original staging block. This
+        // writer compares the full retained checkpoint without another payload
+        // allocation or codec workspace.
+        let writer = material_bytes::PySemanticMaterialWriter::from_original_output(
+            py, &budget, &output, 0,
+        )?;
         let result = resolve.bind(py).call1((
             &self.destination,
             PyBytes::new(py, &Sha256::digest(&checkpoint)),
+            writer.clone_ref(py),
         ))?;
         if result.is_none() {
             return Ok(None);
@@ -2559,8 +2575,10 @@ impl PySemanticLearningPhaseTransition {
             self.abandon(py)?;
             return Ok(None);
         }
+        writer.borrow(py).require_sealed_material(py, &result)?;
         require_guarded_material(&result, &checkpoint)?;
         self.retain_durable_readback()?;
+        writer.borrow(py).complete_producer()?;
         self.activate(py).map(Some)
     }
 
