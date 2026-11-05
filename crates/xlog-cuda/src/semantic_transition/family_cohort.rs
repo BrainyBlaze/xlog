@@ -237,6 +237,18 @@ fn decode(bytes: &[u8]) -> Result<SavedCohort<'_>, SemanticTransitionError> {
     })
 }
 
+fn encoding_extent(cohort: &SemanticEvaluationCohort) -> Result<usize, SemanticTransitionError> {
+    let header = MAGIC.len() + (1 + 5 + 3 + 1) * size_of::<u64>() + (1 + 3 + 1 + 1) * 32;
+    SemanticTrainingViewPort::ALL.into_iter().try_fold(
+        header + PORTS * size_of::<u64>() + 32,
+        |bytes, port| {
+            bytes
+                .checked_add(cohort.selected.port(port)?.0.len())
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        },
+    )
+}
+
 impl SemanticTransitionSession {
     /// Freeze only the original Program's supplied coordinates, before learning.
     /// The original admitted cold report owns every selection, transfer and wait.
@@ -292,85 +304,76 @@ impl SemanticTransitionSession {
         );
         let mut results = BTreeMap::new();
         for coordinates in coordinates {
-            let frame = match self.original_family_cohort(coordinates)? {
-                Some(frame) => frame,
-                None => {
-                    self.family_cohort_freeze_anchor()?;
-                    let (source, cohort) = self.prepare_evaluation_cohort(parent, coordinates)?;
-                    let (prefix, archive_count, eligible_count, chain) =
-                        cohort.selected.frozen_source_metadata()?;
-                    let frame = Arc::new(FrozenFamilyCohort::pending(coordinates));
-                    {
-                        let mut original = frame.preparation.lock().map_err(|_| {
-                            publication_input_error("original cohort owner is poisoned")
-                        })?;
-                        original.live = Some(cohort);
-                        original.selection = Some((
-                            source,
-                            [
-                                OriginalNativeCommand::new(&self.domain)?,
-                                OriginalNativeCommand::new(&self.domain)?,
-                            ],
-                        ));
-                        original.encoding.extend_from_slice(MAGIC);
-                        material_u64(&mut original.encoding, 1);
-                        for value in coordinates {
-                            material_u64(&mut original.encoding, value);
+            let frame =
+                match self.original_family_cohort(coordinates)? {
+                    Some(frame) => frame,
+                    None => {
+                        self.family_cohort_freeze_anchor()?;
+                        let (source, cohort) =
+                            self.prepare_evaluation_cohort(parent, coordinates)?;
+                        let (prefix, archive_count, eligible_count, chain) =
+                            cohort.selected.frozen_source_metadata()?;
+                        let encoded_bytes = encoding_extent(&cohort)?;
+                        let reservation = self.reserve_cohort_material(encoded_bytes)?;
+                        let frame = Arc::new(FrozenFamilyCohort::pending(coordinates));
+                        {
+                            let mut original = frame.preparation.lock().map_err(|_| {
+                                publication_input_error("original cohort owner is poisoned")
+                            })?;
+                            original.reservation = Some(reservation);
+                            // Allocate the complete immutable frame before its first
+                            // byte. Pending reads never grow or replace this buffer.
+                            original.encoding.try_reserve_exact(encoded_bytes).map_err(
+                                |error| runtime_error("original cohort encoding allocation", error),
+                            )?;
+                            original.live = Some(cohort);
+                            original.selection = Some((
+                                source,
+                                [
+                                    OriginalNativeCommand::new(&self.domain)?,
+                                    OriginalNativeCommand::new(&self.domain)?,
+                                ],
+                            ));
+                            original.encoding.extend_from_slice(MAGIC);
+                            material_u64(&mut original.encoding, 1);
+                            for value in coordinates {
+                                material_u64(&mut original.encoding, value);
+                            }
+                            original
+                                .encoding
+                                .extend_from_slice(arena.training_domain_identity().as_bytes());
+                            let task = original
+                                .live
+                                .as_ref()
+                                .expect("original cohort")
+                                .source_task();
+                            for identity in [task.query, task.theory_program, task.result] {
+                                original.encoding.extend_from_slice(identity.as_bytes());
+                            }
+                            original.encoding.extend_from_slice(prefix.as_bytes());
+                            material_u64(&mut original.encoding, arena.original_source_count());
+                            material_u64(&mut original.encoding, archive_count);
+                            material_u64(&mut original.encoding, eligible_count);
+                            original.encoding.extend_from_slice(chain.as_bytes());
+                            material_u64(&mut original.encoding, PORTS as u64);
                         }
-                        original
-                            .encoding
-                            .extend_from_slice(arena.training_domain_identity().as_bytes());
-                        let task = original
-                            .live
-                            .as_ref()
-                            .expect("original cohort")
-                            .source_task();
-                        for identity in [task.query, task.theory_program, task.result] {
-                            original.encoding.extend_from_slice(identity.as_bytes());
-                        }
-                        original.encoding.extend_from_slice(prefix.as_bytes());
-                        material_u64(&mut original.encoding, arena.original_source_count());
-                        material_u64(&mut original.encoding, archive_count);
-                        material_u64(&mut original.encoding, eligible_count);
-                        original.encoding.extend_from_slice(chain.as_bytes());
-                        material_u64(&mut original.encoding, PORTS as u64);
+                        self.install_original_family_cohort(Arc::clone(&frame))?;
+                        frame
                     }
-                    self.install_original_family_cohort(Arc::clone(&frame))?;
-                    frame
-                }
-            };
+                };
             let mut original = frame
                 .preparation
                 .lock()
                 .map_err(|_| publication_input_error("original cohort owner is poisoned"))?;
             if original.reservation.is_none() {
-                let live = original.live.as_ref().map(Arc::clone);
-                let bytes = if let Some(bytes) = frame.saved.get() {
-                    bytes.len() as u64
-                } else {
-                    let live = live.as_ref().ok_or_else(|| {
+                let bytes = frame
+                    .saved
+                    .get()
+                    .ok_or_else(|| {
                         publication_input_error("retain the original unresolved cohort preparation")
-                    })?;
-                    SemanticTrainingViewPort::ALL.into_iter().try_fold(
-                        (original.encoding.len() + PORTS * 8 + 32) as u64,
-                        |sum, port| {
-                            sum.checked_add(live.selected.port(port)?.0.len() as u64)
-                                .ok_or(SemanticTransitionError::GenerationExhausted)
-                        },
-                    )?
-                };
-                // Encoded material, the original pinned read, and its resolved
-                // copy can coexist. This is a source-derived enclosure, not expense.
-                let bound = bytes
-                    .checked_mul(3)
-                    .and_then(|n| n.checked_add(size_of::<CohortPreparation>() as u64))
-                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
-                original.reservation = Some(Arc::new(
-                    self.replay_material_budget
-                        .as_ref()
-                        .ok_or(SemanticTransitionError::NotBound)?
-                        .reserve_auxiliary(bound)?,
-                ));
+                    })?
+                    .len();
+                original.reservation = Some(self.reserve_cohort_material(bytes)?);
             }
             if let Some(bytes) = frame.saved.get() {
                 if current != Some(coordinates) {
@@ -545,6 +548,30 @@ impl SemanticTransitionSession {
             native_work_report::add_native_work_ceiling(&mut ceilings[1], dma)?;
         }
         Ok(ceilings)
+    }
+
+    fn reserve_cohort_material(
+        &self,
+        bytes: usize,
+    ) -> Result<Arc<SemanticReplayMaterialReservation>, SemanticTransitionError> {
+        // Exact encoding backing plus either pinned/read values or the final
+        // Vec-to-Arc conversion. The native read retires its pin before cloning.
+        // Both the frame and its saved byte slice own an Arc allocation header.
+        let bound = u64::try_from(bytes)
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?
+            .checked_mul(3)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    size_of::<FrozenFamilyCohort>() as u64 + 4 * size_of::<usize>() as u64,
+                )
+            })
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        Ok(Arc::new(
+            self.replay_material_budget
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .reserve_auxiliary(bound)?,
+        ))
     }
 
     fn read_family_cohort_port(
