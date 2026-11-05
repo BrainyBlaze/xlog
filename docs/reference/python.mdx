@@ -189,8 +189,57 @@ forward, including retained activations, FP32 reverse temporaries and optimizer
 state. It also reads loss/norm scalars to the host. `checkpoint_identity` continues
 to identify the imported checkpoint, not the subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
-Acquired-function insertion, model snapshot serialization and restoration are
-separate capabilities not provided by these methods.
+Acquired-function insertion is a separate capability not provided by these methods.
+
+`save_snapshot(path, application_state=payload_bytes)` saves a complete cold model
+version in one self-contained SafeTensors file and returns its SHA256 identity.
+It includes the numerical graph, shared parameter indices and all actual BF16
+weight bytes. Trainable candidates also include their FP32 master weights, Adam
+moments and completed step count. The application payload is covered by the same
+digest; XLOG preserves these bytes without interpreting the application's history,
+random generator states, data cursors or budgets. The application owner must
+serialize and validate that state at a consistent boundary between operations.
+
+```python
+snapshot_identity = candidate.save_snapshot(
+    snapshot_path, application_state=serialized_application_state
+)
+restored, restored_application_state = pyxlog.NativeCausalModel.from_snapshot(
+    snapshot_path,
+    snapshot_identity=snapshot_identity,
+    device=0,
+    memory_budget_bytes=32 * 1024**3,
+)
+```
+
+The destination must be a new file. Saving streams tracked device reads in bounded
+chunks, syncs the completed temporary file, and publishes it atomically without
+replacing an existing destination. Temporary files created by a failed save are
+removed; cleanup or directory-sync failures report the affected path and whether
+publication occurred. Snapshot methods require the default `host-io` feature and
+perform cold host transfers.
+
+Restore requires the expected 64-digit SHA256 and verifies the actual streamed
+header and payload before returning the model or application bytes. It checks the
+graph, tensor roster and layouts, and the optimizer's finite values, nonnegative
+second moments and BF16/master agreement. Original checkpoint shards are not
+needed. Parameter aliases, context bound and optimizer step are retained. The next
+`forward` or `fit_*` recomputes the supplied causal prefix; no KV cache or unfinished
+gradient accumulation is serialized. Each restore uses a fresh native provider
+with the explicitly supplied memory budget. Hardware equivalence and continuation
+must be qualified on the actual GPU, separately from source compilation.
+
+Applications comparing a base model with a candidate must retain both model
+snapshots or a durable identity-checked reference to the immutable base. Publish
+the application's joint manifest only after all required snapshots succeed;
+a candidate file alone does not preserve the paired base model. The returned
+snapshot identity describes the saved complete bytes, while `checkpoint_identity`
+continues to describe the original import even after training or restoration.
+The read-only `optimizer_steps` property returns a copy of the mapping from each
+canonical trainable parameter name to its completed native optimizer step. Frozen
+models return an empty mapping; a newly trainable down projection has step zero.
+Use these native values to check application metadata after restore, rather than
+treating an application's candidate identifier as optimizer evidence.
 
 ### Semantic task binding
 

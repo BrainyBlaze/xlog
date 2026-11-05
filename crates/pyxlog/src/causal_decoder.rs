@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+#[cfg(feature = "host-io")]
+use pyo3::types::PyBytes;
 use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
@@ -16,6 +18,56 @@ pub(crate) struct PyNativeCausalModel {
 
 #[pymethods]
 impl PyNativeCausalModel {
+    /// Save a cold native state and application bytes; returns its SHA256 identity.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (path, *, application_state))]
+    fn save_snapshot(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        application_state: Vec<u8>,
+    ) -> PyResult<String> {
+        py.detach(|| self.inner.save_snapshot(&path, application_state))
+            .map(|identity| identity.iter().map(|byte| format!("{byte:02x}")).collect())
+            .map_err(xlog_err)
+    }
+
+    /// Restore a self-contained state and its application bytes after digest validation.
+    #[cfg(feature = "host-io")]
+    #[staticmethod]
+    #[pyo3(signature = (path, *, snapshot_identity, device, memory_budget_bytes))]
+    fn from_snapshot(
+        py: Python<'_>,
+        path: PathBuf,
+        snapshot_identity: &str,
+        device: usize,
+        memory_budget_bytes: u64,
+    ) -> PyResult<(Self, Py<PyBytes>)> {
+        if snapshot_identity.len() != 64
+            || !snapshot_identity
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(PyValueError::new_err(
+                "snapshot_identity must be a 64-digit SHA256",
+            ));
+        }
+        let mut identity = [0u8; 32];
+        for (id, byte) in identity.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&snapshot_identity[id * 2..id * 2 + 2], 16)
+                .map_err(|_| PyValueError::new_err("invalid snapshot SHA256"))?;
+        }
+        let (inner, application_state) = py
+            .detach(|| {
+                NativeCausalModel::from_snapshot(&path, identity, device, memory_budget_bytes)
+            })
+            .map_err(xlog_err)?;
+        Ok((
+            Self { inner },
+            PyBytes::new(py, &application_state).unbind(),
+        ))
+    }
+
     /// Import config.json and model.safetensors or its indexed shards.
     /// The explicit byte budget covers weights, activations and cuBLAS workspace.
     #[staticmethod]
@@ -106,6 +158,11 @@ impl PyNativeCausalModel {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
+    }
+
+    #[getter]
+    fn optimizer_steps(&self) -> std::collections::BTreeMap<String, u64> {
+        self.inner.optimizer_steps()
     }
 
     #[getter]

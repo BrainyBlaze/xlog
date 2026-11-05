@@ -1,5 +1,6 @@
 //! Checkpoint-backed causal numerical programs and their retained outputs.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,8 +9,28 @@ use xlog_cuda::tensor::{
     NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
 };
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder, DlpackManagedTensor};
-use xlog_ir::tensor::TensorProgram;
+use xlog_ir::tensor::{TensorProgram, TensorValueShape};
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
+use xlog_neural::causal_snapshot::{
+    CausalDecoderSnapshot, CausalSnapshotDescription, OptimizerSnapshot,
+};
+
+fn native_executor(
+    device: usize,
+    memory_budget_bytes: u64,
+    state_bytes: u64,
+) -> Result<Arc<TensorExecutor>> {
+    if memory_budget_bytes <= state_bytes {
+        return Err(XlogError::Compilation(
+            "memory budget must exceed actual native state bytes to admit execution workspace"
+                .into(),
+        ));
+    }
+    let provider: Arc<CudaKernelProvider> = Arc::new(
+        CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_budget_bytes)).build()?,
+    );
+    Ok(Arc::new(TensorExecutor::new(provider)?))
+}
 
 /// Versioned weights and executable numerical definition on one native provider.
 pub struct NativeCausalModel {
@@ -53,14 +74,7 @@ impl NativeCausalModel {
                         .checked_add(parameter.bytes()? as u64)
                         .ok_or_else(|| XlogError::Compilation("checkpoint size overflow".into()))
                 })?;
-        if memory_budget_bytes <= weight_bytes {
-            return Err(XlogError::Compilation("memory budget must exceed actual checkpoint weight bytes to admit execution workspace".into()));
-        }
-        let provider: Arc<CudaKernelProvider> = Arc::new(
-            CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_budget_bytes))
-                .build()?,
-        );
-        let executor = Arc::new(TensorExecutor::new(provider)?);
+        let executor = native_executor(device, memory_budget_bytes, weight_bytes)?;
         let mut parameters = Vec::with_capacity(checkpoint.program.parameters.len());
         for parameter in &checkpoint.program.parameters {
             let (rows, columns) = match parameter.shape.as_slice() {
@@ -74,9 +88,8 @@ impl NativeCausalModel {
             };
             parameters.push(executor.allocate_parameter(rows, columns)?);
         }
-        let checkpoint_identity = checkpoint.load(|id, offset, bytes| {
-            executor.write_parameter(&mut parameters[id], offset, bytes)
-        })?;
+        let checkpoint_identity = checkpoint
+            .load(|id, offset, bytes| executor.write_tensor(&mut parameters[id], offset, bytes))?;
         Ok(Self {
             executor,
             parameters,
@@ -85,6 +98,91 @@ impl NativeCausalModel {
             device,
             optimizer: None,
         })
+    }
+
+    /// Save actual program/parameter/optimizer bytes and a caller-owned immutable
+    /// application payload. Existing paths are never overwritten. The returned
+    /// identity is SHA256 of this entire self-contained SafeTensors snapshot.
+    pub fn save_snapshot(&self, path: &Path, application_state: Vec<u8>) -> Result<[u8; 32]> {
+        let optimizer = self
+            .optimizer
+            .as_ref()
+            .map(|(parameter, state)| OptimizerSnapshot {
+                parameter: *parameter,
+                step: state.step(),
+            });
+        let description = CausalSnapshotDescription::new(
+            self.program.clone(),
+            self.checkpoint_identity,
+            optimizer,
+            application_state,
+        );
+        let mut tensors = self.parameters.iter().collect::<Vec<_>>();
+        if let Some((_, state)) = &self.optimizer {
+            tensors.extend(state.snapshot_tensors());
+        }
+        CausalDecoderSnapshot::write(path, &description, |id, offset, bytes| {
+            self.executor.read_tensor(tensors[id], offset, bytes)
+        })
+    }
+
+    /// Restore the exact saved bytes on a fresh native provider, without an
+    /// external checkpoint. Application bytes are returned only after SHA256 and
+    /// numerical optimizer checks succeed; their semantics remain caller-owned.
+    pub fn from_snapshot(
+        path: &Path,
+        expected_identity: [u8; 32],
+        device: usize,
+        memory_budget_bytes: u64,
+    ) -> Result<(Self, Vec<u8>)> {
+        let snapshot = CausalDecoderSnapshot::open(path, expected_identity)?;
+        let roster = snapshot.description().tensors()?;
+        let state_bytes = roster.iter().try_fold(0u64, |total, tensor| {
+            total
+                .checked_add(tensor.bytes()? as u64)
+                .ok_or_else(|| XlogError::Compilation("snapshot allocation extent overflow".into()))
+        })?;
+        let executor = native_executor(device, memory_budget_bytes, state_bytes)?;
+        let mut tensors = roster
+            .iter()
+            .map(|tensor| {
+                executor.allocate_tensor(TensorValueShape {
+                    rows: tensor.rows,
+                    columns: tensor.columns,
+                    float32: tensor.float32,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let description = snapshot
+            .load(|id, offset, bytes| executor.write_tensor(&mut tensors[id], offset, bytes))?;
+        let state = tensors.split_off(description.program.parameters.len());
+        let optimizer = if let Some(optimizer) = description.optimizer {
+            let [master, first, second]: [NativeTensor; 3] = state.try_into().map_err(|_| {
+                XlogError::Compilation("snapshot optimizer roster is incomplete".into())
+            })?;
+            let state = executor.restore_linear_optimizer(
+                optimizer.parameter,
+                &tensors[optimizer.parameter],
+                master,
+                first,
+                second,
+                optimizer.step,
+            )?;
+            Some((optimizer.parameter, state))
+        } else {
+            None
+        };
+        Ok((
+            Self {
+                executor,
+                parameters: tensors,
+                program: description.program,
+                checkpoint_identity: description.checkpoint_identity,
+                device,
+                optimizer,
+            },
+            description.application_state,
+        ))
     }
 
     /// Fork a candidate with one trainable MLP down projection. Frozen weights
@@ -219,6 +317,20 @@ impl NativeCausalModel {
     /// Digest of the actual imported configuration and canonical parameter bytes.
     pub fn checkpoint_identity(&self) -> &[u8; 32] {
         &self.checkpoint_identity
+    }
+
+    /// Canonical parameter names and completed native optimizer updates.
+    /// Frozen models return an empty map; newly trainable parameters have step zero.
+    pub fn optimizer_steps(&self) -> BTreeMap<String, u64> {
+        self.optimizer
+            .iter()
+            .map(|(parameter, state)| {
+                (
+                    self.program.parameters[*parameter].name.clone(),
+                    state.step(),
+                )
+            })
+            .collect()
     }
 
     /// Maximum accepted input length; longer input is rejected without truncation.

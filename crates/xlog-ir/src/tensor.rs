@@ -1,9 +1,11 @@
 //! Typed, acyclic numerical programs with shared parameter identities.
 
+use serde::{Deserialize, Serialize};
 use xlog_core::{Result, XlogError};
 
 /// A shared parameter allocation. Multiple operations may reference one index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TensorParameter {
     /// Checkpoint tensor name, independent of the consuming operation.
     pub name: String,
@@ -30,7 +32,8 @@ impl TensorParameter {
 
 /// Numerical operation. Value references address preceding operations.
 /// All intermediate results are BF16 except the explicit Float32 conversion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TensorOperation {
     /// Gather one embedding row for each input token.
     Embedding {
@@ -136,7 +139,8 @@ pub struct TensorValueShape {
 }
 
 /// One numerical function, including its parameter identity table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TensorProgram {
     /// Parameters in canonical checkpoint order. Aliases reuse an index.
     pub parameters: Vec<TensorParameter>,
