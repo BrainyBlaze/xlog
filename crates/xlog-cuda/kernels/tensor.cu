@@ -240,7 +240,8 @@ extern "C" __global__ void tensor_rotary_vjp_f32(
     if (i >= elements) return;
     const uint32_t column = i % head_dim, half = head_dim / 2;
     const uint64_t position = i / (static_cast<uint64_t>(heads) * head_dim);
-    const float angle = static_cast<float>(position) / powf(theta, static_cast<float>(2 * (column % half)) / head_dim);
+    const float inverse = 1.0f / powf(theta, static_cast<float>(2 * (column % half)) / head_dim);
+    const float angle = static_cast<float>(position) * inverse;
     const float cosine = from_bf16(to_bf16(cosf(angle)));
     const float sine = from_bf16(to_bf16(sinf(angle)));
     const uint64_t partner = column < half ? i + half : i - half;
@@ -337,12 +338,17 @@ extern "C" __global__ void tensor_loss_f32(
     if (kind == 1) {
         const float a = logits[positive] - logits[negative];
         const float e = expf(-fabsf(a));
-        const float probability = a >= 0.0f ? 1.0f / (1.0f + e) : e / (1.0f + e);
-        const float derivative = probability - static_cast<float>(target);
+        // Evaluate the target residual directly: computing p - 1 first would
+        // erase a small positive-target gradient when FP32 rounds p to one.
+        const float small = e / (1.0f + e);
+        const float large = 1.0f / (1.0f + e);
+        const float derivative = target == 1 ? (a >= 0.0f ? -small : -large)
+                                             : (a >= 0.0f ? large : small);
         for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) {
             cotangent[i] = i == positive ? derivative : (i == negative ? -derivative : 0.0f);
         }
-        if (threadIdx.x == 0) loss[0] = fmaxf(a, 0.0f) + log1pf(e) - static_cast<float>(target) * a;
+        const float signed_margin = target == 1 ? -a : a;
+        if (threadIdx.x == 0) loss[0] = fmaxf(signed_margin, 0.0f) + log1pf(e);
     } else {
         float maximum = -INFINITY;
         for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) maximum = fmaxf(maximum, logits[i]);
