@@ -6,7 +6,7 @@ use xlog_cuda::{SemanticColdModelWork, SemanticColdModelWorkResult, SemanticCold
 
 pub(super) struct ControlRetirement {
     owners: Option<EvaluationOwners>,
-    checkpoint: Py<material_bytes::PySemanticMaterialBytes>,
+    checkpoint: Option<Py<material_bytes::PySemanticMaterialBytes>>,
     checkpoint_sha256: [u8; 32],
     parent_identity: Py<PyTuple>,
     entries: Py<PyTuple>,
@@ -58,6 +58,7 @@ impl PySemanticLearningPhaseTransition {
             || !current.session_released
             || !current.model_owners_dropped
             || !current.owners_dropped
+            || current.checkpoint.is_some()
             || current.budget_exceeded
             || current.error.is_some()
         {
@@ -99,12 +100,22 @@ impl PySemanticLearningPhaseTransition {
                 "control retirement changed its original frozen entry",
             ));
         }
-        let checkpoint_sha256: [u8; 32] =
-            Sha256::digest(current.checkpoint.borrow(py).as_bytes()).into();
-        if checkpoint_sha256 != current.checkpoint_sha256 {
-            return Err(invalid(
-                "control retirement changed its original complete checkpoint",
-            ));
+        match (&current.checkpoint, current.released) {
+            (Some(checkpoint), false) => {
+                let checkpoint_sha256: [u8; 32] =
+                    Sha256::digest(checkpoint.borrow(py).as_bytes()).into();
+                if checkpoint_sha256 != current.checkpoint_sha256 {
+                    return Err(invalid(
+                        "control retirement changed its original complete checkpoint",
+                    ));
+                }
+            }
+            (None, true) => {}
+            _ => {
+                return Err(invalid(
+                    "control checkpoint lifetime disagrees with its original retirement release",
+                ))
+            }
         }
         Ok(())
     }
@@ -146,7 +157,7 @@ impl PySemanticLearningPhaseTransition {
                 Sha256::digest(checkpoint.borrow(py).as_bytes()).into();
             *self.control_retirement()? = Some(ControlRetirement {
                 owners: Some(owners),
-                checkpoint,
+                checkpoint: Some(checkpoint),
                 checkpoint_sha256,
                 parent_identity,
                 entries: entries.clone().unbind(),
@@ -633,10 +644,30 @@ impl PySemanticLearningPhaseTransition {
         let (released, exceeded) = {
             let retained = self.control_retirement()?;
             let current = retained.as_ref().expect("original control retirement");
+            if !current.recorded
+                || !current.session_released
+                || !current.model_owners_dropped
+                || !current.owners_dropped
+                || current.error.is_some()
+            {
+                return Err(invalid(
+                    "control checkpoint release requires known original retirement and accounting",
+                ));
+            }
             (current.released, current.budget_exceeded)
         };
         if !released {
             self.preparation_inputs.resource_observer.release(py)?;
+            // The original retirement and history are complete. Retain their
+            // digest and ordinal, then release the full CONTROL carrier before
+            // REAL preparation. Drop the byte owner outside the custody mutex.
+            let checkpoint = self
+                .control_retirement()?
+                .as_mut()
+                .expect("original control retirement")
+                .checkpoint
+                .take();
+            drop(checkpoint);
             self.control_retirement()?
                 .as_mut()
                 .expect("original control retirement")
