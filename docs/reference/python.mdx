@@ -419,8 +419,23 @@ Output-last is a restriction of the search language, not equivalence to every
 older wire graph, and it does not guarantee termination within a token budget.
 Versions1–4 retain their exact packets and masking behavior for restoration.
 
-For a version4 or version5 packet, `mask.completion_state(original_prefix_bytes)`
-returns a JSON string describing the completed parts of that exact prefix. It uses the
+New chains may select `language_version=6`, producing
+`xlog-contextual-acquisition-v6` with the same context version1. Before the model
+chooses `output`, the native mask checks whether the empty body has any compatible
+final operation using its declared parameters, known callee signatures and raw
+alphabet. It reuses the same prospective operation predicate and canonical
+inference at lengths1 and `max_context`. If none exists, index zero is excluded
+from the output domain. Actual one-operation cases, such as a pure zero result or
+a compatible argument, parameter, indicator or argument-free call, retain zero.
+Positive output indices and all subsequent choices keep version5's rules.
+The prospective body is never emitted, and no operand or graph is supplied to the
+model. This check removes an impossible one-operation plan; it does not establish
+reachability for longer plans, whole-bundle admission or completion within the
+token budget. Versions1–5 retain their exact packets and masks for restoration.
+
+For a version4, version5 or version6 packet,
+`mask.completion_state(original_prefix_bytes)` returns a JSON string describing
+the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
 computing another mask, invoking a grammar engine, or executing a model. Other
 packet versions, native prefix errors and source-budget overflow raise
