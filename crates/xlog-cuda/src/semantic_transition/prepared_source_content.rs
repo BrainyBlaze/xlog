@@ -3234,7 +3234,7 @@ impl SemanticTransitionSession {
                     .steps
                     .get(&token)
                     .and_then(|step| step.prepared.as_ref())
-                    .and_then(|step| step.training_view.as_ref())
+                    .and_then(|step| step.training_view.as_deref())
                     .ok_or_else(|| {
                         publication_input_error(
                             "SOURCE requires every original target Update training view",
