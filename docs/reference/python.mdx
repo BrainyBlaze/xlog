@@ -271,6 +271,22 @@ it requires the entry definition first and leaves operation selection and
 connections to the proposer. It bounds declarations and indices, but does not
 establish helper ABI equality, preceding references, shape algebra or causality.
 
+New chains may explicitly request `language_version=2, raw_token_ids=[...]`.
+Supply the full public alphabet of the caller's raw-history codec, including
+valid actions not yet observed; the list must be nonempty, unique, and inside
+the native vocabulary. Native code owns no application-specific token IDs.
+The packet retains this alphabet in `context.raw_token_ids`; its schema restricts
+`token_indicators.token_ids` to members with a finite maximum length equal to
+the alphabet size. The native prefix mask owns distinctness; the schema omits
+`uniqueItems`, which the pinned strict grammar engine does not support. The packet is
+`xlog-contextual-acquisition-v2`; its registry context still has version1. This
+schema preserves each canonical `required` list's order in `properties`:
+`signature`, `parameters`, then `operations`, with the `operation` tag before
+its operands. Compile this schema without sorting its property maps. The entry's
+numeric argument range comes from its actual `TensorSignature` (only argument0
+for the causal hidden input; the token parameter is not a numeric argument).
+The default remains version1, including its original sorted contextual schema.
+
 `NativeAcquisitionMask(language_json, token_bytes)` complements that schema with
 cumulative resource admission. Supply one exact byte spelling per vocabulary
 token from the policy's pinned byte tokenizer; EOS spellings are empty because
@@ -283,6 +299,18 @@ and caps total new operations and source bytes using the same limits as
 An empty intersection is a decoding failure, not EOS or permission to repair a
 prefix. These restrictions do not guarantee a completable or semantically valid
 program; final admission still belongs to `fork_acquired`.
+
+For version2 packets the same prefix mask also reads the completed signature and
+parameter declarations before operations. It bounds numeric arguments by that
+signature, `weight` by the local parameter table, value operands and
+`call.arguments` by preceding operations, and `output` by the completed body.
+These are per-function bounds, separate from the cumulative node allowance.
+The mask also enforces the declared raw alphabet and uniqueness as indicator
+IDs arrive, independently of JSON Schema engines' `uniqueItems` support.
+The signature uses the canonical numeric ABI, including pure functions' declared
+argument count. Version1 packets retain their previous resource-only filtering.
+Neither version invents a graph, repairs output, infers a callee's missing
+signature, or substitutes prefix admission for final type/shape/causal checks.
 
 Retain the exact language packet, its digest, compiled grammar, tokenizer and
 producing native version with each attempt and its original chosen token IDs.

@@ -123,12 +123,19 @@ impl PyNativeCausalModel {
     }
 
     /// Contextual wire schema and ABI from this model's actual function registry.
-    #[pyo3(signature = (*, insertion_layer=17))]
-    fn acquisition_language(&self, insertion_layer: usize) -> PyResult<String> {
+    #[pyo3(signature = (*, insertion_layer=17, language_version=1, raw_token_ids=None))]
+    fn acquisition_language(
+        &self,
+        insertion_layer: usize,
+        language_version: usize,
+        raw_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<String> {
         acquisition::language(
             self.inner
                 .acquisition_context(insertion_layer)
                 .map_err(xlog_err)?,
+            language_version,
+            raw_token_ids,
         )
     }
 
