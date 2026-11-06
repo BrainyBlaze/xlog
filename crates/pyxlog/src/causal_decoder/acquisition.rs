@@ -1,6 +1,7 @@
 //! Contextual wire restrictions and shared resource admission before token choice.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -912,9 +913,8 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             true
                         };
                         let choice = map.next_value_seed(NumberChoice {
-                            values: (0..ACQUIRED_NODES - self.resources.nodes)
-                                .filter(|&output| output != 0 || zero_available)
-                                .collect(),
+                            values: 0..ACQUIRED_NODES - self.resources.nodes,
+                            accepts: |output| output != 0 || zero_available,
                             bytes: self.resources.bytes,
                         })?;
                         // An EOF decimal is still a prefix, not a chosen slot.
@@ -927,8 +927,10 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             program.planned_output = Some(choice.value);
                         }
                     } else if let Some(program) = &self.resources.program.typed {
+                        let outputs = program.outputs();
                         let choice = map.next_value_seed(NumberChoice {
-                            values: program.outputs(),
+                            values: 0..program.body.operations.len(),
+                            accepts: |output| outputs.contains(&output),
                             bytes: self.resources.bytes,
                         })?;
                         self.resources.program.typed.as_mut().unwrap().body.output = choice.value;
@@ -1330,13 +1332,17 @@ impl<'de> Visitor<'de> for Operation<'_> {
             let extent = reference_extent(self.program, &key);
             if let Some(program) = &self.program.typed {
                 let choices = if key == "columns" {
-                    program.output_columns().map(|columns| vec![columns])
+                    program.output_columns().map(|columns| columns..columns + 1)
                 } else {
-                    extent.map(|extent| program.numbers(&material, &key, extent, self.signatures))
+                    extent.map(|extent| 0..extent)
                 };
                 let value = if let Some(values) = choices {
                     let choice = map.next_value_seed(NumberChoice {
                         values,
+                        accepts: |value| {
+                            key == "columns"
+                                || program.number_possible(&material, &key, value, self.signatures)
+                        },
                         bytes: self.bytes,
                     })?;
                     if choice.end == self.bytes.len() {
@@ -1439,11 +1445,12 @@ struct ChosenNumber {
     value: usize,
     end: usize,
 }
-struct NumberChoice<'a> {
-    values: Vec<usize>,
+struct NumberChoice<'a, F> {
+    values: Range<usize>,
+    accepts: F,
     bytes: &'a [u8],
 }
-impl<'de> DeserializeSeed<'de> for NumberChoice<'_> {
+impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
     type Value = ChosenNumber;
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         let raw = <&'de serde_json::value::RawValue>::deserialize(decoder)?;
@@ -1451,11 +1458,12 @@ impl<'de> DeserializeSeed<'de> for NumberChoice<'_> {
         let end = spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
         let viable = if end == self.bytes.len() {
+            // Only unfinished decimals need a search for compatible extensions.
             self.values
-                .iter()
-                .any(|id| id.to_string().starts_with(spelling))
+                .clone()
+                .any(|id| id.to_string().starts_with(spelling) && (self.accepts)(id))
         } else {
-            self.values.contains(&value)
+            self.values.contains(&value) && (self.accepts)(value)
         };
         if !viable {
             return Err(D::Error::custom(
@@ -1487,11 +1495,17 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
         loop {
-            let choices =
-                self.program
-                    .array_numbers(self.material, self.field, &values, self.signatures);
             let Some(value) = sequence.next_element_seed(NumberChoice {
-                values: choices,
+                values: self.program.array_range(self.material, self.field, &values),
+                accepts: |value| {
+                    self.program.array_number_possible(
+                        self.material,
+                        self.field,
+                        &values,
+                        value,
+                        self.signatures,
+                    )
+                },
                 bytes: self.bytes,
             })?
             else {
@@ -1501,10 +1515,18 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
             // Once all slots are filled, a comma cannot be accepted merely
             // because its next element has not arrived in this byte token yet.
             if self.bytes[value.end..].trim_ascii_start().starts_with(b",")
-                && self
+                && !self
                     .program
-                    .array_numbers(self.material, self.field, &values, self.signatures)
-                    .is_empty()
+                    .array_range(self.material, self.field, &values)
+                    .any(|value| {
+                        self.program.array_number_possible(
+                            self.material,
+                            self.field,
+                            &values,
+                            value,
+                            self.signatures,
+                        )
+                    })
             {
                 return Err(A::Error::custom(
                     "operand array has no compatible next slot",
