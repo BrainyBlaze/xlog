@@ -5057,7 +5057,8 @@ fn transition_refusal_report(
         .ok_or_else(|| invalid("native refusal has no public reason"))?;
     report.set_item("reason", reason)?;
     match refusal {
-        SemanticTransitionRefusal::InvalidFinalSupport { .. }
+        SemanticTransitionRefusal::ChangedControlState
+        | SemanticTransitionRefusal::InvalidFinalSupport { .. }
         | SemanticTransitionRefusal::NonFinitePolicyInput { .. }
         | SemanticTransitionRefusal::WorkCounterOverflow { .. } => {
             report.set_item("completed_draws", detail)?;
@@ -5898,10 +5899,11 @@ impl PySemanticSegmentInstructionAdmission {
                 "Control observation cannot overlap recording, import or retirement",
             ));
         }
-        session
+        let observation = session
             .owner()?
             .admitted_control_measurements(&self.inner.inner)
-            .map_err(xlog_err)?
+            .map_err(xlog_err)?;
+        observation
             .map(|value| native_observation_report(py, value))
             .transpose()
     }
