@@ -27,8 +27,10 @@ const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
 const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
 const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
 const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
+const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
+pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -41,7 +43,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=9) {
+    if !matches!(version, 1..=10) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -245,7 +247,7 @@ pub(super) fn language(
             ));
         }
         if version >= 7 {
-            rows::schema(&mut schema, version >= 8);
+            rows::schema(&mut schema, version >= 8, version >= 10);
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -263,6 +265,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                10 => INTENT_LANGUAGE,
                 9 => CANONICAL_ENTRY_LANGUAGE,
                 8 => CONTEXT_ENTRY_ROWS_LANGUAGE,
                 7 => NUMERICAL_ROWS_LANGUAGE,
@@ -372,6 +375,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     numerical_rows: bool,
     context_entry_rows: bool,
     canonical_entry_formals: bool,
+    has_intent: bool,
 }
 
 #[pymethods]
@@ -388,7 +392,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != SINGLE_OPERATION_LANGUAGE
             && language["id"] != NUMERICAL_ROWS_LANGUAGE
             && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE
-            && language["id"] != CANONICAL_ENTRY_LANGUAGE)
+            && language["id"] != CANONICAL_ENTRY_LANGUAGE
+            && language["id"] != INTENT_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -403,7 +408,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE;
+        let has_intent = language["id"] == INTENT_LANGUAGE;
+        let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE || has_intent;
         let context_entry_rows =
             language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
         let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
@@ -453,6 +459,7 @@ impl PyNativeAcquisitionMask {
             numerical_rows,
             context_entry_rows,
             canonical_entry_formals,
+            has_intent,
             ordered,
             planned_output,
             check_single_operation,
@@ -547,6 +554,7 @@ impl PyNativeAcquisitionMask {
             self.typed_context.as_ref().unwrap(),
             self.operation_fields.as_ref().unwrap(),
             self.context_entry_rows,
+            self.has_intent,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -562,6 +570,7 @@ impl PyNativeAcquisitionMask {
                 self.typed_context.as_ref().unwrap(),
                 self.operation_fields.as_ref().unwrap(),
                 self.context_entry_rows,
+                self.has_intent,
             )
             .map(|prefix| Cow::Owned(prefix.bytes))
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -599,8 +608,16 @@ pub(super) fn decode_numerical_rows(
     source: &[u8],
     context: &Value,
     context_entry: bool,
+    has_intent: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
-    rows::definitions(source, context, &operation_fields()?, context_entry).map_err(value_error)
+    rows::definitions(
+        source,
+        context,
+        &operation_fields()?,
+        context_entry,
+        has_intent,
+    )
+    .map_err(value_error)
 }
 
 struct Resources<'a> {
