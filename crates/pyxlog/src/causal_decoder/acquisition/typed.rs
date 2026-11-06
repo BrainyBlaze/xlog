@@ -92,6 +92,23 @@ impl Program {
             .collect()
     }
 
+    pub(super) fn required_output(&self) -> Result<[[usize; 2]; 2], String> {
+        let shape = |tokens| {
+            self.body
+                .signature
+                .output(tokens, self.body.vocabulary)
+                .map(|shape| [shape.rows, shape.columns])
+                .map_err(|error| error.to_string())
+        };
+        Ok([shape(1)?, shape(self.body.max_context)?])
+    }
+
+    pub(super) fn last_value(&self) -> Option<[[usize; 2]; 2]> {
+        let first = self.shapes[0].last()?;
+        let last = self.shapes[1].last()?;
+        Some([[first.rows, first.columns], [last.rows, last.columns]])
+    }
+
     fn compatible(&self, operation: Op, signatures: &Signatures) -> bool {
         // The same causal-dependency check used by the complete compiler applies
         // to this prospective operation. No prospective graph is ever emitted.
