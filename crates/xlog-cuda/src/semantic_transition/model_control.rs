@@ -51,7 +51,7 @@ struct ControlFacts {
 // This sealed boundary only admits native C records made entirely of integer
 // words, byte-array identities and embedded records with the same property.
 // None of their inert pointer words becomes a live capability on restoration.
-unsafe trait ControlWords: Copy {}
+unsafe trait ControlWords: Copy + DeviceRepr {}
 // SAFETY: selection and its embedded origin contain only integer words/arrays.
 unsafe impl ControlWords for SemanticTrainingViewSelection {}
 // SAFETY: the frozen native canary contains only integer words/arrays.
