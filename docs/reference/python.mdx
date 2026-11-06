@@ -362,6 +362,33 @@ guarantee termination within a caller's token budget, scientific usefulness or
 hardware admission. Versions1–3 retain their original packets and masks; existing
 chains must not be migrated to this policy during restoration.
 
+For a version4 packet, `mask.completion_state(original_prefix_bytes)` returns a
+JSON string describing the completed parts of that exact prefix. It uses the
+same native resource parser and canonical shape inference as `filter`, without
+computing another mask, invoking a grammar engine, or executing a model. Other
+packet versions, native prefix errors and source-budget overflow raise
+`ValueError`; an unfinished prefix follows the same EOF rules as `filter`.
+The record has exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Record version, always `1`. |
+| `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
+| `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
+| `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
+| `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types. |
+
+When a new definition starts, its shape facts remain `null` until its own
+signature and operations complete. `unread_constants` describes all prefix
+reads; it makes no reachability claim about an unfinished entry. This record
+does not replace final constructor admission or propose a next operation.
+Callers can retain it after a token-limit failure while preserving the original
+bytes, chosen IDs and error, then compare it with a fresh getter result from the
+exact saved packet and prefix during restoration. Getter errors must remain
+explicit, without replacing the original failure with invented facts.
+
 Retain the exact language packet, its digest, compiled grammar, tokenizer and
 producing native version with each attempt and its original chosen token IDs.
 Reconstruct both masks from that retained packet for continuation; do not derive

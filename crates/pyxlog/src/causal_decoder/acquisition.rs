@@ -437,20 +437,42 @@ impl PyNativeAcquisitionMask {
                 }
                 bytes.truncate(prefix.len());
                 bytes.extend_from_slice(spelling);
-                if !resource_prefix(
+                if resource_prefix(
                     &bytes,
                     &self.retained,
                     self.ordered,
                     &self.raw_tokens,
                     self.operation_fields.as_ref(),
                     self.typed_context.as_ref(),
-                ) {
+                )
+                .is_err()
+                {
                     mask[id / 8] &= !bit;
                 }
             }
             mask
         });
         Ok(PyBytes::new(py, &mask).unbind())
+    }
+
+    /// Describe completed prefix state without selecting tokens or changing it.
+    fn completion_state(&self, prefix: &[u8]) -> PyResult<String> {
+        if self.typed_context.is_none() {
+            return Err(value_error(
+                "completion state requires acquisition language version 4",
+            ));
+        }
+        let resources = resource_prefix(
+            prefix,
+            &self.retained,
+            self.ordered,
+            &self.raw_tokens,
+            self.operation_fields.as_ref(),
+            self.typed_context.as_ref(),
+        )
+        .map_err(value_error)?;
+        serde_json::to_string(&resources.completion_state().map_err(value_error)?)
+            .map_err(value_error)
     }
 }
 
@@ -467,6 +489,8 @@ struct Resources<'a> {
     typed_context: Option<&'a Value>,
     signatures: typed::Signatures,
     definition_name: Option<String>,
+    definition_index: Option<usize>,
+    program_definition_index: Option<usize>,
     definitions: BTreeMap<String, TensorProgram>,
     declarations: BTreeMap<String, TensorParameter>,
 }
@@ -480,16 +504,18 @@ struct Program {
     typed: Option<typed::Program>,
 }
 
-fn resource_prefix(
-    bytes: &[u8],
-    retained: &BTreeSet<String>,
+fn resource_prefix<'a>(
+    bytes: &'a [u8],
+    retained: &'a BTreeSet<String>,
     ordered: bool,
-    raw_tokens: &BTreeSet<u32>,
-    operation_fields: Option<&BTreeMap<String, Vec<String>>>,
-    typed_context: Option<&Value>,
-) -> bool {
+    raw_tokens: &'a BTreeSet<u32>,
+    operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
+    typed_context: Option<&'a Value>,
+) -> Result<Resources<'a>, serde_json::Error> {
     if bytes.len() > ACQUIRED_SOURCE_BYTES {
-        return false;
+        return Err(serde_json::Error::custom(
+            "acquisition source byte budget exceeded",
+        ));
     }
     let mut resources = Resources {
         bytes,
@@ -518,6 +544,8 @@ fn resource_prefix(
             })
             .unwrap_or_default(),
         definition_name: None,
+        definition_index: None,
+        program_definition_index: None,
         definitions: BTreeMap::new(),
         declarations: typed_context
             .map(|context| {
@@ -536,12 +564,58 @@ fn resource_prefix(
     })
     .deserialize(&mut decoder)
     {
-        Ok(()) => decoder.end().is_ok(),
-        Err(error) => error.is_eof(),
+        Ok(()) => decoder.end()?,
+        Err(error) if error.is_eof() => {}
+        Err(error) => return Err(error),
     }
+    Ok(resources)
 }
 
 impl Resources<'_> {
+    fn completion_state(&self) -> Result<Value, String> {
+        // A newly opened definition has no shape facts until its own signature
+        // completes, even while the parser still retains the preceding body.
+        let program = self
+            .program
+            .typed
+            .as_ref()
+            .filter(|_| self.program_definition_index == self.definition_index);
+        let mut read = BTreeSet::new();
+        for body in self
+            .definitions
+            .values()
+            .chain(program.map(|program| &program.body))
+        {
+            for operation in &body.operations {
+                if let Some(id) = operation.parameter() {
+                    let parameter = body
+                        .parameters
+                        .get(id)
+                        .ok_or_else(|| "unknown acquired parameter reference".to_owned())?;
+                    read.insert(&parameter.name);
+                }
+            }
+        }
+        // These are reads anywhere in completed operations, not reachability
+        // from the entry. The constructor's final usage gate remains separate.
+        let unread = self
+            .declarations
+            .keys()
+            .filter(|name| !self.retained.contains(*name) && !read.contains(name))
+            .count();
+        Ok(json!({
+            "version": 1,
+            "definition_index": self.definition_index,
+            "required_output": program.map(typed::Program::required_output).transpose()?,
+            "last_value": program.and_then(typed::Program::last_value),
+            "compatible_outputs": program.map_or(0, |program| program.outputs().len()),
+            "unread_constants": unread,
+            "entry_completed": self.definitions.contains_key(
+                self.typed_context.unwrap()["entrypoint"].as_str().unwrap()
+            ),
+        }))
+    }
+
     fn complete_entry(&self) -> Result<(), String> {
         let Some(context) = self.typed_context else {
             return Ok(());
@@ -639,6 +713,10 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
         f.write_str("numerical definition object")
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        if matches!(self.level, Level::Definition) {
+            self.resources.definition_index =
+                Some(self.resources.definition_index.map_or(0, |index| index + 1));
+        }
         while let Some((key, offset)) = next_key(
             &mut map,
             self.resources.bytes,
@@ -730,6 +808,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             context["max_context"].as_u64().unwrap() as usize,
                             *self.resources.raw_tokens.first().unwrap(),
                         ));
+                        self.resources.program_definition_index = self.resources.definition_index;
                     }
                 }
                 (Level::Program, "parameters") => {

@@ -111,6 +111,8 @@ class NativeAcquisitionMask:
 
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
     def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
+    def completion_state(self, prefix: bytes) -> str:
+        """Version4 prefix facts as JSON; no token selection or final admission."""
 
 class _GreedySelection(TypedDict):
     raw_argmax: int
