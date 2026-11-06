@@ -248,7 +248,7 @@ state. It also reads loss/norm scalars to the host. `checkpoint_identity` contin
 to identify the imported checkpoint, not the subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
 `fork_acquired(definition_json, parameter_values, insertion_layer=17,
-train_down_projection=True)` constructs an independent acquired candidate. The JSON
+train_down_projection=True, source_encoding="funcdef-json-v1")` constructs an independent acquired candidate. The default JSON
 object has exactly `entrypoint` (a new registry name) and `definitions` (canonical
 `FuncDef` records). Each definition includes its actual `params`, `return_type`,
 `body: {"Numerical": ...}`, and `is_private`. Numerical bodies carry `signature`,
@@ -433,7 +433,36 @@ model. This check removes an impossible one-operation plan; it does not establis
 reachability for longer plans, whole-bundle admission or completion within the
 token budget. Versions1–5 retain their exact packets and masks for restoration.
 
-For a version4, version5 or version6 packet,
+New chains may select `language_version=7`, producing
+`xlog-contextual-acquisition-v7` with context version1 and source encoding
+`numerical-rows-v1`. The top-level JSON still has exactly `entrypoint` and
+`definitions`. Every definition has, in order, `name`, `signature`, `parameters`,
+`output` and `operations`. Names, signatures and parameter declarations retain
+their canonical forms. Each operation is an array containing its tag followed by
+the operands in the canonical wire schema's `required` order, excluding the
+`operation` field itself. Arity is exact; the operation set and operand order are
+derived from that schema. Definitions omit the `Numerical` wrapper, context-owned
+`vocabulary`/`max_context`, and formal types supplied by `FuncDef::numerical`.
+
+The native codec elaborates this syntax for the same resource/type prefix owner.
+Unfinished operand strings, decimals and arrays retain their bytes and delimiter
+semantics. Callee-first/entry-last order, output-first plans, version6's zero-slot
+feasibility, both context-length shape checks, causal/usage checks and shared
+node/scalar budgets remain in that owner. The 1 MiB bound counts original compact
+UTF-8 bytes. Versions1–6 keep their packets and source interpretation.
+
+`mask.decode_definition(original_source_bytes)` returns canonical JSON for a
+complete version7 source, using the mask's captured native context. Callers may
+use that definition for deterministic parameter initialization while retaining the
+original compact bytes and generated token IDs. Pass the original compact string
+to `fork_acquired(..., source_encoding="numerical-rows-v1")`: the binding uses the
+same codec with the actual model context and passes canonical definitions to the
+shared registration/allocation/optimizer path. Unknown encodings fail explicitly.
+The codec neither chooses operations nor repairs a graph; it establishes no
+token-fit, training-benefit or performance claim. Restoration must select the
+saved language/context and compare the same elaboration before mask replay.
+
+For a version4, version5, version6 or version7 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -450,7 +479,7 @@ The record has exactly these fields:
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
 | `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types. |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for version7). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
