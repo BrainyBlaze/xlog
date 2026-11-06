@@ -25,7 +25,9 @@ const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
 const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
 const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
 const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
+const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
+pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -38,7 +40,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
+    if !matches!(version, 1..=8) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -241,8 +243,8 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 7 {
-            rows::schema(&mut schema);
+        if version >= 7 {
+            rows::schema(&mut schema, version >= 8);
         }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
@@ -254,6 +256,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                8 => CONTEXT_ENTRY_ROWS_LANGUAGE,
                 7 => NUMERICAL_ROWS_LANGUAGE,
                 6 => SINGLE_OPERATION_LANGUAGE,
                 5 => PLANNED_LANGUAGE,
@@ -359,6 +362,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
     numerical_rows: bool,
+    context_entry_rows: bool,
 }
 
 #[pymethods]
@@ -373,7 +377,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != TYPED_LANGUAGE
             && language["id"] != PLANNED_LANGUAGE
             && language["id"] != SINGLE_OPERATION_LANGUAGE
-            && language["id"] != NUMERICAL_ROWS_LANGUAGE)
+            && language["id"] != NUMERICAL_ROWS_LANGUAGE
+            && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -388,7 +393,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE;
+        let context_entry_rows = language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE;
+        let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
         let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
         let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
         let typed = language["id"] == TYPED_LANGUAGE || planned_output;
@@ -433,6 +439,7 @@ impl PyNativeAcquisitionMask {
         }
         Ok(Self {
             numerical_rows,
+            context_entry_rows,
             ordered,
             planned_output,
             check_single_operation,
@@ -524,6 +531,7 @@ impl PyNativeAcquisitionMask {
             source_bytes,
             self.typed_context.as_ref().unwrap(),
             self.operation_fields.as_ref().unwrap(),
+            self.context_entry_rows,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -538,6 +546,7 @@ impl PyNativeAcquisitionMask {
                 source,
                 self.typed_context.as_ref().unwrap(),
                 self.operation_fields.as_ref().unwrap(),
+                self.context_entry_rows,
             )
             .map(|prefix| Cow::Owned(prefix.bytes))
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -574,8 +583,9 @@ fn operation_fields() -> PyResult<BTreeMap<String, Vec<String>>> {
 pub(super) fn decode_numerical_rows(
     source: &[u8],
     context: &Value,
+    context_entry: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
-    rows::definitions(source, context, &operation_fields()?).map_err(value_error)
+    rows::definitions(source, context, &operation_fields()?, context_entry).map_err(value_error)
 }
 
 struct Resources<'a> {

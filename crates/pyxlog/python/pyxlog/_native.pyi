@@ -77,7 +77,7 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v7 uses compact numerical operation rows."""
+        """Exact native context/schema; v8 derives the entry ABI and counts operation rows."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
@@ -113,9 +113,9 @@ class NativeAcquisitionMask:
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
     def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–7 prefix facts as JSON; no token selection or final admission."""
+        """Version4–8 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7 source into canonical JSON using the captured context."""
+        """Elaborate complete v7/v8 source into canonical JSON using the captured context."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int

@@ -462,7 +462,28 @@ The codec neither chooses operations nor repairs a graph; it establishes no
 token-fit, training-benefit or performance claim. Restoration must select the
 saved language/context and compare the same elaboration before mask replay.
 
-For a version4, version5, version6 or version7 packet,
+Version8 (`xlog-contextual-acquisition-v8`, `numerical-rows-v2`) keeps the same
+operation rows and native admission. Its root fields are `helpers`, then `entry`.
+Each helper contains `name`, `signature`, `parameters`, `operation_count`,
+`operations` in that order. Entry contains only `parameters`, `operation_count`,
+`operations`: its name and signature come from the captured native context.
+Helpers may be empty; the codec appends the required entry after them. Every
+helper, constant, operation and operand remains explicitly selected in source.
+
+A positive count `n` requires exactly `n` rows and maps mechanically to canonical
+output index `n-1`; the last row returns the function result. The codec waits for
+the count's delimiter before projecting that index, so an unfinished `1` remains
+a possible prefix of `10` through `19`. The existing planned-output owner still
+enforces remaining node allowance, one-operation feasibility and the final
+result's shape at both context lengths. ABI construction, causality, usage and
+source/scalar budgets are unchanged. Complete decoding also checks the row count.
+Use `decode_definition` with the version8 packet and pass the original source to
+`fork_acquired(..., source_encoding="numerical-rows-v2")`; both use this codec,
+with captured or actual model context respectively. Versions1–7 retain their
+literal packets, source interpretation and prefix behavior. Version8 establishes
+no termination or training-benefit guarantee.
+
+For a version4 through version8 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -479,7 +500,7 @@ The record has exactly these fields:
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
 | `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for version7). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–8). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
