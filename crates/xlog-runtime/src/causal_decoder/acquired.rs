@@ -211,14 +211,15 @@ impl NativeCausalModel {
                 }
             }
         }
-        if !new_names.is_subset(&reached)
-            || new_parameters
-                .keys()
-                .any(|name| !used_parameters.contains(name))
-        {
-            return Err(invalid(
-                "new definitions and constants must have actual callers",
-            ));
+        let unused_definitions = new_names.difference(&reached).collect::<Vec<_>>();
+        let unused_constants = new_parameters
+            .keys()
+            .filter(|name| !used_parameters.contains(*name))
+            .collect::<Vec<_>>();
+        if !unused_definitions.is_empty() || !unused_constants.is_empty() {
+            return Err(invalid(format!(
+                "new definitions and constants must have actual callers; unreachable definitions: {unused_definitions:?}; unused constants: {unused_constants:?}"
+            )));
         }
         let mut constants = 0usize;
         for parameter in new_parameters.values() {
