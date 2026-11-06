@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -780,6 +780,8 @@ fn compile_kernels(
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let artifacts = Mutex::new(Vec::new());
+    let (sender, receiver) = mpsc::channel();
+    let receiver = Mutex::new(receiver);
     let jobs = env::var("NUM_JOBS")
         .expect("Cargo must supply NUM_JOBS")
         .parse::<usize>()
@@ -800,39 +802,46 @@ fn compile_kernels(
         }
     };
     std::thread::scope(|scope| {
-        let mut workers = 1;
-        loop {
-            if failed.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Some(client) = &jobserver {
-                while workers < jobs {
-                    let Some(token) = client.try_acquire().expect("acquire Cargo job slot") else {
-                        break;
-                    };
-                    let run = &run;
-                    let next = &next;
-                    let failed = &failed;
-                    let modules = &modules;
-                    scope.spawn(move || {
-                        let _slot = token;
-                        while !failed.load(Ordering::Relaxed) {
-                            let index = next.fetch_add(1, Ordering::Relaxed);
-                            if index >= modules.len() {
-                                break;
-                            }
-                            run(index);
+        let helper = jobserver.filter(|_| jobs > 1).map(|client| {
+            client
+                .into_helper_thread(move |token| {
+                    let _ = sender.send(token);
+                })
+                .expect("start Cargo job slot acquisition")
+        });
+        if let Some(helper) = &helper {
+            for _ in 1..jobs {
+                helper.request_token();
+                scope.spawn(|| {
+                    let _slot = match receiver.lock().expect("job slot receiver poisoned").recv() {
+                        Ok(Ok(token)) => token,
+                        Ok(Err(error)) => {
+                            failed.store(true, Ordering::Relaxed);
+                            panic!("acquire Cargo job slot: {error}");
                         }
-                    });
-                    workers += 1;
-                }
+                        Err(_) => return,
+                    };
+                    while !failed.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= modules.len() {
+                            break;
+                        }
+                        run(index);
+                    }
+                });
             }
+        }
+        while !failed.load(Ordering::Relaxed) {
             let index = next.fetch_add(1, Ordering::Relaxed);
             if index >= modules.len() {
                 break;
             }
             run(index);
         }
+        // Slots can become available while the main thread compiles a large
+        // kernel. The helper wakes waiting workers then, but is cancelled here
+        // so an all-cache-hit build never waits for unrelated Cargo jobs.
+        drop(helper);
     });
     for path in compiler
         .inputs
