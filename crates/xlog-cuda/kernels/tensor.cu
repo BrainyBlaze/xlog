@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <math.h>
+#include "philox.cuh"
 
 static __device__ __forceinline__ float from_bf16(uint16_t value) {
     return __uint_as_float(static_cast<uint32_t>(value) << 16);
@@ -267,6 +268,90 @@ extern "C" __global__ void tensor_greedy_reduce_f32(
         invalid |= row[4];
     }
     block_logit_selection(raw, selected, invalid, output);
+}
+
+struct LogitSample {
+    double rank;
+    uint32_t token;
+};
+
+static __device__ LogitSample logit_sample_maximum(LogitSample a, LogitSample b) {
+    return b.rank > a.rank || (b.rank == a.rank && b.token < a.token) ? b : a;
+}
+
+// The returned winner is consumed only by thread zero of a 256-thread block.
+static __device__ LogitSample block_logit_sample(LogitSample selected) {
+    __shared__ LogitSample warps[8];
+    const unsigned lane = threadIdx.x & 31;
+    const unsigned warp = threadIdx.x >> 5;
+    for (unsigned offset = 16; offset; offset >>= 1) {
+        selected = logit_sample_maximum(selected,
+            {__shfl_down_sync(0xffffffffU, selected.rank, offset),
+             __shfl_down_sync(0xffffffffU, selected.token, offset)});
+    }
+    if (lane == 0) warps[warp] = selected;
+    __syncthreads();
+    if (warp == 0) {
+        selected = lane < 8 ? warps[lane] : LogitSample{-INFINITY, UINT32_MAX};
+        for (unsigned offset = 16; offset; offset >>= 1) {
+            selected = logit_sample_maximum(selected,
+                {__shfl_down_sync(0xffffffffU, selected.rank, offset),
+                 __shfl_down_sync(0xffffffffU, selected.token, offset)});
+        }
+    }
+    return selected;
+}
+
+extern "C" __global__ void tensor_categorical_partial_f32(
+    const float* logits, const uint8_t* mask, const uint32_t* maxima,
+    uint64_t* partials, uint32_t vocabulary, uint64_t seed, uint64_t sequence,
+    uint32_t position
+) {
+    LogitSample selected{-INFINITY, UINT32_MAX};
+    // Maxima cover the entire row's finiteness, including disallowed tokens.
+    if (maxima[4] == 0 && maxima[2] < vocabulary) {
+        const double anchor = double(__uint_as_float(maxima[3]));
+        const uint32_t key[2] = {uint32_t(seed), uint32_t(seed >> 32)};
+        for (uint32_t token = blockIdx.x * blockDim.x + threadIdx.x;
+             token < vocabulary; token += gridDim.x * blockDim.x) {
+            if (mask && !(mask[token / 8] & (1U << (token % 8)))) continue;
+            const uint32_t counter[4] = {
+                token, position, uint32_t(sequence), uint32_t(sequence >> 32)
+            };
+            uint32_t random[4];
+            philox4x32_10(random, counter, key);
+            const uint64_t bits = (uint64_t(random[0]) << 20) | (random[1] >> 12);
+            const double u = (double(bits) + 0.5) * 0x1p-52;
+            // Center before adding noise so equal large logits retain the draw.
+            const double rank = (double(logits[token]) - anchor) - log(-log(u));
+            selected = logit_sample_maximum(selected, {rank, token});
+        }
+    }
+    selected = block_logit_sample(selected);
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x * 2] = uint64_t(__double_as_longlong(selected.rank));
+        partials[blockIdx.x * 2 + 1] = selected.token;
+    }
+}
+
+extern "C" __global__ void tensor_categorical_reduce_f32(
+    const float* logits, const uint32_t* maxima, const uint64_t* partials,
+    uint32_t* output, uint32_t count
+) {
+    LogitSample selected{-INFINITY, UINT32_MAX};
+    for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+        selected = logit_sample_maximum(selected,
+            {__longlong_as_double(static_cast<long long>(partials[i * 2])),
+             uint32_t(partials[i * 2 + 1])});
+    }
+    selected = block_logit_sample(selected);
+    if (threadIdx.x == 0) {
+        output[0] = maxima[0];
+        output[1] = maxima[1];
+        output[2] = selected.token;
+        output[3] = selected.token == UINT32_MAX ? 0 : __float_as_uint(logits[selected.token]);
+        output[4] = maxima[4];
+    }
 }
 
 extern "C" __global__ void tensor_check_finite_f32(

@@ -20,13 +20,13 @@ mod functions;
 mod training;
 pub use training::{TensorAdamState, TensorLoss, TensorTrainingResult};
 
-/// CUDA-selected maxima and the digest of the complete original FP32 vocabulary row.
-pub struct GreedySelection {
+/// CUDA token selection and the digest of the complete original FP32 vocabulary row.
+pub struct LogitSelection {
     /// Maximum over the whole vocabulary, with the lowest ID breaking ties.
     pub raw_argmax: u32,
     /// Original FP32 score of the unmasked maximum.
     pub raw_score: f32,
-    /// Maximum among allowed tokens, with the same tie rule.
+    /// Token chosen among allowed tokens by the requested selection law.
     pub selected: u32,
     /// Original FP32 score of the selected token, before masking.
     pub selected_score: f32,
@@ -752,14 +752,41 @@ impl TensorExecutor {
         &self,
         tensor: &NativeTensor,
         allowed_mask: Option<&[u8]>,
-    ) -> Result<GreedySelection> {
+    ) -> Result<LogitSelection> {
+        self.select_logits(tensor, allowed_mask, None)
+    }
+
+    /// Temperature-one categorical selection with Philox-addressed Gumbel noise.
+    /// The address is supplied by the caller; no device RNG state is advanced.
+    pub fn select_categorical(
+        &self,
+        tensor: &NativeTensor,
+        allowed_mask: Option<&[u8]>,
+        seed: u64,
+        sequence: u64,
+        position: u32,
+    ) -> Result<LogitSelection> {
+        self.select_logits(tensor, allowed_mask, Some((seed, sequence, position)))
+    }
+
+    fn select_logits(
+        &self,
+        tensor: &NativeTensor,
+        allowed_mask: Option<&[u8]>,
+        sampling: Option<(u64, u64, u32)>,
+    ) -> Result<LogitSelection> {
+        let law = if sampling.is_some() {
+            "categorical"
+        } else {
+            "greedy"
+        };
         if !tensor.shape.float32
             || tensor.shape.rows != 1
             || tensor.device != self.provider.device().ordinal()
         {
-            return Err(failure(
-                "greedy selection requires this device's FP32 vocabulary row",
-            ));
+            return Err(failure(format!(
+                "{law} selection requires this device's FP32 vocabulary row"
+            )));
         }
         let vocabulary = dimension(tensor.shape.columns)?;
         if let Some(mask) = allowed_mask {
@@ -768,9 +795,9 @@ impl TensorExecutor {
                 || (remainder != 0 && mask[mask.len() - 1] >> remainder != 0)
                 || !mask.iter().any(|&byte| byte != 0)
             {
-                return Err(failure(
-                    "greedy mask must contain in-range tokens at the exact vocabulary extent",
-                ));
+                return Err(failure(format!(
+                    "{law} mask must contain in-range tokens at the exact vocabulary extent"
+                )));
             }
         }
         let mask = allowed_mask
@@ -812,20 +839,73 @@ impl TensorExecutor {
                 groups as u32,
             ),
         )?;
+        let sampled = if let Some((seed, sequence, position)) = sampling {
+            let samples = self.provider.memory().alloc::<u64>(groups * 2)?;
+            let selected = self.provider.memory().alloc::<u32>(5)?;
+            let mut recorder = LaunchRecorder::new_strict(self.stream);
+            recorder
+                .read(tensor.storage.as_ref())
+                .read(&output)
+                .write(&samples);
+            if let Some(mask) = &mask {
+                recorder.read(mask);
+            }
+            self.launch(
+                recorder,
+                "tensor_categorical_partial_f32",
+                grid(groups)?,
+                (
+                    tensor.pointer(),
+                    mask.as_ref().map_or(0, |mask| mask.device_ptr_value()),
+                    output.device_ptr_value(),
+                    samples.device_ptr_value(),
+                    vocabulary,
+                    seed,
+                    sequence,
+                    position,
+                ),
+            )?;
+            let mut recorder = LaunchRecorder::new_strict(self.stream);
+            recorder
+                .read(tensor.storage.as_ref())
+                .read(&output)
+                .read(&samples)
+                .write(&selected);
+            self.launch(
+                recorder,
+                "tensor_categorical_reduce_f32",
+                grid(1)?,
+                (
+                    tensor.pointer(),
+                    output.device_ptr_value(),
+                    samples.device_ptr_value(),
+                    selected.device_ptr_value(),
+                    groups as u32,
+                ),
+            )?;
+            // Retain both allocations through the final result synchronization.
+            Some((samples, selected))
+        } else {
+            None
+        };
         let mut result = [0u32; 5];
-        self.provider
-            .dtoh_sync_copy_into_tracked(&output, &mut result)?;
+        self.provider.dtoh_sync_copy_into_tracked(
+            sampled.as_ref().map_or(&output, |(_, selected)| selected),
+            &mut result,
+        )?;
         if result[4] != 0 {
-            return Err(failure(
-                "greedy selection requires a finite full-vocabulary row",
-            ));
+            return Err(failure(format!(
+                "{law} selection requires a finite full-vocabulary row"
+            )));
         }
         if result[0] >= vocabulary || result[2] >= vocabulary {
-            return Err(failure("greedy selection produced no admissible token"));
+            return Err(failure(format!(
+                "{law} selection produced no admissible token"
+            )));
         }
         let mut bytes = vec![0u8; tensor.shape.columns * 4];
         self.read_tensor(tensor, 0, &mut bytes)?;
-        Ok(GreedySelection {
+        Ok(LogitSelection {
             raw_argmax: result[0],
             raw_score: f32::from_bits(result[1]),
             selected: result[2],

@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::tensor::{
-    GreedySelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss,
-    TensorTrainingResult,
+    LogitSelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
 };
 use xlog_cuda::{CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::{TensorProgram, TensorValueShape};
@@ -494,8 +493,21 @@ impl NativeLogits {
 
     /// CUDA maxima with minimum-ID ties and the original full-row FP32 digest.
     /// A supplied mask is an exact little-endian bitset; absent means every token.
-    pub fn select_greedy(&self, allowed_mask: Option<&[u8]>) -> Result<GreedySelection> {
+    pub fn select_greedy(&self, allowed_mask: Option<&[u8]>) -> Result<LogitSelection> {
         self.executor.select_greedy(&self.tensor, allowed_mask)
+    }
+
+    /// CUDA categorical draw at temperature one, with an explicit Philox address.
+    /// Scores and the full-row digest refer to the original unperturbed logits.
+    pub fn select_categorical(
+        &self,
+        allowed_mask: Option<&[u8]>,
+        seed: u64,
+        sequence: u64,
+        position: u32,
+    ) -> Result<LogitSelection> {
+        self.executor
+            .select_categorical(&self.tensor, allowed_mask, seed, sequence, position)
     }
 
     /// Export the native [1, vocabulary] FP32 allocation with retained ownership.

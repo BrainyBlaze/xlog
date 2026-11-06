@@ -548,6 +548,10 @@ fn main() {
     println!("cargo:rerun-if-changed=src/kernel_manifest_data.rs");
     println!(
         "cargo:rerun-if-changed={}",
+        kernels_dir.join("philox.cuh").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         kernels_dir.join("semantic_feedback_encoding.cuh").display()
     );
     println!(
