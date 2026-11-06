@@ -392,8 +392,35 @@ guarantee termination within a caller's token budget, scientific usefulness or
 hardware admission. Versions1–3 retain their original packets and masks; existing
 chains must not be migrated to this policy during restoration.
 
-For a version4 packet, `mask.completion_state(original_prefix_bytes)` returns a
-JSON string describing the completed parts of that exact prefix. It uses the
+New chains may select `language_version=5`, producing
+`xlog-contextual-acquisition-v5` with the same version1 registry context and
+explicit raw alphabet. It uses the same canonical JSON definition and constructor;
+there is no intermediate representation, lowering or output repair. Within each
+numerical body the field order is `signature`, `parameters`, `output`,
+`operations`, `vocabulary`, `max_context`. The model chooses output index `p`
+from zero through the remaining shared node allowance minus one. That body must
+contain exactly `p+1` operations: the array cannot close early, and no operation
+or separating comma may follow slot `p`.
+
+Slots before `p` retain version4's typed choices. At slot `p`, the same canonical
+inference must produce the signature's output at lengths1 and `max_context`.
+Prospective choices account for output width: `zeros.columns` admits decimal
+prefixes of the required width, gather arrays can continue to that width, and
+token indicators require enough distinct IDs in the raw alphabet. These internal
+shape witnesses never supply emitted operations or operands. Every actual value,
+array element and token ID remains a model choice; closed arrays must already
+have the required length.
+
+The chosen index is never extended or replaced to rescue an unreachable output
+slot. An empty intersection remains a decoding failure. Callee-first ordering,
+entry-last ordering, causal checks and whole-bundle helper/constant usage remain
+unchanged; a helper need not independently read constants owned by another body.
+Output-last is a restriction of the search language, not equivalence to every
+older wire graph, and it does not guarantee termination within a token budget.
+Versions1–4 retain their exact packets and masking behavior for restoration.
+
+For a version4 or version5 packet, `mask.completion_state(original_prefix_bytes)`
+returns a JSON string describing the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
 computing another mask, invoking a grammar engine, or executing a model. Other
 packet versions, native prefix errors and source-budget overflow raise

@@ -19,6 +19,7 @@ const LANGUAGE: &str = "xlog-contextual-acquisition-v1";
 const ORDERED_LANGUAGE: &str = "xlog-contextual-acquisition-v2";
 const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
 const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
+const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -31,7 +32,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3 | 4) {
+    if !matches!(version, 1 | 2 | 3 | 4 | 5) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -65,7 +66,7 @@ pub(super) fn language(
         "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
         "prefixItems": [{"$ref": "#/$defs/EntryFuncDef"}], "items": {"$ref": "#/$defs/FuncDef"},
     });
-    if version == 4 {
+    if version >= 4 {
         // Helper names extend the entry's function namespace, so they cannot
         // match the entry's exact name. This union is disjoint without oneOf.
         schema["properties"]["definitions"] = json!({
@@ -95,7 +96,7 @@ pub(super) fn language(
     defs["FuncDef"]["properties"]["name"] = function_name.clone();
     defs["FuncDef"]["properties"]["params"]["maxItems"] = json!(ACQUIRED_NODES + 1);
     defs["FuncDef"]["properties"]["is_private"] = json!({"const": false});
-    defs["FuncDef"]["required"] = if version == 4 {
+    defs["FuncDef"]["required"] = if version >= 4 {
         json!(["name", "body", "params", "return_type", "is_private"])
     } else {
         json!(["name", "params", "return_type", "body", "is_private"])
@@ -168,6 +169,16 @@ pub(super) fn language(
     program["parameters"]["maxItems"] = json!(ACQUIRED_NODES);
     program["operations"]["minItems"] = json!(1);
     program["operations"]["maxItems"] = json!(ACQUIRED_NODES);
+    if version == 5 {
+        defs["TensorProgram"]["required"] = json!([
+            "signature",
+            "parameters",
+            "output",
+            "operations",
+            "vocabulary",
+            "max_context"
+        ]);
+    }
     let mut entry_program = defs["TensorProgram"].clone();
     entry_program["properties"]["signature"] = json!({"const": context["signature"]});
     if version >= 2 {
@@ -206,9 +217,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 4 {
+        if version >= 4 {
             schema["description"] = json!(format!(
                 "{} Definitions precede their callers and the entry is last. Typed operand choices and outputs use canonical operation inference at one and maximum context length with known callee signatures. Numerical bodies precede formal parameters and return types, whose canonical serialization comes from FuncDef::numerical_types. Entry closure requires actual callers for every new definition and constant. This is not a guarantee of termination or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 5 {
+            schema["description"] = json!(format!(
+                "{} Each numerical body chooses output before operations, within the remaining shared node allowance. Output p requires exactly p+1 operations; slot p must match the canonical signature output at both context lengths. Earlier slots retain typed choices. This output-last search restriction does not guarantee completion within a token budget.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -222,6 +239,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                5 => PLANNED_LANGUAGE,
                 4 => TYPED_LANGUAGE,
                 3 => OPERAND_LANGUAGE,
                 _ => ORDERED_LANGUAGE,
@@ -318,6 +336,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     token_bytes: Vec<Vec<u8>>,
     retained: BTreeSet<String>,
     ordered: bool,
+    planned_output: bool,
     raw_tokens: BTreeSet<u32>,
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
@@ -332,7 +351,8 @@ impl PyNativeAcquisitionMask {
         if (language["id"] != LANGUAGE
             && language["id"] != ORDERED_LANGUAGE
             && language["id"] != OPERAND_LANGUAGE
-            && language["id"] != TYPED_LANGUAGE)
+            && language["id"] != TYPED_LANGUAGE
+            && language["id"] != PLANNED_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -347,6 +367,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
+        let planned_output = language["id"] == PLANNED_LANGUAGE;
+        let typed = language["id"] == TYPED_LANGUAGE || planned_output;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
                 .map_err(value_error)?;
@@ -356,34 +378,33 @@ impl PyNativeAcquisitionMask {
         };
         // Required operand fields come from the same wire schema as the
         // compiler-facing packet, never from an authored operation sequence.
-        let operation_fields =
-            if language["id"] == OPERAND_LANGUAGE || language["id"] == TYPED_LANGUAGE {
-                let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
-                Some(
-                    wire["$defs"]["TensorOperation"]["oneOf"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|operation| {
-                            (
-                                operation["properties"]["operation"]["const"]
-                                    .as_str()
-                                    .unwrap()
-                                    .to_owned(),
-                                operation["required"]
-                                    .as_array()
-                                    .unwrap()
-                                    .iter()
-                                    .map(|field| field.as_str().unwrap().to_owned())
-                                    .collect(),
-                            )
-                        })
-                        .collect(),
-                )
-            } else {
-                None
-            };
-        if language["id"] == TYPED_LANGUAGE {
+        let operation_fields = if language["id"] == OPERAND_LANGUAGE || typed {
+            let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+            Some(
+                wire["$defs"]["TensorOperation"]["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|operation| {
+                        (
+                            operation["properties"]["operation"]["const"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                            operation["required"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|field| field.as_str().unwrap().to_owned())
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        if typed {
             let max_context = context["max_context"]
                 .as_u64()
                 .filter(|&value| value > 0)
@@ -410,10 +431,11 @@ impl PyNativeAcquisitionMask {
         }
         Ok(Self {
             ordered,
+            planned_output,
             raw_tokens,
             token_bytes,
             operation_fields,
-            typed_context: (language["id"] == TYPED_LANGUAGE).then(|| context.clone()),
+            typed_context: typed.then(|| context.clone()),
             retained: parameters
                 .into_iter()
                 .map(|parameter| parameter.name)
@@ -444,6 +466,7 @@ impl PyNativeAcquisitionMask {
                     &self.raw_tokens,
                     self.operation_fields.as_ref(),
                     self.typed_context.as_ref(),
+                    self.planned_output,
                 )
                 .is_err()
                 {
@@ -469,6 +492,7 @@ impl PyNativeAcquisitionMask {
             &self.raw_tokens,
             self.operation_fields.as_ref(),
             self.typed_context.as_ref(),
+            self.planned_output,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -483,6 +507,7 @@ struct Resources<'a> {
     scalars: usize,
     nodes: usize,
     ordered: bool,
+    planned_output: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -511,6 +536,7 @@ fn resource_prefix<'a>(
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     typed_context: Option<&'a Value>,
+    planned_output: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     if bytes.len() > ACQUIRED_SOURCE_BYTES {
         return Err(serde_json::Error::custom(
@@ -524,6 +550,7 @@ fn resource_prefix<'a>(
         scalars: 0,
         nodes: 0,
         ordered,
+        planned_output,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -806,7 +833,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             signature,
                             context["vocabulary"].as_u64().unwrap() as usize,
                             context["max_context"].as_u64().unwrap() as usize,
-                            *self.resources.raw_tokens.first().unwrap(),
+                            self.resources.raw_tokens.iter().copied().collect(),
                         ));
                         self.resources.program_definition_index = self.resources.definition_index;
                     }
@@ -827,13 +854,45 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             "signature and parameters must precede operations",
                         ));
                     }
+                    if self.resources.planned_output
+                        && self
+                            .resources
+                            .program
+                            .typed
+                            .as_ref()
+                            .is_none_or(|program| program.planned_output.is_none())
+                    {
+                        return Err(A::Error::custom("output must precede operations"));
+                    }
                     map.next_value_seed(Array {
                         resources: self.resources,
                         kind: Items::Operations,
                     })?;
                 }
                 (Level::Program, "output") if self.resources.ordered => {
-                    if let Some(program) = &self.resources.program.typed {
+                    if self.resources.planned_output {
+                        if self.resources.program.arguments.is_none()
+                            || !self.resources.program.parameters_complete
+                            || self.resources.program.operations != 0
+                        {
+                            return Err(A::Error::custom(
+                                "output must follow signature and parameters, before operations",
+                            ));
+                        }
+                        let choice = map.next_value_seed(NumberChoice {
+                            values: (0..ACQUIRED_NODES - self.resources.nodes).collect(),
+                            bytes: self.resources.bytes,
+                        })?;
+                        // An EOF decimal is still a prefix, not a chosen slot.
+                        if choice.end < self.resources.bytes.len() {
+                            let program = self.resources.program.typed.as_mut().unwrap();
+                            if program.planned_output.is_some() {
+                                return Err(A::Error::custom("output slot is already chosen"));
+                            }
+                            program.body.output = choice.value;
+                            program.planned_output = Some(choice.value);
+                        }
+                    } else if let Some(program) = &self.resources.program.typed {
                         let choice = map.next_value_seed(NumberChoice {
                             values: program.outputs(),
                             bytes: self.resources.bytes,
@@ -910,6 +969,16 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
             ));
         }
         if matches!(self.kind, Items::Operations) {
+            if self.resources.planned_output {
+                let program = self.resources.program.typed.as_ref().unwrap();
+                if program.planned_output != self.resources.program.operations.checked_sub(1)
+                    || !program.outputs().contains(&program.body.output)
+                {
+                    return Err(A::Error::custom(
+                        "operations must end at the chosen compatible output slot",
+                    ));
+                }
+            }
             self.resources.complete_entry().map_err(A::Error::custom)?;
         }
         if matches!(self.kind, Items::Definitions) {
@@ -955,6 +1024,15 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                 resources: self.resources,
             }),
             Items::Operations => {
+                if self.resources.planned_output
+                    && self.resources.program.typed.as_ref().is_none_or(|program| {
+                        program
+                            .planned_output
+                            .is_none_or(|output| self.resources.program.operations > output)
+                    })
+                {
+                    return Err(D::Error::custom("operations exceed the chosen output slot"));
+                }
                 self.resources.nodes += 1;
                 if self.resources.nodes > ACQUIRED_NODES {
                     return Err(D::Error::custom("acquired node budget exceeded"));
@@ -1177,12 +1255,14 @@ impl<'de> Visitor<'de> for Operation<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut tagged = false;
         let mut material = serde_json::Map::new();
+        let mut last_value_offset = None;
         loop {
             let Some((key, offset)) =
                 next_key(&mut map, self.bytes, self.operation_fields.is_some())?
             else {
                 break;
             };
+            last_value_offset = offset;
             let after_key = offset.map(|offset| &self.bytes[offset..]);
             if key == "operation" {
                 if let Some(fields) = self.operation_fields {
@@ -1215,9 +1295,14 @@ impl<'de> Visitor<'de> for Operation<'_> {
             }
             let extent = reference_extent(self.program, &key);
             if let Some(program) = &self.program.typed {
-                let value = if let Some(extent) = extent {
+                let choices = if key == "columns" {
+                    program.output_columns().map(|columns| vec![columns])
+                } else {
+                    extent.map(|extent| program.numbers(&material, &key, extent, self.signatures))
+                };
+                let value = if let Some(values) = choices {
                     let choice = map.next_value_seed(NumberChoice {
-                        values: program.numbers(&material, &key, extent, self.signatures),
+                        values,
                         bytes: self.bytes,
                     })?;
                     if choice.end == self.bytes.len() {
@@ -1239,6 +1324,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     serde_json::to_value(map.next_value_seed(TokenIds {
                         alphabet: self.raw_tokens,
                         bytes: self.bytes,
+                        required_length: program.output_columns(),
                     })?)
                     .map_err(A::Error::custom)?
                 } else if key == "function" {
@@ -1272,9 +1358,37 @@ impl<'de> Visitor<'de> for Operation<'_> {
                 map.next_value_seed(TokenIds {
                     alphabet: self.raw_tokens,
                     bytes: self.bytes,
+                    required_length: None,
                 })?;
             } else {
                 map.next_value::<IgnoredAny>()?;
+            }
+        }
+        if self
+            .program
+            .typed
+            .as_ref()
+            .is_some_and(typed::Program::is_output_slot)
+        {
+            // The map is complete. Locate its final value in the original
+            // bytes so even a trailing comma without a next operation fails.
+            // RawValue only finds the delimiter; operand inference above owns
+            // the semantics, including unfinished numeric and array prefixes.
+            if let Some(offset) = last_value_offset {
+                let tail = self.bytes[offset..].trim_ascii_start();
+                let tail = tail.strip_prefix(b":").unwrap().trim_ascii_start();
+                let mut decoder = serde_json::Deserializer::from_slice(tail);
+                let raw = <&serde_json::value::RawValue>::deserialize(&mut decoder)
+                    .map_err(A::Error::custom)?;
+                let end =
+                    raw.get().as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+                if self.bytes[end..]
+                    .trim_ascii_start()
+                    .strip_prefix(b"}")
+                    .is_some_and(|rest| rest.trim_ascii_start().starts_with(b","))
+                {
+                    return Err(A::Error::custom("no operation may follow the output slot"));
+                }
             }
         }
         if self.program.typed.is_some() {
@@ -1382,6 +1496,7 @@ struct Indices {
 struct TokenIds<'a> {
     alphabet: &'a BTreeSet<u32>,
     bytes: &'a [u8],
+    required_length: Option<usize>,
 }
 impl<'de> DeserializeSeed<'de> for TokenIds<'_> {
     type Value = Vec<u32>;
@@ -1398,6 +1513,12 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
         let mut seen = BTreeSet::new();
         let mut values = Vec::new();
         while let Some(raw) = sequence.next_element::<&'de serde_json::value::RawValue>()? {
+            if self
+                .required_length
+                .is_some_and(|length| values.len() >= length)
+            {
+                return Err(A::Error::custom("token array exceeds the output width"));
+            }
             let spelling = raw.get();
             // The borrowed RawValue identifies the exact source slice. At EOF
             // a decimal may still extend across BPE tokens (e.g. "1" -> "15").
@@ -1421,6 +1542,19 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
                     "token indicator must name a distinct raw-alphabet ID",
                 ));
             }
+            let end =
+                spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+            if self.required_length == Some(values.len())
+                && self.bytes[end..].trim_ascii_start().starts_with(b",")
+            {
+                return Err(A::Error::custom("token array has no remaining output slot"));
+            }
+        }
+        if self
+            .required_length
+            .is_some_and(|length| values.len() != length)
+        {
+            return Err(A::Error::custom("token array must match the output width"));
         }
         Ok(values)
     }
