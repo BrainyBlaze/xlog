@@ -171,6 +171,36 @@ grammar, mask, per-token forward budget, and output provenance. This method requ
 plus the full row for native SHA256 hashing. It creates no Python vocabulary list
 or identity-index gather, but it is not a device-resident or ZERO TRANSFER call.
 
+`NativeLogits.select_categorical(allowed_mask=None, *, seed, sequence, position)`
+samples from the same allowed vocabulary on CUDA at fixed temperature one. It
+uses the same mask and full-row finiteness requirements and returns the same five
+dictionary fields. `raw_argmax` remains the unmasked maximum; `selected_score`
+is the chosen token's original FP32 logit, never a perturbed score. The full-row
+digest and tracked host transfers have the same meaning as for greedy selection.
+The greedy method retains its original selection law.
+
+Categorical selection uses Philox4x32-10 with key
+`[seed.low32, seed.high32]` and counter
+`[token_id, position, sequence.low32, sequence.high32]`. The first two output
+words define the unsigned 52-bit integer `b = (u64(r0) << 20) | (r1 >> 12)`.
+CUDA computes `u = (f64(b) + 0.5) * 2^-52`, strictly between zero and one, then
+selects the greatest
+`(f64(logit) - f64(allowed_max)) - log(-log(u))` among allowed tokens, breaking
+ties by minimum token ID. Centering on the allowed maximum preserves the noise
+when equal original logits have large magnitude. This is a finite-precision
+Gumbel-max categorical draw; bitwise equivalence across GPU architectures or
+changed model logits is not asserted.
+
+`seed` and `sequence` must fit unsigned 64-bit integers, and `position` must fit
+an unsigned 32-bit integer; out-of-range arguments raise rather than wrap.
+The caller assigns and retains these addresses, including positions whose masks
+contain one token. `position` is the caller's draw index, independently of the
+logits' `prediction_position`. There is no hidden device RNG state, extra forward,
+temperature option, top-k truncation or top-p truncation. Persist the address
+before its associated forward, including failed paid calls, to resume without
+reusing draws. Restoring addresses and admissibility does not reconstruct a
+selection from a logits digest alone.
+
 `fork_trainable(down_projection_layer=17)` returns an independent candidate with
 that zero-based decoder layer's MLP down projection trainable. Frozen parameters
 share the original allocations. The candidate owns FP32 master weights and Adam

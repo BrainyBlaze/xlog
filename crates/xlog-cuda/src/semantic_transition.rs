@@ -11304,6 +11304,7 @@ fn publication_material_runtime() -> [u8; 32] {
         hash.update(include_bytes!("semantic_transition/evaluation_fork.rs"));
         hash.update(include_bytes!("semantic_transition/rule_control.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
+        hash.update(include_bytes!("../kernels/philox.cuh"));
         hash.update(include_bytes!("../kernels/semantic_conditional_policy.cuh"));
         hash.update(include_bytes!("../kernels/semantic_program.cuh"));
         hash.update(include_bytes!("../kernels/semantic_rule_action.cuh"));
@@ -41933,6 +41934,7 @@ impl SemanticTransitionSession {
         hash.update(b"xlog.native.flat-feedback-adapter.v1\0");
         hash.update(include_bytes!("semantic_transition.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
+        hash.update(include_bytes!("../kernels/philox.cuh"));
         hash.update(include_bytes!("../kernels/semantic_feedback_encoding.cuh"));
         Identity256::from_bytes(hash.finalize().into())
     }

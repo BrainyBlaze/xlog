@@ -114,7 +114,7 @@ class NativeAcquisitionMask:
     def completion_state(self, prefix: bytes) -> str:
         """Version4 prefix facts as JSON; no token selection or final admission."""
 
-class _GreedySelection(TypedDict):
+class _LogitSelection(TypedDict):
     raw_argmax: int
     raw_score: float
     selected: int
@@ -127,8 +127,13 @@ class NativeLogits:
     def read(self, token_ids: Sequence[int]) -> list[float]:
         """Copy requested logits in caller order; requires host-io."""
         ...
-    def select_greedy(self, allowed_mask: Optional[bytes] = None) -> _GreedySelection:
+    def select_greedy(self, allowed_mask: Optional[bytes] = None) -> _LogitSelection:
         """CUDA maxima with minimum-ID ties and full-row SHA256; requires host-io."""
+        ...
+    def select_categorical(
+        self, allowed_mask: Optional[bytes] = None, *, seed: int, sequence: int, position: int
+    ) -> _LogitSelection:
+        """CUDA categorical draw at temperature one with a retained Philox address."""
         ...
     @property
     def prediction_position(self) -> int: ...

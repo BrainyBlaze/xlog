@@ -255,6 +255,27 @@ pub(crate) struct PyNativeLogits {
     inner: NativeLogits,
 }
 
+#[cfg(feature = "host-io")]
+fn selection_record(
+    py: Python<'_>,
+    result: xlog_cuda::tensor::LogitSelection,
+) -> PyResult<Py<PyDict>> {
+    let selected = PyDict::new(py);
+    selected.set_item("raw_argmax", result.raw_argmax)?;
+    selected.set_item("raw_score", result.raw_score)?;
+    selected.set_item("selected", result.selected)?;
+    selected.set_item("selected_score", result.selected_score)?;
+    selected.set_item(
+        "logits_sha256",
+        result
+            .logits_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )?;
+    Ok(selected.unbind())
+}
+
 #[pymethods]
 impl PyNativeLogits {
     /// Read specified token IDs to the host, in exactly the requested order.
@@ -271,20 +292,27 @@ impl PyNativeLogits {
         let result = py
             .detach(|| self.inner.select_greedy(allowed_mask.as_deref()))
             .map_err(xlog_err)?;
-        let selected = PyDict::new(py);
-        selected.set_item("raw_argmax", result.raw_argmax)?;
-        selected.set_item("raw_score", result.raw_score)?;
-        selected.set_item("selected", result.selected)?;
-        selected.set_item("selected_score", result.selected_score)?;
-        selected.set_item(
-            "logits_sha256",
-            result
-                .logits_sha256
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
-        )?;
-        Ok(selected.unbind())
+        selection_record(py, result)
+    }
+
+    /// Draw on CUDA at temperature one using an explicit Philox seed/address.
+    #[cfg(feature = "host-io")]
+    #[pyo3(signature = (allowed_mask=None, *, seed, sequence, position))]
+    fn select_categorical(
+        &self,
+        py: Python<'_>,
+        allowed_mask: Option<Vec<u8>>,
+        seed: u64,
+        sequence: u64,
+        position: u32,
+    ) -> PyResult<Py<PyDict>> {
+        let result = py
+            .detach(|| {
+                self.inner
+                    .select_categorical(allowed_mask.as_deref(), seed, sequence, position)
+            })
+            .map_err(xlog_err)?;
+        selection_record(py, result)
     }
 
     #[getter]

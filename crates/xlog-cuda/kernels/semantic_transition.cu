@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <math.h>
+#include "philox.cuh"
 #ifdef __CUDACC__
 #include <cuda/atomic>
 #else
@@ -110,13 +111,10 @@ __device__ uint64_t boundary(U192 cumulative,uint32_t h) {
 __device__ void philox(uint32_t out[4],const uint32_t counter[4],const uint32_t key[2],
         semantic_graph::NativeWorkTally* work=nullptr) {
     for(int j=0;j<4;++j)out[j]=counter[j];
-    uint32_t k0=key[0],k1=key[1];
+    uint32_t round_key[2]={key[0],key[1]};
     for(int round=0;round<10;++round) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::PhiloxRound,1);
-        uint64_t a=uint64_t(0xd2511f53U)*out[0], b=uint64_t(0xcd9e8d57U)*out[2];
-        uint32_t next[4]={uint32_t(b>>32)^out[1]^k0,uint32_t(b),uint32_t(a>>32)^out[3]^k1,uint32_t(a)};
-        for(int j=0;j<4;++j)out[j]=next[j];
-        k0+=0x9e3779b9U; k1+=0xbb67ae85U;
+        philox4x32_round(out,round_key);
     }
 }
 struct Receipt {
