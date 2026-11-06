@@ -66,9 +66,11 @@ pub(super) fn language(
         "prefixItems": [{"$ref": "#/$defs/EntryFuncDef"}], "items": {"$ref": "#/$defs/FuncDef"},
     });
     if version == 4 {
+        // Helper names extend the entry's function namespace, so they cannot
+        // match the entry's exact name. This union is disjoint without oneOf.
         schema["properties"]["definitions"] = json!({
             "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
-            "items": {"oneOf": [{"$ref": "#/$defs/FuncDef"}, {"$ref": "#/$defs/EntryFuncDef"}]},
+            "items": {"anyOf": [{"$ref": "#/$defs/FuncDef"}, {"$ref": "#/$defs/EntryFuncDef"}]},
         });
     }
     let defs = &mut schema["$defs"];
