@@ -2691,7 +2691,7 @@ impl PySemanticModelContextContinuation {
                 cold_capacity,
                 replay_model_backings: Arc::new(xlog_cuda::SemanticReplayModelBackings::default()),
                 cancelled_checkpoint: Mutex::new(Some(cancelled_checkpoint)),
-                resource_interval: self.resource_interval.as_ref().map(Arc::clone),
+                resource_interval: context.resource_interval.as_ref().map(Arc::clone),
                 preparation: Mutex::new(SegmentInstructionPreparation {
                     scope: state.scope.as_ref().map(Arc::clone),
                     native_steps: state.steps.clone(),
