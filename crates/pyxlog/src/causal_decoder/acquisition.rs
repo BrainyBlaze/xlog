@@ -7,14 +7,18 @@ use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visito
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use xlog_ir::tensor::{TensorParameter, TensorSignature};
+use xlog_ir::tensor::{TensorOperation, TensorParameter, TensorProgram, TensorSignature};
+use xlog_logic::ast::FuncDef;
+
+mod typed;
 use xlog_runtime::causal_decoder::acquired::{
-    ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
+    definition_usage, ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
 };
 
 const LANGUAGE: &str = "xlog-contextual-acquisition-v1";
 const ORDERED_LANGUAGE: &str = "xlog-contextual-acquisition-v2";
 const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
+const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -27,7 +31,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3) {
+    if !matches!(version, 1 | 2 | 3 | 4) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -47,7 +51,7 @@ pub(super) fn language(
         context["raw_token_ids"] = json!(tokens);
     } else if raw_token_ids.is_some() {
         return Err(value_error(
-            "a raw-token alphabet requires acquisition language version 2 or 3",
+            "a raw-token alphabet requires acquisition language version 2, 3 or 4",
         ));
     }
     let max_context = context["max_context"].as_u64().unwrap() as usize;
@@ -61,6 +65,12 @@ pub(super) fn language(
         "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
         "prefixItems": [{"$ref": "#/$defs/EntryFuncDef"}], "items": {"$ref": "#/$defs/FuncDef"},
     });
+    if version == 4 {
+        schema["properties"]["definitions"] = json!({
+            "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
+            "items": {"oneOf": [{"$ref": "#/$defs/FuncDef"}, {"$ref": "#/$defs/EntryFuncDef"}]},
+        });
+    }
     let defs = &mut schema["$defs"];
     defs["Index"] = integer(0, ACQUIRED_NODES - 1);
     defs["Width"] = integer(1, maximum_width);
@@ -83,7 +93,11 @@ pub(super) fn language(
     defs["FuncDef"]["properties"]["name"] = function_name.clone();
     defs["FuncDef"]["properties"]["params"]["maxItems"] = json!(ACQUIRED_NODES + 1);
     defs["FuncDef"]["properties"]["is_private"] = json!({"const": false});
-    defs["FuncDef"]["required"] = json!(["name", "params", "return_type", "body", "is_private"]);
+    defs["FuncDef"]["required"] = if version == 4 {
+        json!(["name", "body", "params", "return_type", "is_private"])
+    } else {
+        json!(["name", "params", "return_type", "body", "is_private"])
+    };
     for signature in defs["TensorSignature"]["oneOf"].as_array_mut().unwrap() {
         let properties = &mut signature["properties"];
         properties["output_width"] = json!({"$ref": "#/$defs/Width"});
@@ -184,9 +198,15 @@ pub(super) fn language(
         schema["description"] = json!(
             "Ordered contextual acquisition. Properties follow the canonical required-field order: signature and parameters before operations, operation tag before operands. The native prefix mask additionally bounds arguments by the actual signature, parameter references by declarations, and value/output references by preceding operations. Native compilation owns remaining type, shape, call and causal checks."
         );
-        if version == 3 {
+        if version >= 3 {
             schema["description"] = json!(format!(
                 "{} The native prefix mask also restricts operation names, including unfinished byte-token spellings, to operations whose mandatory numeric references have a nonempty available extent.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 4 {
+            schema["description"] = json!(format!(
+                "{} Definitions precede their callers and the entry is last. Typed operand choices and outputs use canonical operation inference at one and maximum context length with known callee signatures. Numerical bodies precede formal parameters and return types, whose canonical serialization comes from FuncDef::numerical_types. Entry closure requires actual callers for every new definition and constant. This is not a guarantee of termination or usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -199,10 +219,10 @@ pub(super) fn language(
             schema: OrderedSchema<'a>,
         }
         return serde_json::to_string(&Packet {
-            id: if version == 3 {
-                OPERAND_LANGUAGE
-            } else {
-                ORDERED_LANGUAGE
+            id: match version {
+                4 => TYPED_LANGUAGE,
+                3 => OPERAND_LANGUAGE,
+                _ => ORDERED_LANGUAGE,
             },
             context: &context,
             schema: OrderedSchema(&schema),
@@ -298,6 +318,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     ordered: bool,
     raw_tokens: BTreeSet<u32>,
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
+    typed_context: Option<Value>,
 }
 
 #[pymethods]
@@ -308,7 +329,8 @@ impl PyNativeAcquisitionMask {
         let context = &language["context"];
         if (language["id"] != LANGUAGE
             && language["id"] != ORDERED_LANGUAGE
-            && language["id"] != OPERAND_LANGUAGE)
+            && language["id"] != OPERAND_LANGUAGE
+            && language["id"] != TYPED_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -322,7 +344,7 @@ impl PyNativeAcquisitionMask {
         if parameters.iter().any(|parameter| !parameter.float32) {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
-        let ordered = language["id"] == ORDERED_LANGUAGE || language["id"] == OPERAND_LANGUAGE;
+        let ordered = language["id"] != LANGUAGE;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
                 .map_err(value_error)?;
@@ -332,37 +354,64 @@ impl PyNativeAcquisitionMask {
         };
         // Required operand fields come from the same wire schema as the
         // compiler-facing packet, never from an authored operation sequence.
-        let operation_fields = if language["id"] == OPERAND_LANGUAGE {
-            let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
-            Some(
-                wire["$defs"]["TensorOperation"]["oneOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|operation| {
-                        (
-                            operation["properties"]["operation"]["const"]
-                                .as_str()
-                                .unwrap()
-                                .to_owned(),
-                            operation["required"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .map(|field| field.as_str().unwrap().to_owned())
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let operation_fields =
+            if language["id"] == OPERAND_LANGUAGE || language["id"] == TYPED_LANGUAGE {
+                let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+                Some(
+                    wire["$defs"]["TensorOperation"]["oneOf"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|operation| {
+                            (
+                                operation["properties"]["operation"]["const"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned(),
+                                operation["required"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|field| field.as_str().unwrap().to_owned())
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        if language["id"] == TYPED_LANGUAGE {
+            let max_context = context["max_context"]
+                .as_u64()
+                .filter(|&value| value > 0)
+                .ok_or_else(|| value_error("typed acquisition requires a positive context bound"))?
+                as usize;
+            if token_bytes.is_empty()
+                || context["entrypoint"].as_str().is_none_or(str::is_empty)
+                || !context["params"].is_array()
+                || !context["return_type"].is_object()
+            {
+                return Err(value_error("typed acquisition ABI is incomplete"));
+            }
+            let callees = context["callees"]
+                .as_object()
+                .ok_or_else(|| value_error("typed acquisition requires known callee signatures"))?;
+            for callee in callees.values() {
+                let signature: TensorSignature =
+                    serde_json::from_value(callee["signature"].clone()).map_err(value_error)?;
+                signature.arguments(max_context).map_err(value_error)?;
+                signature
+                    .output(max_context, token_bytes.len())
+                    .map_err(value_error)?;
+            }
+        }
         Ok(Self {
             ordered,
             raw_tokens,
             token_bytes,
             operation_fields,
+            typed_context: (language["id"] == TYPED_LANGUAGE).then(|| context.clone()),
             retained: parameters
                 .into_iter()
                 .map(|parameter| parameter.name)
@@ -392,6 +441,7 @@ impl PyNativeAcquisitionMask {
                     self.ordered,
                     &self.raw_tokens,
                     self.operation_fields.as_ref(),
+                    self.typed_context.as_ref(),
                 ) {
                     mask[id / 8] &= !bit;
                 }
@@ -412,6 +462,11 @@ struct Resources<'a> {
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
+    typed_context: Option<&'a Value>,
+    signatures: typed::Signatures,
+    definition_name: Option<String>,
+    definitions: BTreeMap<String, TensorProgram>,
+    declarations: BTreeMap<String, TensorParameter>,
 }
 
 #[derive(Default)]
@@ -420,6 +475,7 @@ struct Program {
     parameters: usize,
     parameters_complete: bool,
     operations: usize,
+    typed: Option<typed::Program>,
 }
 
 fn resource_prefix(
@@ -428,6 +484,7 @@ fn resource_prefix(
     ordered: bool,
     raw_tokens: &BTreeSet<u32>,
     operation_fields: Option<&BTreeMap<String, Vec<String>>>,
+    typed_context: Option<&Value>,
 ) -> bool {
     if bytes.len() > ACQUIRED_SOURCE_BYTES {
         return false;
@@ -442,6 +499,33 @@ fn resource_prefix(
         raw_tokens,
         operation_fields,
         program: Program::default(),
+        typed_context,
+        signatures: typed_context
+            .map(|context| {
+                context["callees"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            serde_json::from_value(value["signature"].clone()).unwrap(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        definition_name: None,
+        definitions: BTreeMap::new(),
+        declarations: typed_context
+            .map(|context| {
+                serde_json::from_value::<Vec<TensorParameter>>(context["parameters"].clone())
+                    .unwrap()
+                    .into_iter()
+                    .map(|parameter| (parameter.name.clone(), parameter))
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -453,6 +537,75 @@ fn resource_prefix(
         Ok(()) => decoder.end().is_ok(),
         Err(error) => error.is_eof(),
     }
+}
+
+impl Resources<'_> {
+    fn complete_entry(&self) -> Result<(), String> {
+        let Some(context) = self.typed_context else {
+            return Ok(());
+        };
+        let entry = context["entrypoint"].as_str().unwrap();
+        if self.definition_name.as_deref() != Some(entry) {
+            return Ok(());
+        }
+        let program = &self.program.typed.as_ref().unwrap().body;
+        let usage = definition_usage(entry, |name| {
+            if name == entry {
+                Ok(Some(program))
+            } else if let Some(body) = self.definitions.get(name) {
+                Ok(Some(body))
+            } else if self.signatures.contains_key(name) {
+                Ok(None)
+            } else {
+                Err(xlog_core::XlogError::Compilation(
+                    "callee must precede its caller".into(),
+                ))
+            }
+        })
+        .map_err(|error| error.to_string())?;
+        if self
+            .definitions
+            .keys()
+            .any(|name| !usage.definitions.contains(name))
+            || self
+                .declarations
+                .keys()
+                .any(|name| !self.retained.contains(name) && !usage.parameters.contains(name))
+        {
+            return Err("entry has unreachable definitions or unread new constants".into());
+        }
+        Ok(())
+    }
+}
+
+fn next_key<'de, A: MapAccess<'de>>(
+    map: &mut A,
+    bytes: &[u8],
+    raw: bool,
+) -> Result<Option<(String, Option<usize>)>, A::Error> {
+    if raw {
+        let Some(key) = map.next_key::<&'de serde_json::value::RawValue>()? else {
+            return Ok(None);
+        };
+        let offset = key.get().as_bytes().as_ptr_range().end as usize - bytes.as_ptr() as usize;
+        let key = serde_json::from_str::<String>(key.get()).map_err(A::Error::custom)?;
+        Ok(Some((key, Some(offset))))
+    } else {
+        Ok(map.next_key::<String>()?.map(|key| (key, None)))
+    }
+}
+
+fn value_prefix(bytes: &[u8], expected: &[u8]) -> bool {
+    let bytes = bytes.trim_ascii_start();
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(bytes) = bytes.strip_prefix(b":") else {
+        return false;
+    };
+    let bytes = bytes.trim_ascii_start();
+    let count = bytes.len().min(expected.len());
+    bytes[..count] == expected[..count]
 }
 
 #[derive(Clone, Copy)]
@@ -484,12 +637,78 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
         f.write_str("numerical definition object")
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some((key, offset)) = next_key(
+            &mut map,
+            self.resources.bytes,
+            self.resources.typed_context.is_some(),
+        )? {
             match (self.level, key.as_str()) {
                 (Level::Root, "definitions") => map.next_value_seed(Array {
                     resources: self.resources,
                     kind: Items::Definitions,
                 })?,
+                (Level::Definition, "name") if self.resources.typed_context.is_some() => {
+                    let name = map.next_value::<String>()?;
+                    if self.resources.signatures.contains_key(&name) {
+                        return Err(A::Error::custom("definition identity is already present"));
+                    }
+                    self.resources.definition_name = Some(name);
+                }
+                (Level::Definition, "params" | "return_type")
+                    if self.resources.typed_context.is_some() =>
+                {
+                    let program = self.resources.program.typed.as_ref().ok_or_else(|| {
+                        A::Error::custom("numerical body must precede formal types")
+                    })?;
+                    let context = self.resources.typed_context.unwrap();
+                    let expected = if self.resources.definition_name.as_deref()
+                        == context["entrypoint"].as_str()
+                    {
+                        serde_json::to_vec(
+                            &context[if key == "params" {
+                                "params"
+                            } else {
+                                "return_type"
+                            }],
+                        )
+                        .map_err(A::Error::custom)?
+                    } else {
+                        let (params, result) = FuncDef::numerical_types(
+                            &program.body.signature,
+                            program.body.vocabulary,
+                            program.body.max_context,
+                        )
+                        .map_err(A::Error::custom)?;
+                        if key == "params" {
+                            serde_json::to_vec(&params)
+                        } else {
+                            serde_json::to_vec(&result)
+                        }
+                        .map_err(A::Error::custom)?
+                    };
+                    if !value_prefix(&self.resources.bytes[offset.unwrap()..], &expected) {
+                        return Err(A::Error::custom(
+                            "formal type prefix differs from the numerical ABI",
+                        ));
+                    }
+                    map.next_value::<IgnoredAny>()?;
+                }
+                (Level::Definition, "is_private") if self.resources.typed_context.is_some() => {
+                    let raw = map.next_value::<&'de serde_json::value::RawValue>()?;
+                    let end = raw.get().as_bytes().as_ptr_range().end as usize
+                        - self.resources.bytes.as_ptr() as usize;
+                    if self.resources.definition_name.as_deref()
+                        == self.resources.typed_context.unwrap()["entrypoint"].as_str()
+                    {
+                        let rest = self.resources.bytes[end..].trim_ascii_start();
+                        if rest
+                            .strip_prefix(b"}")
+                            .is_some_and(|rest| rest.trim_ascii_start().starts_with(b","))
+                        {
+                            return Err(A::Error::custom("entry must be the last definition"));
+                        }
+                    }
+                }
                 (Level::Definition, "body") => map.next_value_seed(Object {
                     resources: self.resources,
                     level: Level::Body,
@@ -502,6 +721,14 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     let signature = map.next_value::<TensorSignature>()?;
                     let arguments = signature.arguments(1).map_err(A::Error::custom)?.len();
                     self.resources.program.arguments = Some(arguments);
+                    if let Some(context) = self.resources.typed_context {
+                        self.resources.program.typed = Some(typed::Program::new(
+                            signature,
+                            context["vocabulary"].as_u64().unwrap() as usize,
+                            context["max_context"].as_u64().unwrap() as usize,
+                            *self.resources.raw_tokens.first().unwrap(),
+                        ));
+                    }
                 }
                 (Level::Program, "parameters") => {
                     map.next_value_seed(Array {
@@ -525,13 +752,34 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     })?;
                 }
                 (Level::Program, "output") if self.resources.ordered => {
-                    map.next_value_seed(Index {
-                        extent: self.resources.program.operations,
-                    })?;
+                    if let Some(program) = &self.resources.program.typed {
+                        let choice = map.next_value_seed(NumberChoice {
+                            values: program.outputs(),
+                            bytes: self.resources.bytes,
+                        })?;
+                        self.resources.program.typed.as_mut().unwrap().body.output = choice.value;
+                    } else {
+                        map.next_value_seed(Index {
+                            extent: self.resources.program.operations,
+                        })?;
+                    }
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
+            }
+        }
+        if matches!(self.level, Level::Definition) {
+            if let (Some(name), Some(program)) = (
+                &self.resources.definition_name,
+                &self.resources.program.typed,
+            ) {
+                self.resources
+                    .signatures
+                    .insert(name.clone(), program.body.signature.clone());
+                self.resources
+                    .definitions
+                    .insert(name.clone(), program.body.clone());
             }
         }
         Ok(())
@@ -568,6 +816,32 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
             })?
             .is_some()
         {}
+        if matches!(self.kind, Items::Operations)
+            && self
+                .resources
+                .program
+                .typed
+                .as_ref()
+                .is_some_and(|program| program.outputs().is_empty())
+        {
+            return Err(A::Error::custom(
+                "operations have no output compatible with the signature",
+            ));
+        }
+        if matches!(self.kind, Items::Operations) {
+            self.resources.complete_entry().map_err(A::Error::custom)?;
+        }
+        if matches!(self.kind, Items::Definitions) {
+            if let Some(context) = self.resources.typed_context {
+                if !self
+                    .resources
+                    .definitions
+                    .contains_key(context["entrypoint"].as_str().unwrap())
+                {
+                    return Err(A::Error::custom("definitions must end with the entry"));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -580,6 +854,13 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
         match self.kind {
             Items::Definitions => {
+                if self.resources.typed_context.is_some_and(|context| {
+                    self.resources
+                        .definitions
+                        .contains_key(context["entrypoint"].as_str().unwrap())
+                }) {
+                    return Err(D::Error::custom("entry must be the last definition"));
+                }
                 if self.resources.nodes >= ACQUIRED_NODES {
                     return Err(D::Error::custom("no nodes remain for another definition"));
                 }
@@ -598,12 +879,20 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                     return Err(D::Error::custom("acquired node budget exceeded"));
                 }
                 if self.resources.ordered {
-                    decoder.deserialize_map(Operation {
+                    let operation = decoder.deserialize_map(Operation {
                         program: &self.resources.program,
                         raw_tokens: self.resources.raw_tokens,
                         bytes: self.resources.bytes,
                         operation_fields: self.resources.operation_fields,
+                        signatures: &self.resources.signatures,
                     })?;
+                    if let (Some(program), Some(operation)) =
+                        (&mut self.resources.program.typed, operation)
+                    {
+                        program
+                            .push(operation, &self.resources.signatures)
+                            .map_err(D::Error::custom)?;
+                    }
                 } else {
                     IgnoredAny::deserialize(decoder)?;
                 }
@@ -625,9 +914,34 @@ impl<'de> Visitor<'de> for Parameter<'_, '_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut name = None;
         let mut extent = None;
-        while let Some(key) = map.next_key::<String>()? {
+        let mut dimensions = Vec::new();
+        while let Some((key, offset)) = next_key(
+            &mut map,
+            self.resources.bytes,
+            self.resources.typed_context.is_some(),
+        )? {
             match key.as_str() {
-                "name" => name = Some(map.next_value::<String>()?),
+                "name" => {
+                    let value = map.next_value::<String>()?;
+                    if self
+                        .resources
+                        .program
+                        .typed
+                        .as_ref()
+                        .is_some_and(|program| {
+                            program
+                                .body
+                                .parameters
+                                .iter()
+                                .any(|parameter| parameter.name == value)
+                        })
+                    {
+                        return Err(A::Error::custom(
+                            "parameter table identities must be unique",
+                        ));
+                    }
+                    name = Some(value);
+                }
                 "shape" => {
                     // The wire grammar orders name before shape. A partial
                     // dimension is already a lower bound on its final extent;
@@ -635,15 +949,26 @@ impl<'de> Visitor<'de> for Parameter<'_, '_> {
                     let name = name
                         .as_ref()
                         .ok_or_else(|| A::Error::custom("parameter name must precede shape"))?;
+                    if let Some(parameter) = self.resources.declarations.get(name) {
+                        let expected =
+                            serde_json::to_vec(&parameter.shape).map_err(A::Error::custom)?;
+                        if !value_prefix(&self.resources.bytes[offset.unwrap()..], &expected) {
+                            return Err(A::Error::custom(
+                                "parameter alias shape differs from its declaration",
+                            ));
+                        }
+                    }
                     let new = !self.resources.retained.contains(name)
                         && !self.resources.parameters.contains_key(name);
-                    extent = Some(map.next_value_seed(Shape {
+                    let shape = map.next_value_seed(Shape {
                         remaining: if new {
                             ACQUIRED_SCALARS - self.resources.scalars
                         } else {
                             usize::MAX
                         },
-                    })?);
+                    })?;
+                    extent = Some(shape.0);
+                    dimensions = shape.1;
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -656,7 +981,28 @@ impl<'de> Visitor<'de> for Parameter<'_, '_> {
             && !self.resources.parameters.contains_key(&name)
         {
             self.resources.scalars += extent;
-            self.resources.parameters.insert(name, extent);
+            self.resources.parameters.insert(name.clone(), extent);
+        }
+        if let Some(program) = &mut self.resources.program.typed {
+            let parameter = TensorParameter {
+                name,
+                shape: dimensions,
+                float32: true,
+            };
+            if program
+                .body
+                .parameters
+                .iter()
+                .any(|old| old.name == parameter.name)
+            {
+                return Err(A::Error::custom(
+                    "parameter table identities must be unique",
+                ));
+            }
+            self.resources
+                .declarations
+                .insert(parameter.name.clone(), parameter.clone());
+            program.body.parameters.push(parameter);
         }
         self.resources.program.parameters += 1;
         Ok(())
@@ -686,6 +1032,7 @@ struct Operation<'a> {
     raw_tokens: &'a BTreeSet<u32>,
     bytes: &'a [u8],
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
+    signatures: &'a typed::Signatures,
 }
 
 fn reference_extent(program: &Program, field: &str) -> Option<usize> {
@@ -742,27 +1089,20 @@ fn operation_prefix(bytes: &[u8], name: &str) -> bool {
 }
 
 impl<'de> Visitor<'de> for Operation<'_> {
-    type Value = ();
+    type Value = Option<TensorOperation>;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("operation tag followed by available operands")
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut tagged = false;
+        let mut material = serde_json::Map::new();
         loop {
-            let (key, after_key) = if self.operation_fields.is_some() {
-                let Some(raw) = map.next_key::<&'de serde_json::value::RawValue>()? else {
-                    break;
-                };
-                let key = serde_json::from_str::<String>(raw.get()).map_err(A::Error::custom)?;
-                let offset =
-                    raw.get().as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
-                (key, Some(&self.bytes[offset..]))
-            } else {
-                let Some(key) = map.next_key::<String>()? else {
-                    break;
-                };
-                (key, None)
+            let Some((key, offset)) =
+                next_key(&mut map, self.bytes, self.operation_fields.is_some())?
+            else {
+                break;
             };
+            let after_key = offset.map(|offset| &self.bytes[offset..]);
             if key == "operation" {
                 if let Some(fields) = self.operation_fields {
                     let viable = fields.iter().any(|(name, required)| {
@@ -770,14 +1110,22 @@ impl<'de> Visitor<'de> for Operation<'_> {
                             .iter()
                             .all(|field| reference_extent(self.program, field) != Some(0))
                             && operation_prefix(after_key.unwrap(), name)
+                            && self.program.typed.as_ref().is_none_or(|program| {
+                                let mut candidate = material.clone();
+                                candidate.insert(key.clone(), Value::String(name.clone()));
+                                program.possible(&candidate, None, self.signatures)
+                            })
                     });
                     if !viable {
                         return Err(A::Error::custom(
-                            "operation has no available mandatory operands",
+                            "operation has no compatible mandatory operands",
                         ));
                     }
                 }
-                map.next_value::<String>()?;
+                let tag = map.next_value::<String>()?;
+                if self.program.typed.is_some() {
+                    material.insert(key, Value::String(tag));
+                }
                 tagged = true;
                 continue;
             }
@@ -785,7 +1133,55 @@ impl<'de> Visitor<'de> for Operation<'_> {
                 return Err(A::Error::custom("operation tag must precede operands"));
             }
             let extent = reference_extent(self.program, &key);
-            if let Some(extent) = extent {
+            if let Some(program) = &self.program.typed {
+                let value = if let Some(extent) = extent {
+                    let choice = map.next_value_seed(NumberChoice {
+                        values: program.numbers(&material, &key, extent, self.signatures),
+                        bytes: self.bytes,
+                    })?;
+                    if choice.end == self.bytes.len() {
+                        // The domain already admitted this unfinished decimal.
+                        // Its temporary integer is not yet a selected operand.
+                        continue;
+                    }
+                    Value::from(choice.value)
+                } else if key == "arguments" || key == "indices" {
+                    serde_json::to_value(map.next_value_seed(TypedIndices {
+                        program,
+                        material: &material,
+                        field: &key,
+                        signatures: self.signatures,
+                        bytes: self.bytes,
+                    })?)
+                    .map_err(A::Error::custom)?
+                } else if key == "token_ids" {
+                    serde_json::to_value(map.next_value_seed(TokenIds {
+                        alphabet: self.raw_tokens,
+                        bytes: self.bytes,
+                    })?)
+                    .map_err(A::Error::custom)?
+                } else if key == "function" {
+                    let tail = after_key.unwrap();
+                    let known = self.signatures.keys().any(|name| {
+                        let mut candidate = material.clone();
+                        candidate.insert(key.clone(), Value::String(name.clone()));
+                        operation_prefix(tail, name)
+                            && program.possible(&candidate, None, self.signatures)
+                    });
+                    if !known {
+                        return Err(A::Error::custom("callee has no compatible operands"));
+                    }
+                    Value::String(map.next_value::<String>()?)
+                } else {
+                    map.next_value::<Value>()?
+                };
+                material.insert(key, value);
+                if !program.possible(&material, None, self.signatures) {
+                    return Err(A::Error::custom(
+                        "operands have no compatible operation completion",
+                    ));
+                }
+            } else if let Some(extent) = extent {
                 map.next_value_seed(Index { extent })?;
             } else if key == "arguments" {
                 map.next_value_seed(Indices {
@@ -800,7 +1196,101 @@ impl<'de> Visitor<'de> for Operation<'_> {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        Ok(())
+        if self.program.typed.is_some() {
+            serde_json::from_value(Value::Object(material))
+                .map(Some)
+                .map_err(A::Error::custom)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+struct ChosenNumber {
+    value: usize,
+    end: usize,
+}
+struct NumberChoice<'a> {
+    values: Vec<usize>,
+    bytes: &'a [u8],
+}
+impl<'de> DeserializeSeed<'de> for NumberChoice<'_> {
+    type Value = ChosenNumber;
+    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
+        let raw = <&'de serde_json::value::RawValue>::deserialize(decoder)?;
+        let spelling = raw.get();
+        let end = spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+        let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
+        let viable = if end == self.bytes.len() {
+            self.values
+                .iter()
+                .any(|id| id.to_string().starts_with(spelling))
+        } else {
+            self.values.contains(&value)
+        };
+        if !viable {
+            return Err(D::Error::custom(
+                "reference has no compatible decimal continuation",
+            ));
+        }
+        Ok(ChosenNumber { value, end })
+    }
+}
+
+struct TypedIndices<'a> {
+    program: &'a typed::Program,
+    material: &'a serde_json::Map<String, Value>,
+    field: &'a str,
+    signatures: &'a typed::Signatures,
+    bytes: &'a [u8],
+}
+impl<'de> DeserializeSeed<'de> for TypedIndices<'_> {
+    type Value = Vec<usize>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
+        decoder.deserialize_seq(self)
+    }
+}
+impl<'de> Visitor<'de> for TypedIndices<'_> {
+    type Value = Vec<usize>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("compatible numeric operands")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        loop {
+            let choices =
+                self.program
+                    .array_numbers(self.material, self.field, &values, self.signatures);
+            let Some(value) = sequence.next_element_seed(NumberChoice {
+                values: choices,
+                bytes: self.bytes,
+            })?
+            else {
+                break;
+            };
+            values.push(value.value);
+            // Once all slots are filled, a comma cannot be accepted merely
+            // because its next element has not arrived in this byte token yet.
+            if self.bytes[value.end..].trim_ascii_start().starts_with(b",")
+                && self
+                    .program
+                    .array_numbers(self.material, self.field, &values, self.signatures)
+                    .is_empty()
+            {
+                return Err(A::Error::custom(
+                    "operand array has no compatible next slot",
+                ));
+            }
+        }
+        if !self
+            .program
+            .array_can_end(self.material, self.field, &values, self.signatures)
+        {
+            return Err(A::Error::custom(
+                "operand array cannot complete this operation",
+            ));
+        }
+        Ok(values)
     }
 }
 
@@ -813,18 +1303,19 @@ struct TokenIds<'a> {
     bytes: &'a [u8],
 }
 impl<'de> DeserializeSeed<'de> for TokenIds<'_> {
-    type Value = ();
-    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
+    type Value = Vec<u32>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         decoder.deserialize_seq(self)
     }
 }
 impl<'de> Visitor<'de> for TokenIds<'_> {
-    type Value = ();
+    type Value = Vec<u32>;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("distinct IDs from the declared raw-token alphabet")
     }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = BTreeSet::new();
+        let mut values = Vec::new();
         while let Some(raw) = sequence.next_element::<&'de serde_json::value::RawValue>()? {
             let spelling = raw.get();
             // The borrowed RawValue identifies the exact source slice. At EOF
@@ -843,13 +1334,14 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
                 continue;
             }
             let token = spelling.parse::<u32>().map_err(A::Error::custom)?;
+            values.push(token);
             if !self.alphabet.contains(&token) || !seen.insert(token) {
                 return Err(A::Error::custom(
                     "token indicator must name a distinct raw-alphabet ID",
                 ));
             }
         }
-        Ok(())
+        Ok(values)
     }
 }
 impl<'de> DeserializeSeed<'de> for Indices {
@@ -878,24 +1370,26 @@ struct Shape {
     remaining: usize,
 }
 impl<'de> DeserializeSeed<'de> for Shape {
-    type Value = usize;
-    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<usize, D::Error> {
+    type Value = (usize, Vec<usize>);
+    fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         decoder.deserialize_seq(self)
     }
 }
 impl<'de> Visitor<'de> for Shape {
-    type Value = usize;
+    type Value = (usize, Vec<usize>);
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("bounded parameter dimensions")
     }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<usize, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut extent = 1usize;
+        let mut dimensions = Vec::new();
         while let Some(dimension) = sequence.next_element::<usize>()? {
+            dimensions.push(dimension);
             extent = extent
                 .checked_mul(dimension)
                 .filter(|&value| value > 0 && value <= self.remaining)
                 .ok_or_else(|| A::Error::custom("acquired scalar budget exceeded"))?;
         }
-        Ok(extent)
+        Ok((extent, dimensions))
     }
 }

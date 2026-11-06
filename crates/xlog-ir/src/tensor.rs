@@ -341,165 +341,17 @@ impl TensorProgram {
         }
         let mut shapes: Vec<TensorValueShape> = Vec::with_capacity(self.operations.len());
         for operation in &self.operations {
-            if let Some(shape) = self.function_shape(operation, &shapes, tokens, resolve)? {
-                shapes.push(shape);
-                continue;
-            }
-            let input = |id: usize| -> Result<TensorValueShape> {
-                let shape = *shapes
-                    .get(id)
-                    .ok_or_else(|| invalid("numerical value is not a preceding definition"))?;
-                if shape.float32 {
-                    return Err(invalid("BF16 operation received an FP32 value"));
-                }
-                Ok(shape)
-            };
-            let parameter = |id: usize| -> Result<&[usize]> {
-                self.parameters
-                    .get(id)
-                    .map(|value| value.shape.as_slice())
-                    .ok_or_else(|| invalid("unknown numerical parameter"))
-            };
-            let shape = match *operation {
-                TensorOperation::Embedding { weight } => {
-                    if self
-                        .parameters
-                        .get(weight)
-                        .is_some_and(|parameter| parameter.float32)
-                    {
-                        return Err(invalid("decoder embeddings require BF16 parameters"));
-                    }
-                    let &[vocabulary, columns] = parameter(weight)? else {
-                        return Err(invalid("embedding weight must be a matrix"));
-                    };
-                    if vocabulary != self.vocabulary {
-                        return Err(invalid(
-                            "embedding vocabulary differs from program vocabulary",
-                        ));
-                    }
-                    TensorValueShape {
-                        rows: tokens,
-                        columns,
-                        float32: false,
-                    }
-                }
-                TensorOperation::Linear { input: id, weight } => {
-                    let source = *shapes
+            let shape = self.operation_shape_with(
+                operation,
+                tokens,
+                &|id| {
+                    shapes
                         .get(id)
-                        .ok_or_else(|| invalid("linear input is not preceding"))?;
-                    if source.float32
-                        != self
-                            .parameters
-                            .get(weight)
-                            .ok_or_else(|| invalid("unknown parameter"))?
-                            .float32
-                    {
-                        return Err(invalid("linear parameter and activation types differ"));
-                    }
-                    let &[columns, inner] = parameter(weight)? else {
-                        return Err(invalid("linear weight must be a matrix"));
-                    };
-                    if inner != source.columns {
-                        return Err(invalid("linear input and parameter dimensions differ"));
-                    }
-                    TensorValueShape { columns, ..source }
-                }
-                TensorOperation::RmsNorm {
-                    input: id,
-                    weight,
-                    epsilon,
-                } => {
-                    let source = input(id)?;
-                    if self
-                        .parameters
-                        .get(weight)
-                        .is_some_and(|parameter| parameter.float32)
-                    {
-                        return Err(invalid("decoder normalization requires BF16 parameters"));
-                    }
-                    let &[width] = parameter(weight)? else {
-                        return Err(invalid("normalization weight must be a vector"));
-                    };
-                    if source.columns % width != 0 || !epsilon.is_finite() || epsilon <= 0.0 {
-                        return Err(invalid("invalid RMS normalization width or epsilon"));
-                    }
-                    source
-                }
-                TensorOperation::Rotary {
-                    input: id,
-                    heads,
-                    head_dim,
-                    theta,
-                } => {
-                    let source = input(id)?;
-                    if head_dim == 0
-                        || head_dim % 2 != 0
-                        || heads.checked_mul(head_dim) != Some(source.columns)
-                        || source.rows != tokens
-                        || !theta.is_finite()
-                        || theta <= 0.0
-                    {
-                        return Err(invalid(
-                            "invalid rotary embedding geometry or frequency base",
-                        ));
-                    }
-                    source
-                }
-                TensorOperation::Attention {
-                    query,
-                    key,
-                    value,
-                    heads,
-                    kv_heads,
-                    head_dim,
-                } => {
-                    let q = input(query)?;
-                    let k = input(key)?;
-                    let v = input(value)?;
-                    if kv_heads == 0
-                        || heads == 0
-                        || heads % kv_heads != 0
-                        || head_dim == 0
-                        || heads.checked_mul(head_dim) != Some(q.columns)
-                        || kv_heads.checked_mul(head_dim) != Some(k.columns)
-                        || q.rows != tokens
-                        || k.rows != tokens
-                        || k != v
-                    {
-                        return Err(invalid("invalid causal grouped-query attention geometry"));
-                    }
-                    q
-                }
-                TensorOperation::SiluGate {
-                    gate: left,
-                    value: right,
-                } => {
-                    let lhs = input(left)?;
-                    if lhs != input(right)? {
-                        return Err(invalid("elementwise numerical input shapes differ"));
-                    }
-                    lhs
-                }
-                TensorOperation::PredictionRow { input: id } => {
-                    let source = input(id)?;
-                    if source.rows != tokens {
-                        return Err(invalid(
-                            "prediction row must select from the complete causal sequence",
-                        ));
-                    }
-                    TensorValueShape { rows: 1, ..source }
-                }
-                TensorOperation::Float32 { input: id } => TensorValueShape {
-                    float32: true,
-                    ..input(id)?
+                        .copied()
+                        .ok_or_else(|| invalid("numerical value is not preceding"))
                 },
-                _ => unreachable!("function operation handled above"),
-            };
-            shape
-                .rows
-                .checked_mul(shape.columns)
-                .and_then(|n| n.checked_mul(if shape.float32 { 4 } else { 2 }))
-                .ok_or_else(|| invalid("numerical value extent overflow"))?;
+                resolve,
+            )?;
             shapes.push(shape);
         }
         if shapes[self.output] != self.signature.output(tokens, self.vocabulary)? {
@@ -508,6 +360,173 @@ impl TensorProgram {
             ));
         }
         Ok(shapes)
+    }
+
+    /// Infer one operation using the compiler's canonical shape rules.
+    /// Both complete compilation and prefix operand selection resolve real
+    /// preceding values and known callee signatures through this boundary.
+    pub fn operation_shape_with(
+        &self,
+        operation: &TensorOperation,
+        tokens: usize,
+        value: &dyn Fn(usize) -> Result<TensorValueShape>,
+        resolve: &dyn Fn(&str) -> Result<TensorSignature>,
+    ) -> Result<TensorValueShape> {
+        if let Some(shape) = self.function_shape(operation, value, tokens, resolve)? {
+            return Ok(shape);
+        }
+        let input = |id: usize| -> Result<TensorValueShape> {
+            let shape = value(id)?;
+            if shape.float32 {
+                return Err(invalid("BF16 operation received an FP32 value"));
+            }
+            Ok(shape)
+        };
+        let parameter = |id: usize| -> Result<&[usize]> {
+            self.parameters
+                .get(id)
+                .map(|value| value.shape.as_slice())
+                .ok_or_else(|| invalid("unknown numerical parameter"))
+        };
+        let shape = match *operation {
+            TensorOperation::Embedding { weight } => {
+                if self
+                    .parameters
+                    .get(weight)
+                    .is_some_and(|parameter| parameter.float32)
+                {
+                    return Err(invalid("decoder embeddings require BF16 parameters"));
+                }
+                let &[vocabulary, columns] = parameter(weight)? else {
+                    return Err(invalid("embedding weight must be a matrix"));
+                };
+                if vocabulary != self.vocabulary {
+                    return Err(invalid(
+                        "embedding vocabulary differs from program vocabulary",
+                    ));
+                }
+                TensorValueShape {
+                    rows: tokens,
+                    columns,
+                    float32: false,
+                }
+            }
+            TensorOperation::Linear { input: id, weight } => {
+                let &[columns, inner] = parameter(weight)? else {
+                    return Err(invalid("linear weight must be a matrix"));
+                };
+                let source = value(id)?;
+                if source.float32
+                    != self
+                        .parameters
+                        .get(weight)
+                        .ok_or_else(|| invalid("unknown parameter"))?
+                        .float32
+                {
+                    return Err(invalid("linear parameter and activation types differ"));
+                }
+                if inner != source.columns {
+                    return Err(invalid("linear input and parameter dimensions differ"));
+                }
+                TensorValueShape { columns, ..source }
+            }
+            TensorOperation::RmsNorm {
+                input: id,
+                weight,
+                epsilon,
+            } => {
+                let source = input(id)?;
+                if self
+                    .parameters
+                    .get(weight)
+                    .is_some_and(|parameter| parameter.float32)
+                {
+                    return Err(invalid("decoder normalization requires BF16 parameters"));
+                }
+                let &[width] = parameter(weight)? else {
+                    return Err(invalid("normalization weight must be a vector"));
+                };
+                if source.columns % width != 0 || !epsilon.is_finite() || epsilon <= 0.0 {
+                    return Err(invalid("invalid RMS normalization width or epsilon"));
+                }
+                source
+            }
+            TensorOperation::Rotary {
+                input: id,
+                heads,
+                head_dim,
+                theta,
+            } => {
+                let source = input(id)?;
+                if head_dim == 0
+                    || head_dim % 2 != 0
+                    || heads.checked_mul(head_dim) != Some(source.columns)
+                    || source.rows != tokens
+                    || !theta.is_finite()
+                    || theta <= 0.0
+                {
+                    return Err(invalid(
+                        "invalid rotary embedding geometry or frequency base",
+                    ));
+                }
+                source
+            }
+            TensorOperation::Attention {
+                query,
+                key,
+                value,
+                heads,
+                kv_heads,
+                head_dim,
+            } => {
+                let q = input(query)?;
+                let k = input(key)?;
+                let v = input(value)?;
+                if kv_heads == 0
+                    || heads == 0
+                    || heads % kv_heads != 0
+                    || head_dim == 0
+                    || heads.checked_mul(head_dim) != Some(q.columns)
+                    || kv_heads.checked_mul(head_dim) != Some(k.columns)
+                    || q.rows != tokens
+                    || k.rows != tokens
+                    || k != v
+                {
+                    return Err(invalid("invalid causal grouped-query attention geometry"));
+                }
+                q
+            }
+            TensorOperation::SiluGate {
+                gate: left,
+                value: right,
+            } => {
+                let lhs = input(left)?;
+                if lhs != input(right)? {
+                    return Err(invalid("elementwise numerical input shapes differ"));
+                }
+                lhs
+            }
+            TensorOperation::PredictionRow { input: id } => {
+                let source = input(id)?;
+                if source.rows != tokens {
+                    return Err(invalid(
+                        "prediction row must select from the complete causal sequence",
+                    ));
+                }
+                TensorValueShape { rows: 1, ..source }
+            }
+            TensorOperation::Float32 { input: id } => TensorValueShape {
+                float32: true,
+                ..input(id)?
+            },
+            _ => unreachable!("function operation handled above"),
+        };
+        shape
+            .rows
+            .checked_mul(shape.columns)
+            .and_then(|n| n.checked_mul(if shape.float32 { 4 } else { 2 }))
+            .ok_or_else(|| invalid("numerical value extent overflow"))?;
+        Ok(shape)
     }
 }
 

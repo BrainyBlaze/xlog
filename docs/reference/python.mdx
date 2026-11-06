@@ -334,6 +334,34 @@ Version1/2 packets retain their original masks for historical continuation.
 These filters do not invent a graph, repair output, infer a callee's missing
 signature, or substitute prefix admission for final type/shape/causal checks.
 
+New chains may select `language_version=4` and the same explicit raw alphabet.
+The packet is `xlog-contextual-acquisition-v4`, with registry context version1.
+Definitions precede their callers and the fixed entry is last. Calls and scans
+choose only retained or fully serialized callees with known signatures, including
+pure functions with no arguments. This ordering preserves acyclic graphs without
+guessing a future callee's type. The producer orders each definition's numerical
+body before its formal parameters and result. The native mask requires the exact
+canonical formal serialization from `FuncDef::numerical_types`; the entry retains
+its supplied context ABI.
+
+Version4 shares `TensorProgram::operation_shape_with` with final compilation.
+Before choosing a tag or operand, it requires a compatible completion of that
+operation at causal lengths1 and `max_context`. Partial decimal references must
+extend to compatible IDs; array references must fit the known callee slots or
+gather width. For example, a vector cannot be selected as a linear weight, and an
+input is unavailable if no declared matrix can consume it. Known callee-name
+prefixes are filtered before the closing quote. Every completed operation uses
+the same acquired-body causal rules as the compiler.
+
+An operations array can close only with a result matching the actual signature.
+The entry must also reach every new helper and read every new constant before
+closing its body, using the constructor's shared declaration-usage traversal.
+Repeated parameter aliases retain their original shapes. These restrictions
+neither supply operations nor reorder or repair generated output. They do not
+guarantee termination within a caller's token budget, scientific usefulness or
+hardware admission. Versions1–3 retain their original packets and masks; existing
+chains must not be migrated to this policy during restoration.
+
 Retain the exact language packet, its digest, compiled grammar, tokenizer and
 producing native version with each attempt and its original chosen token IDs.
 Reconstruct both masks from that retained packet for continuation; do not derive

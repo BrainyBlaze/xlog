@@ -221,17 +221,11 @@ impl TensorProgram {
     pub(super) fn function_shape(
         &self,
         operation: &TensorOperation,
-        shapes: &[TensorValueShape],
+        input: &dyn Fn(usize) -> Result<TensorValueShape>,
         tokens: usize,
         resolve: &dyn Fn(&str) -> Result<TensorSignature>,
     ) -> Result<Option<TensorValueShape>> {
         use TensorOperation::*;
-        let input = |id: usize| {
-            shapes
-                .get(id)
-                .copied()
-                .ok_or_else(|| invalid("numerical value is not preceding"))
-        };
         let float = |id| {
             let shape = input(id)?;
             if !shape.float32 {

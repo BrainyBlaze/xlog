@@ -15,6 +15,49 @@ pub const ACQUIRED_SCALARS: usize = 65_536;
 /// Feature width at the native residual insertion.
 pub const ACQUIRED_WIDTH: usize = 16;
 
+/// Actual callers and physical parameter reads in a numerical call graph.
+pub struct DefinitionUsage {
+    /// Definitions reached from the requested entry, including external leaves.
+    pub definitions: BTreeSet<String>,
+    /// Parameter identities read by operations in the resolved bodies.
+    pub parameters: BTreeSet<String>,
+}
+
+/// Follow canonical call/parameter references without constructing model state.
+/// A prefix owner may resolve a known retained callee as an external leaf: an
+/// earlier immutable body cannot reference a newly acquired name or constant.
+pub fn definition_usage<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<Option<&'a TensorProgram>>,
+) -> Result<DefinitionUsage> {
+    let mut usage = DefinitionUsage {
+        definitions: BTreeSet::new(),
+        parameters: BTreeSet::new(),
+    };
+    let mut pending = vec![entrypoint.to_owned()];
+    while let Some(name) = pending.pop() {
+        if !usage.definitions.insert(name.clone()) {
+            continue;
+        }
+        let Some(body) = resolve(&name)? else {
+            continue;
+        };
+        for operation in &body.operations {
+            if let Some(callee) = operation.callee() {
+                pending.push(callee.to_owned());
+            }
+            if let Some(id) = operation.parameter() {
+                let parameter = body
+                    .parameters
+                    .get(id)
+                    .ok_or_else(|| invalid("unknown acquired parameter reference"))?;
+                usage.parameters.insert(parameter.name.clone());
+            }
+        }
+    }
+    Ok(usage)
+}
+
 fn invalid(message: impl Into<String>) -> XlogError {
     XlogError::Compilation(message.into())
 }
@@ -190,31 +233,11 @@ impl NativeCausalModel {
                 "new entrypoint must map this layer's hidden rows to 16 FP32 features",
             ));
         }
-        let mut reached = BTreeSet::new();
-        let mut pending = vec![entrypoint.clone()];
-        let mut used_parameters = BTreeSet::new();
-        while let Some(name) = pending.pop() {
-            if !reached.insert(name.clone()) {
-                continue;
-            }
-            let body = functions.numerical(&name)?;
-            for operation in &body.operations {
-                if let Some(callee) = operation.callee() {
-                    pending.push(callee.to_owned());
-                }
-                if let Some(id) = operation.parameter() {
-                    let parameter = body
-                        .parameters
-                        .get(id)
-                        .ok_or_else(|| invalid("unknown acquired parameter reference"))?;
-                    used_parameters.insert(parameter.name.clone());
-                }
-            }
-        }
-        let unused_definitions = new_names.difference(&reached).collect::<Vec<_>>();
+        let usage = definition_usage(&entrypoint, |name| functions.numerical(name).map(Some))?;
+        let unused_definitions = new_names.difference(&usage.definitions).collect::<Vec<_>>();
         let unused_constants = new_parameters
             .keys()
-            .filter(|name| !used_parameters.contains(*name))
+            .filter(|name| !usage.parameters.contains(*name))
             .collect::<Vec<_>>();
         if !unused_definitions.is_empty() || !unused_constants.is_empty() {
             return Err(invalid(format!(

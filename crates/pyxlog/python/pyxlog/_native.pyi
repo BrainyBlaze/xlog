@@ -77,7 +77,7 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v3 also checks operation operand availability."""
+        """Exact native context/schema; v4 uses typed operands and callees before callers."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
@@ -107,7 +107,7 @@ class NativeCausalModel:
     def vocabulary_size(self) -> int: ...
 
 class NativeAcquisitionMask:
-    """Intersect byte-token masks with cumulative native acquisition budgets."""
+    """Intersect byte-token masks with the selected native acquisition contract."""
 
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
     def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
