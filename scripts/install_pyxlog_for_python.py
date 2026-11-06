@@ -165,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
         PYXLOG_MANIFEST,
         "--release",
         "--locked",
+        "--compression-level",
+        "1",
         "--compatibility",
         args.compatibility,
         "--out",

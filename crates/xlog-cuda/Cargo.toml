@@ -32,10 +32,13 @@ serde = "1"
 serde_json = { workspace = true, features = ["raw_value"] }
 
 [build-dependencies]
+jobserver = "0.1.34"
+sha2 = "0.11"
 xlog-core.workspace = true
 
 [dev-dependencies]
 bytemuck = "1.14"
+jobserver = "0.1.34"
 # v0.6.2 plan→provider cert: tests that the pure-Rust hypergraph
 # planner and the GPU WCOJ provider agree on the same fixture.
 # Dev-only — no runtime coupling between xlog-cuda and xlog-logic.
