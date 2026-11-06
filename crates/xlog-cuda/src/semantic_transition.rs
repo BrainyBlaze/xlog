@@ -30462,7 +30462,7 @@ impl SemanticTransitionSession {
         let training_canaries = owner
             .prepared
             .as_ref()
-            .and_then(|prepared| prepared.training_view.as_ref())
+            .and_then(|prepared| prepared.training_view.as_deref())
             .map(SemanticSelectedTrainingView::canaries);
         #[cfg(not(feature = "semantic-policy"))]
         let training_canaries: Option<DeviceMemoryView<SemanticTrainingCanaryRecord>> = None;
