@@ -8,6 +8,7 @@ use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorSignature, Ten
 
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
 
+#[derive(Clone)]
 pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
