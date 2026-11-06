@@ -26,6 +26,7 @@ const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
 const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
 const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
 const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
+const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
@@ -40,7 +41,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=8) {
+    if !matches!(version, 1..=9) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -246,6 +247,12 @@ pub(super) fn language(
         if version >= 7 {
             rows::schema(&mut schema, version >= 8);
         }
+        if version >= 9 {
+            schema["description"] = json!(format!(
+                "{} Entry formal-type prefixes use FuncDef::numerical_types and its struct serialization, matching the compact codec and helper ABI owner.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -256,6 +263,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                9 => CANONICAL_ENTRY_LANGUAGE,
                 8 => CONTEXT_ENTRY_ROWS_LANGUAGE,
                 7 => NUMERICAL_ROWS_LANGUAGE,
                 6 => SINGLE_OPERATION_LANGUAGE,
@@ -363,6 +371,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     typed_context: Option<Value>,
     numerical_rows: bool,
     context_entry_rows: bool,
+    canonical_entry_formals: bool,
 }
 
 #[pymethods]
@@ -378,7 +387,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != PLANNED_LANGUAGE
             && language["id"] != SINGLE_OPERATION_LANGUAGE
             && language["id"] != NUMERICAL_ROWS_LANGUAGE
-            && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE)
+            && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE
+            && language["id"] != CANONICAL_ENTRY_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -393,7 +403,9 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let context_entry_rows = language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE;
+        let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE;
+        let context_entry_rows =
+            language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
         let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
         let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
         let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
@@ -440,6 +452,7 @@ impl PyNativeAcquisitionMask {
         Ok(Self {
             numerical_rows,
             context_entry_rows,
+            canonical_entry_formals,
             ordered,
             planned_output,
             check_single_operation,
@@ -486,6 +499,7 @@ impl PyNativeAcquisitionMask {
                     self.typed_context.as_ref(),
                     self.planned_output,
                     self.check_single_operation,
+                    self.canonical_entry_formals,
                 )
                 .is_err()
                 {
@@ -514,6 +528,7 @@ impl PyNativeAcquisitionMask {
             self.typed_context.as_ref(),
             self.planned_output,
             self.check_single_operation,
+            self.canonical_entry_formals,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -597,6 +612,7 @@ struct Resources<'a> {
     ordered: bool,
     planned_output: bool,
     check_single_operation: bool,
+    canonical_entry_formals: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -627,6 +643,7 @@ fn resource_prefix<'a>(
     typed_context: Option<&'a Value>,
     planned_output: bool,
     check_single_operation: bool,
+    canonical_entry_formals: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -637,6 +654,7 @@ fn resource_prefix<'a>(
         ordered,
         planned_output,
         check_single_operation,
+        canonical_entry_formals,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -854,8 +872,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         A::Error::custom("numerical body must precede formal types")
                     })?;
                     let context = self.resources.typed_context.unwrap();
-                    let expected = if self.resources.definition_name.as_deref()
-                        == context["entrypoint"].as_str()
+                    let expected = if !self.resources.canonical_entry_formals
+                        && self.resources.definition_name.as_deref()
+                            == context["entrypoint"].as_str()
                     {
                         serde_json::to_vec(
                             &context[if key == "params" {
@@ -866,6 +885,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         )
                         .map_err(A::Error::custom)?
                     } else {
+                        // Compact codecs serialize these structs directly.
+                        // A context Value sorts object keys and has different
+                        // bytes despite representing the same entry ABI.
                         let (params, result) = FuncDef::numerical_types(
                             &program.body.signature,
                             program.body.vocabulary,

@@ -483,7 +483,17 @@ with captured or actual model context respectively. Versions1–7 retain their
 literal packets, source interpretation and prefix behavior. Version8 establishes
 no termination or training-benefit guarantee.
 
-For a version4 through version8 packet,
+Version9 (`xlog-contextual-acquisition-v9`) retains `numerical-rows-v2` and its
+source syntax. It fixes entry closure in the native prefix mask: formal types
+emitted by the codec are compared with `FuncDef::numerical_types` serialized as
+Rust structs, just like helper types. Versions7–8 instead compare entry types
+with a context JSON value whose object keys are sorted; those bytes differ even
+when the ABI is identical, rejecting the closing entry token. Their historical
+packets/masks remain literal for saved-attempt replay. New chains should use
+version9. This changes no ABI, operation, source elaboration, actual fork or
+optimizer behavior; successful compilation alone does not prove runtime closure.
+
+For a version4 through version9 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -500,7 +510,7 @@ The record has exactly these fields:
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
 | `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–8). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–9). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
