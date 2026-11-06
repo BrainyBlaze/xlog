@@ -276,8 +276,9 @@ Supply the full public alphabet of the caller's raw-history codec, including
 valid actions not yet observed; the list must be nonempty, unique, and inside
 the native vocabulary. Native code owns no application-specific token IDs.
 The packet retains this alphabet in `context.raw_token_ids`; its schema restricts
-`token_indicators.token_ids` to distinct members with a finite maximum length
-equal to the alphabet size. The packet is
+`token_indicators.token_ids` to members with a finite maximum length equal to
+the alphabet size. The native prefix mask owns distinctness; the schema omits
+`uniqueItems`, which the pinned strict grammar engine does not support. The packet is
 `xlog-contextual-acquisition-v2`; its registry context still has version1. This
 schema preserves each canonical `required` list's order in `properties`:
 `signature`, `parameters`, then `operations`, with the `operation` tag before

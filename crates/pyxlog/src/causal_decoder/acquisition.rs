@@ -126,7 +126,8 @@ pub(super) fn language(
                 if version == 2 {
                     properties["token_ids"]["maxItems"] =
                         json!(context["raw_token_ids"].as_array().unwrap().len());
-                    properties["token_ids"]["uniqueItems"] = json!(true);
+                    // Distinctness belongs to TokenIds below. The strict
+                    // pinned grammar engine does not implement uniqueItems.
                 }
             }
             "gather_columns" => {
