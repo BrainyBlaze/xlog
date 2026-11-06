@@ -20,6 +20,7 @@ const ORDERED_LANGUAGE: &str = "xlog-contextual-acquisition-v2";
 const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
 const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
 const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
+const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -32,7 +33,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3 | 4 | 5) {
+    if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -169,7 +170,7 @@ pub(super) fn language(
     program["parameters"]["maxItems"] = json!(ACQUIRED_NODES);
     program["operations"]["minItems"] = json!(1);
     program["operations"]["maxItems"] = json!(ACQUIRED_NODES);
-    if version == 5 {
+    if version >= 5 {
         defs["TensorProgram"]["required"] = json!([
             "signature",
             "parameters",
@@ -223,9 +224,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 5 {
+        if version >= 5 {
             schema["description"] = json!(format!(
                 "{} Each numerical body chooses output before operations, within the remaining shared node allowance. Output p requires exactly p+1 operations; slot p must match the canonical signature output at both context lengths. Earlier slots retain typed choices. This output-last search restriction does not guarantee completion within a token budget.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 6 {
+            schema["description"] = json!(format!(
+                "{} Output zero is available only when canonical prospective inference on the empty body admits a final operation using the declared parameters, known callees and raw-token alphabet. Positive output indices keep the same domain; this does not establish whole-body reachability.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -239,6 +246,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                6 => SINGLE_OPERATION_LANGUAGE,
                 5 => PLANNED_LANGUAGE,
                 4 => TYPED_LANGUAGE,
                 3 => OPERAND_LANGUAGE,
@@ -337,6 +345,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     retained: BTreeSet<String>,
     ordered: bool,
     planned_output: bool,
+    check_single_operation: bool,
     raw_tokens: BTreeSet<u32>,
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
@@ -352,7 +361,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != ORDERED_LANGUAGE
             && language["id"] != OPERAND_LANGUAGE
             && language["id"] != TYPED_LANGUAGE
-            && language["id"] != PLANNED_LANGUAGE)
+            && language["id"] != PLANNED_LANGUAGE
+            && language["id"] != SINGLE_OPERATION_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -367,7 +377,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let planned_output = language["id"] == PLANNED_LANGUAGE;
+        let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE;
+        let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
         let typed = language["id"] == TYPED_LANGUAGE || planned_output;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
@@ -432,6 +443,7 @@ impl PyNativeAcquisitionMask {
         Ok(Self {
             ordered,
             planned_output,
+            check_single_operation,
             raw_tokens,
             token_bytes,
             operation_fields,
@@ -467,6 +479,7 @@ impl PyNativeAcquisitionMask {
                     self.operation_fields.as_ref(),
                     self.typed_context.as_ref(),
                     self.planned_output,
+                    self.check_single_operation,
                 )
                 .is_err()
                 {
@@ -493,6 +506,7 @@ impl PyNativeAcquisitionMask {
             self.operation_fields.as_ref(),
             self.typed_context.as_ref(),
             self.planned_output,
+            self.check_single_operation,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -508,6 +522,7 @@ struct Resources<'a> {
     nodes: usize,
     ordered: bool,
     planned_output: bool,
+    check_single_operation: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -537,6 +552,7 @@ fn resource_prefix<'a>(
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     typed_context: Option<&'a Value>,
     planned_output: bool,
+    check_single_operation: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     if bytes.len() > ACQUIRED_SOURCE_BYTES {
         return Err(serde_json::Error::custom(
@@ -551,6 +567,7 @@ fn resource_prefix<'a>(
         nodes: 0,
         ordered,
         planned_output,
+        check_single_operation,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -879,8 +896,25 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                 "output must follow signature and parameters, before operations",
                             ));
                         }
+                        let zero_available = if self.resources.check_single_operation {
+                            // Ask the same final-slot predicate before choosing
+                            // p=0. This body has no operations yet; the clone's
+                            // prospective target never changes the parsed body.
+                            let mut candidate =
+                                self.resources.program.typed.as_ref().unwrap().clone();
+                            candidate.planned_output = Some(0);
+                            self.resources.operation_fields.unwrap().keys().any(|tag| {
+                                let mut fields = serde_json::Map::new();
+                                fields.insert("operation".into(), json!(tag));
+                                candidate.possible(&fields, None, &self.resources.signatures)
+                            })
+                        } else {
+                            true
+                        };
                         let choice = map.next_value_seed(NumberChoice {
-                            values: (0..ACQUIRED_NODES - self.resources.nodes).collect(),
+                            values: (0..ACQUIRED_NODES - self.resources.nodes)
+                                .filter(|&output| output != 0 || zero_available)
+                                .collect(),
                             bytes: self.resources.bytes,
                         })?;
                         // An EOF decimal is still a prefix, not a chosen slot.
