@@ -161,7 +161,9 @@ impl PyNativeCausalModel {
                     train_down_projection,
                 )
                 .map_err(xlog_err),
-            acquisition::NUMERICAL_ROWS_ENCODING | acquisition::CONTEXT_ENTRY_ROWS_ENCODING => {
+            acquisition::NUMERICAL_ROWS_ENCODING
+            | acquisition::CONTEXT_ENTRY_ROWS_ENCODING
+            | acquisition::INTENT_ROWS_ENCODING => {
                 let context = self
                     .inner
                     .acquisition_context(insertion_layer)
@@ -169,7 +171,8 @@ impl PyNativeCausalModel {
                 let (entrypoint, definitions) = acquisition::decode_numerical_rows(
                     definition_json.as_bytes(),
                     &context,
-                    source_encoding == acquisition::CONTEXT_ENTRY_ROWS_ENCODING,
+                    source_encoding != acquisition::NUMERICAL_ROWS_ENCODING,
+                    source_encoding == acquisition::INTENT_ROWS_ENCODING,
                 )?;
                 self.inner
                     .fork_acquired_definitions(

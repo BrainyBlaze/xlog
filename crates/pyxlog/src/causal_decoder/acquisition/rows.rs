@@ -7,10 +7,12 @@ use xlog_logic::ast::FuncBody;
 
 pub(super) const ENCODING: &str = "numerical-rows-v1";
 pub(super) const CONTEXT_ENTRY_ENCODING: &str = "numerical-rows-v2";
+pub(super) const INTENT_ENCODING: &str = "numerical-rows-v3";
+const INTENT_CHARACTERS: usize = 256;
 
 /// Derive positional rows from the existing specialized canonical operation
 /// schema. Its required-field lists own both the operand order and exact arity.
-pub(super) fn schema(schema: &mut Value, context_entry: bool) {
+pub(super) fn schema(schema: &mut Value, context_entry: bool, has_intent: bool) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
         let mut rows = Vec::new();
@@ -81,6 +83,16 @@ pub(super) fn schema(schema: &mut Value, context_entry: bool) {
             "Compact numerical-rows-v2 acquisition. Source contains helpers followed by entry. Helpers contain name, signature, parameters, operation_count and operations; entry contains parameters, operation_count and operations. Native context supplies the entry name and signature. Positive operation_count n requires exactly n operations and maps to canonical output n-1 after its number delimiter is visible. Operation rows, FuncDef::numerical ABI derivation, typed final-slot admission, single-operation feasibility, both context lengths, causal/usage checks and shared original-source/node/scalar budgets retain the numerical-rows-v1 owners. Every helper, constant, operation and operand is selected in source. Termination and usefulness are not guaranteed."
         );
     }
+    if has_intent {
+        schema["required"] = json!(["intent", "helpers", "entry"]);
+        schema["properties"]["intent"] =
+            json!({"type": "string", "minLength": 1, "maxLength": INTENT_CHARACTERS});
+        schema["description"] = json!(format!(
+            "{} Numerical-rows-v3 additionally starts with a model-authored intent string of one through {INTENT_CHARACTERS} Unicode scalar values. Intent remains in original source and its byte budget, but describes rather than executes the subsequent model-selected graph. The codec removes only this descriptive field during canonical elaboration; it does not check usefulness or agreement between intent and operations.",
+            schema["description"].as_str().unwrap()
+                .replace("numerical-rows-v2", "numerical-rows-v3")
+        ));
+    }
 }
 
 pub(super) struct Prefix {
@@ -106,6 +118,7 @@ struct Reader<'a> {
     context: &'a Value,
     fields: &'a BTreeMap<String, Vec<String>>,
     context_entry: bool,
+    has_intent: bool,
 }
 
 /// Only syntax is expanded. An unfinished operand remains the same byte prefix
@@ -115,6 +128,7 @@ pub(super) fn prefix(
     context: &Value,
     fields: &BTreeMap<String, Vec<String>>,
     context_entry: bool,
+    has_intent: bool,
 ) -> Result<Prefix, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -126,6 +140,7 @@ pub(super) fn prefix(
         context,
         fields,
         context_entry,
+        has_intent,
     };
     let complete = match reader.document() {
         Ok(()) => true,
@@ -145,8 +160,9 @@ pub(super) fn definitions(
     context: &Value,
     fields: &BTreeMap<String, Vec<String>>,
     context_entry: bool,
+    has_intent: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
-    let decoded = prefix(source, context, fields, context_entry)?;
+    let decoded = prefix(source, context, fields, context_entry, has_intent)?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
     }
@@ -280,6 +296,16 @@ impl Reader<'_> {
 
     fn context_entry_document(&mut self) -> Result<(), Stop> {
         self.punctuation(b'{', b'{')?;
+        if self.has_intent {
+            self.key("intent")?;
+            let intent: String = serde_json::from_str(self.raw(false)?.get())?;
+            if !(1..=INTENT_CHARACTERS).contains(&intent.chars().count()) {
+                return Err(Stop::Invalid(
+                    "numerical intent must contain one through 256 Unicode scalar values".into(),
+                ));
+            }
+            self.take(b',')?;
+        }
         self.key("helpers")?;
         self.output.extend_from_slice(b"\"entrypoint\":");
         self.output

@@ -493,7 +493,20 @@ packets/masks remain literal for saved-attempt replay. New chains should use
 version9. This changes no ABI, operation, source elaboration, actual fork or
 optimizer behavior; successful compilation alone does not prove runtime closure.
 
-For a version4 through version9 packet,
+Version10 (`xlog-contextual-acquisition-v10`, `numerical-rows-v3`) starts the
+source object with `intent`, followed by the same `helpers` and `entry` as v9.
+The intent is a model-authored JSON string containing 1–256 Unicode scalar values.
+It describes the algorithm before the model commits to helpers and operations.
+The syntax grammar and native reader enforce that string domain. Prefix masking,
+`decode_definition`, and `fork_acquired(..., source_encoding="numerical-rows-v3")`
+use the same codec, which omits only this descriptive field from canonical
+definitions. Original UTF-8 source retains it and counts it against the existing
+source-byte limit; token accounting, feedback and training remain caller-owned.
+Intent does not supply an operation, prove a data dependency or establish
+agreement with the executable graph. All v9 numerical and resource contracts
+remain, and earlier packets/codecs retain their literal behavior.
+
+For a version4 through version10 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -510,7 +523,7 @@ The record has exactly these fields:
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
 | `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–9). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–10). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
