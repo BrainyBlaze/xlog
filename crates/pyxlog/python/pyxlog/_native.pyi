@@ -77,7 +77,7 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v4 uses typed operands and callees before callers."""
+        """Exact native context/schema; v5 plans the final output before typed operations."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
@@ -112,7 +112,7 @@ class NativeAcquisitionMask:
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
     def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4 prefix facts as JSON; no token selection or final admission."""
+        """Version4/5 prefix facts as JSON; no token selection or final admission."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int
