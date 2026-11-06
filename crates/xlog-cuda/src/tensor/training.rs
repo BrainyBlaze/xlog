@@ -610,7 +610,7 @@ impl TensorExecutor {
                     Some(gradient) => gradient,
                     None => self.zeros(parameters[id].shape)?,
                 };
-                self.require_finite(&gradient)?;
+                self.require_finite(&gradient, &format!("parameter {id} gradient"))?;
                 Ok(gradient)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -623,7 +623,7 @@ impl TensorExecutor {
             return Err(failure("optimizer requires this provider's parameter"));
         }
         let master = self.as_float(value)?;
-        self.require_finite(&master)?;
+        self.require_finite(&master, &format!("parameter {parameter} initial master"))?;
         Ok(TensorAdamState {
             parameter,
             forward: value.clone(),
@@ -805,10 +805,11 @@ impl TensorExecutor {
                     ),
                 )?;
             }
-            self.require_finite(&next.master)?;
-            self.require_finite(&next.first)?;
-            self.require_finite(&next.second)?;
-            self.require_finite(&self.as_float(&forward)?)?;
+            let role = format!("parameter {} Adam", state.parameter);
+            self.require_finite(&next.master, &format!("{role} master"))?;
+            self.require_finite(&next.first, &format!("{role} first moment"))?;
+            self.require_finite(&next.second, &format!("{role} second moment"))?;
+            self.require_finite(&self.as_float(&forward)?, &format!("{role} forward view"))?;
             updates.push((state.parameter, forward, next));
         }
         Ok((
