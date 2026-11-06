@@ -227,6 +227,12 @@ object has exactly `entrypoint` (a new registry name) and `definitions` (canonic
 proposals. Definitions cannot replace old names; calls resolve the original
 bodies and parameter identities from that registry.
 
+Every new definition must be reachable from the entrypoint, and every new
+constant must be read by an operation in a reachable body. A refusal lists the
+unreachable definition names and unused constant names in sorted order so a
+subsequent proposal can address the actual omissions. It does not select a graph
+or replace the constructor's remaining shape and causal checks.
+
 The wheel and source distribution include the canonical JSON Schema resource
 `pyxlog/acquired_funcdef_wire_v1.schema.json`. On Python 3.9 or later, read its
 original bytes with `importlib.resources`:
