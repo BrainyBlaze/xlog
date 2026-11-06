@@ -14,6 +14,7 @@ use xlog_runtime::causal_decoder::acquired::{
 
 const LANGUAGE: &str = "xlog-contextual-acquisition-v1";
 const ORDERED_LANGUAGE: &str = "xlog-contextual-acquisition-v2";
+const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -26,7 +27,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1 | 2 | 3) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -38,7 +39,7 @@ pub(super) fn language(
     );
     let width = context["signature"]["input_width"].as_u64().unwrap() as usize;
     let vocabulary = context["vocabulary"].as_u64().unwrap() as usize;
-    if version == 2 {
+    if version >= 2 {
         let tokens = raw_token_ids.ok_or_else(|| {
             value_error("ordered acquisition requires an explicit raw-token alphabet")
         })?;
@@ -46,7 +47,7 @@ pub(super) fn language(
         context["raw_token_ids"] = json!(tokens);
     } else if raw_token_ids.is_some() {
         return Err(value_error(
-            "a raw-token alphabet requires acquisition language version 2",
+            "a raw-token alphabet requires acquisition language version 2 or 3",
         ));
     }
     let max_context = context["max_context"].as_u64().unwrap() as usize;
@@ -64,7 +65,7 @@ pub(super) fn language(
     defs["Index"] = integer(0, ACQUIRED_NODES - 1);
     defs["Width"] = integer(1, maximum_width);
     defs["TokenId"] = integer(0, vocabulary - 1);
-    if version == 2 {
+    if version >= 2 {
         defs["TokenId"] = json!({"enum": context["raw_token_ids"]});
     }
     defs["FunctionElement"]["enum"] = json!(["u32", "f32"]);
@@ -123,7 +124,7 @@ pub(super) fn language(
             "zeros" => properties["columns"] = json!({"$ref": "#/$defs/Width"}),
             "token_indicators" => {
                 properties["token_ids"]["minItems"] = json!(1);
-                if version == 2 {
+                if version >= 2 {
                     properties["token_ids"]["maxItems"] =
                         json!(context["raw_token_ids"].as_array().unwrap().len());
                     // Distinctness belongs to TokenIds below. The strict
@@ -153,7 +154,7 @@ pub(super) fn language(
     program["operations"]["maxItems"] = json!(ACQUIRED_NODES);
     let mut entry_program = defs["TensorProgram"].clone();
     entry_program["properties"]["signature"] = json!({"const": context["signature"]});
-    if version == 2 {
+    if version >= 2 {
         // The entry's numeric ABI comes from TensorSignature, not the global
         // operation count or the number of formal parameters (tokens included).
         let signature: TensorSignature =
@@ -176,11 +177,19 @@ pub(super) fn language(
     entry["properties"]["return_type"] = json!({"const": context["return_type"]});
     entry["properties"]["body"]["properties"]["Numerical"] = entry_program;
     defs["EntryFuncDef"] = entry;
-    if version == 2 {
-        schema["$id"] = json!("https://xlog.md/schemas/acquired-funcdef-context/v2");
+    if version >= 2 {
+        schema["$id"] = json!(format!(
+            "https://xlog.md/schemas/acquired-funcdef-context/v{version}"
+        ));
         schema["description"] = json!(
             "Ordered contextual acquisition. Properties follow the canonical required-field order: signature and parameters before operations, operation tag before operands. The native prefix mask additionally bounds arguments by the actual signature, parameter references by declarations, and value/output references by preceding operations. Native compilation owns remaining type, shape, call and causal checks."
         );
+        if version == 3 {
+            schema["description"] = json!(format!(
+                "{} The native prefix mask also restricts operation names, including unfinished byte-token spellings, to operations whose mandatory numeric references have a nonempty available extent.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -190,7 +199,11 @@ pub(super) fn language(
             schema: OrderedSchema<'a>,
         }
         return serde_json::to_string(&Packet {
-            id: ORDERED_LANGUAGE,
+            id: if version == 3 {
+                OPERAND_LANGUAGE
+            } else {
+                ORDERED_LANGUAGE
+            },
             context: &context,
             schema: OrderedSchema(&schema),
         })
@@ -284,6 +297,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     retained: BTreeSet<String>,
     ordered: bool,
     raw_tokens: BTreeSet<u32>,
+    operation_fields: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[pymethods]
@@ -292,7 +306,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        if (language["id"] != LANGUAGE && language["id"] != ORDERED_LANGUAGE)
+        if (language["id"] != LANGUAGE
+            && language["id"] != ORDERED_LANGUAGE
+            && language["id"] != OPERAND_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -306,7 +322,7 @@ impl PyNativeAcquisitionMask {
         if parameters.iter().any(|parameter| !parameter.float32) {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
-        let ordered = language["id"] == ORDERED_LANGUAGE;
+        let ordered = language["id"] == ORDERED_LANGUAGE || language["id"] == OPERAND_LANGUAGE;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
                 .map_err(value_error)?;
@@ -314,10 +330,39 @@ impl PyNativeAcquisitionMask {
         } else {
             BTreeSet::new()
         };
+        // Required operand fields come from the same wire schema as the
+        // compiler-facing packet, never from an authored operation sequence.
+        let operation_fields = if language["id"] == OPERAND_LANGUAGE {
+            let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+            Some(
+                wire["$defs"]["TensorOperation"]["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|operation| {
+                        (
+                            operation["properties"]["operation"]["const"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                            operation["required"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|field| field.as_str().unwrap().to_owned())
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
         Ok(Self {
             ordered,
             raw_tokens,
             token_bytes,
+            operation_fields,
             retained: parameters
                 .into_iter()
                 .map(|parameter| parameter.name)
@@ -341,7 +386,13 @@ impl PyNativeAcquisitionMask {
                 }
                 bytes.truncate(prefix.len());
                 bytes.extend_from_slice(spelling);
-                if !resource_prefix(&bytes, &self.retained, self.ordered, &self.raw_tokens) {
+                if !resource_prefix(
+                    &bytes,
+                    &self.retained,
+                    self.ordered,
+                    &self.raw_tokens,
+                    self.operation_fields.as_ref(),
+                ) {
                     mask[id / 8] &= !bit;
                 }
             }
@@ -359,6 +410,7 @@ struct Resources<'a> {
     nodes: usize,
     ordered: bool,
     raw_tokens: &'a BTreeSet<u32>,
+    operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
 }
 
@@ -375,6 +427,7 @@ fn resource_prefix(
     retained: &BTreeSet<String>,
     ordered: bool,
     raw_tokens: &BTreeSet<u32>,
+    operation_fields: Option<&BTreeMap<String, Vec<String>>>,
 ) -> bool {
     if bytes.len() > ACQUIRED_SOURCE_BYTES {
         return false;
@@ -387,6 +440,7 @@ fn resource_prefix(
         nodes: 0,
         ordered,
         raw_tokens,
+        operation_fields,
         program: Program::default(),
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
@@ -548,6 +602,7 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                         program: &self.resources.program,
                         raw_tokens: self.resources.raw_tokens,
                         bytes: self.resources.bytes,
+                        operation_fields: self.resources.operation_fields,
                     })?;
                 } else {
                     IgnoredAny::deserialize(decoder)?;
@@ -630,7 +685,62 @@ struct Operation<'a> {
     program: &'a Program,
     raw_tokens: &'a BTreeSet<u32>,
     bytes: &'a [u8],
+    operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
 }
+
+fn reference_extent(program: &Program, field: &str) -> Option<usize> {
+    match field {
+        "argument" => program.arguments,
+        "weight" => Some(program.parameters),
+        "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative" => {
+            Some(program.operations)
+        }
+        _ => None,
+    }
+}
+
+/// Whether the value following a complete JSON key can still name this ASCII
+/// operation. Include unfinished BPE spellings and JSON Unicode escapes: waiting
+/// for the closing quote would merely move the empty-mask failure to that quote.
+fn operation_prefix(bytes: &[u8], name: &str) -> bool {
+    let bytes = bytes.trim_ascii_start();
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(bytes) = bytes.strip_prefix(b":") else {
+        return false;
+    };
+    let bytes = bytes.trim_ascii_start();
+    if bytes.is_empty() {
+        return true;
+    }
+    let Some(mut bytes) = bytes.strip_prefix(b"\"") else {
+        return false;
+    };
+    for character in name.bytes() {
+        if bytes.is_empty() {
+            return true;
+        }
+        if bytes[0] == b'\\' {
+            let escaped = format!("\\u{character:04x}");
+            let count = bytes.len().min(escaped.len());
+            if !bytes[..count].eq_ignore_ascii_case(&escaped.as_bytes()[..count]) {
+                return false;
+            }
+            if count < escaped.len() {
+                return true;
+            }
+            bytes = &bytes[count..];
+        } else {
+            if bytes[0] != character {
+                return false;
+            }
+            bytes = &bytes[1..];
+        }
+    }
+    bytes.is_empty() || bytes[0] == b'"'
+}
+
 impl<'de> Visitor<'de> for Operation<'_> {
     type Value = ();
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -638,8 +748,35 @@ impl<'de> Visitor<'de> for Operation<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut tagged = false;
-        while let Some(key) = map.next_key::<String>()? {
+        loop {
+            let (key, after_key) = if self.operation_fields.is_some() {
+                let Some(raw) = map.next_key::<&'de serde_json::value::RawValue>()? else {
+                    break;
+                };
+                let key = serde_json::from_str::<String>(raw.get()).map_err(A::Error::custom)?;
+                let offset =
+                    raw.get().as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+                (key, Some(&self.bytes[offset..]))
+            } else {
+                let Some(key) = map.next_key::<String>()? else {
+                    break;
+                };
+                (key, None)
+            };
             if key == "operation" {
+                if let Some(fields) = self.operation_fields {
+                    let viable = fields.iter().any(|(name, required)| {
+                        required
+                            .iter()
+                            .all(|field| reference_extent(self.program, field) != Some(0))
+                            && operation_prefix(after_key.unwrap(), name)
+                    });
+                    if !viable {
+                        return Err(A::Error::custom(
+                            "operation has no available mandatory operands",
+                        ));
+                    }
+                }
                 map.next_value::<String>()?;
                 tagged = true;
                 continue;
@@ -647,14 +784,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
             if !tagged {
                 return Err(A::Error::custom("operation tag must precede operands"));
             }
-            let extent = match key.as_str() {
-                "argument" => self.program.arguments,
-                "weight" => Some(self.program.parameters),
-                "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative" => {
-                    Some(self.program.operations)
-                }
-                _ => None,
-            };
+            let extent = reference_extent(self.program, &key);
             if let Some(extent) = extent {
                 map.next_value_seed(Index { extent })?;
             } else if key == "arguments" {
