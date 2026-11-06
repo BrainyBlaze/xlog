@@ -670,11 +670,11 @@ impl TensorExecutor {
         let output = values[program.output]
             .as_ref()
             .ok_or_else(|| failure("missing numerical output"))?;
-        self.require_finite(output)?;
+        self.require_finite(output, "program output")?;
         Ok(values)
     }
 
-    fn require_finite(&self, tensor: &NativeTensor) -> Result<()> {
+    fn require_finite(&self, tensor: &NativeTensor, role: &str) -> Result<()> {
         let mut invalid = self.provider.memory().alloc::<u32>(1)?;
         self.provider
             .htod_sync_copy_into_tracked(&[0u32], &mut invalid)?;
@@ -695,9 +695,9 @@ impl TensorExecutor {
         self.provider
             .dtoh_sync_copy_into_tracked(&invalid, &mut flag)?;
         if flag[0] != 0 {
-            return Err(failure(
-                "numerical execution produced nonfinite FP32 values",
-            ));
+            return Err(failure(format!(
+                "numerical execution produced nonfinite FP32 values in {role}"
+            )));
         }
         Ok(())
     }

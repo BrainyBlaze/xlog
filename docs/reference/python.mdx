@@ -541,6 +541,12 @@ successful proposals.
 Operations use a snake-case `operation` tag. `argument` reads the indexed numeric
 argument; `parameter` reads a shared parameter; `linear` multiplies by a named
 parameter's indexed matrix; `add`, `subtract`, `multiply`, `divide`, and `tanh` provide FP32 arithmetic.
+Division uses the ordinary quotient and derivative, with no epsilon or clipping.
+Both numeric branches of `select` are computed before selection; it does not guard
+an invalid division. Zero inputs therefore require a numerically defined graph,
+including during differentiation. Existing finiteness failures identify the
+function result, program output, parameter gradient or Adam state that failed.
+An unsuccessful minibatch publishes no parameter or optimizer changes.
 `zeros` creates a fixed single row, including a nontrainable zero scan state.
 `gather_columns` retains its explicit index order and accumulates repeated-index
 gradients. `select` chooses its positive or negative numeric input according to
