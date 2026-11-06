@@ -73,8 +73,11 @@ class NativeCausalModel:
     ) -> NativeLogits: ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
     def fork_candidate(self) -> NativeCausalModel: ...
-    def acquisition_language(self, *, insertion_layer: int = 17) -> str:
-        """Exact native context/schema packet for contextual proposal masking."""
+    def acquisition_language(
+        self, *, insertion_layer: int = 17, language_version: int = 1,
+        raw_token_ids: Optional[Sequence[int]] = None,
+    ) -> str:
+        """Exact native context/schema; v3 also checks operation operand availability."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
