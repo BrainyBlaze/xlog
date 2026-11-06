@@ -1,5 +1,6 @@
 //! Contextual wire restrictions and shared resource admission before token choice.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
@@ -11,6 +12,7 @@ use serde_json::{json, Value};
 use xlog_ir::tensor::{TensorOperation, TensorParameter, TensorProgram, TensorSignature};
 use xlog_logic::ast::FuncDef;
 
+mod rows;
 mod typed;
 use xlog_runtime::causal_decoder::acquired::{
     definition_usage, ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
@@ -22,6 +24,8 @@ const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
 const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
 const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
 const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
+const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
+pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -34,7 +38,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
+    if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -231,11 +235,14 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 6 {
+        if version >= 6 {
             schema["description"] = json!(format!(
                 "{} Output zero is available only when canonical prospective inference on the empty body admits a final operation using the declared parameters, known callees and raw-token alphabet. Positive output indices keep the same domain; this does not establish whole-body reachability.",
                 schema["description"].as_str().unwrap()
             ));
+        }
+        if version == 7 {
+            rows::schema(&mut schema);
         }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
@@ -247,6 +254,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                7 => NUMERICAL_ROWS_LANGUAGE,
                 6 => SINGLE_OPERATION_LANGUAGE,
                 5 => PLANNED_LANGUAGE,
                 4 => TYPED_LANGUAGE,
@@ -350,6 +358,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     raw_tokens: BTreeSet<u32>,
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
+    numerical_rows: bool,
 }
 
 #[pymethods]
@@ -363,7 +372,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != OPERAND_LANGUAGE
             && language["id"] != TYPED_LANGUAGE
             && language["id"] != PLANNED_LANGUAGE
-            && language["id"] != SINGLE_OPERATION_LANGUAGE)
+            && language["id"] != SINGLE_OPERATION_LANGUAGE
+            && language["id"] != NUMERICAL_ROWS_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -378,7 +388,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE;
+        let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE;
+        let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
         let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
         let typed = language["id"] == TYPED_LANGUAGE || planned_output;
         let raw_tokens = if ordered {
@@ -391,28 +402,7 @@ impl PyNativeAcquisitionMask {
         // Required operand fields come from the same wire schema as the
         // compiler-facing packet, never from an authored operation sequence.
         let operation_fields = if language["id"] == OPERAND_LANGUAGE || typed {
-            let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
-            Some(
-                wire["$defs"]["TensorOperation"]["oneOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|operation| {
-                        (
-                            operation["properties"]["operation"]["const"]
-                                .as_str()
-                                .unwrap()
-                                .to_owned(),
-                            operation["required"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .map(|field| field.as_str().unwrap().to_owned())
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            )
+            Some(operation_fields()?)
         } else {
             None
         };
@@ -442,6 +432,7 @@ impl PyNativeAcquisitionMask {
             }
         }
         Ok(Self {
+            numerical_rows,
             ordered,
             planned_output,
             check_single_operation,
@@ -472,8 +463,15 @@ impl PyNativeAcquisitionMask {
                 }
                 bytes.truncate(prefix.len());
                 bytes.extend_from_slice(spelling);
+                let canonical = match self.canonical_prefix(&bytes) {
+                    Ok(canonical) => canonical,
+                    Err(_) => {
+                        mask[id / 8] &= !bit;
+                        continue;
+                    }
+                };
                 if resource_prefix(
-                    &bytes,
+                    &canonical,
                     &self.retained,
                     self.ordered,
                     &self.raw_tokens,
@@ -499,8 +497,9 @@ impl PyNativeAcquisitionMask {
                 "completion state requires acquisition language version 4",
             ));
         }
+        let canonical = self.canonical_prefix(prefix).map_err(value_error)?;
         let resources = resource_prefix(
-            prefix,
+            &canonical,
             &self.retained,
             self.ordered,
             &self.raw_tokens,
@@ -513,6 +512,70 @@ impl PyNativeAcquisitionMask {
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
             .map_err(value_error)
     }
+
+    /// Elaborate complete compact source with the packet's captured native ABI.
+    fn decode_definition(&self, source_bytes: &[u8]) -> PyResult<String> {
+        if !self.numerical_rows {
+            return Err(value_error(
+                "definition decoding requires numerical rows language",
+            ));
+        }
+        let (entrypoint, definitions) = rows::definitions(
+            source_bytes,
+            self.typed_context.as_ref().unwrap(),
+            self.operation_fields.as_ref().unwrap(),
+        )
+        .map_err(value_error)?;
+        serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
+            .map_err(value_error)
+    }
+}
+
+impl PyNativeAcquisitionMask {
+    fn canonical_prefix<'a>(&self, source: &'a [u8]) -> Result<Cow<'a, [u8]>, String> {
+        if self.numerical_rows {
+            rows::prefix(
+                source,
+                self.typed_context.as_ref().unwrap(),
+                self.operation_fields.as_ref().unwrap(),
+            )
+            .map(|prefix| Cow::Owned(prefix.bytes))
+        } else if source.len() > ACQUIRED_SOURCE_BYTES {
+            Err("acquisition source byte budget exceeded".into())
+        } else {
+            Ok(Cow::Borrowed(source))
+        }
+    }
+}
+
+fn operation_fields() -> PyResult<BTreeMap<String, Vec<String>>> {
+    let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+    Ok(wire["$defs"]["TensorOperation"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|operation| {
+            (
+                operation["properties"]["operation"]["const"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                operation["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|field| field.as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
+pub(super) fn decode_numerical_rows(
+    source: &[u8],
+    context: &Value,
+) -> PyResult<(String, Vec<FuncDef>)> {
+    rows::definitions(source, context, &operation_fields()?).map_err(value_error)
 }
 
 struct Resources<'a> {
@@ -555,11 +618,6 @@ fn resource_prefix<'a>(
     planned_output: bool,
     check_single_operation: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
-    if bytes.len() > ACQUIRED_SOURCE_BYTES {
-        return Err(serde_json::Error::custom(
-            "acquisition source byte budget exceeded",
-        ));
-    }
     let mut resources = Resources {
         bytes,
         retained,

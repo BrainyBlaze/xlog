@@ -160,7 +160,30 @@ impl NativeCausalModel {
                 .ok_or_else(|| invalid("acquired definition requires canonical definitions"))?,
         )
         .map_err(|error| invalid(format!("acquired definitions: {error}")))?;
-        if !document.is_empty() || definitions.is_empty() {
+        if !document.is_empty() {
+            return Err(invalid("unknown acquired fields or empty definitions"));
+        }
+        self.fork_acquired_definitions(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+        )
+    }
+
+    /// Admit decoded definitions through the same registry, allocation and
+    /// optimizer path as the JSON entry point. A source decoder owns its byte
+    /// limit and elaboration before passing canonical definitions here.
+    pub fn fork_acquired_definitions(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> Result<Self> {
+        if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
         let down = self.acquisition_down_projection(insertion_layer)?;

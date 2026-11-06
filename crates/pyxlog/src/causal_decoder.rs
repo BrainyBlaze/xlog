@@ -141,7 +141,7 @@ impl PyNativeCausalModel {
 
     /// Construct an acquired candidate from actual canonical definitions and FP32 arrays.
     #[cfg(feature = "host-io")]
-    #[pyo3(signature = (definition_json, parameter_values, *, insertion_layer=17, train_down_projection=true))]
+    #[pyo3(signature = (definition_json, parameter_values, *, insertion_layer=17, train_down_projection=true, source_encoding="funcdef-json-v1"))]
     fn fork_acquired(
         &self,
         py: Python<'_>,
@@ -149,17 +149,40 @@ impl PyNativeCausalModel {
         parameter_values: std::collections::BTreeMap<String, Vec<f32>>,
         insertion_layer: usize,
         train_down_projection: bool,
+        source_encoding: &str,
     ) -> PyResult<Self> {
-        py.detach(|| {
-            self.inner.fork_acquired(
-                &definition_json,
-                parameter_values,
-                insertion_layer,
-                train_down_projection,
-            )
+        py.detach(|| match source_encoding {
+            "funcdef-json-v1" => self
+                .inner
+                .fork_acquired(
+                    &definition_json,
+                    parameter_values,
+                    insertion_layer,
+                    train_down_projection,
+                )
+                .map_err(xlog_err),
+            acquisition::NUMERICAL_ROWS_ENCODING => {
+                let context = self
+                    .inner
+                    .acquisition_context(insertion_layer)
+                    .map_err(xlog_err)?;
+                let (entrypoint, definitions) =
+                    acquisition::decode_numerical_rows(definition_json.as_bytes(), &context)?;
+                self.inner
+                    .fork_acquired_definitions(
+                        entrypoint,
+                        definitions,
+                        parameter_values,
+                        insertion_layer,
+                        train_down_projection,
+                    )
+                    .map_err(xlog_err)
+            }
+            _ => Err(PyValueError::new_err(
+                "unsupported acquired source encoding",
+            )),
         })
         .map(|inner| Self { inner })
-        .map_err(xlog_err)
     }
 
     /// Versioned JSON with actual insertion, parameter and optimizer roles.
