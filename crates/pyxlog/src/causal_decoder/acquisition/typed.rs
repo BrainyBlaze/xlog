@@ -1,6 +1,7 @@
 //! Prospective operand choices use the executable compiler's shape inference.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use serde_json::{Map, Value};
 use xlog_core::XlogError;
@@ -146,17 +147,17 @@ impl Program {
     }
 
     fn compatible(&self, operation: Op, signatures: &Signatures) -> bool {
-        // The same causal-dependency check used by the complete compiler applies
-        // to this prospective operation. No prospective graph is ever emitted.
-        let mut body = self.body.clone();
-        body.operations.push(operation.clone());
-        if body.validate_acquired_body().is_err() {
-            return false;
-        }
-        (0..2).all(|length| {
+        if !(0..2).all(|length| {
             self.infer(&operation, signatures, length)
                 .is_ok_and(|shape| !self.is_output_slot() || self.matches_output(shape, length))
-        })
+        }) {
+            return false;
+        }
+        // The same causal-dependency check used by the complete compiler applies
+        // after shape inference. No prospective graph is ever emitted.
+        let mut body = self.body.clone();
+        body.operations.push(operation);
+        body.validate_acquired_body().is_ok()
     }
 
     fn references(&self, fields: &Map<String, Value>, name: &str, extent: usize) -> Vec<usize> {
@@ -166,56 +167,60 @@ impl Program {
         }
     }
 
-    pub(super) fn numbers(
+    pub(super) fn number_possible(
         &self,
         fields: &Map<String, Value>,
         name: &str,
-        extent: usize,
+        value: usize,
         signatures: &Signatures,
-    ) -> Vec<usize> {
+    ) -> bool {
         let mut candidate = fields.clone();
-        (0..extent)
-            .filter(|&id| {
-                candidate.insert(name.into(), Value::from(id));
-                self.possible(&candidate, None, signatures)
-            })
-            .collect()
+        candidate.insert(name.into(), Value::from(value));
+        self.possible(&candidate, None, signatures)
     }
 
-    pub(super) fn array_numbers(
+    pub(super) fn array_range(
         &self,
         fields: &Map<String, Value>,
         name: &str,
         prefix: &[usize],
-        signatures: &Signatures,
-    ) -> Vec<usize> {
+    ) -> Range<usize> {
         if name == "indices" {
             if self
                 .output_columns()
                 .is_some_and(|columns| prefix.len() >= columns)
             {
-                return Vec::new();
+                return 0..0;
             }
             let id = fields["input"].as_u64().unwrap() as usize;
-            return (0..self
+            return 0..self
                 .shapes
                 .iter()
                 .map(|shapes| shapes[id].columns)
                 .min()
-                .unwrap())
-                .collect();
+                .unwrap();
         }
-        let extent = self.body.operations.len();
+        0..self.body.operations.len()
+    }
+
+    pub(super) fn array_number_possible(
+        &self,
+        fields: &Map<String, Value>,
+        name: &str,
+        prefix: &[usize],
+        value: usize,
+        signatures: &Signatures,
+    ) -> bool {
+        if name == "indices" {
+            // The contiguous domain is exact; the complete array still uses
+            // canonical gather inference in array_can_end.
+            return true;
+        }
         let mut candidate = fields.clone();
         let mut values = prefix.to_vec();
-        values.push(0);
-        (0..extent)
-            .filter(|&id| {
-                *values.last_mut().unwrap() = id;
-                candidate.insert(name.into(), serde_json::json!(values));
-                self.possible(&candidate, Some(name), signatures)
-            })
-            .collect()
+        values.push(value);
+        candidate.insert(name.into(), serde_json::json!(values));
+        self.possible(&candidate, Some(name), signatures)
     }
 
     pub(super) fn array_can_end(
