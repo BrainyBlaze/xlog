@@ -309,8 +309,24 @@ The mask also enforces the declared raw alphabet and uniqueness as indicator
 IDs arrive, independently of JSON Schema engines' `uniqueItems` support.
 The signature uses the canonical numeric ABI, including pure functions' declared
 argument count. Version1 packets retain their previous resource-only filtering.
-Neither version invents a graph, repairs output, infers a callee's missing
-signature, or substitutes prefix admission for final type/shape/causal checks.
+
+New chains may request `language_version=3` with the same explicit raw alphabet.
+The packet is `xlog-contextual-acquisition-v3`; its registry context remains
+version1. It retains version2's field order and reference bounds, and excludes
+operation names whose mandatory numeric operands have no available references.
+For example, `linear` cannot be the first operation because no preceding input
+exists; it also requires a declared parameter. `argument` requires an actual
+numeric argument and `parameter` requires a local parameter declaration.
+The required fields come from the canonical wire schema. Checks apply to partial
+byte-token spellings of the operation name, including JSON Unicode escapes,
+so an impossible name cannot become a dead end just before its closing quote.
+Zero-input operations remain choices of the proposer. A first `call` remains
+possible with `arguments: []`; the final compiler must resolve a callable with
+no numeric arguments and a permitted causal boundary. This filter does not
+establish full shape, helper-signature, reachability or causal validity.
+Version1/2 packets retain their original masks for historical continuation.
+These filters do not invent a graph, repair output, infer a callee's missing
+signature, or substitute prefix admission for final type/shape/causal checks.
 
 Retain the exact language packet, its digest, compiled grammar, tokenizer and
 producing native version with each attempt and its original chosen token IDs.
