@@ -489,8 +489,8 @@ emitted by the codec are compared with `FuncDef::numerical_types` serialized as
 Rust structs, just like helper types. Versions7–8 instead compare entry types
 with a context JSON value whose object keys are sorted; those bytes differ even
 when the ABI is identical, rejecting the closing entry token. Their historical
-packets/masks remain literal for saved-attempt replay. New chains should use
-version9. This changes no ABI, operation, source elaboration, actual fork or
+packets/masks remain literal for saved-attempt replay. The repair begins with
+version9. It changes no ABI, operation, source elaboration, actual fork or
 optimizer behavior; successful compilation alone does not prove runtime closure.
 
 Version10 (`xlog-contextual-acquisition-v10`, `numerical-rows-v3`) starts the
@@ -506,7 +506,24 @@ Intent does not supply an operation, prove a data dependency or establish
 agreement with the executable graph. All v9 numerical and resource contracts
 remain, and earlier packets/codecs retain their literal behavior.
 
-For a version4 through version10 packet,
+Version11 (`xlog-contextual-acquisition-v11`) retains `numerical-rows-v3` and
+adds a necessary lower bound on the entry's remaining operations. In the
+callee-first helper DAG, each new root helper needs an entry call. New physical
+constants unread by every helper need direct entry reads; aliases count once.
+Every still-required call or read needs its own row. When none can return the
+entry's required shape, a separate result row must also remain. Parameter,
+linear and scan possibilities use canonical shape inference at both context
+lengths, allowing hypothetical operands for this lower bound.
+
+The same calculation restricts `operation_count` and prospective operation tags
+and operands. It excludes prefixes that have already spent the rows needed for
+their declared obligations, without emitting a graph or choosing a constant,
+call or operand. It does not prove that all needed operands can be constructed,
+that generation will terminate, or that the result depends usefully on history.
+Actual shape, causal and terminal usage admission remain unchanged. Earlier
+packets keep their literal prefix behavior; restoration selects the saved version.
+
+For a version4 through version11 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

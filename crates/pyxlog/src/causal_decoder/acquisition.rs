@@ -28,6 +28,7 @@ const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
 const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
 const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
 const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
+const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -43,7 +44,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=10) {
+    if !matches!(version, 1..=11) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -255,6 +256,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 11 {
+            schema["description"] = json!(format!(
+                "{} Entry plans and prospective operations must leave enough rows for every required root helper call and new physical parameter read, reserving a separate result row when none of the remaining obligations can have the required output shape. This necessary lower bound neither supplies operands nor guarantees completion or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -265,6 +272,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                11 => ENTRY_BUDGET_LANGUAGE,
                 10 => INTENT_LANGUAGE,
                 9 => CANONICAL_ENTRY_LANGUAGE,
                 8 => CONTEXT_ENTRY_ROWS_LANGUAGE,
@@ -376,6 +384,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     context_entry_rows: bool,
     canonical_entry_formals: bool,
     has_intent: bool,
+    entry_budget: bool,
 }
 
 #[pymethods]
@@ -393,7 +402,8 @@ impl PyNativeAcquisitionMask {
             && language["id"] != NUMERICAL_ROWS_LANGUAGE
             && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE
             && language["id"] != CANONICAL_ENTRY_LANGUAGE
-            && language["id"] != INTENT_LANGUAGE)
+            && language["id"] != INTENT_LANGUAGE
+            && language["id"] != ENTRY_BUDGET_LANGUAGE)
             || context["version"] != 1
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
@@ -408,7 +418,8 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let has_intent = language["id"] == INTENT_LANGUAGE;
+        let entry_budget = language["id"] == ENTRY_BUDGET_LANGUAGE;
+        let has_intent = language["id"] == INTENT_LANGUAGE || entry_budget;
         let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE || has_intent;
         let context_entry_rows =
             language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
@@ -460,6 +471,7 @@ impl PyNativeAcquisitionMask {
             context_entry_rows,
             canonical_entry_formals,
             has_intent,
+            entry_budget,
             ordered,
             planned_output,
             check_single_operation,
@@ -507,6 +519,7 @@ impl PyNativeAcquisitionMask {
                     self.planned_output,
                     self.check_single_operation,
                     self.canonical_entry_formals,
+                    self.entry_budget,
                 )
                 .is_err()
                 {
@@ -536,6 +549,7 @@ impl PyNativeAcquisitionMask {
             self.planned_output,
             self.check_single_operation,
             self.canonical_entry_formals,
+            self.entry_budget,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -630,6 +644,7 @@ struct Resources<'a> {
     planned_output: bool,
     check_single_operation: bool,
     canonical_entry_formals: bool,
+    entry_budget: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -661,6 +676,7 @@ fn resource_prefix<'a>(
     planned_output: bool,
     check_single_operation: bool,
     canonical_entry_formals: bool,
+    entry_budget: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -672,6 +688,7 @@ fn resource_prefix<'a>(
         planned_output,
         check_single_operation,
         canonical_entry_formals,
+        entry_budget,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -720,6 +737,42 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn entry_requirements(&self) -> Result<Option<typed::EntryRequirements>, String> {
+        if !self.entry_budget
+            || self.definition_name.as_deref()
+                != self
+                    .typed_context
+                    .and_then(|context| context["entrypoint"].as_str())
+        {
+            return Ok(None);
+        }
+        let mut calls = self.definitions.keys().cloned().collect::<BTreeSet<_>>();
+        let mut parameters = self
+            .declarations
+            .keys()
+            .filter(|name| !self.retained.contains(*name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        // Callee-first order makes the new-definition graph acyclic. Roots need
+        // direct entry calls; all other new helpers become reachable through them.
+        // Reads in any helper are therefore covered by those required calls.
+        for body in self.definitions.values() {
+            for operation in &body.operations {
+                if let Some(name) = operation.callee() {
+                    calls.remove(name);
+                }
+                if let Some(weight) = operation.parameter() {
+                    let parameter = body
+                        .parameters
+                        .get(weight)
+                        .ok_or_else(|| "unknown acquired parameter reference".to_owned())?;
+                    parameters.remove(&parameter.name);
+                }
+            }
+        }
+        Ok(Some(typed::EntryRequirements { calls, parameters }))
+    }
+
     fn completion_state(&self) -> Result<Value, String> {
         // A newly opened definition has no shape facts until its own signature
         // completes, even while the parser still retains the preceding body.
@@ -969,6 +1022,13 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         kind: Items::Parameters,
                     })?;
                     self.resources.program.parameters_complete = true;
+                    let required = self
+                        .resources
+                        .entry_requirements()
+                        .map_err(A::Error::custom)?;
+                    if let Some(program) = &mut self.resources.program.typed {
+                        program.entry_requirements = required;
+                    }
                 }
                 (Level::Program, "operations") => {
                     if self.resources.ordered
@@ -1021,7 +1081,16 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         };
                         let choice = map.next_value_seed(NumberChoice {
                             values: 0..ACQUIRED_NODES - self.resources.nodes,
-                            accepts: |output| output != 0 || zero_available,
+                            accepts: |output| {
+                                (output != 0 || zero_available)
+                                    && self
+                                        .resources
+                                        .program
+                                        .typed
+                                        .as_ref()
+                                        .unwrap()
+                                        .permits_plan(output, &self.resources.signatures)
+                            },
                             bytes: self.resources.bytes,
                         })?;
                         // An EOF decimal is still a prefix, not a chosen slot.
