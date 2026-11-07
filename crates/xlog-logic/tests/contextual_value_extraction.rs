@@ -365,7 +365,7 @@ fn imported_alias_providers_are_complete_and_selected_per_entrypoint() {
     let retained = occurrences(&report, "relation:source_ref/2", "retained");
     assert_eq!(authored.len(), 6);
     assert_eq!(retained.len(), 4);
-    for pair in authored.chunks_exact(2) {
+    for pair in authored.as_chunks::<2>().0 {
         assert_eq!(pair[0]["outcome"], authored[0]["outcome"]);
         assert_eq!(pair[1]["outcome"], authored[1]["outcome"]);
     }
