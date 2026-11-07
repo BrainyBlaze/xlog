@@ -617,7 +617,7 @@ pub(crate) fn canonicalize_public_values(
 
 fn term_from_public_value(value: Value) -> Term {
     match value {
-        Value::I64(value) => Term::Integer(value),
+        Value::I64(value) => Term::Integer(i128::from(value)),
         Value::F64(value) => Term::Float(f64::from_bits(value)),
         Value::Symbol(value) => Term::Symbol(value),
         Value::String(value) => Term::String(value),
@@ -883,7 +883,7 @@ pub(crate) fn atom_key_from_ground_atom(atom: &Atom) -> Result<GroundAtom> {
 
 pub(crate) fn value_from_term(term: &Term) -> Result<Value> {
     match term {
-        Term::Integer(i) => Ok(Value::I64(*i)),
+        Term::Integer(_) => provenance_value_from_arithmetic(ArithmeticValue::from_term(term)?),
         Term::Float(f) => Ok(Value::F64(f.to_bits())),
         Term::String(s) => Ok(Value::String(s.clone())),
         Term::Symbol(id) => Ok(Value::Symbol(*id)),

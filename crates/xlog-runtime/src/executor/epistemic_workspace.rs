@@ -3372,7 +3372,13 @@ impl TupleKeyExpectation {
                     "integer {value} is out of range for U64 tuple-key column"
                 ))
             })?,
-            (EirTerm::Integer(value), ScalarType::I64) => *value as u64,
+            (EirTerm::Integer(value), ScalarType::I64) => i64::try_from(*value)
+                .map(|value| value as u64)
+                .map_err(|_| {
+                    tuple_key_expectation_error(format!(
+                        "integer {value} is out of range for I64 tuple-key column"
+                    ))
+                })?,
             (EirTerm::Integer(value), ScalarType::Bool) => match *value {
                 0 => 0,
                 1 => 1,

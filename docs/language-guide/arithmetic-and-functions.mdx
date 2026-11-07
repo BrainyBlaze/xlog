@@ -52,6 +52,15 @@ result(X, Y, Z, R) :- v(X, Y, Z), R is (X + Y) * Z.
 
 A binary operator requires both operands to have the **same** type. You cannot add an
 `i64` to an `f64` directly, or a `u32` to an `i32` — there is no implicit promotion.
+
+Integer literals range from `-9223372036854775808` to `18446744073709551615`.
+Predicate declarations determine their storage type and reject values outside
+that type. In arithmetic, a literal defaults to `i64` when representable and
+`u64` above `9223372036854775807`; use an explicit cast for a different operand
+type. The full unsigned range is also preserved in lists, extraction, and
+arithmetic results. Interfaces explicitly limited to signed 64-bit integers,
+such as probabilistic provenance values and neural row IDs, retain their range
+checks.
 When operand types differ, convert one explicitly with `cast` (below).
 
 ## The five built-in functions

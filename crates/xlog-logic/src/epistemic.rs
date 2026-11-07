@@ -41,7 +41,7 @@ impl TruthValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum EpistemicTermKey {
-    Integer(i64),
+    Integer(i128),
     FloatBits(u64),
     String(String),
     Symbol(u32),

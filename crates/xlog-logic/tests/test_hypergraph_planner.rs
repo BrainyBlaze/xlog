@@ -36,7 +36,7 @@ fn anon() -> Term {
 }
 
 fn int(n: i64) -> Term {
-    Term::Integer(n)
+    Term::Integer(i128::from(n))
 }
 
 fn atom(predicate: &str, terms: Vec<Term>) -> Atom {

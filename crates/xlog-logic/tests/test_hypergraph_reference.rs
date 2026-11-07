@@ -48,7 +48,7 @@ fn rule_with(head: Atom, body: Vec<BodyLiteral>) -> Rule {
 }
 
 fn int(n: i64) -> Term {
-    Term::Integer(n)
+    Term::Integer(i128::from(n))
 }
 
 fn anon() -> Term {

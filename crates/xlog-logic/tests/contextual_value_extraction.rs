@@ -365,7 +365,7 @@ fn imported_alias_providers_are_complete_and_selected_per_entrypoint() {
     let retained = occurrences(&report, "relation:source_ref/2", "retained");
     assert_eq!(authored.len(), 6);
     assert_eq!(retained.len(), 4);
-    for pair in authored.chunks_exact(2) {
+    for pair in authored.as_chunks::<2>().0 {
         assert_eq!(pair[0]["outcome"], authored[0]["outcome"]);
         assert_eq!(pair[1]["outcome"], authored[1]["outcome"]);
     }
@@ -438,8 +438,19 @@ fn identical_authored_integers_have_positional_types_and_parser_limits() {
         assert_eq!(term["authored_term"], terms[0]["authored_term"]);
         assert_eq!(term["outcome"]["value"]["kind"], kind);
     }
-    // Authored AST integer syntax is i64. This does not describe external U64 ingress.
-    assert!(xlog_logic::parser::parse_program("pred p(u64). p(18446744073709551615).").is_err());
+    let wide = extract("pred wide(u64). wide(18446744073709551615).\n");
+    let wide = occurrences(&wide, "relation:wide/1", "retained");
+    assert_eq!(
+        wide[0]["authored_term"],
+        json!({"kind":"integer", "value":u64::MAX})
+    );
+    assert_eq!(
+        wide[0]["outcome"]["value"],
+        json!({"kind":"u64", "value":"18446744073709551615"})
+    );
+    for value in ["18446744073709551616", "-9223372036854775809"] {
+        assert!(xlog_logic::parser::parse_program(&format!("pred p(u64). p({value}).")).is_err());
+    }
     let inferred = extract("p(1). q(X) :- p(X).\n");
     let inferred = occurrences(&inferred, "relation:p/1", "retained");
     assert_eq!(inferred[0]["scope"], "inferred_scalar_carrier");

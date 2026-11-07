@@ -69,7 +69,7 @@ fn xlog_run_uses_shared_ground_term_encoding() {
     let supported = run_xlog(
         r#"
             pred encoded(u32, u64, i32, i64, f32, f64, bool, bool, symbol, symbol).
-            encoded(42, 43, -44, -45, 1.5, 2.25, true, 0, "hello", world).
+            encoded(42, 18446744073709551615, -44, -9223372036854775808, 1.5, 2.25, true, 0, "hello", world).
             ?- encoded(A, B, C, D, E, F, G, H, I, J).
         "#,
     );
@@ -81,8 +81,27 @@ fn xlog_run_uses_shared_ground_term_encoding() {
     let stdout = String::from_utf8_lossy(&supported.stdout);
     assert!(
         stdout
-            .contains("A=42, B=43, C=-44, D=-45, E=1.5, F=2.25, G=true, H=false, I=hello, J=world"),
+            .contains("A=42, B=18446744073709551615, C=-44, D=-9223372036854775808, E=1.5, F=2.25, G=true, H=false, I=hello, J=world"),
         "{stdout}"
+    );
+
+    let unsigned_arithmetic = run_xlog(
+        r#"
+            pred wide(u64).
+            pred next(u64).
+            wide(9223372036854775808).
+            wide(18446744073709551615).
+            next(Y) :- wide(X), X < 18446744073709551615, Y is X + cast(1, u64).
+            :- not wide(18446744073709551615).
+            :- not next(9223372036854775809).
+            :- next(0).
+            ?- next(N).
+        "#,
+    );
+    assert!(
+        unsigned_arithmetic.status.success(),
+        "full-range unsigned comparison/arithmetic constraints failed:\n{}",
+        String::from_utf8_lossy(&unsigned_arithmetic.stderr)
     );
 
     let invalid = run_xlog(

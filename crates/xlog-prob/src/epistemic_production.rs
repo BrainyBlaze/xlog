@@ -3823,7 +3823,9 @@ fn record_conditioned_assumption_counts(
 
 fn evidence_term_variants(term: &EpistemicEvidenceTerm) -> Vec<(Value, Term)> {
     match term {
-        EpistemicEvidenceTerm::Integer(value) => vec![(Value::I64(*value), Term::Integer(*value))],
+        EpistemicEvidenceTerm::Integer(value) => {
+            vec![(Value::I64(*value), Term::Integer(i128::from(*value)))]
+        }
         EpistemicEvidenceTerm::String(value) => {
             let symbol_id = symbol::intern(value);
             vec![

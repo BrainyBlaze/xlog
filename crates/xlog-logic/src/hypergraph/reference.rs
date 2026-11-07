@@ -458,7 +458,7 @@ impl<'a> AtomSpec<'a> {
 }
 
 fn coerce_integer_constant(
-    n: i64,
+    n: i128,
     target: ScalarType,
     predicate: &str,
     position: usize,
@@ -471,27 +471,29 @@ fn coerce_integer_constant(
     };
     match target {
         ScalarType::U32 => {
-            if n < 0 || n > u32::MAX as i64 {
+            if n < 0 || n > u32::MAX as i128 {
                 Err(mismatch(format!("integer {n} out of range for U32")))
             } else {
                 Ok(RefValue::U32(n as u32))
             }
         }
         ScalarType::U64 => {
-            if n < 0 {
-                Err(mismatch(format!("negative integer {n} for U64")))
+            if !(0..=u64::MAX as i128).contains(&n) {
+                Err(mismatch(format!("integer {n} out of range for U64")))
             } else {
                 Ok(RefValue::U64(n as u64))
             }
         }
         ScalarType::I32 => {
-            if !(i32::MIN as i64..=i32::MAX as i64).contains(&n) {
+            if !(i32::MIN as i128..=i32::MAX as i128).contains(&n) {
                 Err(mismatch(format!("integer {n} out of range for I32")))
             } else {
                 Ok(RefValue::I32(n as i32))
             }
         }
-        ScalarType::I64 => Ok(RefValue::I64(n)),
+        ScalarType::I64 => i64::try_from(n)
+            .map(RefValue::I64)
+            .map_err(|_| mismatch(format!("integer {n} out of range for I64"))),
         ScalarType::Bool | ScalarType::F32 | ScalarType::F64 | ScalarType::Symbol => {
             Err(mismatch(format!("integer {n} for {target:?}")))
         }
@@ -619,7 +621,12 @@ fn enumerate(
                         .clone();
                     row.push(v);
                 }
-                Term::Integer(n) => row.push(RefValue::I64(*n)),
+                Term::Integer(n) => row.push(coerce_integer_constant(
+                    *n,
+                    crate::ast::integer_literal_type(*n),
+                    &head.predicate,
+                    row.len(),
+                )?),
                 Term::String(s) => row.push(RefValue::Symbol(s.clone())),
                 Term::Anonymous
                 | Term::Symbol(_)
@@ -722,7 +729,12 @@ fn resolve_term_for_comparison(
                 .cloned()
                 .ok_or_else(|| RefEvalError::UnboundHeadVariable(name.clone()))
         }
-        Term::Integer(n) => Ok(RefValue::I64(*n)),
+        Term::Integer(n) => coerce_integer_constant(
+            *n,
+            crate::ast::integer_literal_type(*n),
+            &hg.head_predicate,
+            0,
+        ),
         Term::String(s) => Ok(RefValue::Symbol(s.clone())),
         Term::Anonymous
         | Term::Symbol(_)
