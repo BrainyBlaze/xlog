@@ -78,7 +78,9 @@ fn load_test_facts(
             .terms
             .iter()
             .map(|t| match t {
-                xlog_logic::ast::Term::Integer(v) => *v,
+                xlog_logic::ast::Term::Integer(v) => {
+                    i64::try_from(*v).expect("test value fits i64")
+                }
                 xlog_logic::ast::Term::Symbol(id) => *id as i64,
                 _ => panic!("Test helper only handles Integer/Symbol terms"),
             })

@@ -297,7 +297,7 @@ fn try_term(source: &str, pos: usize) -> Option<(FastTerm<'_>, usize)> {
             let val: f64 = source[pos..end].parse().ok()?;
             return Some((FastTerm::Term(Term::Float(val)), end));
         }
-        let val: i64 = source[pos..end].parse().ok()?;
+        let val = crate::ast::parse_integer_literal(&source[pos..end])?;
         return Some((FastTerm::Term(Term::Integer(val)), end));
     }
     if b == b'"' {

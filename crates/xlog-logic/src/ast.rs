@@ -2,6 +2,23 @@
 
 use xlog_core::{Result, ScalarType, XlogError};
 
+/// Parse the shared signed/unsigned 64-bit source literal range.
+pub(crate) fn parse_integer_literal(source: &str) -> Option<i128> {
+    let value = source.parse::<i128>().ok()?;
+    (i128::from(i64::MIN)..=i128::from(u64::MAX))
+        .contains(&value)
+        .then_some(value)
+}
+
+/// Default arithmetic type; a declared schema may instead select a narrower type.
+pub(crate) fn integer_literal_type(value: i128) -> ScalarType {
+    if value > i128::from(i64::MAX) {
+        ScalarType::U64
+    } else {
+        ScalarType::I64
+    }
+}
+
 /// A term in an atom
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
@@ -9,8 +26,9 @@ pub enum Term {
     Variable(String),
     /// Anonymous wildcard `_` -- each occurrence is a fresh unnamed variable.
     Anonymous,
-    /// Integer literal.
-    Integer(i64),
+    /// Integer literal in the inclusive range `i64::MIN..=u64::MAX`.
+    /// The wider source payload does not introduce a 128-bit runtime scalar.
+    Integer(i128),
     /// Floating-point literal.
     Float(f64),
     /// Quoted string literal.
@@ -82,10 +100,10 @@ impl Term {
         match self {
             Term::Variable(_) | Term::Anonymous => ScalarType::U64,
             Term::Integer(value) => {
-                if *value >= 0 && *value <= u32::MAX as i64 {
+                if *value >= 0 && *value <= u32::MAX as i128 {
                     ScalarType::U32
                 } else {
-                    ScalarType::I64
+                    integer_literal_type(*value)
                 }
             }
             Term::Float(_) => ScalarType::F64,
@@ -182,8 +200,9 @@ pub enum AggOp {
 pub enum ArithExpr {
     /// Variable reference.
     Variable(String),
-    /// Integer literal.
-    Integer(i64),
+    /// Integer literal in the inclusive range `i64::MIN..=u64::MAX`.
+    /// The wider source payload does not introduce a 128-bit runtime scalar.
+    Integer(i128),
     /// Float literal.
     Float(f64),
 

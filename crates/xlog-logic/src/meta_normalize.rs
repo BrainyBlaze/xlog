@@ -319,15 +319,15 @@ impl MetaNormalizer {
         match expected {
             Some(TypeRef::Term) if term.is_any_variable() => Ok(term.clone()),
             Some(TypeRef::Term) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Any)? as i64
+                self.register_term(term, ExpectedTerm::Any)? as i128
             )),
             Some(TypeRef::Compound) if term.is_any_variable() => Ok(term.clone()),
             Some(TypeRef::Compound) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Compound)? as i64,
+                self.register_term(term, ExpectedTerm::Compound)? as i128,
             )),
             Some(TypeRef::PredRef) if term.is_any_variable() => Ok(term.clone()),
             Some(TypeRef::PredRef) => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::PredRef)? as i64,
+                self.register_term(term, ExpectedTerm::PredRef)? as i128,
             )),
             Some(TypeRef::List(inner)) => self.normalize_list_value(term, inner),
             Some(TypeRef::Scalar(_)) | Some(TypeRef::Domain(_)) | None => {
@@ -733,7 +733,7 @@ impl MetaNormalizer {
                     name
                 )))
             }
-            Term::Integer(_) => Ok(TypeRef::Scalar(ScalarType::U32)),
+            Term::Integer(_) => Ok(TypeRef::Scalar(template.inferred_scalar_type())),
             Term::Float(_) => Ok(TypeRef::Scalar(ScalarType::F64)),
             Term::String(_) | Term::Symbol(_) => Ok(TypeRef::Scalar(ScalarType::Symbol)),
             Term::Compound { .. } | Term::PredRef(_) | Term::List(_) | Term::Cons { .. } => {
@@ -757,7 +757,7 @@ impl MetaNormalizer {
                 "{context} requires a known finite term before runtime inspection"
             ))),
             _ => Ok(Term::Integer(
-                self.register_term(term, ExpectedTerm::Any)? as i64
+                self.register_term(term, ExpectedTerm::Any)? as i128
             )),
         }
     }
@@ -770,7 +770,7 @@ impl MetaNormalizer {
                     .iter()
                     .map(|item| {
                         Ok(Term::Integer(
-                            self.register_term(item, ExpectedTerm::Any)? as i64
+                            self.register_term(item, ExpectedTerm::Any)? as i128
                         ))
                     })
                     .collect::<Result<Vec<_>>>()?,
@@ -794,7 +794,7 @@ impl MetaNormalizer {
     fn normalize_u32_argument(&self, term: &Term, context: &str) -> Result<Term> {
         match term {
             Term::Variable(_) | Term::Anonymous => Ok(term.clone()),
-            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i64 => Ok(term.clone()),
+            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i128 => Ok(term.clone()),
             _ => Err(meta_error(format!(
                 "{context} must be a u32 integer or variable"
             ))),
@@ -997,19 +997,19 @@ impl MetaNormalizer {
                 self.add_helper_fact(
                     functor_pred(),
                     vec![
-                        Term::Integer(record.id as i64),
+                        Term::Integer(record.id as i128),
                         Term::Symbol(symbol::intern(&functor)),
-                        Term::Integer(args.len() as i64),
+                        Term::Integer(args.len() as i128),
                     ],
                 );
                 self.add_helper_fact(
                     univ_pred(),
                     vec![
-                        Term::Integer(record.id as i64),
+                        Term::Integer(record.id as i128),
                         Term::List(
                             parts
                                 .into_iter()
-                                .map(|id| Term::Integer(id as i64))
+                                .map(|id| Term::Integer(id as i128))
                                 .collect(),
                         ),
                     ],
@@ -1018,9 +1018,9 @@ impl MetaNormalizer {
                     self.add_helper_fact(
                         arg_pred(),
                         vec![
-                            Term::Integer(record.id as i64),
-                            Term::Integer(idx as i64),
-                            Term::Integer(arg_id as i64),
+                            Term::Integer(record.id as i128),
+                            Term::Integer(idx as i128),
+                            Term::Integer(arg_id as i128),
                         ],
                     );
                 }
@@ -1145,10 +1145,7 @@ pub(crate) fn static_meta_predicate_dependency(atom: &Atom) -> Option<String> {
 fn infer_type_ref_from_terms(items: &[Term]) -> TypeRef {
     if let Some(first) = items.first() {
         match first {
-            Term::Integer(value) if *value >= 0 && *value <= u32::MAX as i64 => {
-                TypeRef::Scalar(ScalarType::U32)
-            }
-            Term::Integer(_) => TypeRef::Scalar(ScalarType::I64),
+            Term::Integer(_) => TypeRef::Scalar(first.inferred_scalar_type()),
             Term::Float(_) => TypeRef::Scalar(ScalarType::F64),
             Term::String(_) | Term::Symbol(_) => TypeRef::Scalar(ScalarType::Symbol),
             Term::Compound { .. } | Term::PredRef(_) | Term::List(_) | Term::Cons { .. } => {

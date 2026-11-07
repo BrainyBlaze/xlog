@@ -3461,7 +3461,7 @@ fn accepted_ground_literal_component_executable(
             atom: EirAtom {
                 predicate: predicate.to_string(),
                 arity: 1,
-                terms: vec![EirTerm::Integer(value)],
+                terms: vec![EirTerm::Integer(i128::from(value))],
             },
         }],
         vec![EpistemicReductionPlan {

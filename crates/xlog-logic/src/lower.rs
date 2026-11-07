@@ -1420,7 +1420,12 @@ impl Lowerer {
         let const_count = atom
             .terms
             .iter()
-            .filter(|t| term_to_const_value(t).is_some())
+            .filter(|t| {
+                matches!(
+                    t,
+                    Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_)
+                )
+            })
             .count();
 
         // Equality constants are usually selective; use a conservative default.
@@ -2515,7 +2520,9 @@ impl Lowerer {
             match task {
                 ArithmeticTypeTask::Visit(expression) => match expression {
                     ArithExpr::Variable(name) => values.push(variable_type(name)),
-                    ArithExpr::Integer(_) => values.push(Some(ScalarType::I64)),
+                    ArithExpr::Integer(value) => {
+                        values.push(Some(crate::ast::integer_literal_type(*value)))
+                    }
                     ArithExpr::Float(_) => values.push(Some(ScalarType::F64)),
                     ArithExpr::Add(left, right)
                     | ArithExpr::Sub(left, right)
@@ -2784,7 +2791,13 @@ impl Lowerer {
                         values.push(Expr::Column(column));
                     }
                     ArithExpr::Integer(value) => {
-                        values.push(Expr::Const(ConstValue::I64(*value)));
+                        values.push(Expr::Const(
+                            term_to_typed_const_value(
+                                &Term::Integer(*value),
+                                crate::ast::integer_literal_type(*value),
+                            )?
+                            .expect("integer literal lowers to a constant"),
+                        ));
                     }
                     ArithExpr::Float(value) => {
                         values.push(Expr::Const(ConstValue::F64(*value)));
@@ -3052,9 +3065,11 @@ fn sort_labels_from_terms(terms: &[Term]) -> Vec<String> {
 }
 
 /// Convert a term to a constant value (if it is a constant)
-fn term_to_const_value(term: &Term) -> Option<ConstValue> {
-    match term {
-        Term::Integer(i) => Some(ConstValue::I64(*i)),
+fn term_to_const_value(term: &Term) -> Result<Option<ConstValue>> {
+    Ok(match term {
+        Term::Integer(i) => {
+            return term_to_typed_const_value(term, crate::ast::integer_literal_type(*i));
+        }
         Term::Float(f) => Some(ConstValue::F64(*f)),
         Term::String(s) => Some(ConstValue::Symbol(s.clone())),
         Term::Symbol(id) => Some(ConstValue::Symbol(symbol::resolve(*id))),
@@ -3065,7 +3080,7 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         | Term::Cons { .. }
         | Term::Compound { .. }
         | Term::PredRef(_) => None,
-    }
+    })
 }
 
 /// A comparison coerces a constant only when its peer is a typed bound variable.
@@ -3076,7 +3091,7 @@ pub(crate) fn comparison_constant_value(
 ) -> Result<Option<ConstValue>> {
     match peer_type {
         Some(typ) => term_to_typed_const_value(term, typ),
-        None => Ok(term_to_const_value(term)),
+        None => term_to_const_value(term),
     }
 }
 
@@ -3087,7 +3102,7 @@ pub(crate) fn term_to_typed_const_value(
     let const_val = match term {
         Term::Integer(i) => match expected {
             ScalarType::U32 => {
-                if *i >= 0 && *i <= u32::MAX as i64 {
+                if *i >= 0 && *i <= u32::MAX as i128 {
                     ConstValue::U32(*i as u32)
                 } else {
                     return Err(XlogError::Compilation(format!(
@@ -3097,7 +3112,7 @@ pub(crate) fn term_to_typed_const_value(
                 }
             }
             ScalarType::U64 => {
-                if *i >= 0 {
+                if *i >= 0 && *i <= u64::MAX as i128 {
                     ConstValue::U64(*i as u64)
                 } else {
                     return Err(XlogError::Compilation(format!(
@@ -3107,7 +3122,7 @@ pub(crate) fn term_to_typed_const_value(
                 }
             }
             ScalarType::I32 => {
-                if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                if *i >= i32::MIN as i128 && *i <= i32::MAX as i128 {
                     ConstValue::I32(*i as i32)
                 } else {
                     return Err(XlogError::Compilation(format!(
@@ -3116,7 +3131,12 @@ pub(crate) fn term_to_typed_const_value(
                     )));
                 }
             }
-            ScalarType::I64 => ConstValue::I64(*i),
+            ScalarType::I64 => ConstValue::I64(i64::try_from(*i).map_err(|_| {
+                XlogError::Compilation(format!(
+                    "Integer literal {} out of range for {:?}",
+                    i, expected
+                ))
+            })?),
             ScalarType::F32 => {
                 let value = *i as f64;
                 if value < f32::MIN as f64 || value > f32::MAX as f64 {
@@ -3870,7 +3890,7 @@ mod tests {
         );
         assert_eq!(Term::Integer(42).inferred_scalar_type(), ScalarType::U32);
         assert_eq!(
-            Term::Integer(i64::MAX).inferred_scalar_type(),
+            Term::Integer(i128::from(i64::MAX)).inferred_scalar_type(),
             ScalarType::I64
         );
         assert_eq!(Term::Float(3.25).inferred_scalar_type(), ScalarType::F64);

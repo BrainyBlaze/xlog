@@ -466,7 +466,7 @@ impl ListNormalizer {
                 let tail_items = self.list_by_id(tail_id)?.items.clone();
                 items.extend(tail_items);
                 let id = self.register_list_terms(items, Some(elem_type))?;
-                Ok(Term::Integer(id as i64))
+                Ok(Term::Integer(id as i128))
             }
             _ => Ok(term.clone()),
         }
@@ -483,7 +483,7 @@ impl ListNormalizer {
                 let id = self.register_list_terms(items.clone(), expected_elem_type)?;
                 let elem_type = self.list_by_id(id)?.elem_type;
                 Ok(ListArg {
-                    term: Term::Integer(id as i64),
+                    term: Term::Integer(id as i128),
                     id: Some(id),
                     elem_type,
                     is_literal: true,
@@ -501,7 +501,7 @@ impl ListNormalizer {
                 };
                 let elem_type = self.list_by_id(id)?.elem_type;
                 Ok(ListArg {
-                    term: Term::Integer(id as i64),
+                    term: Term::Integer(id as i128),
                     id: Some(id),
                     elem_type,
                     is_literal: true,
@@ -567,23 +567,27 @@ impl ListNormalizer {
                 Some(ScalarType::U32) => {
                     let value = u32::try_from(*i)
                         .map_err(|_| list_error("integer list element is out of range for u32"))?;
-                    Ok((ScalarType::U32, Term::Integer(value as i64)))
+                    Ok((ScalarType::U32, Term::Integer(value as i128)))
                 }
                 Some(ScalarType::U64) => {
                     let value = u64::try_from(*i)
                         .map_err(|_| list_error("integer list element is out of range for u64"))?;
-                    Ok((ScalarType::U64, Term::Integer(value as i64)))
+                    Ok((ScalarType::U64, Term::Integer(value as i128)))
                 }
                 Some(ScalarType::I32) => {
                     let value = i32::try_from(*i)
                         .map_err(|_| list_error("integer list element is out of range for i32"))?;
-                    Ok((ScalarType::I32, Term::Integer(value as i64)))
+                    Ok((ScalarType::I32, Term::Integer(value as i128)))
                 }
-                Some(ScalarType::I64) | None if *i < 0 || *i > u32::MAX as i64 => {
-                    Ok((ScalarType::I64, Term::Integer(*i)))
+                Some(ScalarType::I64) => {
+                    let value = i64::try_from(*i)
+                        .map_err(|_| list_error("integer list element is out of range for i64"))?;
+                    Ok((ScalarType::I64, Term::Integer(i128::from(value))))
                 }
-                Some(ScalarType::I64) => Ok((ScalarType::I64, Term::Integer(*i))),
-                None => Ok((ScalarType::U32, Term::Integer(*i))),
+                None => {
+                    let typ = term.inferred_scalar_type();
+                    self.normalize_scalar_term(term, Some(typ))
+                },
                 Some(ScalarType::F32) => Ok((ScalarType::F32, Term::Float(*i as f64))),
                 Some(ScalarType::F64) => Ok((ScalarType::F64, Term::Float(*i as f64))),
                 Some(ScalarType::Bool) if *i == 0 || *i == 1 => {
@@ -630,7 +634,7 @@ impl ListNormalizer {
                         "nested list element requires list<list<T>> or list<u64> context",
                     ));
                 }
-                Ok((LIST_ID_TYPE, Term::Integer(id as i64)))
+                Ok((LIST_ID_TYPE, Term::Integer(id as i128)))
             }
             Term::Compound { .. } | Term::PredRef(_) | Term::Aggregate(_) => Err(list_error(
                 "compound, predref, and aggregate list elements require meta-term normalization support",
@@ -719,8 +723,8 @@ impl ListNormalizer {
             helper_rules.push(fact(
                 len_pred(),
                 vec![
-                    Term::Integer(list.id as i64),
-                    Term::Integer(list.items.len() as i64),
+                    Term::Integer(list.id as i128),
+                    Term::Integer(list.items.len() as i128),
                 ],
             ));
 
@@ -730,8 +734,8 @@ impl ListNormalizer {
                 helper_rules.push(fact(
                     &item_name,
                     vec![
-                        Term::Integer(list.id as i64),
-                        Term::Integer(idx as i64),
+                        Term::Integer(list.id as i128),
+                        Term::Integer(idx as i128),
                         item.clone(),
                     ],
                 ));
@@ -743,9 +747,9 @@ impl ListNormalizer {
                 helper_rules.push(fact(
                     &cons_name,
                     vec![
-                        Term::Integer(list.id as i64),
+                        Term::Integer(list.id as i128),
                         head,
-                        Term::Integer(tail_id as i64),
+                        Term::Integer(tail_id as i128),
                     ],
                 ));
             }
@@ -769,7 +773,9 @@ impl ListNormalizer {
             self.helper_preds.insert(pred.clone());
             helper_rules.push(fact(
                 &pred,
-                ids.into_iter().map(|id| Term::Integer(id as i64)).collect(),
+                ids.into_iter()
+                    .map(|id| Term::Integer(id as i128))
+                    .collect(),
             ));
         }
 
@@ -896,7 +902,7 @@ fn literal_key(term: &Term, typ: ScalarType) -> Result<LiteralKey> {
         (ScalarType::U32, Term::Integer(v)) => Ok(LiteralKey::U32(*v as u32)),
         (ScalarType::U64, Term::Integer(v)) => Ok(LiteralKey::U64(*v as u64)),
         (ScalarType::I32, Term::Integer(v)) => Ok(LiteralKey::I32(*v as i32)),
-        (ScalarType::I64, Term::Integer(v)) => Ok(LiteralKey::I64(*v)),
+        (ScalarType::I64, Term::Integer(v)) => Ok(LiteralKey::I64(*v as i64)),
         (ScalarType::F32, Term::Float(v)) => Ok(LiteralKey::F32((*v as f32).to_bits())),
         (ScalarType::F64, Term::Float(v)) => Ok(LiteralKey::F64(v.to_bits())),
         (ScalarType::Bool, Term::Integer(v)) => Ok(LiteralKey::Bool(*v != 0)),

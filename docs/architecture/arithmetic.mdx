@@ -25,7 +25,7 @@ that computes it).
 /// Arithmetic expression tree
 pub enum ArithExpr {
     Variable(String),
-    Integer(i64),
+    Integer(i128),
     Float(f64),
 
     // Binary operations
@@ -55,6 +55,12 @@ pub struct IsExpr {
 }
 ```
 
+The source integer payload preserves the full signed and unsigned 64-bit ranges.
+It is lowered to the declared native scalar type with range checking; there is no
+128-bit runtime scalar. Structured extraction keeps the `integer` tag and exact
+JSON number. Rust callers constructing integer AST or EIR variants must widen
+typed integer values with `i128::from(value)`.
+
 ## Type Inference Rules
 
 Before lowering, every expression node gets a scalar type. The rules below are
@@ -70,7 +76,7 @@ inputs.
 | `min(X, Y)` | `type(X) == type(Y)` required | `type(X)` |
 | `pow(X, Y)` | Any numeric | `f64` always |
 | `cast(X, T)` | Any numeric | `T` |
-| Integer literal | - | `i64` |
+| Integer literal | Source range `i64::MIN..=u64::MAX` | `i64` when representable, otherwise `u64` |
 | Float literal | - | `f64` |
 
 Type mismatches are rejected during inference with a source-located diagnostic

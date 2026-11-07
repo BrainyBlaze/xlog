@@ -15,12 +15,12 @@ pub enum GroundTermEncodingError {
         /// Requested scalar type.
         expected: ScalarType,
         /// Integer value that could not be represented.
-        value: i64,
+        value: i128,
     },
     /// A boolean integer was neither zero nor one.
     InvalidBooleanInteger {
         /// Integer supplied for the boolean column.
-        value: i64,
+        value: i128,
     },
     /// A boolean symbol was neither `true` nor `false`.
     InvalidBooleanSymbol {
@@ -117,7 +117,12 @@ pub fn append_ground_term_bytes(
             output.extend_from_slice(&encoded.to_le_bytes());
         }
         (ScalarType::I64, Term::Integer(value)) => {
-            output.extend_from_slice(&value.to_le_bytes());
+            let encoded =
+                i64::try_from(*value).map_err(|_| GroundTermEncodingError::IntegerOutOfRange {
+                    expected: ScalarType::I64,
+                    value: *value,
+                })?;
+            output.extend_from_slice(&encoded.to_le_bytes());
         }
         (ScalarType::F32, Term::Float(value)) => {
             output.extend_from_slice(&(*value as f32).to_le_bytes());
@@ -287,10 +292,10 @@ mod tests {
             (
                 "large u32",
                 ScalarType::U32,
-                Term::Integer(i64::from(u32::MAX) + 1),
+                Term::Integer(i128::from(u32::MAX) + 1),
                 GroundTermEncodingError::IntegerOutOfRange {
                     expected: ScalarType::U32,
-                    value: i64::from(u32::MAX) + 1,
+                    value: i128::from(u32::MAX) + 1,
                 },
                 "u32 out of range: 4294967296",
             ),
@@ -307,20 +312,20 @@ mod tests {
             (
                 "small i32",
                 ScalarType::I32,
-                Term::Integer(i64::from(i32::MIN) - 1),
+                Term::Integer(i128::from(i32::MIN) - 1),
                 GroundTermEncodingError::IntegerOutOfRange {
                     expected: ScalarType::I32,
-                    value: i64::from(i32::MIN) - 1,
+                    value: i128::from(i32::MIN) - 1,
                 },
                 "i32 out of range: -2147483649",
             ),
             (
                 "large i32",
                 ScalarType::I32,
-                Term::Integer(i64::from(i32::MAX) + 1),
+                Term::Integer(i128::from(i32::MAX) + 1),
                 GroundTermEncodingError::IntegerOutOfRange {
                     expected: ScalarType::I32,
-                    value: i64::from(i32::MAX) + 1,
+                    value: i128::from(i32::MAX) + 1,
                 },
                 "i32 out of range: 2147483648",
             ),
