@@ -350,8 +350,9 @@ values under `pred p(symbol)`, while the same authored integer can encode as
 different native types in different columns. The exact floating bits preserve
 native same-scalar total-order equality, including distinct positive and negative
 zero. Mixed-type comparison evaluation is not supplied by this report. Authored
-integer syntax is limited to signed 64-bit values; this syntax limit says nothing
-about the full range accepted through other numeric input interfaces.
+integer syntax preserves the inclusive range `i64::MIN..=u64::MAX`. The source
+payload is wider than the runtime scalar; conversion to a declared column type
+still rejects values outside that type's range.
 
 Import coalescing is a separate operation: native AST equality can coalesce
 `p(0.0)` and `p(-0.0)`. Each authored row keeps its own carrier conversion; the
