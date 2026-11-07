@@ -1,6 +1,6 @@
 //! Prospective operand choices use the executable compiler's shape inference.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use serde_json::{Map, Value};
@@ -10,9 +10,16 @@ use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorSignature, Ten
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
 
 #[derive(Clone)]
+pub(super) struct EntryRequirements {
+    pub(super) calls: BTreeSet<String>,
+    pub(super) parameters: BTreeSet<String>,
+}
+
+#[derive(Clone)]
 pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
+    pub(super) entry_requirements: Option<EntryRequirements>,
     shapes: [Vec<TensorValueShape>; 2],
     raw_tokens: Vec<u32>,
 }
@@ -34,6 +41,7 @@ impl Program {
                 max_context,
             },
             planned_output: None,
+            entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],
             raw_tokens,
         }
@@ -85,6 +93,12 @@ impl Program {
         self.body
             .validate_acquired_body()
             .map_err(|error| error.to_string())?;
+        if self
+            .planned_output
+            .is_some_and(|output| !self.completion_possible(&self.body, output, signatures))
+        {
+            return Err("remaining entry operations cannot cover required calls and reads".into());
+        }
         self.shapes[0].push(first);
         self.shapes[1].push(last);
         Ok(())
@@ -158,6 +172,143 @@ impl Program {
         let mut body = self.body.clone();
         body.operations.push(operation);
         body.validate_acquired_body().is_ok()
+            && self
+                .planned_output
+                .is_none_or(|output| self.completion_possible(&body, output, signatures))
+    }
+
+    pub(super) fn permits_plan(&self, output: usize, signatures: &Signatures) -> bool {
+        self.completion_possible(&self.body, output, signatures)
+    }
+
+    fn completion_possible(
+        &self,
+        body: &TensorProgram,
+        output: usize,
+        signatures: &Signatures,
+    ) -> bool {
+        let Some(required) = &self.entry_requirements else {
+            return true;
+        };
+        let Some(remaining) = (output + 1).checked_sub(body.operations.len()) else {
+            return false;
+        };
+        let mut calls = required.calls.clone();
+        let mut parameters = required.parameters.clone();
+        for operation in &body.operations {
+            if let Some(name) = operation.callee() {
+                calls.remove(name);
+            }
+            if let Some(weight) = operation.parameter() {
+                let Some(parameter) = body.parameters.get(weight) else {
+                    return false;
+                };
+                parameters.remove(&parameter.name);
+            }
+        }
+        let needed = calls.len() + parameters.len();
+        if remaining < needed
+            || parameters.iter().any(|name| {
+                !body
+                    .parameters
+                    .iter()
+                    .any(|parameter| &parameter.name == name)
+            })
+        {
+            return false;
+        }
+        if needed == 0 || remaining > needed {
+            return true;
+        }
+        // Each outstanding root call or direct physical read needs a distinct
+        // row. With no spare row, at least one must also yield the entry result.
+        // Allow hypothetical operands here: this is a necessary lower bound,
+        // not a claim that those operands already exist or can still be built.
+        calls
+            .iter()
+            .any(|name| self.call_can_finish(name, signatures))
+            || body
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(weight, parameter)| {
+                    parameters.contains(&parameter.name)
+                        && self.parameter_can_finish(weight, signatures)
+                })
+    }
+
+    fn parameter_can_finish(&self, weight: usize, signatures: &Signatures) -> bool {
+        (0..2).all(|length| {
+            self.infer(&Op::Parameter { weight }, signatures, length)
+                .is_ok_and(|shape| self.matches_output(shape, length))
+        }) || [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                let parameter = &self.body.parameters[weight];
+                let [_, inner] = parameter.shape.as_slice() else {
+                    return false;
+                };
+                let Ok(mut input) = self.body.signature.output(tokens, self.body.vocabulary) else {
+                    return false;
+                };
+                input.columns = *inner;
+                self.body
+                    .operation_shape_with(
+                        &Op::Linear { input: 0, weight },
+                        tokens,
+                        &|_| Ok(input),
+                        &|name| {
+                            signatures.get(name).cloned().ok_or_else(|| {
+                                XlogError::Compilation("callee must precede its caller".into())
+                            })
+                        },
+                    )
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+    }
+
+    fn call_can_finish(&self, name: &str, signatures: &Signatures) -> bool {
+        let Some(signature) = signatures.get(name) else {
+            return false;
+        };
+        if [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                signature
+                    .output(tokens, self.body.vocabulary)
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+        {
+            return true;
+        }
+        if !matches!(signature, TensorSignature::Pure { input_widths, .. } if input_widths.len() == 2)
+        {
+            return false;
+        }
+        [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                let Ok(mut arguments) = signature.arguments(tokens) else {
+                    return false;
+                };
+                arguments[1].rows = tokens;
+                self.body
+                    .operation_shape_with(
+                        &Op::Scan {
+                            input: 1,
+                            initial: 0,
+                            function: name.into(),
+                            max_steps: self.body.max_context,
+                        },
+                        tokens,
+                        &|id| Ok(arguments[id]),
+                        &|_| Ok(signature.clone()),
+                    )
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
     }
 
     fn references(&self, fields: &Map<String, Value>, name: &str, extent: usize) -> Vec<usize> {
