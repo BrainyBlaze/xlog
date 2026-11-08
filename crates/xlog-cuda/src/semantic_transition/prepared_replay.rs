@@ -2,7 +2,8 @@
 
 use super::*;
 
-const SUCCESSOR_CUSTODY_ROLES: [u64; 10] = [2, 14, 27, 28, 30, 31, 32, 33, 39, 48];
+// The complete immutable world binding is already retained by the parent.
+const SUCCESSOR_CUSTODY_ROLES: [u64; 11] = [2, 14, 27, 28, 30, 31, 32, 33, 39, 48, 60];
 
 /// Canonical replay roots belonging to one original completed Proposal.
 #[cfg(feature = "semantic-policy")]

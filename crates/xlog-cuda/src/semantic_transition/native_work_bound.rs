@@ -2583,6 +2583,7 @@ fn publication_finalization_native_work_ceiling(
         .filter(|range| {
             matches!(range.role, 32 | 44 | 56 | 57)
                 || range.role == SemanticStateRole::TaskGround as u64
+                || range.role == SemanticStateRole::SemanticWorldState as u64
         })
         .count() as u64;
     // Applying the continuation repeats Update-binding validation, then walks
@@ -2788,6 +2789,23 @@ fn publication_finalization_native_work_ceiling(
     ] {
         repeat_native_ceiling(&mut result, publication_hash_ceiling(bytes)?, count)?;
     }
+    add_native_work_ceiling(
+        &mut result,
+        [
+            0,
+            ceiling_sum([ceiling_product(3, n)?, 60])?,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            ceiling_sum([
+                capacity(SemanticStateRole::SemanticWorldState as u64, 0)?,
+                18 * 8,
+            ])?,
+        ],
+    )?;
     let fixed = ceiling_sum([
         size_of::<DeviceState>() as u64,
         136 * size_of::<SemanticTransitionReceipt>() as u64,
@@ -3039,6 +3057,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
         for original in storage.bank_templates[0].iter().filter(|range| {
             matches!(range.role, 32 | 44 | 56 | 57)
                 || range.role == SemanticStateRole::TaskGround as u64
+                || range.role == SemanticStateRole::SemanticWorldState as u64
         }) {
             let mut bytes = 0;
             for bank in &storage.bank_templates {

@@ -748,6 +748,9 @@ impl SemanticTransitionSession {
         loaded.require_budget(budget)?;
         let archive = loaded.bytes.clone();
         let mut material = loaded.into_complete()?;
+        task.spec
+            .semantic_context
+            .derive_context(&mut material.ranges, budget)?;
         if target.nonterminal_intent.is_some_and(|binding| {
             binding.candidate_prefix_end <= material.bank.header.prefix_extent
         }) {

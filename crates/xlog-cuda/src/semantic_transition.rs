@@ -118,6 +118,8 @@ pub use state_restoration::{
 };
 mod program_image;
 mod task_ground;
+mod world_state;
+pub use world_state::{SemanticWorldContext, SemanticWorldSource};
 mod task_retirement;
 mod verification_receipts;
 #[cfg(feature = "semantic-policy")]
@@ -612,6 +614,8 @@ fn task_candidate_better(
 /// attach an authorized task to its retained semantic session.
 #[derive(Clone, Debug)]
 pub struct SemanticTaskEvaluationSpec {
+    /// Original common namespace and authored context, retained through every branch.
+    pub semantic_context: SemanticWorldContext,
     pub rule_library: Option<Arc<SemanticEvaluationRuleLibrary>>,
     pub evaluation_intervention: Option<SemanticEvaluationIntervention>,
     /// Original statement records in the retained admission, in observer order.
@@ -757,6 +761,7 @@ impl SemanticTaskEvaluationSpec {
             detail: format!("task binding: {detail}"),
         };
         let query_count = self.statement_records.len();
+        self.semantic_context.validate_queries(query_count)?;
         let query_count_u32 = u32::try_from(query_count)
             .map_err(|_| invalid("query roster exceeds the original record-index domain"))?;
         if query_count == 0 || self.admissible_truth_masks.len() != query_count {
@@ -3128,9 +3133,11 @@ pub enum SemanticStateRole {
     ReplayAppendEntries = 56,
     ReplayAppendPayload = 57,
     TaskGround = 58,
+    SemanticWorldSource = 59,
+    SemanticWorldState = 60,
 }
 
-const PUBLICATION_ROLE_COUNT: usize = SemanticStateRole::TaskGround as usize;
+const PUBLICATION_ROLE_COUNT: usize = SemanticStateRole::SemanticWorldState as usize;
 
 impl SemanticStateRole {
     pub fn from_code(code: u64) -> Option<Self> {
@@ -3193,6 +3200,8 @@ impl SemanticStateRole {
             SemanticStateRole::ReplayAppendEntries,
             SemanticStateRole::ReplayAppendPayload,
             SemanticStateRole::TaskGround,
+            SemanticStateRole::SemanticWorldSource,
+            SemanticStateRole::SemanticWorldState,
         ];
         let index = usize::try_from(code.checked_sub(1)?).ok()?;
         ROLES.get(index).copied()
@@ -18207,7 +18216,7 @@ fn initial_acknowledgement_record(
 }
 
 fn publication_mutable_role(role: u64) -> bool {
-    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=58)
+    matches!(role, 3..=15 | 18..=25 | 30 | 32 | 33 | 39 | 44 | 51..=58 | 60)
 }
 
 fn continuation_role(role: u64) -> bool {
@@ -18269,7 +18278,7 @@ fn validate_parent_records(
     for record in &parent.records {
         let role = record.role as u64;
         if is_tensor_role(role)
-            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55..=58)
+            || matches!(role, 1 | 3 | 14..=16 | 33 | 43 | 47 | 48 | 55..=60)
             || record.index >= parent.role_counts[role as usize - 1]
             || (record.bytes.is_empty() && role != 2)
             || record.bytes.len() > record.capacity_bytes
@@ -32896,6 +32905,8 @@ impl SemanticTransitionSession {
                         | SemanticStateRole::ReplayAppendEntries
                         | SemanticStateRole::ReplayAppendPayload
                         | SemanticStateRole::TaskGround
+                        | SemanticStateRole::SemanticWorldSource
+                        | SemanticStateRole::SemanticWorldState
                 )
             })
         {
@@ -32960,6 +32971,15 @@ impl SemanticTransitionSession {
             )?,
             capacity_bytes: ground_layout.bytes,
         });
+        parent.records.extend(
+            self.task
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .0
+                .spec
+                .semantic_context
+                .initial_records(),
+        );
         let mut layouts = BTreeMap::new();
         let mut plans = Vec::new();
         for tensor in tensors {

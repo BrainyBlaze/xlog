@@ -22,6 +22,7 @@ pub(super) struct WorldDeclarationData {
 }
 
 pub(super) struct WorldOwnerData {
+    pub(super) native: Arc<xlog_cuda::SemanticWorldSource>,
     pub(super) declaration: Arc<WorldDeclarationData>,
     declaration_object: Py<PySemanticWorldDeclaration>,
     seed_identity: [u8; 32],
@@ -729,8 +730,17 @@ impl PySemanticWorldOwner {
                 .extract::<PyRef<'_, PySemanticWorldDeclaration>>()?
                 .inner,
         );
+        let native = xlog_cuda::SemanticWorldSource::new(
+            Arc::clone(&inner.native),
+            inner.programs.clone(),
+            Arc::clone(&inner.material),
+            xlog_cuda::Identity256::from_bytes(inner.identity),
+            xlog_cuda::Identity256::from_bytes(seed_identity),
+        )
+        .map_err(xlog_err)?;
         Ok(Self {
             inner: Arc::new(WorldOwnerData {
+                native,
                 declaration: inner,
                 seed_identity,
                 declaration_object: declaration

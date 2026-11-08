@@ -10860,7 +10860,7 @@ fn read_task_evaluation_spec(
     actor_eligible: &Bound<'_, PyAny>,
     task_ground: &Bound<'_, PyAny>,
     budget: &mut usize,
-) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+) -> PyResult<TaskEvaluationContent> {
     let values = read_task_evaluation_values(
         statements,
         supports,
@@ -11132,13 +11132,50 @@ fn task_ground_value(value: &ColdValue) -> PyResult<xlog_cuda::SemanticTaskGroun
     }
 }
 
+/// Parsed original content; authority and the common namespace are bound once below.
+struct TaskEvaluationContent {
+    rule_library: Option<Arc<xlog_cuda::SemanticEvaluationRuleLibrary>>,
+    evaluation_intervention: Option<xlog_cuda::SemanticEvaluationIntervention>,
+    statement_records: Vec<u32>,
+    task_ground: xlog_cuda::SemanticTaskGround,
+    allowed_support_records: Vec<u32>,
+    program: Arc<dyn xlog_cuda::SemanticTaskProgram>,
+    scoring: xlog_cuda::SemanticTaskScoring,
+    priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
+    admissible_truth_masks: Vec<u8>,
+    actor_eligible: bool,
+    training_domain: Option<SemanticTrainingDomain>,
+}
+
+impl TaskEvaluationContent {
+    fn bind(
+        self,
+        semantic_context: xlog_cuda::SemanticWorldContext,
+    ) -> xlog_cuda::SemanticTaskEvaluationSpec {
+        xlog_cuda::SemanticTaskEvaluationSpec {
+            semantic_context,
+            rule_library: self.rule_library,
+            evaluation_intervention: self.evaluation_intervention,
+            statement_records: self.statement_records,
+            task_ground: self.task_ground,
+            allowed_support_records: self.allowed_support_records,
+            program: self.program,
+            scoring: self.scoring,
+            priority_levels: self.priority_levels,
+            admissible_truth_masks: self.admissible_truth_masks,
+            actor_eligible: self.actor_eligible,
+            training_domain: self.training_domain,
+        }
+    }
+}
+
 fn task_evaluation_spec(
     values: &[ColdValue],
     priority_levels: Vec<xlog_cuda::SemanticTaskPriorityLevel>,
     editable_program: Option<Arc<cold_task::EditableProgramOwner>>,
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
-) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+) -> PyResult<TaskEvaluationContent> {
     task_evaluation_spec_owned(
         values,
         priority_levels,
@@ -11162,15 +11199,16 @@ fn task_evaluation_spec_with_allocation_owner(
             "evaluation requires its eight content fields and native semantic context",
         ));
     }
-    material_sources.semantic_context(&values[8])?;
-    task_evaluation_spec_owned(
+    let context = material_sources.native_semantic_context(&values[8])?;
+    let content = task_evaluation_spec_owned(
         &values[..8],
         priority_levels,
         editable_program,
         training_domain,
         initial_program_source,
         Some(material_sources),
-    )
+    )?;
+    Ok(content.bind(context))
 }
 
 fn task_evaluation_spec_owned(
@@ -11180,7 +11218,7 @@ fn task_evaluation_spec_owned(
     training_domain: &ColdValue,
     initial_program_source: Option<&str>,
     material_sources: Option<&material_source::MaterialSourceRegistry>,
-) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+) -> PyResult<TaskEvaluationContent> {
     let material_budget = material_sources
         .map(|sources| sources.native_budget())
         .transpose()?;
@@ -11216,7 +11254,7 @@ fn task_evaluation_spec_core(
     material_budget: Option<&xlog_cuda::SemanticReplayMaterialBudget>,
     material_sources: Option<&material_source::MaterialSourceRegistry>,
     diagnostic_handoff: &mut Option<crate::types::PreparedDiagnosticHandoff>,
-) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+) -> PyResult<TaskEvaluationContent> {
     if values.len() != 8 {
         return Err(invalid("incorrect task evaluation input count"));
     }
@@ -11454,7 +11492,7 @@ fn task_evaluation_spec_core(
         program = program.with_editable_program(Arc::clone(&editable.program));
     }
     let program = Arc::new(program);
-    Ok(xlog_cuda::SemanticTaskEvaluationSpec {
+    Ok(TaskEvaluationContent {
         rule_library,
         evaluation_intervention: None,
         statement_records,

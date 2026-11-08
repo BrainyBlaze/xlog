@@ -215,6 +215,7 @@ pub(super) struct MaterialSourceRegistry {
     compiler_diagnostic_acquiring: AtomicBool,
     owner_metadata: Mutex<Option<xlog_cuda::SemanticReplayMaterialReservation>>,
     semantic_world: Mutex<Option<Arc<world::WorldOwnerData>>>,
+    semantic_world_metadata: Mutex<Option<xlog_cuda::SemanticReplayMaterialReservation>>,
 }
 
 impl MaterialSourceRegistry {
@@ -247,6 +248,29 @@ impl MaterialSourceRegistry {
             .map(Arc::clone)
             .ok_or_else(|| invalid("semantic context requires its original common world owner"))?;
         world::resolve_binding(&owner, binding)
+    }
+
+    pub(super) fn native_semantic_context(
+        &self,
+        binding: &ColdValue,
+    ) -> PyResult<xlog_cuda::SemanticWorldContext> {
+        let context = self.semantic_context(binding)?;
+        let budget = self.native_budget()?;
+        let mut retained = self
+            .semantic_world_metadata
+            .lock()
+            .map_err(|_| invalid("common semantic world allocation owner is poisoned"))?;
+        if retained.is_none() {
+            let bytes =
+                u64::try_from(context.owner.native.allocation_bytes().map_err(xlog_err)?)
+                    .map_err(|_| invalid("common semantic world allocation extent exceeds u64"))?;
+            *retained = Some(budget.reserve_auxiliary(bytes).map_err(xlog_err)?);
+        }
+        context
+            .owner
+            .native
+            .context(context.index)
+            .map_err(xlog_err)
     }
 
     /// Warm the same original cache before acquiring a consumer's own mutex.
