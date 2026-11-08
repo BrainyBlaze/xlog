@@ -874,6 +874,15 @@ class SemanticWorldDeclaration:
     ) -> None: ...
     @staticmethod
     def from_material(material: bytes) -> SemanticWorldDeclaration: ...
+    @staticmethod
+    def capacity_requirements(
+        *, contexts: tuple[tuple[Any, ...], ...],
+        event_nodes: tuple[tuple[Any, ...], ...],
+        measure_factors: tuple[tuple[Any, ...], ...],
+        numeric_law: tuple[str, str, str, str, str],
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        """Native full-source workspace geometry; no CUDA allocation or evaluation."""
+        ...
     @property
     def material(self) -> bytes: ...
     @property

@@ -947,7 +947,7 @@ impl ColdTaskSource {
         }
     }
 
-    fn admission(&self) -> PyResult<SemanticAdmissionRecords> {
+    pub(super) fn admission(&self) -> PyResult<SemanticAdmissionRecords> {
         task_admission(
             &self.initial_theory,
             &self.input_facts,

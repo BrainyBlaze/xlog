@@ -14,6 +14,7 @@ const CONTEXT_TAG: &str = "xlog.semantic-context.v1";
 
 pub(super) struct WorldDeclarationData {
     pub(super) native: Arc<world::SemanticWorldDeclaration>,
+    pub(super) programs: Vec<Arc<xlog_cuda::SemanticProgramAdmission>>,
     pub(super) material: Arc<[u8]>,
     pub(super) identity: [u8; 32],
     pub(super) local_identities: Vec<[u8; 32]>,
@@ -348,6 +349,115 @@ fn validate_canonical_primitives(value: &ColdValue) -> PyResult<()> {
     }
 }
 
+fn authored_contexts(contexts: &Bound<'_, PyAny>) -> PyResult<(Vec<ColdValue>, Vec<Py<PyTuple>>)> {
+    if !contexts.is_exact_instance_of::<PyTuple>() {
+        return Err(invalid(
+            "semantic contexts require an exact ordered immutable tuple",
+        ));
+    }
+    let mut records = Vec::new();
+    let mut original_sources = Vec::new();
+    for row in contexts.cast::<PyTuple>()?.iter() {
+        if !row.is_exact_instance_of::<PyTuple>() || row.cast::<PyTuple>()?.len() != 5 {
+            return Err(invalid("semantic local record requires source, view, signed program, rule cells and queries"));
+        }
+        let row = row.cast::<PyTuple>()?;
+        let original = row.get_item(0)?;
+        let mut fields = vec![source_material(&original)?];
+        original_sources.push(original.cast::<PyTuple>()?.clone().unbind());
+        for field in row.iter().skip(1) {
+            fields.push(cold_immutable(&field)?);
+        }
+        records.push(ColdValue::Sequence(fields));
+    }
+    Ok((records, original_sources))
+}
+
+fn compiled_programs(
+    py: Python<'_>,
+    sources: &[Py<PyTuple>],
+    contexts: &[world::SemanticContextDeclaration],
+) -> PyResult<Vec<Arc<xlog_cuda::SemanticProgramAdmission>>> {
+    if sources.len() != contexts.len() {
+        return Err(invalid("common semantic source/context roster differs"));
+    }
+    let mut programs = Vec::with_capacity(sources.len());
+    for (source, context) in sources.iter().zip(contexts) {
+        let source = super::cold_task::ColdTaskSource::from_tuple(source.bind(py).as_any())?;
+        let compiled = super::cold_task::editable_source_from_admission(&source.admission()?)?
+            .ok_or_else(|| {
+                invalid("semantic world lost its original canonical program lowering")
+            })?;
+        context
+            .bind_program(
+                compiled.program.initial_facts.len(),
+                &compiled
+                    .program
+                    .initial_rules
+                    .iter()
+                    .map(|rule| rule.body_count as usize)
+                    .collect::<Vec<_>>(),
+                compiled.program.queries.len(),
+            )
+            .map_err(|error| invalid(&error.to_string()))?;
+        programs.push(compiled.program);
+    }
+    Ok(programs)
+}
+
+fn require_capacities(
+    actual: world::SemanticMeasureCapacities,
+    required: world::SemanticMeasureCapacities,
+) -> PyResult<()> {
+    let dimensions = |cap: world::SemanticMeasureCapacities| {
+        [
+            cap.nodes,
+            cap.edges,
+            cap.unique_slots,
+            cap.apply_entries,
+            cap.dependency_edges,
+            cap.frontier_entries,
+            cap.particles,
+            cap.variables,
+        ]
+    };
+    if dimensions(actual)
+        .iter()
+        .zip(dimensions(required))
+        .any(|(have, need)| *have < need)
+    {
+        return Err(invalid(
+            "semantic capacities do not enclose the complete authored mutation family",
+        ));
+    }
+    Ok(())
+}
+
+fn capacity_tuple(
+    cap: world::SemanticMeasureCapacities,
+) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    (
+        cap.nodes,
+        cap.edges,
+        cap.unique_slots,
+        cap.apply_entries,
+        cap.dependency_edges,
+        cap.frontier_entries,
+        cap.particles,
+        cap.variables,
+    )
+}
+
+fn numeric_law(value: &ColdValue) -> PyResult<()> {
+    let law = value.fields(value::SEMANTIC_VALUE_NUMERIC_LAW.len())?;
+    for (actual, expected) in law.iter().zip(value::SEMANTIC_VALUE_NUMERIC_LAW) {
+        if text_value(actual)? != expected {
+            return Err(invalid("semantic world changed the declared numerical law"));
+        }
+    }
+    Ok(())
+}
+
 impl WorldDeclarationData {
     fn from_value(
         py: Python<'_>,
@@ -367,12 +477,7 @@ impl WorldDeclarationData {
                 "semantic world requires the full finite ordered context roster",
             ));
         }
-        let law = fields[4].fields(value::SEMANTIC_VALUE_NUMERIC_LAW.len())?;
-        for (actual, expected) in law.iter().zip(value::SEMANTIC_VALUE_NUMERIC_LAW) {
-            if text_value(actual)? != expected {
-                return Err(invalid("semantic world changed the declared numerical law"));
-            }
-        }
+        numeric_law(&fields[4])?;
         let caps = fields[5].fields(8)?;
         let native = world::SemanticWorldDeclaration {
             contexts: local_records
@@ -410,6 +515,14 @@ impl WorldDeclarationData {
                 ));
             }
         }
+        let programs = compiled_programs(py, &sources, &native.contexts)?;
+        let required = xlog_cuda::semantic_measure::semantic_measure_capacity_requirements(
+            &programs,
+            &native.event_nodes,
+            &native.measure_factors,
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        require_capacities(native.capacities, required)?;
         let local_identities = local_records
             .iter()
             .map(|record| {
@@ -433,6 +546,7 @@ impl WorldDeclarationData {
         let identity = digest.finalize().into();
         Ok(Self {
             native: Arc::new(native),
+            programs,
             material: checkpoint_cold_value_bytes(&material).into(),
             identity,
             local_identities,
@@ -461,26 +575,7 @@ impl PySemanticWorldDeclaration {
         numeric_law: &Bound<'_, PyAny>,
         capacities: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
-        if !contexts.is_exact_instance_of::<PyTuple>() {
-            return Err(invalid(
-                "semantic contexts require an exact ordered immutable tuple",
-            ));
-        }
-        let mut records = Vec::new();
-        let mut original_sources = Vec::new();
-        for row in contexts.cast::<PyTuple>()?.iter() {
-            if !row.is_exact_instance_of::<PyTuple>() || row.cast::<PyTuple>()?.len() != 5 {
-                return Err(invalid("semantic local record requires source, view, signed program, rule cells and queries"));
-            }
-            let row = row.cast::<PyTuple>()?;
-            let original = row.get_item(0)?;
-            let mut fields = vec![source_material(&original)?];
-            original_sources.push(original.cast::<PyTuple>()?.clone().unbind());
-            for field in row.iter().skip(1) {
-                fields.push(cold_immutable(&field)?);
-            }
-            records.push(ColdValue::Sequence(fields));
-        }
+        let (records, original_sources) = authored_contexts(contexts)?;
         let material = ColdValue::Sequence(vec![
             ColdValue::Text(WORLD_TAG.into()),
             ColdValue::Sequence(records),
@@ -496,6 +591,42 @@ impl PySemanticWorldDeclaration {
                 Some(original_sources),
             )?),
         })
+    }
+
+    /// Derives the resident workspace dimensions from the same original owners.
+    /// It parses cold source through the canonical compiler and performs no CUDA
+    /// allocation, model execution, or query evaluation.
+    #[staticmethod]
+    #[pyo3(signature = (*, contexts, event_nodes, measure_factors, numeric_law))]
+    fn capacity_requirements(
+        py: Python<'_>,
+        contexts: &Bound<'_, PyAny>,
+        event_nodes: &Bound<'_, PyAny>,
+        measure_factors: &Bound<'_, PyAny>,
+        numeric_law: &Bound<'_, PyAny>,
+    ) -> PyResult<(u32, u32, u32, u32, u32, u32, u32, u32)> {
+        let (records, sources) = authored_contexts(contexts)?;
+        let contexts = records
+            .iter()
+            .map(parse_context)
+            .collect::<PyResult<Vec<_>>>()?;
+        let events = parse_events(&cold_immutable(event_nodes)?)?;
+        let factors = parse_factors(&cold_immutable(measure_factors)?)?;
+        self::numeric_law(&cold_immutable(numeric_law)?)?;
+        let programs = compiled_programs(py, &sources, &contexts)?;
+        let capacities = xlog_cuda::semantic_measure::semantic_measure_capacity_requirements(
+            &programs, &events, &factors,
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        world::SemanticWorldDeclaration {
+            contexts,
+            event_nodes: events,
+            measure_factors: factors,
+            capacities,
+        }
+        .validate()
+        .map_err(|error| invalid(&error.to_string()))?;
+        Ok(capacity_tuple(capacities))
     }
 
     #[staticmethod]
