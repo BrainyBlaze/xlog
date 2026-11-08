@@ -578,7 +578,37 @@ the canonical compiler; this lower bound does not guarantee a constructible
 completion, token termination or useful dependence on history. Packets1–12
 retain their literal mask semantics and saved replay behavior.
 
-For a version4 through version13 packet,
+Version14 (`xlog-contextual-acquisition-v14`) keeps the context2 dependency
+records, constructor predicate and `numerical-rows-v3` source. Entry plans and
+prospective choices search for a joint typed structural completion within the
+remaining operation rows. Each frontier value retains its canonical shape at
+lengths1 and `max_context`, output-reaching dependencies and numeric-argument
+reads. Every search transition uses the same typed program insertion, acquired
+causal check and dependency propagation as an actual model-authored operation.
+Shape conversions and joins therefore consume rows together; separate values
+do not contribute a free union of their dependencies.
+
+The search keeps only nondominated values with identical shape pairs, preserving
+the distinction between raw-token and numeric-argument reads needed by causal
+scans. Equivalent frontiers are memoized within one mask call. Candidate widths
+come from the actual frontier, parameter dimensions and declared input/output
+ABIs; column selection values do not change structural dependency coverage.
+Mandatory direct vector reads and calls that ignore all numeric formals can be
+scheduled first inside the search when doing so preserves the causal boundary;
+scan-capable cells remain choices. This removes equivalent scheduling orders
+without changing the model's source order.
+Binary joins share the structural transition of a `Select` with one repeated
+operand. A shape-preserving `Tanh` can fill spare rows after a complete result
+becomes available. These are search representatives, never emitted source or
+operations substituted for model choices. Incomplete calls enumerate actual
+shape-valid operand vectors instead of unioning mutually exclusive choices.
+
+This establishes structural completion under the typed operation-row bound,
+not completion within source-byte or token budgets, numerical nonconstancy,
+usefulness or scientific acceptance. Earlier packets1–13 retain their literal
+mask and saved restoration behavior; callers explicitly select the new packet.
+
+For a version4 through version14 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -593,9 +623,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12 and13 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–14 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–13). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–14). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix

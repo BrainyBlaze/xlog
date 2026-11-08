@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -33,6 +34,7 @@ const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
 const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
 const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
 const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
+const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -48,7 +50,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=13) {
+    if !matches!(version, 1..=14) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -278,6 +280,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 14 {
+            schema["description"] = json!(format!(
+                "{} Entry plans and prospective choices must also admit a joint typed structural completion within the remaining rows. Search states retain canonical shape pairs, output dependencies and numeric-argument reads; every searched transition uses the same acquired-body admission as a model-authored operation. The search supplies no source or operands and does not prove token-budget completion, semantic nonconstancy or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -288,6 +296,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                14 => TYPED_COMPLETION_LANGUAGE,
                 13 => FRONTIER_COMPLETION_LANGUAGE,
                 12 => OUTPUT_DEPENDENCY_LANGUAGE,
                 11 => ENTRY_BUDGET_LANGUAGE,
@@ -405,6 +414,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    completion_cache: Option<Arc<typed::CompletionCache>>,
 }
 
 #[pymethods]
@@ -413,7 +423,10 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let frontier_completion = language["id"] == FRONTIER_COMPLETION_LANGUAGE;
+        let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE)
+            .then(|| Arc::new(typed::CompletionCache::default()));
+        let frontier_completion =
+            language["id"] == FRONTIER_COMPLETION_LANGUAGE || completion_cache.is_some();
         let output_dependencies =
             language["id"] == OUTPUT_DEPENDENCY_LANGUAGE || frontier_completion;
         if (language["id"] != LANGUAGE
@@ -525,6 +538,7 @@ impl PyNativeAcquisitionMask {
             entry_budget,
             output_dependencies,
             frontier_completion,
+            completion_cache,
             ordered,
             planned_output,
             check_single_operation,
@@ -544,6 +558,9 @@ impl PyNativeAcquisitionMask {
     fn filter(&self, py: Python<'_>, prefix: &[u8], allowed_mask: &[u8]) -> PyResult<Py<PyBytes>> {
         if allowed_mask.len() != self.token_bytes.len().div_ceil(32) * 4 {
             return Err(value_error("acquisition mask vocabulary differs"));
+        }
+        if let Some(cache) = &self.completion_cache {
+            cache.clear();
         }
         let mask = py.detach(|| {
             let mut mask = allowed_mask.to_vec();
@@ -575,6 +592,7 @@ impl PyNativeAcquisitionMask {
                     self.entry_budget,
                     self.output_dependencies,
                     self.frontier_completion,
+                    self.completion_cache.as_ref(),
                 )
                 .is_err()
                 {
@@ -607,6 +625,7 @@ impl PyNativeAcquisitionMask {
             self.entry_budget,
             self.output_dependencies,
             self.frontier_completion,
+            self.completion_cache.as_ref(),
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -704,6 +723,7 @@ struct Resources<'a> {
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -739,6 +759,7 @@ fn resource_prefix<'a>(
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    completion_cache: Option<&'a Arc<typed::CompletionCache>>,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -753,6 +774,7 @@ fn resource_prefix<'a>(
         entry_budget,
         output_dependencies,
         frontier_completion,
+        completion_cache,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -1121,6 +1143,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                 .set_output_dependencies(
                                     self.resources.dependencies.clone(),
                                     self.resources.frontier_completion,
+                                    self.resources.completion_cache.cloned(),
                                 );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;
