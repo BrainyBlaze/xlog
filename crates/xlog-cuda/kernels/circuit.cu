@@ -2,13 +2,14 @@
 #include <cstdint>
 #include <cstddef>
 #include <cmath>
+#include "semantic_measure.cuh"
 
 /**
  * XGCF Circuit Evaluation Kernels
  *
  * This module evaluates Decision-DNNF circuits lowered to XGCF in log-space.
  *
- * Node type encoding must match crates/xlog-prob/src/xgcf.rs:
+ * Node type encoding is owned by xlog-ir/src/semantic_measure.rs:
  * 0 = Const0
  * 1 = Const1
  * 2 = Lit
@@ -17,52 +18,15 @@
  * 5 = Decision
  */
 
-#define XGCF_CONST0 0
-#define XGCF_CONST1 1
-#define XGCF_LIT 2
-#define XGCF_AND 3
-#define XGCF_OR 4
-#define XGCF_DECISION 5
+using semantic_measure::XGCF_CONST0;
+using semantic_measure::XGCF_CONST1;
+using semantic_measure::XGCF_LIT;
+using semantic_measure::XGCF_AND;
+using semantic_measure::XGCF_OR;
+using semantic_measure::XGCF_DECISION;
+using semantic_measure::logsumexp2;
 
 #define BLOCK_SIZE 256
-
-__device__ __forceinline__ double logsumexp2(double a, double b) {
-    if (isnan(a) || isnan(b)) {
-        return NAN;
-    }
-    double m = (a > b) ? a : b;
-    if (isinf(m)) {
-        return m;
-    }
-    return m + log(exp(a - m) + exp(b - m));
-}
-
-__device__ __forceinline__ double circuit_logsumexp_children(
-    const uint32_t* child_indices,
-    uint32_t child_start,
-    uint32_t child_end,
-    const double* values
-) {
-    double maxv = -INFINITY;
-    for (uint32_t i = child_start; i < child_end; i++) {
-        double child_value = values[child_indices[i]];
-        if (isnan(child_value)) {
-            return NAN;
-        }
-        if (child_value > maxv) {
-            maxv = child_value;
-        }
-    }
-    if (isinf(maxv)) {
-        return maxv;
-    }
-
-    double sum = 0.0;
-    for (uint32_t i = child_start; i < child_end; i++) {
-        sum += exp(values[child_indices[i]] - maxv);
-    }
-    return maxv + log(sum);
-}
 
 __device__ __forceinline__ size_t slot_offset(uint32_t slot, uint32_t stride) {
     return static_cast<size_t>(slot) * static_cast<size_t>(stride);
@@ -108,54 +72,11 @@ extern "C" __global__ void xgcf_forward_level(
     }
 
     uint32_t node = level_nodes[level_offset + tid];
-    uint8_t ty = node_type[node];
-
-    double v;
-    switch (ty) {
-        case XGCF_CONST0:
-            v = -INFINITY;
-            break;
-        case XGCF_CONST1:
-            v = 0.0;
-            break;
-        case XGCF_LIT: {
-            int32_t l = lit[node];
-            uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-            v = (l > 0) ? var_log_true[var] : var_log_false[var];
-            break;
-        }
-        case XGCF_AND: {
-            uint32_t c0 = child_offsets[node];
-            uint32_t c1 = child_offsets[node + 1];
-            double acc = 0.0;
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices[i];
-                acc += values[child];
-            }
-            v = acc;
-            break;
-        }
-        case XGCF_OR: {
-            uint32_t c0 = child_offsets[node];
-            uint32_t c1 = child_offsets[node + 1];
-            v = circuit_logsumexp_children(child_indices, c0, c1, values);
-            break;
-        }
-        case XGCF_DECISION: {
-            uint32_t var = decision_var[node];
-            uint32_t child_f = decision_child_false[node];
-            uint32_t child_t = decision_child_true[node];
-            double t = var_log_true[var];
-            double f = var_log_false[var];
-            v = logsumexp2(f + values[child_f], t + values[child_t]);
-            break;
-        }
-        default:
-            v = -INFINITY;
-            break;
-    }
-
-    values[node] = v;
+    const semantic_measure::CircuitView circuit{
+        node_type, child_offsets, child_indices, lit,
+        decision_var, decision_child_false, decision_child_true};
+    values[node] = semantic_measure::forward_node(
+        circuit, node, var_log_true, var_log_false, values);
 }
 
 /**
@@ -527,54 +448,11 @@ extern "C" __global__ void xgcf_forward_level_cached(
     }
 
     uint32_t node = level_nodes_s[level_offset + tid];
-    uint8_t ty = node_type_s[node];
-
-    double v;
-    switch (ty) {
-        case XGCF_CONST0:
-            v = -INFINITY;
-            break;
-        case XGCF_CONST1:
-            v = 0.0;
-            break;
-        case XGCF_LIT: {
-            int32_t l = lit_s[node];
-            uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-            v = (l > 0) ? var_log_true_s[var] : var_log_false_s[var];
-            break;
-        }
-        case XGCF_AND: {
-            uint32_t c0 = child_offsets_s[node];
-            uint32_t c1 = child_offsets_s[node + 1];
-            double acc = 0.0;
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices_s[i];
-                acc += values_s[child];
-            }
-            v = acc;
-            break;
-        }
-        case XGCF_OR: {
-            uint32_t c0 = child_offsets_s[node];
-            uint32_t c1 = child_offsets_s[node + 1];
-            v = circuit_logsumexp_children(child_indices_s, c0, c1, values_s);
-            break;
-        }
-        case XGCF_DECISION: {
-            uint32_t var = decision_var_s[node];
-            uint32_t child_f = decision_child_false_s[node];
-            uint32_t child_t = decision_child_true_s[node];
-            double t = var_log_true_s[var];
-            double f = var_log_false_s[var];
-            v = logsumexp2(f + values_s[child_f], t + values_s[child_t]);
-            break;
-        }
-        default:
-            v = -INFINITY;
-            break;
-    }
-
-    values_s[node] = v;
+    const semantic_measure::CircuitView circuit{
+        node_type_s, child_offsets_s, child_indices_s, lit_s,
+        decision_var_s, decision_child_false_s, decision_child_true_s};
+    values_s[node] = semantic_measure::forward_node(
+        circuit, node, var_log_true_s, var_log_false_s, values_s);
 }
 
 // Evaluate all levels in a single kernel (cached layout).
@@ -628,54 +506,11 @@ extern "C" __global__ void xgcf_eval_all_levels_cached(
         uint32_t num_level_nodes = level_offsets_s[level + 1] - level_offset;
         for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
             uint32_t node = level_nodes_s[level_offset + idx];
-            uint8_t ty = node_type_s[node];
-
-            double v;
-            switch (ty) {
-                case XGCF_CONST0:
-                    v = -INFINITY;
-                    break;
-                case XGCF_CONST1:
-                    v = 0.0;
-                    break;
-                case XGCF_LIT: {
-                    int32_t l = lit_s[node];
-                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-                    v = (l > 0) ? var_log_true_s[var] : var_log_false_s[var];
-                    break;
-                }
-                case XGCF_AND: {
-                    uint32_t c0 = child_offsets_s[node];
-                    uint32_t c1 = child_offsets_s[node + 1];
-                    double acc = 0.0;
-                    for (uint32_t i = c0; i < c1; i++) {
-                        uint32_t child = child_indices_s[i];
-                        acc += values_s[child];
-                    }
-                    v = acc;
-                    break;
-                }
-                case XGCF_OR: {
-                    uint32_t c0 = child_offsets_s[node];
-                    uint32_t c1 = child_offsets_s[node + 1];
-                    v = circuit_logsumexp_children(child_indices_s, c0, c1, values_s);
-                    break;
-                }
-                case XGCF_DECISION: {
-                    uint32_t var = decision_var_s[node];
-                    uint32_t child_f = decision_child_false_s[node];
-                    uint32_t child_t = decision_child_true_s[node];
-                    double t = var_log_true_s[var];
-                    double f = var_log_false_s[var];
-                    v = logsumexp2(f + values_s[child_f], t + values_s[child_t]);
-                    break;
-                }
-                default:
-                    v = -INFINITY;
-                    break;
-            }
-
-            values_s[node] = v;
+            const semantic_measure::CircuitView circuit{
+                node_type_s, child_offsets_s, child_indices_s, lit_s,
+                decision_var_s, decision_child_false_s, decision_child_true_s};
+            values_s[node] = semantic_measure::forward_node(
+                circuit, node, var_log_true_s, var_log_false_s, values_s);
         }
         __syncthreads();
     }
@@ -743,54 +578,11 @@ extern "C" __global__ void xgcf_eval_all_levels_cached_batched(
         uint32_t num_level_nodes = level_offsets_s[level + 1] - level_offset;
         for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
             uint32_t node = level_nodes_s[level_offset + idx];
-            uint8_t ty = node_type_s[node];
-
-            double v;
-            switch (ty) {
-                case XGCF_CONST0:
-                    v = -INFINITY;
-                    break;
-                case XGCF_CONST1:
-                    v = 0.0;
-                    break;
-                case XGCF_LIT: {
-                    int32_t l = lit_s[node];
-                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-                    v = (l > 0) ? var_log_true_q[var] : var_log_false_q[var];
-                    break;
-                }
-                case XGCF_AND: {
-                    uint32_t c0 = child_offsets_s[node];
-                    uint32_t c1 = child_offsets_s[node + 1];
-                    double acc = 0.0;
-                    for (uint32_t i = c0; i < c1; i++) {
-                        uint32_t child = child_indices_s[i];
-                        acc += values_q[child];
-                    }
-                    v = acc;
-                    break;
-                }
-                case XGCF_OR: {
-                    uint32_t c0 = child_offsets_s[node];
-                    uint32_t c1 = child_offsets_s[node + 1];
-                    v = circuit_logsumexp_children(child_indices_s, c0, c1, values_q);
-                    break;
-                }
-                case XGCF_DECISION: {
-                    uint32_t var = decision_var_s[node];
-                    uint32_t child_f = decision_child_false_s[node];
-                    uint32_t child_t = decision_child_true_s[node];
-                    double t = var_log_true_q[var];
-                    double f = var_log_false_q[var];
-                    v = logsumexp2(f + values_q[child_f], t + values_q[child_t]);
-                    break;
-                }
-                default:
-                    v = -INFINITY;
-                    break;
-            }
-
-            values_q[node] = v;
+            const semantic_measure::CircuitView circuit{
+                node_type_s, child_offsets_s, child_indices_s, lit_s,
+                decision_var_s, decision_child_false_s, decision_child_true_s};
+            values_q[node] = semantic_measure::forward_node(
+                circuit, node, var_log_true_q, var_log_false_q, values_q);
         }
         __syncthreads();
     }
