@@ -10,7 +10,7 @@ use xlog_ir::semantic_value as value;
 use xlog_ir::semantic_world as world;
 
 const WORLD_TAG: &str = "xlog.semantic-world.v1";
-const CONTEXT_TAG: &str = "xlog.semantic-context.v1";
+const CONTEXT_TAG: &str = "xlog.semantic-context.v2";
 
 pub(super) struct WorldDeclarationData {
     pub(super) native: Arc<world::SemanticWorldDeclaration>,
@@ -24,6 +24,7 @@ pub(super) struct WorldDeclarationData {
 pub(super) struct WorldOwnerData {
     pub(super) declaration: Arc<WorldDeclarationData>,
     declaration_object: Py<PySemanticWorldDeclaration>,
+    seed_identity: [u8; 32],
 }
 
 pub(super) struct ContextSourceData {
@@ -694,13 +695,35 @@ pub(crate) struct PySemanticWorldOwner {
 #[pymethods]
 impl PySemanticWorldOwner {
     #[new]
-    #[pyo3(signature = (*, declaration))]
-    fn new(py: Python<'_>, declaration: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (*, declaration, seed_material))]
+    fn new(
+        py: Python<'_>,
+        declaration: &Bound<'_, PyAny>,
+        seed_material: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
         if !declaration.is_exact_instance_of::<PySemanticWorldDeclaration>() {
             return Err(invalid(
                 "semantic world owner requires its native immutable declaration",
             ));
         }
+        if !seed_material.is_exact_instance_of::<PyBytes>() {
+            return Err(invalid(
+                "semantic seed material requires exact builtin bytes",
+            ));
+        }
+        let seed = seed_material.cast::<PyBytes>()?.as_bytes();
+        if seed.is_empty() || (seed.len() > 1 && seed[0] == 0) {
+            return Err(invalid(
+                "semantic seed requires unsigned minimal big-endian bytes, with one zero byte for zero",
+            ));
+        }
+        let seed_length = u64::try_from(seed.len())
+            .map_err(|_| invalid("semantic seed material byte length exceeds u64"))?;
+        let mut seed_hash = Sha256::new();
+        seed_hash.update(b"xlog.semantic-rng.seed-source.v1\0");
+        seed_hash.update(seed_length.to_le_bytes());
+        seed_hash.update(seed);
+        let seed_identity: [u8; 32] = seed_hash.finalize().into();
         let inner = Arc::clone(
             &declaration
                 .extract::<PyRef<'_, PySemanticWorldDeclaration>>()?
@@ -709,6 +732,7 @@ impl PySemanticWorldOwner {
         Ok(Self {
             inner: Arc::new(WorldOwnerData {
                 declaration: inner,
+                seed_identity,
                 declaration_object: declaration
                     .extract::<Py<PySemanticWorldDeclaration>>()?
                     .clone_ref(py),
@@ -896,6 +920,7 @@ pub(super) fn context_data(
         ColdValue::Bytes(Arc::from(*local)),
         ColdValue::Bytes(Arc::from(identity)),
         ColdValue::Integer(context_index.to_string()),
+        ColdValue::Bytes(Arc::from(owner.seed_identity)),
     ]));
     Ok(Arc::new(ContextSourceData {
         owner: Arc::clone(owner),
@@ -951,7 +976,7 @@ pub(super) fn resolve_binding(
         ));
     };
     let value = checkpoint_cold_value(bytes, bytes.len())?;
-    let fields = value.fields(5)?;
+    let fields = value.fields(6)?;
     if text_value(&fields[0])? != CONTEXT_TAG {
         return Err(invalid(
             "semantic context binding has another material kind",
