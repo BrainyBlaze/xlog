@@ -35,6 +35,7 @@ const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
 const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
 const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
 const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
+const ENTRY_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v15";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -56,7 +57,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=14) {
+    if !matches!(version, 1..=15) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -291,6 +292,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 15 {
+            schema["description"] = json!(format!(
+                "{} Before the entry parameter table closes, every new physical parameter absent from required callee outputs must be declared in that table. The same output-dependency owner determines these direct-read obligations for operation plans. Shared aliases retain their original shapes and count once; the mask does not insert declarations or operations. This necessary coverage check does not guarantee a typed or token-budget completion.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -301,6 +308,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                15 => ENTRY_PARAMETER_LANGUAGE,
                 14 => TYPED_COMPLETION_LANGUAGE,
                 13 => FRONTIER_COMPLETION_LANGUAGE,
                 12 => OUTPUT_DEPENDENCY_LANGUAGE,
@@ -419,6 +427,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    entry_parameter_coverage: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -429,7 +438,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE)
+        let entry_parameter_coverage = language["id"] == ENTRY_PARAMETER_LANGUAGE;
+        let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE
+            || entry_parameter_coverage)
             .then(|| Arc::new(typed::CompletionCache::default()));
         let frontier_completion =
             language["id"] == FRONTIER_COMPLETION_LANGUAGE || completion_cache.is_some();
@@ -544,6 +555,7 @@ impl PyNativeAcquisitionMask {
             entry_budget,
             output_dependencies,
             frontier_completion,
+            entry_parameter_coverage,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -683,6 +695,7 @@ impl PyNativeAcquisitionMask {
             self.entry_budget,
             self.output_dependencies,
             self.frontier_completion,
+            self.entry_parameter_coverage,
             self.completion_cache.as_ref(),
             reusable_prefix,
             capture_prefix,
@@ -759,6 +772,7 @@ struct Resources<'a> {
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    entry_parameter_coverage: bool,
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
@@ -805,6 +819,7 @@ fn resource_prefix<'a>(
     entry_budget: bool,
     output_dependencies: bool,
     frontier_completion: bool,
+    entry_parameter_coverage: bool,
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
@@ -822,6 +837,7 @@ fn resource_prefix<'a>(
         entry_budget,
         output_dependencies,
         frontier_completion,
+        entry_parameter_coverage,
         completion_cache,
         raw_tokens,
         operation_fields,
@@ -1237,6 +1253,13 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         .map_err(A::Error::custom)?;
                     if let Some(program) = &mut self.resources.program.typed {
                         program.entry_requirements = required;
+                        if self.resources.entry_parameter_coverage
+                            && !program.entry_parameters_available()
+                        {
+                            return Err(A::Error::custom(
+                                "entry parameter table omits required physical parameters",
+                            ));
+                        }
                     }
                 }
                 (Level::Program, "operations") => {
