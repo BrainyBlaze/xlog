@@ -434,22 +434,27 @@ impl Program {
     }
 
     pub(super) fn entry_parameters_available(&self) -> bool {
+        self.missing_entry_parameters()
+            .is_some_and(|missing| missing.is_empty())
+    }
+
+    pub(super) fn missing_entry_parameters(&self) -> Option<BTreeSet<String>> {
         let Some(required) = &self.entry_requirements else {
-            return true;
+            return Some(BTreeSet::new());
         };
-        let Some(producers) = self
+        let mut missing = self
             .dependencies
             .as_ref()
-            .and_then(|facts| facts.required_producers(required))
-        else {
-            return false;
-        };
-        producers.parameters.iter().all(|name| {
-            self.body
+            .and_then(|facts| facts.required_producers(required))?
+            .parameters;
+        missing.retain(|name| {
+            !self
+                .body
                 .parameters
                 .iter()
                 .any(|parameter| &parameter.name == name)
-        })
+        });
+        Some(missing)
     }
 
     fn completion_possible(

@@ -36,6 +36,7 @@ const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
 const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
 const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
 const ENTRY_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v15";
+const REQUIRED_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v16";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -57,7 +58,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=15) {
+    if !matches!(version, 1..=16) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -298,6 +299,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 16 {
+            schema["description"] = json!(format!(
+                "{} Entry parameter declarations cover missing required physical aliases before optional new parameters. While any remain, each parameter-name prefix must match the canonical JSON spelling of an outstanding alias from the same native dependency owner. The model chooses alias order and emits every declaration token; existing alias shape, uniqueness and scalar checks still apply. Helper declarations and operation choices are unchanged. No declaration or graph is inserted, and token-budget completion or usefulness is not guaranteed.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -308,6 +315,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                16 => REQUIRED_PARAMETER_LANGUAGE,
                 15 => ENTRY_PARAMETER_LANGUAGE,
                 14 => TYPED_COMPLETION_LANGUAGE,
                 13 => FRONTIER_COMPLETION_LANGUAGE,
@@ -428,6 +436,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     output_dependencies: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
+    required_parameter_names: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -438,7 +447,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let entry_parameter_coverage = language["id"] == ENTRY_PARAMETER_LANGUAGE;
+        let required_parameter_names = language["id"] == REQUIRED_PARAMETER_LANGUAGE;
+        let entry_parameter_coverage =
+            language["id"] == ENTRY_PARAMETER_LANGUAGE || required_parameter_names;
         let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE
             || entry_parameter_coverage)
             .then(|| Arc::new(typed::CompletionCache::default()));
@@ -556,6 +567,7 @@ impl PyNativeAcquisitionMask {
             output_dependencies,
             frontier_completion,
             entry_parameter_coverage,
+            required_parameter_names,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -696,6 +708,7 @@ impl PyNativeAcquisitionMask {
             self.output_dependencies,
             self.frontier_completion,
             self.entry_parameter_coverage,
+            self.required_parameter_names,
             self.completion_cache.as_ref(),
             reusable_prefix,
             capture_prefix,
@@ -773,6 +786,7 @@ struct Resources<'a> {
     output_dependencies: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
+    required_parameter_names: bool,
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
@@ -820,6 +834,7 @@ fn resource_prefix<'a>(
     output_dependencies: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
+    required_parameter_names: bool,
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
@@ -838,6 +853,7 @@ fn resource_prefix<'a>(
         output_dependencies,
         frontier_completion,
         entry_parameter_coverage,
+        required_parameter_names,
         completion_cache,
         raw_tokens,
         operation_fields,
@@ -1242,6 +1258,15 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     }
                 }
                 (Level::Program, "parameters") => {
+                    if self.resources.required_parameter_names {
+                        let required = self
+                            .resources
+                            .entry_requirements()
+                            .map_err(A::Error::custom)?;
+                        if let Some(program) = &mut self.resources.program.typed {
+                            program.entry_requirements = required;
+                        }
+                    }
                     map.next_value_seed(Array {
                         resources: self.resources,
                         kind: Items::Parameters,
@@ -1556,6 +1581,37 @@ impl<'de> Visitor<'de> for Parameter<'_, '_> {
         )? {
             match key.as_str() {
                 "name" => {
+                    if self.resources.required_parameter_names {
+                        let missing = self
+                            .resources
+                            .program
+                            .typed
+                            .as_ref()
+                            .unwrap()
+                            .missing_entry_parameters()
+                            .ok_or_else(|| {
+                                A::Error::custom(
+                                    "required entry parameter dependencies are unavailable",
+                                )
+                            })?;
+                        if !missing.is_empty() {
+                            let mut permitted = false;
+                            for alias in missing {
+                                let expected =
+                                    serde_json::to_vec(&alias).map_err(A::Error::custom)?;
+                                if value_prefix(&self.resources.bytes[offset.unwrap()..], &expected)
+                                {
+                                    permitted = true;
+                                    break;
+                                }
+                            }
+                            if !permitted {
+                                return Err(A::Error::custom(
+                                    "entry parameter must name a missing required physical alias",
+                                ));
+                            }
+                        }
+                    }
                     let value = map.next_value::<String>()?;
                     if self
                         .resources

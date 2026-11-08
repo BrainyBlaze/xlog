@@ -654,7 +654,26 @@ own those structural checks. Count projection still waits for its visible
 delimiter. Earlier packets1–14 retain their literal prefix and replay behavior;
 callers explicitly select `language_version=15` for a new decoding policy.
 
-For a version4 through version15 packet,
+Version16 (`xlog-contextual-acquisition-v16`) makes those missing physical aliases
+the name domain while the entry parameter table is still open. The native owner
+computes the required direct reads before parsing the array. Until they are all
+declared, an unfinished `name` must match the canonical JSON spelling of one of
+the outstanding aliases. Completed declarations remove their own physical
+identity from that domain; the model may choose any order among the missing
+aliases. The existing owner checks every alias's original shape, unique table
+identity and physical scalar accounting.
+
+Only after covering those aliases may the model declare optional new entry
+parameters. Helpers retain their original declaration choices. The codec does
+not insert aliases, infer operations or rewrite the selected source: every
+name, shape and `float32` token still comes from the model's masked selection.
+Operation planning, final output dependencies, source syntax and constructor
+admission remain unchanged. This declaration-order restriction does not guarantee
+shape-valid completion, termination within a token budget or useful behavior.
+Callers explicitly select `language_version=16` for a new policy; packets1–15
+retain their literal masks and saved replay behavior.
+
+For a version4 through version16 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -669,9 +688,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–15 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–16 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–15). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–16). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
