@@ -31,6 +31,22 @@ struct OutputDependencies {
 }
 
 impl OutputDependencies {
+    fn required_producers(&self, required: &EntryRequirements) -> Option<EntryRequirements> {
+        let mut producers = required.clone();
+        for name in &required.calls {
+            let callee = self.callees.get(name)?;
+            for dependency in &callee.definitions {
+                if dependency != name {
+                    producers.calls.remove(dependency);
+                }
+            }
+            producers
+                .parameters
+                .retain(|name| !callee.parameters.contains(name));
+        }
+        Some(producers)
+    }
+
     fn operation(
         &self,
         body: &TensorProgram,
@@ -417,6 +433,25 @@ impl Program {
         self.completion_possible(&self.body, output, signatures, None)
     }
 
+    pub(super) fn entry_parameters_available(&self) -> bool {
+        let Some(required) = &self.entry_requirements else {
+            return true;
+        };
+        let Some(producers) = self
+            .dependencies
+            .as_ref()
+            .and_then(|facts| facts.required_producers(required))
+        else {
+            return false;
+        };
+        producers.parameters.iter().all(|name| {
+            self.body
+                .parameters
+                .iter()
+                .any(|parameter| &parameter.name == name)
+        })
+    }
+
     fn completion_possible(
         &self,
         body: &TensorProgram,
@@ -537,19 +572,13 @@ impl Program {
 
         // Roots are computed from returned values, not from calls serialized
         // elsewhere in helper bodies. Each missing root needs its own call row.
-        let mut roots = required.calls.clone();
-        let mut parameters = required.parameters.clone();
-        for name in &required.calls {
-            let Some(callee) = facts.callees.get(name) else {
-                return false;
-            };
-            for dependency in &callee.definitions {
-                if dependency != name {
-                    roots.remove(dependency);
-                }
-            }
-            parameters.retain(|name| !callee.parameters.contains(name));
-        }
+        let Some(EntryRequirements {
+            calls: mut roots,
+            mut parameters,
+        }) = facts.required_producers(required)
+        else {
+            return false;
+        };
         roots.retain(|name| !available.definitions.contains(name));
         parameters.retain(|name| !available.parameters.contains(name));
         if parameters.iter().any(|name| {

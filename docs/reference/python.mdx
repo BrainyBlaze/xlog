@@ -636,7 +636,25 @@ not completion within source-byte or token budgets, numerical nonconstancy,
 usefulness or scientific acceptance. Earlier packets1–13 retain their literal
 mask and saved restoration behavior; callers explicitly select the new packet.
 
-For a version4 through version14 packet,
+Version15 (`xlog-contextual-acquisition-v15`) adds a necessary coverage check
+before the entry's parameter array closes. A new physical parameter must either
+reach a required callee's returned value or appear in the entry's parameter table
+for a direct read. The same dependency owner computes these direct-read
+obligations for operation-count plans. Reading a parameter in a discarded helper
+operation does not cover it: if that helper returns `Zeros`, an entry alias is
+still required. Shared aliases keep the original shape and consume no additional
+physical scalar allowance.
+
+The mask rejects premature array closure while the model can still declare the
+missing aliases. It supplies no names, declarations, operations or operands and
+does not change the final output-dependency predicate. This check does not prove
+that the available shapes can be joined in the remaining rows or that generation
+fits the token budget; operation-count and prospective-operation admission still
+own those structural checks. Count projection still waits for its visible
+delimiter. Earlier packets1–14 retain their literal prefix and replay behavior;
+callers explicitly select `language_version=15` for a new decoding policy.
+
+For a version4 through version15 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -651,9 +669,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–14 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–15 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–14). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–15). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
