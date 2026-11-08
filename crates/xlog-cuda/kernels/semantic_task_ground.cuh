@@ -27,6 +27,7 @@ struct Task {
     uint32_t snapshot_count;
     const uint64_t* snapshot_rows;
     const uint64_t* program_image_owner;
+    uint64_t mask_weighting,autoregressive_coefficient_bits;
     const uint64_t *requirements, *requirement_offsets, *attainment_order;
     uint64_t actor_eligible;
     semantic_program::Bank program;
@@ -55,7 +56,7 @@ struct Task {
 // One exact decoder for the native owner's variable-length task bank. No
 // consumer derives an extent from a public pointer or an unbounded sentinel.
 __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
-    if(!words || !output || count<47 || words[0]!=11 || !words[1] ||
+    if(!words || !output || count<49 || words[0]!=12 || !words[1] ||
        !words[6] || words[6]>UINT32_MAX || words[7]>UINT32_MAX || words[8]>1 ||
        (words[8]==0 ? words[7]!=0 : words[7]==0) || words[10]>words[6] ||
        words[11]>words[6] || words[37]>1)return false;
@@ -130,7 +131,7 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
        task.library_digest[2]|task.library_digest[3]))return false;
     offset+=8;
     const uint64_t library_words=uint64_t(task.library_count)*(semantic_program::kRuleWords+18);
-    if(count-offset<library_words+5)return false;
+    if(count-offset<library_words+7)return false;
     task.library_rules=words+offset;
     task.library_actions=task.library_rules+uint64_t(task.library_count)*semantic_program::kRuleWords;
     for(uint32_t member=0;member<task.library_count;++member) {
@@ -146,7 +147,7 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
     offset+=library_words;
     if(words[offset]>UINT32_MAX || words[offset]!=uint64_t(task.editable ? task.program.statement_count : 0))return false;
     task.snapshot_count=uint32_t(words[offset++]);task.snapshot_rows=words+offset;
-    if(count-offset!=uint64_t(task.snapshot_count)*9+4)return false;
+    if(count-offset!=uint64_t(task.snapshot_count)*9+6)return false;
     for(uint32_t index=0;index<task.snapshot_count;++index) {
         const auto* row=task.snapshot_rows+uint64_t(index)*9;
         const auto* native=task.program.statement_rows+uint64_t(index)*5;
@@ -154,6 +155,10 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
         for(uint32_t field=0;field<5;++field)if(row[4+field]!=native[field])return false;
     }
     task.program_image_owner=task.snapshot_rows+uint64_t(task.snapshot_count)*9;
+    task.mask_weighting=task.program_image_owner[4];
+    task.autoregressive_coefficient_bits=task.program_image_owner[5];
+    if(task.mask_weighting>1 || (task.autoregressive_coefficient_bits!=0 &&
+       task.autoregressive_coefficient_bits!=0x3f800000ULL))return false;
     if(task.editable) {
         if(!(task.program_image_owner[0]|task.program_image_owner[1]|
              task.program_image_owner[2]|task.program_image_owner[3]))return false;

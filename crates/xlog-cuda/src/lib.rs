@@ -81,15 +81,15 @@ pub use semantic_program_image::{
     SemanticProgramImageAdmission, SemanticProgramLeaf, SemanticProgramNode,
 };
 pub use semantic_training_view::{
-    validate_training_view_layout, SemanticSelectedTrainingView, SemanticTrainingCanary,
-    SemanticTrainingCanaryKind, SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
-    SemanticTrainingCanaryRefusalRecord, SemanticTrainingCanarySource, SemanticTrainingDomain,
-    SemanticTrainingManifest, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
-    SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
-    SemanticTrainingObjectiveRecord, SemanticTrainingRosterRow, SemanticTrainingViewBasis,
-    SemanticTrainingViewLayout, SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord,
-    SemanticTrainingViewPort, SemanticTrainingViewRow, SemanticTrainingViewSelection,
-    SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
+    validate_training_view_layout, SemanticMaskWeightingLaw, SemanticSelectedTrainingView,
+    SemanticTrainingCanary, SemanticTrainingCanaryKind, SemanticTrainingCanaryRecord,
+    SemanticTrainingCanaryRefusalReason, SemanticTrainingCanaryRefusalRecord,
+    SemanticTrainingCanarySource, SemanticTrainingDomain, SemanticTrainingManifest,
+    SemanticTrainingObjective, SemanticTrainingObjectiveGroup, SemanticTrainingObjectiveGroupKind,
+    SemanticTrainingObjectiveGroupRecord, SemanticTrainingObjectiveRecord,
+    SemanticTrainingRosterRow, SemanticTrainingViewBasis, SemanticTrainingViewLayout,
+    SemanticTrainingViewOrigin, SemanticTrainingViewOriginRecord, SemanticTrainingViewPort,
+    SemanticTrainingViewRow, SemanticTrainingViewSelection, SEMANTIC_TRAINING_CANARY_EVALUATOR_ABI,
 };
 pub use semantic_transition::{
     initial_source_layout, output_intents_from_publication_material,

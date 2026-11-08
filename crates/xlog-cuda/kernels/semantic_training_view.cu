@@ -29,6 +29,7 @@ struct SemanticTrainingViewOriginRecord {
 struct TrainingViewRowDescriptor {
     uint64_t ordinal;
     uint64_t basis;
+    uint64_t mask_weighting;
     uint64_t raw_offset;
     uint64_t raw_bytes;
     uint64_t window;
@@ -46,7 +47,7 @@ struct TrainingViewRowDescriptor {
     uint64_t non_actor_groups;
     uint64_t edit_material_roots[4][4];
 };
-static_assert(sizeof(TrainingViewRowDescriptor)==656,"training row descriptor ABI");
+static_assert(sizeof(TrainingViewRowDescriptor)==664,"training row descriptor ABI");
 
 struct SemanticTrainingViewSelection {
     uint64_t status;
@@ -111,6 +112,7 @@ struct TrainingPublicationRange {
 struct TrainingPublicationStorageEntry { uint64_t pointer,bytes,generation; };
 
 struct TrainingViewLaunch {
+    uint64_t mask_weighting,autoregressive_coefficient_bits;
     uint64_t descriptors;
     uint64_t raw;
     uint64_t row_count;
@@ -335,7 +337,16 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
     if (threadIdx.x == 0) {
         append_header=nullptr;
         append_entries=nullptr;
-        bool publication_valid=launch.initial_row_count<=launch.row_count;
+        semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::TableSlot,4);
+        bool publication_valid=launch.initial_row_count<=launch.row_count
+            && launch.mask_weighting<=1 && (launch.autoregressive_coefficient_bits==0 ||
+                launch.autoregressive_coefficient_bits==0x3f800000ULL);
+        const auto& original_objective=
+            *reinterpret_cast<const SemanticTrainingObjectiveRecord*>(launch.objective_template);
+        if(original_objective.evaluator_abi) {
+            publication_valid=publication_valid && original_objective.evaluator_abi==3 &&
+                original_objective.coefficient_bits[1]==launch.autoregressive_coefficient_bits;
+        } else if(launch.row_count) publication_valid=false;
         uint64_t published_rows=launch.initial_row_count;
         publication_valid=publication_valid && semantic_training_append_queue(launch,
             &append_header,&append_entries,work);
@@ -386,7 +397,7 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
                     semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     const uint64_t ordinal=launch.initial_row_count+slot;
                     const auto& row=descriptors[launch.original_slot_boundary+slot];
-                    if (row.ordinal!=ordinal || row.basis!=1 || (row.non_actor_groups&~31ULL)) {
+                    if (row.ordinal!=ordinal || row.basis!=1 || row.mask_weighting!=launch.mask_weighting || (row.non_actor_groups&~31ULL)) {
                         selection->status=4;break;
                     }
                     if (row.non_actor_groups&(1ULL<<(source.kind-1))) {
@@ -415,7 +426,8 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
     const auto* raw = reinterpret_cast<const uint8_t*>(launch.raw) + descriptor.raw_offset;
     const auto* selected = reinterpret_cast<const uint8_t*>(launch.selected_view);
     if (threadIdx.x == 0 &&
-        (descriptor.ordinal != cursor || descriptor.raw_bytes != launch.selected_view_bytes)) {
+        (descriptor.ordinal != cursor || descriptor.raw_bytes != launch.selected_view_bytes ||
+         descriptor.mask_weighting != launch.mask_weighting)) {
         selection->status = 2;
         semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::CanonicalByte,
             sizeof(selection->status));
@@ -439,6 +451,11 @@ extern "C" __global__ void semantic_training_view_select(TrainingViewLaunch laun
         for (uint64_t row = 0; row < selection->row_count; ++row) {
             semantic_graph::charge_native_parallel(work, semantic_graph::NativeWorkEvent::TableSlot, 1);
             const auto item = descriptors[semantic_training_physical_row(launch,row)];
+            if(item.mask_weighting!=launch.mask_weighting) {
+                selection->status=3;
+                semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::CanonicalByte,
+                    sizeof(selection->status));
+            }
             uint64_t origin_candidate = UINT64_MAX;
             if (row>=launch.initial_row_count) {
                 const uint64_t slot=row-launch.initial_row_count;

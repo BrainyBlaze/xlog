@@ -9285,7 +9285,7 @@ fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDo
             caps: unsigned_array(&manifest[1])?,
         });
     }
-    let loader = fields[1].fields(5)?;
+    let loader = fields[1].fields(7)?;
     let batch = unsigned_array::<4>(&loader[0])?;
     let ColdValue::Integer(training_seed) = &loader[3] else {
         return Err(invalid(
@@ -9302,6 +9302,10 @@ fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDo
         mask_permille: loader[2].unsigned()?,
         training_seed: training_seed.clone(),
         mask_policy: replay_digest_identity(loader[4].text()?)?,
+        mask_weighting: xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(loader[5].text()?)
+            .map_err(invalid)?,
+        autoregressive_coefficient_bits: u32::try_from(loader[6].unsigned()?)
+            .map_err(|_| invalid("original auxiliary AR coefficient exceeds FP32 bits"))?,
     }))
 }
 
@@ -9683,7 +9687,7 @@ impl ReplayRow {
         }
         let bytes = material.load_original()?;
         let identity = self.identity.fields(6)?;
-        let view = identity[0].fields(9)?;
+        let view = identity[0].fields(10)?;
         let ColdValue::Integer(training_seed) = &view[6] else {
             return Err(invalid("training view seed is not its original integer"));
         };
@@ -9724,6 +9728,8 @@ impl ReplayRow {
                 replay_digest_identity(view[0].text()?)?,
                 replay_digest_identity(view[5].text()?)?,
                 training_seed,
+                xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(view[9].text()?)
+                    .map_err(invalid)?,
                 task_content,
                 origin,
             )
@@ -10193,7 +10199,7 @@ fn validate_replay_training_identity(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
 ) -> PyResult<()> {
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 10] = [
         "data_manifest_hash",
         "example_id",
         "final_split",
@@ -10203,15 +10209,19 @@ fn validate_replay_training_identity(
         "training_seed",
         "epoch_index",
         "variant_index",
+        "mask_weighting",
     ];
     let view = identity[0].fields(NAMES.len())?;
     let original = replay_json_object(replay_json_field(record, "training_view")?)?;
     if original.len() != NAMES.len() {
-        return Err(invalid("training view requires its original nine fields"));
+        return Err(invalid("training view requires its original ten fields"));
     }
     for (index, name) in NAMES.iter().enumerate() {
         if index < 6 {
             view[index].text()?;
+        } else if index == 9 {
+            xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(view[index].text()?)
+                .map_err(invalid)?;
         } else if !matches!(&view[index], ColdValue::Integer(value) if !value.starts_with('-')) {
             return Err(invalid(
                 "training view seed, epoch and variant require nonnegative integers",
@@ -10239,7 +10249,7 @@ fn validate_replay_training_identity(
         }
     }
     let canonical = replay_identity_json(&identity[0])?;
-    if replay_hash(format!("[\"dlm-new/training-view-identity/v1\",{canonical}]").as_bytes())
+    if replay_hash(format!("[\"dlm-new/training-view-identity/v2\",{canonical}]").as_bytes())
         != identity[1].text()?
     {
         return Err(invalid("training-view identity digest differs"));
@@ -10264,7 +10274,7 @@ fn validate_anchor_admission(
         "training_view",
         "training_view_identity",
     ];
-    let view = identity[0].fields(9)?;
+    let view = identity[0].fields(10)?;
     let group = match replay_json_value(replay_json_field(record, "group")?)?.as_str() {
         Some("language") => ReplayAnchorGroup::Language,
         Some("symbolic") => ReplayAnchorGroup::Symbolic,
@@ -11833,7 +11843,7 @@ impl TaskAuthority {
         let mut targets = BTreeSet::new();
         for (row, replay) in self.replay.iter().enumerate() {
             let fields = replay.identity.fields(6)?;
-            let context = fields[0].fields(9)?;
+            let context = fields[0].fields(10)?;
             if !matches!(context[2].text()?, "train" | "dev" | "request-local-replay") {
                 return Err(invalid("replay task cannot contain sealed evaluation rows"));
             }
@@ -12315,7 +12325,7 @@ impl TaskAuthority {
 
     fn require_replay_learning_scope(&self, rows: &[ReplayRow], purpose: &str) -> PyResult<()> {
         for row in rows {
-            let split = row.identity.fields(6)?[0].fields(9)?[2].text()?;
+            let split = row.identity.fields(6)?[0].fields(10)?[2].text()?;
             if (purpose == "current-request-fast-adaptation" && split != "request-local-replay")
                 || (purpose == "durable-slow-consolidation" && !matches!(split, "train" | "dev"))
             {
@@ -24298,7 +24308,7 @@ impl PySemanticTransitionController {
     /// ``training_domain`` is the original ``(manifests, loader)`` projection:
     /// manifests are sorted ``(sha256_hex, (entries, keys, records, bytes))``
     /// rows, and loader is ``((window, pad_id, mask_id, block_size), batch_size,
-    /// mask_permille, training_seed, mask_policy_sha256_hex)``. The application
+    /// mask_permille, training_seed, mask_policy_sha256_hex, mask_weighting, AR_bits)``. The application
     /// must extract it from validated sealed inputs before the first action;
     /// native binding does not authenticate external manifest ownership. None
     /// explicitly means no prospective training arena and cannot be expanded

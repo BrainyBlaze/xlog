@@ -409,7 +409,14 @@ impl SemanticTaskScoring {
         self,
         program: Option<&crate::SemanticProgramAdmission>,
         query_count: u32,
+        training_domain: Option<&SemanticTrainingDomain>,
     ) -> Result<SemanticTaskObjectiveLaw, SemanticTransitionError> {
+        if let Some(domain) = training_domain {
+            domain.validate()?;
+        }
+        let autoregressive_bits = training_domain.map_or(1.0f32.to_bits(), |domain| {
+            domain.autoregressive_coefficient_bits
+        });
         let return_bound = self.return_bound(program, query_count)?;
         let mut evaluator_max = return_bound as f64;
         // The integer return bound may exceed exact FP64 integer precision.
@@ -422,7 +429,11 @@ impl SemanticTaskScoring {
             return_bound,
             evaluator_min,
             evaluator_max,
-            coefficients: frozen_training_coefficients(evaluator_min, evaluator_max),
+            coefficients: frozen_training_coefficients(
+                evaluator_min,
+                evaluator_max,
+                autoregressive_bits,
+            ),
             structural_cost: semantic_structural_cost_descriptor(program, query_count)?,
         })
     }
@@ -1108,6 +1119,7 @@ impl TaskEvaluationBinding {
         let objective_law = spec.scoring.objective_law(
             spec.program.editable_program(),
             spec.statement_records.len() as u32,
+            spec.training_domain.as_ref(),
         )?;
         Ok(Self {
             admission_identity: admission.identity(),
@@ -1352,7 +1364,7 @@ impl TaskEvaluationBinding {
     }
 
     fn word_count(&self) -> Result<usize, SemanticTransitionError> {
-        let mut count = 44usize;
+        let mut count = 46usize;
         for (rows, width) in [
             (self.statements.len(), 7usize),
             (self.allowed_supports.len(), 5),
@@ -1489,7 +1501,7 @@ impl TaskEvaluationBinding {
             .map(|level| level.goals.len())
             .sum::<usize>();
         let mut words = Vec::with_capacity(count);
-        words.extend([11, owner]);
+        words.extend([12, owner]);
         words.extend(identity_words(
             *self.identity_with_intervention(intervention).as_bytes(),
         ));
@@ -1591,6 +1603,18 @@ impl TaskEvaluationBinding {
             ]);
         }
         words.extend(self.program_image_owner().unwrap_or([0; 4]));
+        words.extend([
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(0, |domain| domain.mask_weighting as u64),
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(u64::from(1.0f32.to_bits()), |domain| {
+                    u64::from(domain.autoregressive_coefficient_bits)
+                }),
+        ]);
         debug_assert_eq!(words.len(), count);
         words
     }
@@ -8140,6 +8164,7 @@ impl SemanticReplayLoadedMaterial {
         data_manifest: Identity256,
         mask_policy: Identity256,
         training_seed: &str,
+        mask_weighting: crate::SemanticMaskWeightingLaw,
         task_content: Option<SemanticTaskContentIdentity>,
         origin: Option<SemanticTrainingViewOrigin>,
     ) -> Result<SemanticReplayTrainingViewRow, SemanticTransitionError> {
@@ -8166,6 +8191,7 @@ impl SemanticReplayLoadedMaterial {
             data_manifest,
             mask_policy,
             training_seed: training_seed.to_owned(),
+            mask_weighting,
             task_content,
             origin,
             edit_demonstration: None,
