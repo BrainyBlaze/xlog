@@ -602,6 +602,10 @@ operand. A shape-preserving `Tanh` can fill spare rows after a complete result
 becomes available. These are search representatives, never emitted source or
 operations substituted for model choices. Incomplete calls enumerate actual
 shape-valid operand vectors instead of unioning mutually exclusive choices.
+Raw-token arrays also apply that predicate to unfinished decimal IDs and
+commas, so an open array cannot bypass the remaining typed completion bound.
+Unfinished column widths use the same native width domain and consider decimal
+extensions before committing a dimension, preserving split-token widths.
 
 This establishes structural completion under the typed operation-row bound,
 not completion within source-byte or token budgets, numerical nonconstancy,

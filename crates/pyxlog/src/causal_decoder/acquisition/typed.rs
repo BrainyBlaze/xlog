@@ -141,6 +141,7 @@ pub(super) struct Program {
     pub(super) entry_requirements: Option<EntryRequirements>,
     shapes: [Vec<TensorValueShape>; 2],
     raw_tokens: Vec<u32>,
+    column_limit: usize,
     dependencies: Option<OutputDependencies>,
 }
 
@@ -150,6 +151,7 @@ impl Program {
         vocabulary: usize,
         max_context: usize,
         raw_tokens: Vec<u32>,
+        column_limit: usize,
     ) -> Self {
         Self {
             body: TensorProgram {
@@ -164,6 +166,7 @@ impl Program {
             entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],
             raw_tokens,
+            column_limit,
             dependencies: None,
         }
     }
@@ -277,7 +280,7 @@ impl Program {
             == Some(shape)
     }
 
-    fn completion_widths(&self, signatures: &Signatures) -> BTreeSet<usize> {
+    pub(super) fn completion_widths(&self, signatures: &Signatures) -> BTreeSet<usize> {
         let mut widths = BTreeSet::from([1]);
         for signature in std::iter::once(&self.body.signature).chain(signatures.values()) {
             if let Ok(shape) = signature.output(1, self.body.vocabulary) {
@@ -294,7 +297,12 @@ impl Program {
         widths
     }
 
-    fn searches_completion(&self) -> bool {
+    pub(super) fn column_range(&self) -> Range<usize> {
+        self.output_columns()
+            .map_or(1..self.column_limit + 1, |columns| columns..columns + 1)
+    }
+
+    pub(super) fn searches_completion(&self) -> bool {
         self.dependencies
             .as_ref()
             .is_some_and(|facts| facts.completion_cache.is_some())
