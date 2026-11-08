@@ -519,13 +519,13 @@ struct SemanticTrainingViewOriginRecord {
     uint64_t model_geometry_digest[4];
 };
 struct TrainingViewRowDescriptor {
-    uint64_t ordinal,basis,mask_weighting,raw_offset,raw_bytes,window,source_length,block_size,prefix_extent,answer_start;
+    uint64_t ordinal,basis,mask_weighting,clean_conditioning,raw_offset,raw_bytes,window,source_length,block_size,prefix_extent,answer_start;
     uint64_t identity[4],source_identity[4],content_identity[4],task_query_identity[4];
     uint64_t task_theory_program_identity[4],task_result_identity[4];
     SemanticTrainingViewOriginRecord origin;
     uint64_t non_actor_groups,edit_material_roots[4][4];
 };
-static_assert(sizeof(TrainingViewRowDescriptor)==664,"training row descriptor ABI");
+static_assert(sizeof(TrainingViewRowDescriptor)==672,"training row descriptor ABI");
 struct SemanticTrainingReplayAppendHeader {
     uint64_t abi,count,capacity,payload_used_bytes,payload_capacity_bytes,eligible_count;
     uint64_t original_stage,original_count,original_prefix_identity[4],chain_head[4];
@@ -2669,7 +2669,7 @@ extern "C" __global__ void semantic_publication_prepare_model_update_admissibili
        objective.row_count!=selection.row_count || objective.capacity!=inputs.capacity ||
        objective.protected_member_count!=inputs.protected_member_count ||
        !selection.row_count || selection.row_count>inputs.row_count || selection.capacity!=inputs.capacity ||
-        task[0]!=12 || !task[1] ||
+        task[0]!=13 || !task[1] ||
         !task_program_bank(task,inputs.task_words,&program_bank) ||
        !publication_identity_equal(objective.task_identity,task+2,&input_work));
     semantic_canary_merge(work,native_work,input_work);
@@ -5054,7 +5054,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                 const double evaluator_max=__longlong_as_double((long long)objective.evaluator_max_bits);
                 slot();
                 if(!descriptor.task || objective.coefficient_bits[1]!=
-                   backward_program_bank.task.autoregressive_coefficient_bits)*status=1;
+                   backward_program_bank.task.autoregressive_coefficient_bits ||
+                   backward_program_bank.task.clean_conditioning>1)*status=1;
                 float objective_coefficients[9];
                 for(uint32_t i=0;i<9;++i) {
                     slot();
@@ -5756,7 +5757,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
        !contract.model_generation || bank.header.model_generation>UINT32_MAX ||
        (restored ? bank.header.model_generation<contract.model_generation : bank.header.model_generation!=contract.model_generation) ||
        bank.header.authority_generation!=contract.authority_generation ||
-        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=12 || task[1]!=descriptor.arena[1] ||
+        !publication_identity_equal(contract.task_identity,task+2) || task[0]!=13 || task[1]!=descriptor.arena[1] ||
        !publication_identity_equal(control.instance,bank.header.instance) || bank.header.range_count!=inactive.header.range_count ||
        (contract.terminal_token_count && !contract.terminal_tokens))return 1;
     uint64_t end=0;
@@ -5857,7 +5858,7 @@ __device__ uint64_t publication_initialize(const Descriptor& descriptor,Publicat
 __device__ uint64_t publication_append_replay(PublicationControl& control,const PublicationBank& base,
         const PublicationRange* old,PublicationRange* next_ranges,const PublicationRange& entries_template,
         const PublicationRange& payload_template,const PublicationReplayDeliveryInput& input,
-        const IntentEntry& intent,uint64_t mask_weighting,
+        const IntentEntry& intent,uint64_t mask_weighting,uint64_t clean_conditioning,
         semantic_graph::NativeWorkTally* work=nullptr,bool commit=true) {
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
     const auto* prior_entries=publication_find_range(old,base.header.range_count,56,0,work);
@@ -5919,6 +5920,7 @@ __device__ uint64_t publication_append_replay(PublicationControl& control,const 
            added.row_ordinal!=(eligible ? header.original_count+header.eligible_count+eligible_added : UINT64_MAX) ||
            input.arena_descriptor_count!=contract.replay_row_capacity || input.arena_raw_bytes!=contract.replay_raw_capacity_bytes ||
            row.ordinal!=added.row_ordinal || row.basis!=1 || row.mask_weighting!=mask_weighting ||
+            row.clean_conditioning!=clean_conditioning ||
             row.origin.present!=1 || row.origin.transition!=1 ||
            row.raw_bytes!=value.row_bytes_len || !row.raw_bytes ||
            (eligible && (physical>=input.arena_descriptor_count || physical>UINT64_MAX/row.raw_bytes ||
@@ -6307,7 +6309,7 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
            cursor>storage[ack_template.storage_slot].bytes ||
            sizeof(AcknowledgementEntry)+joint_bytes>storage[ack_template.storage_slot].bytes-cursor)break;
         if(replay && publication_append_replay(control,*base,old,next_ranges,
-            append_entries_template,append_payload_template,*replay,*selected,result_task.mask_weighting,cold_work,false))break;
+            append_entries_template,append_payload_template,*replay,*selected,result_task.mask_weighting,result_task.clean_conditioning,cold_work,false))break;
         for(uint64_t i=0;i<base->header.range_count;++i) {
             semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::TableSlot,1);
             PublicationRange target=next_ranges[i];
@@ -6359,7 +6361,7 @@ __device__ uint64_t publication_acknowledge(const Descriptor& descriptor,Publica
         semantic_graph::charge_native(cold_work,semantic_graph::NativeWorkEvent::CanonicalByte,2*sizeof(uint64_t));
         semantic_graph::copy_identity(queue->chain_head,chain,cold_work);
         if(replay && publication_append_replay(control,*base,old,next_ranges,
-            append_entries_template,append_payload_template,*replay,*selected,result_task.mask_weighting,cold_work))break;
+            append_entries_template,append_payload_template,*replay,*selected,result_task.mask_weighting,result_task.clean_conditioning,cold_work))break;
         auto& next=*publication_bank(control,word^1);
         if(replay && next.header.abi==1) {
             const semantic_graph::ResidentHandle retired{next.header.semantic_owner,semantic_graph::kRootKind,
@@ -8371,7 +8373,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                    !publication_identity_equal(pending.instance,lease.instance) || contract.abi!=1 ||
                    !publication_identity_equal(pending.topology_identity,contract.topology_identity) ||
                    !publication_identity_equal(pending.table_identity,contract.table_identity) ||
-                    !task || task[0]!=12 || task[1]!=descriptor.arena[1] ||
+                    !task || task[0]!=13 || task[1]!=descriptor.arena[1] ||
                    !publication_identity_equal(contract.task_identity,task+2)) {
                     semantic_content_integrity_trap();return;
                 }
@@ -8454,7 +8456,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
                 transition_kind=reinterpret_cast<const PendingContinuation*>(control.continuation)->transition_kind;
             }
         }
-        if(!failed && task && (task[0]!=12 || task[1]!=descriptor.arena[1])) {
+        if(!failed && task && (task[0]!=13 || task[1]!=descriptor.arena[1])) {
             failed=1;state->status=7;
         }
         if(!failed && task && !fixed_score)state->actor_eligible=program_bank.task.actor_eligible;
