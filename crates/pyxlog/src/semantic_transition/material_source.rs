@@ -1153,6 +1153,10 @@ impl MaterialSourceRegistry {
             compiler_diagnostic: Mutex::new(CompilerDiagnosticCache::default()),
             compiler_diagnostic_acquiring: AtomicBool::new(false),
             owner_metadata: Mutex::new(None),
+            // Saved metadata has no live world or allocation owner. decode_bound
+            // installs the original registry before resolving its context.
+            semantic_world: Mutex::new(None),
+            semantic_world_metadata: Mutex::new(None),
         })
     }
 

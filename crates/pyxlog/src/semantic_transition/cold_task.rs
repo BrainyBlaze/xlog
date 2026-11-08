@@ -1458,10 +1458,11 @@ impl PySemanticTransitionColdTask {
             }
             None
         };
+        let canary_context = super::world::context_source(semantic_context)?;
         let (canary_source, canary_owner, _) = super::read_training_canary_source(
             py,
             Some(training_canary_source),
-            &super::world::context_source(semantic_context)?,
+            canary_context.as_ref(),
         )?;
         let source_allocation = canary_owner
             .as_ref()
