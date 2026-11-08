@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -420,6 +420,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     output_dependencies: bool,
     frontier_completion: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
+    parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
 
 #[pymethods]
@@ -543,6 +544,7 @@ impl PyNativeAcquisitionMask {
             entry_budget,
             output_dependencies,
             frontier_completion,
+            parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
             planned_output,
@@ -568,6 +570,33 @@ impl PyNativeAcquisitionMask {
             cache.clear_search();
         }
         let mask = py.detach(|| {
+            let mut parsed = self
+                .parsed_prefix
+                .as_ref()
+                .map(|state| state.lock().unwrap());
+            let mut checkpoint = parsed.as_mut().and_then(|state| state.take());
+            if parsed.is_some() && allowed_mask.iter().any(|byte| *byte != 0) {
+                match self.canonical_prefix(prefix) {
+                    Ok(canonical) => {
+                        if checkpoint
+                            .as_ref()
+                            .is_some_and(|state| !canonical.starts_with(&state.bytes))
+                        {
+                            checkpoint = None;
+                        }
+                        // Only the actual input may advance the checkpoint.
+                        // Hypothetical spellings below always check their tail.
+                        let next = self
+                            .resources(&canonical, checkpoint.as_ref(), true)
+                            .ok()
+                            .and_then(|resources| resources.parsed_prefix);
+                        if next.is_some() {
+                            checkpoint = next;
+                        }
+                    }
+                    Err(_) => checkpoint = None,
+                }
+            }
             let mut mask = allowed_mask.to_vec();
             let mut bytes = prefix.to_vec();
             for (id, spelling) in self.token_bytes.iter().enumerate() {
@@ -584,25 +613,15 @@ impl PyNativeAcquisitionMask {
                         continue;
                     }
                 };
-                if resource_prefix(
-                    &canonical,
-                    &self.retained,
-                    self.ordered,
-                    &self.raw_tokens,
-                    self.operation_fields.as_ref(),
-                    self.typed_context.as_ref(),
-                    self.planned_output,
-                    self.check_single_operation,
-                    self.canonical_entry_formals,
-                    self.entry_budget,
-                    self.output_dependencies,
-                    self.frontier_completion,
-                    self.completion_cache.as_ref(),
-                )
-                .is_err()
+                if self
+                    .resources(&canonical, checkpoint.as_ref(), false)
+                    .is_err()
                 {
                     mask[id / 8] &= !bit;
                 }
+            }
+            if let Some(parsed) = &mut parsed {
+                **parsed = checkpoint;
             }
             mask
         });
@@ -617,22 +636,9 @@ impl PyNativeAcquisitionMask {
             ));
         }
         let canonical = self.canonical_prefix(prefix).map_err(value_error)?;
-        let resources = resource_prefix(
-            &canonical,
-            &self.retained,
-            self.ordered,
-            &self.raw_tokens,
-            self.operation_fields.as_ref(),
-            self.typed_context.as_ref(),
-            self.planned_output,
-            self.check_single_operation,
-            self.canonical_entry_formals,
-            self.entry_budget,
-            self.output_dependencies,
-            self.frontier_completion,
-            self.completion_cache.as_ref(),
-        )
-        .map_err(value_error)?;
+        let resources = self
+            .resources(&canonical, None, false)
+            .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
             .map_err(value_error)
     }
@@ -658,6 +664,31 @@ impl PyNativeAcquisitionMask {
 }
 
 impl PyNativeAcquisitionMask {
+    fn resources<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        reusable_prefix: Option<&'a ParsedOperations>,
+        capture_prefix: bool,
+    ) -> Result<Resources<'a>, serde_json::Error> {
+        resource_prefix(
+            bytes,
+            &self.retained,
+            self.ordered,
+            &self.raw_tokens,
+            self.operation_fields.as_ref(),
+            self.typed_context.as_ref(),
+            self.planned_output,
+            self.check_single_operation,
+            self.canonical_entry_formals,
+            self.entry_budget,
+            self.output_dependencies,
+            self.frontier_completion,
+            self.completion_cache.as_ref(),
+            reusable_prefix,
+            capture_prefix,
+        )
+    }
+
     fn canonical_prefix<'a>(&self, source: &'a [u8]) -> Result<Cow<'a, [u8]>, String> {
         if self.numerical_rows {
             rows::prefix(
@@ -740,15 +771,25 @@ struct Resources<'a> {
     program_definition_index: Option<usize>,
     definitions: BTreeMap<String, TensorProgram>,
     declarations: BTreeMap<String, TensorParameter>,
+    reusable_prefix: Option<&'a ParsedOperations>,
+    capture_prefix: bool,
+    parsed_prefix: Option<ParsedOperations>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Program {
     arguments: Option<usize>,
     parameters: usize,
     parameters_complete: bool,
     operations: usize,
     typed: Option<typed::Program>,
+}
+
+struct ParsedOperations {
+    bytes: Vec<u8>,
+    definition_index: Option<usize>,
+    program: Program,
+    nodes: usize,
 }
 
 fn resource_prefix<'a>(
@@ -765,6 +806,8 @@ fn resource_prefix<'a>(
     output_dependencies: bool,
     frontier_completion: bool,
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
+    reusable_prefix: Option<&'a ParsedOperations>,
+    capture_prefix: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -827,6 +870,9 @@ fn resource_prefix<'a>(
                     .collect()
             })
             .unwrap_or_default(),
+        reusable_prefix,
+        capture_prefix,
+        parsed_prefix: None,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -843,6 +889,30 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn remember_operations(&mut self, end: usize) {
+        let previous = self.parsed_prefix.as_ref().or(self.reusable_prefix);
+        if previous.is_some_and(|state| state.bytes.len() >= end) {
+            return;
+        }
+        let Some(available) = ACQUIRED_SOURCE_BYTES
+            .checked_sub(end)
+            .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<ParsedOperations>()))
+        else {
+            return;
+        };
+        let Some(program) = &self.program.typed else {
+            return;
+        };
+        if program.fits_prefix_cache(available) {
+            self.parsed_prefix = Some(ParsedOperations {
+                bytes: self.bytes[..end].to_vec(),
+                definition_index: self.definition_index,
+                program: self.program.clone(),
+                nodes: self.nodes,
+            });
+        }
+    }
+
     fn entry_requirements(&self) -> Result<Option<typed::EntryRequirements>, String> {
         if !self.entry_budget
             || self.definition_name.as_deref()
@@ -1310,6 +1380,21 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
         f.write_str("numerical definition array")
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        if matches!(self.kind, Items::Operations) {
+            if let Some(state) = self.resources.reusable_prefix.filter(|state| {
+                state.definition_index == self.resources.definition_index
+                    && self.resources.bytes.starts_with(&state.bytes)
+            }) {
+                // These exact bytes, through a visible following comma, have
+                // already passed this visitor and canonical typed insertion.
+                // Consume their syntax; resume semantic checks at the tail.
+                for _ in 0..state.program.operations {
+                    sequence.next_element::<IgnoredAny>()?;
+                }
+                self.resources.program = state.program.clone();
+                self.resources.nodes = state.nodes;
+            }
+        }
         while sequence
             .next_element_seed(Item {
                 resources: self.resources,
@@ -1398,25 +1483,31 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                 if self.resources.nodes > ACQUIRED_NODES {
                     return Err(D::Error::custom("acquired node budget exceeded"));
                 }
+                let mut prefix_end = None;
                 if self.resources.ordered {
-                    let operation = decoder.deserialize_map(Operation {
+                    let parsed = decoder.deserialize_map(Operation {
                         program: &self.resources.program,
                         raw_tokens: self.resources.raw_tokens,
                         bytes: self.resources.bytes,
                         operation_fields: self.resources.operation_fields,
                         signatures: &self.resources.signatures,
+                        capture_prefix: self.resources.capture_prefix,
                     })?;
                     if let (Some(program), Some(operation)) =
-                        (&mut self.resources.program.typed, operation)
+                        (&mut self.resources.program.typed, parsed.operation)
                     {
                         program
                             .push(operation, &self.resources.signatures)
                             .map_err(D::Error::custom)?;
                     }
+                    prefix_end = parsed.following_comma;
                 } else {
                     IgnoredAny::deserialize(decoder)?;
                 }
                 self.resources.program.operations += 1;
+                if let Some(end) = prefix_end {
+                    self.resources.remember_operations(end);
+                }
                 Ok(())
             }
         }
@@ -1553,6 +1644,12 @@ struct Operation<'a> {
     bytes: &'a [u8],
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     signatures: &'a typed::Signatures,
+    capture_prefix: bool,
+}
+
+struct ParsedOperation {
+    operation: Option<TensorOperation>,
+    following_comma: Option<usize>,
 }
 
 fn reference_extent(program: &Program, field: &str) -> Option<usize> {
@@ -1609,7 +1706,7 @@ fn operation_prefix(bytes: &[u8], name: &str) -> bool {
 }
 
 impl<'de> Visitor<'de> for Operation<'_> {
-    type Value = Option<TensorOperation>;
+    type Value = ParsedOperation;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("operation tag followed by available operands")
     }
@@ -1747,12 +1844,13 @@ impl<'de> Visitor<'de> for Operation<'_> {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        if self
+        let output_slot = self
             .program
             .typed
             .as_ref()
-            .is_some_and(typed::Program::is_output_slot)
-        {
+            .is_some_and(typed::Program::is_output_slot);
+        let mut following_comma = None;
+        if output_slot || self.capture_prefix {
             // The map is complete. Locate its final value in the original
             // bytes so even a trailing comma without a next operation fails.
             // RawValue only finds the delimiter; operand inference above owns
@@ -1765,22 +1863,28 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     .map_err(A::Error::custom)?;
                 let end =
                     raw.get().as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
-                if self.bytes[end..]
+                following_comma = self.bytes[end..]
                     .trim_ascii_start()
                     .strip_prefix(b"}")
-                    .is_some_and(|rest| rest.trim_ascii_start().starts_with(b","))
-                {
-                    return Err(A::Error::custom("no operation may follow the output slot"));
-                }
+                    .map(<[u8]>::trim_ascii_start)
+                    .filter(|rest| rest.starts_with(b","))
+                    .map(|rest| self.bytes.len() - rest.len() + 1);
             }
         }
-        if self.program.typed.is_some() {
+        if output_slot && following_comma.is_some() {
+            return Err(A::Error::custom("no operation may follow the output slot"));
+        }
+        let operation = if self.program.typed.is_some() {
             serde_json::from_value(Value::Object(material))
                 .map(Some)
-                .map_err(A::Error::custom)
+                .map_err(A::Error::custom)?
         } else {
-            Ok(None)
-        }
+            None
+        };
+        Ok(ParsedOperation {
+            operation,
+            following_comma,
+        })
     }
 }
 
