@@ -15,7 +15,7 @@ use xlog_solve::{GpuCdclConfig, GpuCdclSolver, GpuCnf};
 #[cfg(debug_assertions)]
 use crate::compilation::gpu_d4::validate_cnf_gpu;
 
-use crate::gpu::GpuXgcf;
+use xlog_cuda::semantic_measure::GpuXgcf;
 
 const MAX_GRID_X: u64 = 65_535;
 

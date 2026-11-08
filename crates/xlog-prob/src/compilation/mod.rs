@@ -14,7 +14,7 @@ use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
 
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
-use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
+use xlog_cuda::semantic_measure::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
 pub mod disk_cache;
 pub mod gpu_cache;

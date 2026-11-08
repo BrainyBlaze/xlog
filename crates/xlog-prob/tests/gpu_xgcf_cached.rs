@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
+use xlog_cuda::semantic_measure::GpuXgcf;
 use xlog_cuda::CudaProviderBuilder;
+use xlog_ir::semantic_measure::{Xgcf, XgcfNodeType};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
-use xlog_prob::gpu::GpuXgcf;
-use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 
 #[test]
 fn cached_eval_matches_direct_eval() {

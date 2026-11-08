@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, XlogError};
+use xlog_cuda::semantic_measure::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 use xlog_cuda::CudaKernelProvider;
+use xlog_ir::semantic_measure::{Xgcf, XgcfNodeType};
 use xlog_prob::compilation::{gpu_d4::compute_free_var_mask_gpu, DeviceRandomVarList};
-use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 use xlog_prob::kc::ddnnf::DecisionDnnf;
-use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 fn try_provider() -> Option<CudaKernelProvider> {
@@ -164,7 +164,8 @@ f 3 0
 1 2 1 0
 1 3 -1 0
 "#;
-    let decision_circuit = Xgcf::from_ddnnf(&DecisionDnnf::parse_str(nnf).unwrap()).unwrap();
+    let decision_circuit =
+        xlog_prob::xgcf::from_ddnnf(&DecisionDnnf::parse_str(nnf).unwrap()).unwrap();
     let decision_weights = vec![(0.0, 0.0), (f64::INFINITY, -1.0)];
     let cpu_decision = decision_circuit
         .eval_log_wmc(|var| decision_weights[var as usize])
@@ -246,7 +247,7 @@ f 3 0
         ),
         (
             "DECISION",
-            Xgcf::from_ddnnf(&DecisionDnnf::parse_str(decision_nnf).unwrap()).unwrap(),
+            xlog_prob::xgcf::from_ddnnf(&DecisionDnnf::parse_str(decision_nnf).unwrap()).unwrap(),
             vec![(0.0, 0.0), (f64::INFINITY, -1.0)],
         ),
     ];
@@ -401,7 +402,7 @@ f 4 0
 2 4 -2 0
 "#;
     let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
-    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+    let xgcf = xlog_prob::xgcf::from_ddnnf(&ddnnf).unwrap();
 
     let p1 = 0.7_f64;
     let p2 = 0.2_f64;
@@ -437,7 +438,7 @@ f 4 0
 2 4 -2 0
 "#;
     let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
-    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+    let xgcf = xlog_prob::xgcf::from_ddnnf(&ddnnf).unwrap();
 
     let p1 = 0.7_f64;
     let p2 = 0.2_f64;
@@ -497,7 +498,7 @@ f 4 0
 2 4 -2 0
 "#;
     let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
-    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+    let xgcf = xlog_prob::xgcf::from_ddnnf(&ddnnf).unwrap();
 
     let p1 = 0.7_f64;
     let p2 = 0.2_f64;
@@ -567,11 +568,11 @@ fn test_gpu_xgcf_smoothing_matches_cpu_gradients() {
     // Unsmooth circuit: OR(x1, x2) where each branch mentions a different random var.
     let xgcf = Xgcf {
         node_type: vec![
-            xlog_prob::xgcf::XgcfNodeType::Const0,
-            xlog_prob::xgcf::XgcfNodeType::Const1,
-            xlog_prob::xgcf::XgcfNodeType::Lit,
-            xlog_prob::xgcf::XgcfNodeType::Lit,
-            xlog_prob::xgcf::XgcfNodeType::Or,
+            xlog_ir::semantic_measure::XgcfNodeType::Const0,
+            xlog_ir::semantic_measure::XgcfNodeType::Const1,
+            xlog_ir::semantic_measure::XgcfNodeType::Lit,
+            xlog_ir::semantic_measure::XgcfNodeType::Lit,
+            xlog_ir::semantic_measure::XgcfNodeType::Or,
         ],
         child_offsets: vec![0, 0, 0, 0, 0, 2],
         child_indices: vec![2, 3],
@@ -828,7 +829,7 @@ f 4 0
 2 4 -2 0
 "#;
     let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
-    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+    let xgcf = xlog_prob::xgcf::from_ddnnf(&ddnnf).unwrap();
 
     let p1 = 0.7_f64;
     let p2 = 0.2_f64;
@@ -872,7 +873,7 @@ f 4 0
 2 4 -2 0
 "#;
     let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
-    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+    let xgcf = xlog_prob::xgcf::from_ddnnf(&ddnnf).unwrap();
 
     let p1 = 0.7_f64;
     let p2 = 0.2_f64;
