@@ -1,3 +1,5 @@
+//! Numerical validation shared by circuit compilers and evaluators.
+
 use xlog_core::{Result, XlogError};
 
 fn nan_error(context: &str) -> XlogError {
@@ -8,7 +10,7 @@ fn nan_error(context: &str) -> XlogError {
 ///
 /// Both polarities are part of the weight input contract even when the circuit consumes only one
 /// of them. Positive and negative infinity remain valid for value-only evaluation.
-pub(crate) fn validate_circuit_log_weight_pair(weights: (f64, f64)) -> Result<(f64, f64)> {
+pub fn validate_circuit_log_weight_pair(weights: (f64, f64)) -> Result<(f64, f64)> {
     if weights.0.is_nan() || weights.1.is_nan() {
         return Err(nan_error("circuit log weights"));
     }
@@ -16,7 +18,7 @@ pub(crate) fn validate_circuit_log_weight_pair(weights: (f64, f64)) -> Result<(f
 }
 
 /// Rejects a NaN produced while evaluating a circuit node or read back from a GPU root.
-pub(crate) fn validate_circuit_value(value: f64) -> Result<f64> {
+pub fn validate_circuit_value(value: f64) -> Result<f64> {
     if value.is_nan() {
         return Err(nan_error("circuit evaluation"));
     }
@@ -28,10 +30,7 @@ pub(crate) fn validate_circuit_value(value: f64) -> Result<f64> {
 /// Gradient outputs must be finite even when value-only circuit evaluation legitimately returns
 /// infinity. True-polarity gradients are scanned before false-polarity gradients, and each array
 /// is scanned in ascending variable order, so the reported error is deterministic.
-pub(crate) fn validate_circuit_gradient_values(
-    grad_true: &[f64],
-    grad_false: &[f64],
-) -> Result<()> {
+pub fn validate_circuit_gradient_values(grad_true: &[f64], grad_false: &[f64]) -> Result<()> {
     for (polarity, gradients) in [("true", grad_true), ("false", grad_false)] {
         if let Some((index, _)) = gradients
             .iter()
@@ -52,7 +51,7 @@ pub(crate) fn validate_circuit_gradient_values(
 /// Positive infinity returns positive infinity when no NaN is present. The initial full
 /// scan gives NaN explicit precedence over infinity and returns a typed
 /// [`XlogError::Compilation`] error whenever any input is NaN.
-pub(crate) fn circuit_logsumexp(values: &[f64]) -> Result<f64> {
+pub fn circuit_logsumexp(values: &[f64]) -> Result<f64> {
     let mut max = f64::NEG_INFINITY;
     for &value in values {
         if value.is_nan() {

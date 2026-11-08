@@ -858,22 +858,86 @@ class SemanticProgramImage:
     @property
     def mutation_capacity(self) -> int: ...
 
+class SemanticWorldDeclaration:
+    """Complete immutable common-world declaration; identities stay in native metadata.
+
+    Each contexts row is (source6, context_view, signed_program, rule_cells,
+    query_views). The native parser owns exact nested tags, arities and bounds.
+    The source6 image owner is retained, never reconstructed by a dependent caller.
+    """
+    def __init__(
+        self, *, contexts: tuple[tuple[Any, ...], ...],
+        event_nodes: tuple[tuple[Any, ...], ...],
+        measure_factors: tuple[tuple[Any, ...], ...],
+        numeric_law: tuple[str, str, str, str, str],
+        capacities: tuple[int, int, int, int, int, int, int, int],
+    ) -> None: ...
+    @staticmethod
+    def from_material(material: bytes) -> SemanticWorldDeclaration: ...
+    @staticmethod
+    def capacity_requirements(
+        *, contexts: tuple[tuple[Any, ...], ...],
+        event_nodes: tuple[tuple[Any, ...], ...],
+        measure_factors: tuple[tuple[Any, ...], ...],
+        numeric_law: tuple[str, str, str, str, str],
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        """Native full-source workspace geometry; no CUDA allocation or evaluation."""
+        ...
+    @property
+    def material(self) -> bytes: ...
+    @property
+    def identity(self) -> bytes: ...
+    @property
+    def context_local_identities(self) -> tuple[bytes, ...]: ...
+    @property
+    def context_count(self) -> int: ...
+    def feedback_schema(self, statement_bytes: int) -> tuple[Any, ...]:
+        """Structural tuple11; task answers and world identities do not seed it."""
+        ...
+
+class SemanticWorldOwner:
+    """Common allocation lifetime and namespace; publication remains Session-owned."""
+    def __init__(
+        self, *, declaration: SemanticWorldDeclaration, seed_material: bytes,
+    ) -> None:
+        """Canonical unsigned minimal big-endian original seed; zero is one zero byte."""
+        ...
+    def context_source(self, context_index: int) -> SemanticContextSource: ...
+
+class SemanticContextSource:
+    """Original context/source binding, constructed only by its common world owner."""
+    @property
+    def original_source(
+        self,
+    ) -> tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
+               tuple[int, ...], SemanticProgramImage]: ...
+    @property
+    def world_declaration(self) -> SemanticWorldDeclaration: ...
+    @property
+    def material(self) -> bytes: ...
+    @property
+    def world_identity(self) -> bytes: ...
+    @property
+    def context_identity(self) -> bytes: ...
+    @property
+    def context_index(self) -> int: ...
+
 class SemanticTransitionColdTask:
     """Original admitted statement roster and its explicit ordered query selection."""
 
     @staticmethod
     def admission_requirements(
         cold_source: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
-                           tuple[int, ...], SemanticProgramImage],
+                           tuple[int, ...], SemanticProgramImage, SemanticContextSource],
     ) -> tuple[int, int, int, int]:
         """Exact native admission records, terms, references and UTF-8 byte extents."""
         ...
     @staticmethod
     def evaluation_statement_records(
         source: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
-                      tuple[int, ...], SemanticProgramImage],
+                      tuple[int, ...], SemanticProgramImage, SemanticContextSource],
         target: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
-                      tuple[int, ...], SemanticProgramImage],
+                      tuple[int, ...], SemanticProgramImage, SemanticContextSource],
         *, admission_limits: tuple[int, int, int, int],
     ) -> tuple[int, ...]: ...
 
@@ -881,6 +945,7 @@ class SemanticTransitionColdTask:
         self, *, initial_theory: str, input_facts: str,
         observer_program: Optional[str], statements: tuple[tuple[str, int], ...],
         query_records: tuple[int, ...], program_image: SemanticProgramImage,
+        semantic_context: SemanticContextSource,
         task_ground: tuple[str, tuple[Any, ...]],
         training_canary_source: Optional[SemanticTransitionColdTask],
         capacities: tuple[int, int, int, int],
@@ -971,6 +1036,11 @@ _PolicyOutputLayout = tuple[
 
 class SemanticTransitionTaskUse:
     """Native-issued task; no public constructor."""
+
+    @property
+    def semantic_context(self) -> SemanticContextSource:
+        """Original retained context binding, including after restoration."""
+        ...
 
     def prepare_initial_prefill(
         self, prepare_callback: Callable[[SemanticColdModelWork], Any],
@@ -1310,15 +1380,19 @@ class SemanticTransitionSession:
 
     @staticmethod
     def restore_checkpoint(
-        checkpoint: SemanticMaterialBytes, *, device_ordinal: int, snapshot: Any,
+        checkpoint: SemanticMaterialBytes, *, semantic_context: SemanticContextSource,
+        device_ordinal: int, snapshot: Any,
         restore_model: Any, training_domain: Any, training_canary_source: Any,
         material_source: _ReplayMaterialSource, max_resolved_material_bytes: int,
-        original_program: Optional[bytes] = None, referent: Any = None,
+        original_program: Optional[bytes] = None,
+        original_task_use: Optional[SemanticTransitionTaskUse] = None, referent: Any = None,
         resolve_checkpoint: Any = None, max_checkpoint_bytes: Any = None,
         max_total_checkpoint_bytes: Any = None, refresh_snapshot: Any = None,
         learning_phase_issuer: Any = None, learning_phase_records: Any = None,
         learning_phase_record_limits: Any = None, learning_phase_fence: Any = None,
         learning_phase_checkpoint_issuer: Any = None,
+        target_task_use: Optional[SemanticTransitionTaskUse] = None,
+        prepare_restore_context: Any = None, restore_context: Any = None,
     ) -> Any: ...
 
 class SemanticInitialPrefillReceipt:
@@ -1451,7 +1525,8 @@ class SemanticTransitionController:
         statement_records: Sequence[int], allowed_support_records: Sequence[int],
         task_program_source: Optional[str], task_query_ordinals: Sequence[int],
         task_scoring: Sequence[int], admissible_truth_masks: Sequence[int],
-        actor_eligible: bool, task_ground: Any, replay_rows: Any,
+        actor_eligible: bool, task_ground: Any,
+        semantic_context: SemanticContextSource, replay_rows: Any,
         replay_selection: Any, max_material_bytes: int,
         max_total_material_bytes: int, max_evidence_bytes: int,
         material_source: _ReplayMaterialSource, max_resolved_material_bytes: int,
@@ -1478,6 +1553,7 @@ class SemanticTransitionController:
         allowed_support_records: Any, task_program_source: Any,
         task_query_ordinals: Any, task_scoring: Any, task_priority_levels: Any,
         admissible_truth_masks: Any, actor_eligible: Any, task_ground: Any,
+        semantic_context: SemanticContextSource,
         live_authorities: Any,
         replay_rows: Any, training_objective: Any, training_domain: Any,
         training_canary_source: Any, replay_capacity: Any,

@@ -10,7 +10,7 @@ use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use super::disk_cache;
-use crate::gpu::GpuXgcf;
+use xlog_cuda::semantic_measure::GpuXgcf;
 
 /// Configuration for the GPU-resident circuit cache.
 ///

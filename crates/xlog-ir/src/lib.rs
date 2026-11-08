@@ -1,11 +1,15 @@
 //! Intermediate representations for XLOG
 #![warn(missing_docs)]
 
+pub mod circuit_numeric;
 pub mod eir;
 pub mod epistemic_plan;
 pub mod metadata;
 pub mod plan;
 pub mod rir;
+pub mod semantic_measure;
+pub mod semantic_value;
+pub mod semantic_world;
 pub mod tensor;
 
 pub use eir::{

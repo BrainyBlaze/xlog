@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use xlog_core::{Result, XlogError};
 
-use crate::logsumexp::{
+use xlog_ir::circuit_numeric::{
     circuit_logsumexp, validate_circuit_log_weight_pair, validate_circuit_value,
 };
 
