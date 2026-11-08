@@ -4206,8 +4206,9 @@ impl PySemanticTransitionSession {
             .as_ref()
             .map(|callback| callback.bind(py).as_any())
             .or(refresh_snapshot);
+        let canary_context = seed.semantic_context()?;
         let (canary_source, canary_owner, canary_projection) =
-            read_training_canary_source(py, training_canary_source, &seed.semantic_context()?)?;
+            read_training_canary_source(py, training_canary_source, canary_context.as_ref())?;
         if canary_projection != seed.training_canary_source {
             return Err(invalid(
                 "checkpoint symbolic canary source differs from its original native observation",
@@ -24854,11 +24855,9 @@ impl PySemanticTransitionController {
             target_training_objective_value.clone()
         };
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
-        let (canary_source, canary_owner, canary_projection) = read_training_canary_source(
-            py,
-            Some(training_canary_source),
-            &world::context_source(semantic_context)?,
-        )?;
+        let canary_context = world::context_source(semantic_context)?;
+        let (canary_source, canary_owner, canary_projection) =
+            read_training_canary_source(py, Some(training_canary_source), canary_context.as_ref())?;
         let replay_capacity_value = replay_capacity_value(replay_capacity, &mut budget)?;
         let replay_capacity = read_replay_capacity(&replay_capacity_value)?;
         let training_objective = read_training_objective(&training_objective_value)?;
