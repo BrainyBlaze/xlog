@@ -235,6 +235,22 @@ pub struct SemanticAdmissionLimits {
 }
 
 impl SemanticAdmissionRecords {
+    /// Exact limits consumed by this original typed admission, including every
+    /// occurrence of authored source and image text. This performs no device work.
+    pub fn requirements(&self) -> Result<SemanticAdmissionLimits, SemanticHypergraphError> {
+        Ok(prepare_semantic_record_metadata(
+            self,
+            SemanticAdmissionLimits {
+                max_records: u32::MAX,
+                max_terms: u32::MAX,
+                max_references: u32::MAX,
+                max_utf8_bytes: usize::MAX,
+            },
+            None,
+        )?
+        .requirements)
+    }
+
     /// Compose original cold admissions with an unchanged source prefix and an
     /// independently qualified target. The returned offset and requirements come
     /// from the actual composed records; no graph or CUDA context is created.

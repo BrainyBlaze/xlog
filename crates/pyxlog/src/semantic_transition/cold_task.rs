@@ -22,6 +22,7 @@ const MAX_POSITION: u64 = 262_144;
 
 pub(super) struct EditableTaskSource {
     pub program: Arc<xlog_cuda::SemanticProgramAdmission>,
+    pub image_declaration: Arc<super::program_image::ProgramImageDeclaration>,
     pub observer_source: Option<String>,
     pub initial_source: String,
     pub initial_theory: String,
@@ -36,6 +37,8 @@ struct EditableTaskAllocations {
     _vectors: xlog_cuda::SemanticReplayMaterialReservation,
     _text: xlog_cuda::SemanticReplayMaterialReservation,
     _program: xlog_gpu::logic::PositiveTaskAllocations,
+    _image: Option<xlog_cuda::SemanticReplayMaterialReservation>,
+    _image_declaration: Option<xlog_cuda::SemanticReplayMaterialReservation>,
     _context: Option<(
         Arc<EditableTaskAllocations>,
         xlog_cuda::SemanticReplayMaterialReservation,
@@ -372,7 +375,7 @@ fn editable_source_segment(
     let query_count = records.len().saturating_sub(selector_begin);
     if statement_count == 0
         || statement_count > u32::MAX as usize - 3
-        || !(2..=3).contains(&source_count)
+        || !(3..=4).contains(&source_count)
         || query_count == 0
         || admission.records.len() > u32::MAX as usize
         || !admission.supports.is_empty()
@@ -601,7 +604,7 @@ fn editable_source_segment(
         query_records.push((*statement as usize - record_begin) as u32);
     }
     let statement_texts = statements.iter().map(String::as_str).collect::<Vec<_>>();
-    let (program, allocations) = match budget {
+    let (mut program, mut allocations) = match budget {
         Some(budget) => {
             let (program, native) = xlog_gpu::logic::compile_positive_task_with_allocation_owner(
                 &sources[0],
@@ -622,6 +625,8 @@ fn editable_source_segment(
                     _vectors: vectors.expect("original source vector allocation owner"),
                     _text: text_owner.expect("original source text allocation owner"),
                     _program: native,
+                    _image: None,
+                    _image_declaration: None,
                     _context: None,
                 })),
             )
@@ -637,9 +642,35 @@ fn editable_source_segment(
             None,
         ),
     };
+    let (image_declaration, declaration_owner) =
+        super::program_image::ProgramImageDeclaration::from_source(
+            sources
+                .last()
+                .expect("complete original source includes image material"),
+            budget,
+        )?;
+    let image_owner = budget
+        .map(|budget| {
+            budget
+                .reserve_auxiliary(image_declaration.allocation_bound(&program)?)
+                .map_err(xlog_err)
+        })
+        .transpose()?;
+    program.image = image_declaration.lower(&program)?;
+    if let Some(allocations) = allocations.as_mut() {
+        let allocations = Arc::get_mut(allocations)
+            .ok_or_else(|| invalid("new image allocation has a shared owner"))?;
+        allocations._image = image_owner;
+        allocations._image_declaration = declaration_owner;
+    }
     Ok(Some(EditableTaskSource {
         program: Arc::new(program),
-        observer_source: sources.get(2).cloned(),
+        image_declaration,
+        observer_source: if source_count == 4 {
+            sources.get(2).cloned()
+        } else {
+            None
+        },
         initial_source: xlog_gpu::logic::positive_task_source(
             &sources[0],
             &sources[1],
@@ -819,6 +850,7 @@ impl PySemanticTransitionFreshParent {
 }
 
 struct ColdTaskSource {
+    program_image: Arc<super::program_image::ProgramImageDeclaration>,
     initial_theory: String,
     input_facts: String,
     observer_program: Option<String>,
@@ -833,6 +865,7 @@ impl ColdTaskSource {
         observer_program: &Bound<'_, PyAny>,
         statements: &Bound<'_, PyAny>,
         query_records: &Bound<'_, PyAny>,
+        program_image: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
         let initial_theory = exact_text(initial_theory, "initial_theory")?;
         let input_facts = exact_text(input_facts, "input_facts")?;
@@ -860,6 +893,7 @@ impl ColdTaskSource {
             ));
         }
         Ok(Self {
+            program_image: super::program_image::declaration(program_image)?,
             initial_theory,
             input_facts,
             observer_program,
@@ -870,12 +904,12 @@ impl ColdTaskSource {
 
     fn from_tuple(value: &Bound<'_, PyAny>) -> PyResult<Self> {
         if !value.is_exact_instance_of::<PyTuple>() {
-            return Err(invalid("cold source requires an exact builtin five-tuple"));
+            return Err(invalid("cold source requires an exact builtin six-tuple"));
         }
         let fields = value.cast::<PyTuple>()?;
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             return Err(invalid(
-                "cold source requires its five original source fields",
+                "cold source requires its five original fields and native program image",
             ));
         }
         Self::read(
@@ -884,6 +918,7 @@ impl ColdTaskSource {
             &fields.get_item(2)?,
             &fields.get_item(3)?,
             &fields.get_item(4)?,
+            &fields.get_item(5)?,
         )
     }
 
@@ -894,6 +929,7 @@ impl ColdTaskSource {
         };
         text(digest, &self.initial_theory);
         text(digest, &self.input_facts);
+        text(digest, self.program_image.source());
         if let Some(observer) = &self.observer_program {
             digest.update([1]);
             text(digest, observer);
@@ -918,6 +954,7 @@ impl ColdTaskSource {
             self.observer_program.as_deref(),
             &self.statements,
             &self.statement_records,
+            self.program_image.source(),
         )
     }
 }
@@ -1144,8 +1181,24 @@ impl PySemanticTransitionColdTask {
 
 #[pymethods]
 impl PySemanticTransitionColdTask {
+    /// Native admission requirements of the complete original six-field source.
+    /// The same encoder is used by metadata composition and fresh construction.
+    #[staticmethod]
+    fn admission_requirements(cold_source: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, usize)> {
+        let requirements = ColdTaskSource::from_tuple(cold_source)?
+            .admission()?
+            .requirements()
+            .map_err(xlog_err)?;
+        Ok((
+            requirements.max_records,
+            requirements.max_terms,
+            requirements.max_references,
+            requirements.max_utf8_bytes,
+        ))
+    }
+
     /// Return the target query record ordinals from the canonical cold composition.
-    /// Both sources use the same five arguments as fresh cold construction.
+    /// Both sources use the same six fields as fresh cold construction.
     /// This metadata preparation does not construct a Session or load a model.
     #[staticmethod]
     #[pyo3(signature = (source_cold_source, target_cold_source, *, admission_limits))]
@@ -1185,7 +1238,7 @@ impl PySemanticTransitionColdTask {
     }
 
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None, nonterminal_intent=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, program_image, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None, nonterminal_intent=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -1197,6 +1250,7 @@ impl PySemanticTransitionColdTask {
         observer_program: &Bound<'_, PyAny>,
         statements: &Bound<'_, PyAny>,
         query_records: &Bound<'_, PyAny>,
+        program_image: &Bound<'_, PyAny>,
         task_ground: &Bound<'_, PyAny>,
         training_canary_source: &Bound<'_, PyAny>,
         capacities: (u32, u32, u32, u32),
@@ -1334,12 +1388,14 @@ impl PySemanticTransitionColdTask {
             observer_program,
             statements,
             statement_records,
+            program_image: image_declaration,
         } = ColdTaskSource::read(
             initial_theory,
             input_facts,
             observer_program,
             statements,
             query_records,
+            program_image,
         )?;
         match (&native_ground, &observer_program) {
             (xlog_cuda::SemanticTaskGround::Logical, None) => {
@@ -1399,6 +1455,7 @@ impl PySemanticTransitionColdTask {
             &statements,
             &statement_records,
             &task_ground,
+            image_declaration.source(),
         );
         let admission = task_admission(
             &initial_theory,
@@ -1406,6 +1463,7 @@ impl PySemanticTransitionColdTask {
             observer_program.as_deref(),
             &statements,
             &statement_records,
+            image_declaration.source(),
         )?;
         let role_counts = initial_role_counts(statement_records.len());
         let records = fresh_records(
@@ -2046,6 +2104,7 @@ fn task_admission(
     observer_program: Option<&str>,
     statements: &[(String, u8)],
     query_records: &[u32],
+    image_source: &str,
 ) -> PyResult<SemanticAdmissionRecords> {
     let statement_schema = schema(
         vec![
@@ -2071,6 +2130,7 @@ fn task_admission(
     )?;
     let mut sources = vec![initial_theory, input_facts];
     sources.extend(observer_program);
+    sources.push(image_source);
     if statements
         .len()
         .checked_add(sources.len())
@@ -2158,8 +2218,10 @@ fn task_digest(
     statements: &[(String, u8)],
     query_records: &[u32],
     task_ground: &super::ColdValue,
+    image_source: &str,
 ) -> [u8; 32] {
-    let mut bytes = b"xlog.semantic.cold-task.v2\0".to_vec();
+    let mut bytes = b"xlog.semantic.cold-task.v3\0".to_vec();
+    append_sized(&mut bytes, image_source.as_bytes());
     for value in [initial_theory, input_facts] {
         append_sized(&mut bytes, value.as_bytes());
     }

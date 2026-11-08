@@ -116,6 +116,7 @@ pub(crate) mod state_restoration;
 pub use state_restoration::{
     SemanticPrivateModelContextCheckpointOrigin, SemanticPrivateModelContextCheckpointSave,
 };
+mod program_image;
 mod task_ground;
 mod task_retirement;
 mod verification_receipts;
@@ -309,12 +310,13 @@ impl SemanticTaskObjectiveLaw {
 
 /// The only structural-cost law accepted by a cold training objective.
 pub fn semantic_structural_cost_descriptor(
-    editable_program: bool,
+    program: Option<&crate::SemanticProgramAdmission>,
     query_count: u32,
-) -> SemanticStructuralCostDescriptor {
-    let (support_cap, truth_change_cap) = if editable_program {
+) -> Result<SemanticStructuralCostDescriptor, SemanticTransitionError> {
+    let editable_program = program.is_some();
+    let (support_cap, truth_change_cap) = if let Some(program) = program {
         (
-            crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64,
+            (program.fact_capacity().map_err(publication_input_error)? as u64) * 2,
             u64::from(query_count),
         )
     } else {
@@ -322,7 +324,7 @@ pub fn semantic_structural_cost_descriptor(
     };
     let cap = 2 + support_cap + truth_change_cap;
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.structural-cost.v1\0");
+    hash.update(b"xlog.semantic.structural-cost.v2\0");
     for word in [
         u64::from(editable_program),
         2,
@@ -332,10 +334,10 @@ pub fn semantic_structural_cost_descriptor(
     ] {
         hash.update(word.to_le_bytes());
     }
-    SemanticStructuralCostDescriptor {
+    Ok(SemanticStructuralCostDescriptor {
         unit: Identity256::from_bytes(hash.finalize().into()),
         cap,
-    }
+    })
 }
 
 /// One normalized truth-match objective within an ordered task priority level.
@@ -368,16 +370,15 @@ impl SemanticTaskScoring {
 
     fn return_bound(
         self,
-        editable_program: bool,
+        program: Option<&crate::SemanticProgramAdmission>,
         query_count: u32,
     ) -> Result<i64, SemanticTransitionError> {
-        // A rule may derive many facts from one command. Successful resident
-        // materialization caps the fact bank at 4096, and a candidate can also
-        // change every admitted query truth. The graph-only path retains its smaller
-        // support-attachment cap. Priority selection need not maximize value,
-        // so both signs of selected-minus-base value must fit.
-        let max_cost =
-            u128::from(semantic_structural_cost_descriptor(editable_program, query_count).cap);
+        // A forest may add both support channels throughout its actual finite
+        // constant universe and change every selected query. The graph-only
+        // path retains its support-attachment bound. Priority selection need
+        // not maximize value, so both signs of the return must fit.
+        let editable_program = program.is_some();
+        let max_cost = u128::from(semantic_structural_cost_descriptor(program, query_count)?.cap);
         let queries = u128::from(query_count);
         let max_spent = if editable_program {
             5 * queries + 4
@@ -398,18 +399,25 @@ impl SemanticTaskScoring {
 
     fn validate(
         self,
-        editable_program: bool,
+        program: Option<&crate::SemanticProgramAdmission>,
         query_count: u32,
     ) -> Result<(), SemanticTransitionError> {
-        self.return_bound(editable_program, query_count).map(|_| ())
+        self.return_bound(program, query_count).map(|_| ())
     }
 
     fn objective_law(
         self,
-        editable_program: bool,
+        program: Option<&crate::SemanticProgramAdmission>,
         query_count: u32,
+        training_domain: Option<&SemanticTrainingDomain>,
     ) -> Result<SemanticTaskObjectiveLaw, SemanticTransitionError> {
-        let return_bound = self.return_bound(editable_program, query_count)?;
+        if let Some(domain) = training_domain {
+            domain.validate()?;
+        }
+        let autoregressive_bits = training_domain.map_or(1.0f32.to_bits(), |domain| {
+            domain.autoregressive_coefficient_bits
+        });
+        let return_bound = self.return_bound(program, query_count)?;
         let mut evaluator_max = return_bound as f64;
         // The integer return bound may exceed exact FP64 integer precision.
         // Never narrow the proven interval when rounding its upper endpoint.
@@ -421,8 +429,12 @@ impl SemanticTaskScoring {
             return_bound,
             evaluator_min,
             evaluator_max,
-            coefficients: frozen_training_coefficients(evaluator_min, evaluator_max),
-            structural_cost: semantic_structural_cost_descriptor(editable_program, query_count),
+            coefficients: frozen_training_coefficients(
+                evaluator_min,
+                evaluator_max,
+                autoregressive_bits,
+            ),
+            structural_cost: semantic_structural_cost_descriptor(program, query_count)?,
         })
     }
 
@@ -430,23 +442,19 @@ impl SemanticTaskScoring {
     fn completed_law_bytes(
         self,
         task_identity: Identity256,
-        editable_program: bool,
+        program: Option<&crate::SemanticProgramAdmission>,
         query_count: u32,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-TASK-SCORING-LAW\0".to_vec();
         material_u64(&mut bytes, 2);
         bytes.extend_from_slice(task_identity.as_bytes());
-        let structural_cost = semantic_structural_cost_descriptor(editable_program, query_count);
+        let structural_cost = semantic_structural_cost_descriptor(program, query_count)?;
         bytes.extend_from_slice(structural_cost.unit.as_bytes());
         material_u64(&mut bytes, structural_cost.cap);
         for weight in self.words() {
             material_u64(&mut bytes, weight);
         }
-        bytes.extend_from_slice(
-            &self
-                .return_bound(editable_program, query_count)?
-                .to_le_bytes(),
-        );
+        bytes.extend_from_slice(&self.return_bound(program, query_count)?.to_le_bytes());
         Ok(bytes)
     }
 }
@@ -756,7 +764,7 @@ impl SemanticTaskEvaluationSpec {
             ));
         }
         self.scoring
-            .validate(self.program.editable_program().is_some(), query_count_u32)?;
+            .validate(self.program.editable_program(), query_count_u32)?;
         self.task_ground
             .validate(records, &self.statement_records)?;
         if let Some(domain) = &self.training_domain {
@@ -892,11 +900,13 @@ pub(crate) struct TaskEvaluationBinding {
     statements: Vec<crate::SemanticStatementKey>,
     statement_bytes: BTreeMap<u32, Vec<u8>>,
     observation_statements: Vec<(crate::SemanticStatementKey, crate::SemanticProgramFact)>,
+    snapshot_statements: Vec<(u32, crate::SemanticStatementKey, crate::SemanticProgramFact)>,
     allowed_supports: Vec<(u32, [u8; 32])>,
     observation: SemanticTaskObservation,
     goal_witness: Option<SemanticTaskGoalWitness>,
     objective_law: SemanticTaskObjectiveLaw,
     _requirement_allocation: Option<SemanticReplayMaterialReservation>,
+    _snapshot_allocation: Option<SemanticReplayMaterialReservation>,
 }
 
 type TaskContentSelection = (
@@ -1052,6 +1062,23 @@ impl TaskEvaluationBinding {
             &spec.statement_records,
             &spec.allowed_support_records,
         )?;
+        let snapshot_statements = spec
+            .program
+            .editable_program()
+            .map(|program| {
+                program
+                    .observation_facts
+                    .iter()
+                    .map(|&(record, fact)| {
+                        admission
+                            .statement_key(record)
+                            .map(|key| (record, key, fact))
+                            .map_err(SemanticTransitionError::Semantic)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let observation_statements = spec
             .task_ground
             .bindings()
@@ -1090,8 +1117,9 @@ impl TaskEvaluationBinding {
             ));
         }
         let objective_law = spec.scoring.objective_law(
-            spec.program.editable_program().is_some(),
+            spec.program.editable_program(),
             spec.statement_records.len() as u32,
+            spec.training_domain.as_ref(),
         )?;
         Ok(Self {
             admission_identity: admission.identity(),
@@ -1100,11 +1128,13 @@ impl TaskEvaluationBinding {
             statements,
             statement_bytes,
             observation_statements,
+            snapshot_statements,
             allowed_supports,
             observation,
             goal_witness: None,
             objective_law,
             _requirement_allocation: None,
+            _snapshot_allocation: None,
         })
     }
 
@@ -1198,6 +1228,13 @@ impl TaskEvaluationBinding {
         }
         for statement in &self.statements {
             hash.update(statement.identity().as_bytes());
+        }
+        for &(record, ref statement, fact) in &self.snapshot_statements {
+            hash.update(record.to_le_bytes());
+            hash.update(statement.identity().as_bytes());
+            for value in [fact.predicate, fact.arity, fact.first, fact.second] {
+                hash.update(value.to_le_bytes());
+            }
         }
         for (statement, fact) in &self.observation_statements {
             hash.update(statement.identity().as_bytes());
@@ -1327,13 +1364,14 @@ impl TaskEvaluationBinding {
     }
 
     fn word_count(&self) -> Result<usize, SemanticTransitionError> {
-        let mut count = 39usize;
+        let mut count = 47usize;
         for (rows, width) in [
             (self.statements.len(), 7usize),
             (self.allowed_supports.len(), 5),
             (self.spec.priority_levels.len(), 1),
             (self.spec.task_ground.bindings().len(), 36),
             (self.observation_statements.len(), 8),
+            (self.snapshot_statements.len(), 9),
         ] {
             count = rows
                 .checked_mul(width)
@@ -1385,6 +1423,64 @@ impl TaskEvaluationBinding {
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
+    fn program_image_owner(&self) -> Option<[u64; 4]> {
+        let program = self.spec.program.editable_program()?;
+        let mut hash = Sha256::new();
+        hash.update(b"xlog.qualified-program-image-owner.v1");
+        hash.update(self.schema_generation.as_bytes());
+        program.visit_words(|word| hash.update(word.to_le_bytes()));
+        for &(record, ref statement, _) in &self.snapshot_statements {
+            hash.update(record.to_le_bytes());
+            hash.update(statement.identity().as_bytes());
+        }
+        Some(identity_words(hash.finalize().into()))
+    }
+    fn validate_program_ground(
+        &self,
+        layout: task_ground::TaskGroundLayout,
+        bytes: &[u8],
+    ) -> Result<(), SemanticTransitionError> {
+        let Some(program) = self.spec.program.editable_program() else {
+            return Ok(());
+        };
+        let owner = self
+            .program_image_owner()
+            .ok_or(SemanticTransitionError::NotBound)?;
+        for slot in 0..4 {
+            let frame = &bytes[layout.frame(slot)?];
+            if (0..4)
+                .any(|index| frame[(6 + index) * 8..(7 + index) * 8] != owner[index].to_le_bytes())
+            {
+                return Err(publication_input_error(
+                    "restored selected image changed its qualified native owner",
+                ));
+            }
+            if layout.image.local_roots == 0 {
+                let origin = layout.image.origin_genome(program, owner, None)?;
+                if (0..4).any(|index| {
+                    frame[(26 + index) * 8..(27 + index) * 8] != origin[index].to_le_bytes()
+                }) {
+                    return Err(publication_input_error(
+                        "restored selected image changed its original cold genome",
+                    ));
+                }
+            }
+        }
+        let snapshot = &bytes[layout.snapshot_offset..layout.inherited_offset - 16];
+        if snapshot[..8] != [0; 8] {
+            let begin = 256 + layout.bindings * 144 + layout.inherited_capacity * 176;
+            for (index, &(_, ref key, _)) in self.snapshot_statements.iter().enumerate() {
+                let row = &snapshot[begin + index * 42 * 8..begin + (index + 1) * 42 * 8];
+                if row[20 * 8..24 * 8] != key.identity().as_bytes()[..] {
+                    return Err(publication_input_error(
+                        "restored native entry query changed its qualified statement",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
         self.words_with_intervention(owner, self.spec.evaluation_intervention)
     }
@@ -1405,7 +1501,7 @@ impl TaskEvaluationBinding {
             .map(|level| level.goals.len())
             .sum::<usize>();
         let mut words = Vec::with_capacity(count);
-        words.extend([10, owner]);
+        words.extend([13, owner]);
         words.extend(identity_words(
             *self.identity_with_intervention(intervention).as_bytes(),
         ));
@@ -1495,6 +1591,37 @@ impl TaskEvaluationBinding {
                 0,
             ]);
         }
+        words.push(self.snapshot_statements.len() as u64);
+        for &(record, ref statement, fact) in &self.snapshot_statements {
+            words.extend(identity_words(*statement.identity().as_bytes()));
+            words.extend([
+                u64::from(record),
+                u64::from(fact.predicate),
+                u64::from(fact.arity),
+                u64::from(fact.first),
+                u64::from(fact.second),
+            ]);
+        }
+        words.extend(self.program_image_owner().unwrap_or([0; 4]));
+        words.extend([
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(0, |domain| domain.mask_weighting as u64),
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(u64::from(1.0f32.to_bits()), |domain| {
+                    u64::from(domain.autoregressive_coefficient_bits)
+                }),
+        ]);
+        // An absent prospective training domain has no conditioning law.
+        words.push(
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(u64::MAX, |domain| domain.clean_conditioning as u64),
+        );
         debug_assert_eq!(words.len(), count);
         words
     }
@@ -1588,8 +1715,8 @@ impl SemanticActionCatalogue {
     pub const fn scratch_bytes(&self) -> usize {
         SCRATCH_BYTES
     }
-    /// (active fields, forced-NULL fields) for NO_EDIT, INSERT_SUPPORT and INSERT_RULE.
-    pub const fn field_masks(&self) -> [(u32, u32); 3] {
+    /// Active and forced-NULL masks in canonical opcode order.
+    pub const fn field_masks(&self) -> [(u32, u32); 6] {
         [
             (NO_EDIT_ACTIVE_MASK as u32, NO_EDIT_NULL_MASK as u32),
             (
@@ -1597,6 +1724,18 @@ impl SemanticActionCatalogue {
                 INSERT_SUPPORT_NULL_MASK as u32,
             ),
             (INSERT_RULE_ACTIVE_MASK as u32, INSERT_RULE_NULL_MASK as u32),
+            (
+                REPLACE_BRANCH_ACTIVE_MASK as u32,
+                REPLACE_BRANCH_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_LEAF_ACTIVE_MASK as u32,
+                REPLACE_LEAF_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_ROOT_ACTIVE_MASK as u32,
+                REPLACE_ROOT_NULL_MASK as u32,
+            ),
         ]
     }
 }
@@ -1744,6 +1883,21 @@ pub enum SemanticActionDescriptor {
     RuleVariable {
         index: u32,
     },
+    ProgramNode {
+        index: u32,
+    },
+    ProgramRoot {
+        index: u32,
+    },
+    ProgramGuard {
+        index: u32,
+    },
+    ProgramChild {
+        index: u32,
+    },
+    ProgramLeaf {
+        effect: u32,
+    },
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -1757,7 +1911,17 @@ struct SemanticDecodedSupportInsertion {
 
 struct SemanticDecodedRuleInsertion {
     rule: crate::SemanticProgramRule,
-    #[cfg(any(feature = "semantic-policy", test))]
+    block: u32,
+}
+
+struct SemanticDecodedProgramEdit {
+    opcode: u32,
+    target: u32,
+    guard: u32,
+    children: [u32; 4],
+    effect: u32,
+    block: u32,
+    rule: Option<crate::SemanticProgramRule>,
     bytes: Vec<u8>,
 }
 
@@ -1831,18 +1995,75 @@ struct ActionCodebooks {
 }
 
 impl ActionCodebooks {
+    fn descriptor_table(field: u32) -> Option<usize> {
+        match field {
+            2 => Some(0),
+            3..=10 | 12..=16 => Some(1),
+            11 => Some(2),
+            17 => Some(3),
+            _ => None,
+        }
+    }
+
     fn local_category(&self, field: u32, category: u32) -> Option<usize> {
-        let range = match field {
-            2 => 0,
-            3..=10 => 1,
-            11 => 2,
-            17 => 3,
-            _ => return None,
+        let table = Self::descriptor_table(field)?;
+        let value = u64::from(category);
+        if value == 0 || value >= self.words[2 * table + 1] {
+            return None;
+        }
+        let width = model_catalogue::ROW_WIDTHS[table];
+        let offset = self.words[2 * table] as usize + category as usize * width;
+        let row = self.words.get(offset..offset + width)?;
+        if let Some((role, relative)) = model_catalogue::template_role(table, row) {
+            if relative >= self.words[65 + role] {
+                return None;
+            }
+            if self.words[40] != 0
+                && !(self.words[44 + 2 * table]..self.words[45 + 2 * table]).contains(&value)
+            {
+                return None;
+            }
+            let preceding = match role {
+                1 => self.words[60],
+                3 => self.words[62],
+                _ => 0,
+            };
+            return usize::try_from(self.words[52 + 2 * table] + preceding + relative - 1).ok();
+        }
+        let begin = self.words[29 + 2 * table];
+        let end = self.words[30 + 2 * table];
+        if !(begin..end).contains(&value) {
+            return None;
+        }
+        let mut local = value - begin + 1;
+        if self.words[40] != 0 && local >= self.words[52 + 2 * table] {
+            local += self.words[53 + 2 * table] - self.words[52 + 2 * table];
+        }
+        usize::try_from(local - 1).ok()
+    }
+
+    fn global_category(&self, field: u32, index: usize) -> Option<u32> {
+        let table = Self::descriptor_table(field)?;
+        let local = u64::try_from(index).ok()?.checked_add(1)?;
+        let begin = self.words[52 + 2 * table];
+        let end = self.words[53 + 2 * table];
+        let category = if self.words[40] == 0 {
+            local
+        } else if (begin..end).contains(&local) {
+            let role_index = local - begin;
+            let offset = if table == 0 && role_index >= self.words[60] {
+                self.model_catalogue.as_ref()?.0.template_extents[0] - self.words[60]
+            } else if table == 1 && role_index >= self.words[62] {
+                self.model_catalogue.as_ref()?.0.template_extents[2] - self.words[62]
+            } else {
+                0
+            };
+            self.words[44 + 2 * table] + role_index + offset
+        } else {
+            self.words[29 + 2 * table] + local - 1 - if local >= end { end - begin } else { 0 }
         };
-        let begin = self.words[29 + 2 * range];
-        let end = self.words[30 + 2 * range];
-        (u64::from(category) >= begin && u64::from(category) < end)
-            .then(|| (u64::from(category) - begin) as usize)
+        let category = u32::try_from(category).ok()?;
+        (self.local_category(field, category) == Some(index)).then_some(category)
     }
 
     fn program_binding(program: &crate::SemanticProgramAdmission) -> Identity256 {
@@ -1860,7 +2081,7 @@ impl ActionCodebooks {
         if self.program_binding != Some(Self::program_binding(program))
             || choices[0] != 1
             || choices[1] != 2
-            || choices[11..].iter().any(|&choice| choice != 0)
+            || choices[11..17].iter().any(|&choice| choice != 0)
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -1915,26 +2136,154 @@ impl ActionCodebooks {
             }
         }
         semantic_generated_rule_receipt_words(rule, program)?;
-        #[cfg(any(feature = "semantic-policy", test))]
-        let bytes = {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(b"XLOG-DECODED-RULE-INSERTION\0");
-            material_u64(&mut bytes, 2);
-            bytes.extend_from_slice(self.binding.digest.as_bytes());
-            bytes.extend_from_slice(Self::program_binding(program).as_bytes());
-            for &choice in choices {
-                material_u32(&mut bytes, choice);
+        let block = self
+            .program_leaf_effect(program, choices[17], true)?
+            .1
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        Ok(SemanticDecodedRuleInsertion { rule, block })
+    }
+
+    fn program_leaf_effect(
+        &self,
+        program: &crate::SemanticProgramAdmission,
+        category: u32,
+        block_only: bool,
+    ) -> Result<(u32, Option<u32>), SemanticTransitionError> {
+        let mismatch = || SemanticTransitionError::ObservationMismatch;
+        let effect = match self
+            .local_category(17, category)
+            .and_then(|i| self.leaves.get(i))
+        {
+            Some(SemanticActionDescriptor::ProgramLeaf { effect })
+                if (*effect as usize)
+                    < program.image.leaves.len() - program.image.local_leaf_begin as usize =>
+            {
+                program.image.local_leaf_begin + *effect
             }
-            for field in semantic_program_rule_words(rule) {
-                material_u32(&mut bytes, field as u32);
-            }
-            bytes
+            _ => return Err(mismatch()),
         };
-        Ok(SemanticDecodedRuleInsertion {
-            rule,
-            #[cfg(any(feature = "semantic-policy", test))]
-            bytes,
-        })
+        let block = match program.image.leaves[effect as usize] {
+            crate::SemanticProgramLeaf::RuleBlock(block) => Some(block),
+            _ => None,
+        };
+        if block_only && block.is_none_or(|block| block < program.image.local_block_begin) {
+            return Err(mismatch());
+        }
+        Ok((effect, block))
+    }
+
+    fn decoded_program_edit(
+        &self,
+        program: &crate::SemanticProgramAdmission,
+        choices: &[u32; 18],
+    ) -> Result<SemanticDecodedProgramEdit, SemanticTransitionError> {
+        let mismatch = || SemanticTransitionError::ObservationMismatch;
+        if self.program_binding != Some(Self::program_binding(program)) || choices[0] != 1 {
+            return Err(mismatch());
+        }
+        let opcode = choices[1];
+        let (_, nulls) = semantic_opcode_masks(opcode).ok_or_else(mismatch)?;
+        if !(2..=5).contains(&opcode)
+            || choices
+                .iter()
+                .enumerate()
+                .any(|(field, &value)| nulls & (1 << field) != 0 && value != 0)
+        {
+            return Err(mismatch());
+        }
+        let mut edit = SemanticDecodedProgramEdit {
+            opcode,
+            target: 0,
+            guard: 0,
+            children: [0; 4],
+            effect: 0,
+            block: 0,
+            rule: None,
+            bytes: Vec::new(),
+        };
+        let operand = |field: u32, child: bool| -> Result<u32, SemanticTransitionError> {
+            let index = self
+                .local_category(field, choices[field as usize])
+                .and_then(|index| self.operands.get(index))
+                .ok_or_else(mismatch)?;
+            match (child, index) {
+                (true, SemanticActionDescriptor::ProgramChild { index })
+                    if (*index as usize)
+                        < program.image.nodes.len() - program.image.local_node_begin as usize =>
+                {
+                    Ok(program.image.local_node_begin + *index)
+                }
+                (false, SemanticActionDescriptor::ProgramGuard { index })
+                    if (*index as usize)
+                        < program.image.guards.len() - program.image.local_guard_begin as usize =>
+                {
+                    Ok(program.image.local_guard_begin + *index)
+                }
+                _ => Err(mismatch()),
+            }
+        };
+        if opcode == 2 {
+            let value = self.decoded_rule_insertion(program, choices)?;
+            edit.rule = Some(value.rule);
+            edit.block = value.block;
+            edit.effect = self.program_leaf_effect(program, choices[17], true)?.0;
+        } else {
+            let target = self
+                .local_category(2, choices[2])
+                .and_then(|index| self.targets.get(index))
+                .ok_or_else(mismatch)?;
+            edit.target = match (opcode, target) {
+                (3 | 4, SemanticActionDescriptor::ProgramNode { index })
+                    if (*index as usize)
+                        < program.image.nodes.len() - program.image.local_node_begin as usize =>
+                {
+                    program.image.local_node_begin + *index
+                }
+                (5, SemanticActionDescriptor::ProgramRoot { index })
+                    if (*index as usize)
+                        < program.image.roots.len() - program.image.local_root_begin as usize =>
+                {
+                    program.image.local_root_begin + *index
+                }
+                _ => return Err(mismatch()),
+            };
+            if opcode == 3 {
+                edit.guard = operand(12, false)?;
+                for edge in 0..4 {
+                    edit.children[edge] = operand(13 + edge as u32, true)?;
+                }
+            } else if opcode == 4 {
+                edit.effect = self.program_leaf_effect(program, choices[17], false)?.0;
+            } else {
+                edit.children[0] = operand(13, true)?;
+            }
+        }
+        edit.bytes.extend_from_slice(b"XLOG-DECODED-PROGRAM-EDIT\0");
+        material_u64(&mut edit.bytes, 1);
+        edit.bytes.extend_from_slice(self.binding.digest.as_bytes());
+        edit.bytes
+            .extend_from_slice(Self::program_binding(program).as_bytes());
+        for &choice in choices {
+            material_u32(&mut edit.bytes, choice);
+        }
+        for value in [
+            edit.opcode,
+            edit.target,
+            edit.guard,
+            edit.effect,
+            edit.block,
+        ]
+        .into_iter()
+        .chain(edit.children)
+        {
+            material_u32(&mut edit.bytes, value);
+        }
+        if let Some(rule) = edit.rule {
+            for value in rule.words() {
+                material_u32(&mut edit.bytes, value as u32);
+            }
+        }
+        Ok(edit)
     }
 
     #[cfg(feature = "semantic-policy")]
@@ -2192,22 +2541,33 @@ impl ActionCodebooks {
             );
         }
         let additional_targets = program
-            .map(|program| program.predicate_count as usize)
+            .map(|program| {
+                program.predicate_count as usize
+                    + program.image.nodes.len()
+                    + program.image.roots.len()
+            })
             .unwrap_or(0);
         let additional_operands = program
-            .map(|program| program.predicate_count as usize + 4)
+            .map(|program| {
+                program.predicate_count as usize
+                    + 4
+                    + program.image.guards.len()
+                    + program.image.nodes.len()
+            })
             .unwrap_or(0);
         if [
             targets.len().saturating_add(additional_targets),
             operands.len().saturating_add(additional_operands),
             qualifiers.len(),
-            leaves.len(),
+            leaves
+                .len()
+                .saturating_add(program.map_or(0, |p| p.image.leaves.len())),
         ]
         .into_iter()
-        .any(|n| n >= 65536)
+        .any(|n| n >= SEMANTIC_CATEGORY_CAPACITY)
         {
             return Err(SemanticTransitionError::InvalidInput {
-                detail: "descriptor codebook exceeds 65535 non-NULL entries".into(),
+                detail: "descriptor codebook exceeds the admitted categorical proof domain".into(),
             });
         }
         let mut words = vec![0; model_catalogue::HEADER_WORDS];
@@ -2222,7 +2582,21 @@ impl ActionCodebooks {
                 view
             })
             .collect();
+        words[52] = target_views.len() as u64 + 1;
         if let Some(program) = program {
+            for index in 0..program.image.nodes.len() {
+                words.extend([index as u64, u64::MAX - 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+                target_views.push(SemanticActionDescriptor::ProgramNode {
+                    index: index as u32,
+                });
+            }
+            for index in 0..program.image.roots.len() {
+                words.extend([index as u64, u64::MAX - 2, 0, 0, 0, 0, 0, 0, 0, 0]);
+                target_views.push(SemanticActionDescriptor::ProgramRoot {
+                    index: index as u32,
+                });
+            }
+            words[53] = target_views.len() as u64 + 1;
             for predicate in 0..program.predicate_count {
                 let arity = program.predicate_arities[predicate as usize];
                 words.extend([
@@ -2239,6 +2613,9 @@ impl ActionCodebooks {
                 ]);
                 target_views.push(SemanticActionDescriptor::RulePredicate { predicate, arity });
             }
+        }
+        if words[53] == 0 {
+            words[53] = words[52];
         }
         words[2] = words.len() as u64;
         words[3] = (operands.len() + additional_operands) as u64 + 1;
@@ -2258,7 +2635,21 @@ impl ActionCodebooks {
                 view
             })
             .collect();
+        words[54] = operand_views.len() as u64 + 1;
         if let Some(program) = program {
+            for index in 0..program.image.guards.len() {
+                words.extend([0, 0, 0, 3, index as u64, 0]);
+                operand_views.push(SemanticActionDescriptor::ProgramGuard {
+                    index: index as u32,
+                });
+            }
+            for index in 0..program.image.nodes.len() {
+                words.extend([0, 0, 0, 4, index as u64, 0]);
+                operand_views.push(SemanticActionDescriptor::ProgramChild {
+                    index: index as u32,
+                });
+            }
+            words[55] = operand_views.len() as u64 + 1;
             for predicate in 0..program.predicate_count {
                 let arity = program.predicate_arities[predicate as usize];
                 words.extend([0, 0, 0, 1, u64::from(predicate), u64::from(arity)]);
@@ -2269,6 +2660,11 @@ impl ActionCodebooks {
                 operand_views.push(SemanticActionDescriptor::RuleVariable { index });
             }
         }
+        if words[55] == 0 {
+            words[55] = words[54];
+        }
+        words[56] = 1;
+        words[57] = 1;
         words[4] = words.len() as u64;
         words[5] = qualifiers.len() as u64 + 1;
         words.extend([0; 3]);
@@ -2291,15 +2687,50 @@ impl ActionCodebooks {
             })
             .collect();
         words[6] = words.len() as u64;
-        words[7] = leaves.len() as u64 + 1;
+        words[7] = leaves.len() as u64 + program.map_or(0, |p| p.image.leaves.len()) as u64 + 1;
         words.extend([0; 18]);
-        let leaf_views = leaves
+        let mut leaf_views: Vec<SemanticActionDescriptor> = leaves
             .into_values()
             .map(|(row, view)| {
                 words.extend(row);
                 view
             })
             .collect();
+        words[58] = leaf_views.len() as u64 + 1;
+        if let Some(program) = program {
+            for effect in 0..program.image.leaves.len() {
+                let mut row = [0u64; 18];
+                row[0] = u64::MAX;
+                row[1] = effect as u64;
+                words.extend(row);
+                leaf_views.push(SemanticActionDescriptor::ProgramLeaf {
+                    effect: effect as u32,
+                });
+            }
+        }
+        words[59] = leaf_views.len() as u64 + 1;
+        if let Some(program) = program {
+            words[60..65].copy_from_slice(&[
+                program.image.nodes.len() as u64,
+                program.image.roots.len() as u64,
+                program.image.guards.len() as u64,
+                program.image.nodes.len() as u64,
+                program.image.leaves.len() as u64,
+            ]);
+            for (role, begin) in [
+                program.image.local_node_begin,
+                program.image.local_root_begin,
+                program.image.local_guard_begin,
+                program.image.local_node_begin,
+                program.image.local_leaf_begin,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                words[65 + role] = words[60 + role] - u64::from(begin);
+            }
+        }
+        words[70] = 1;
         words[8] = words.len() as u64 * 8;
         words[9] = bytes.len() as u64;
         words[10..14].copy_from_slice(&identity_words(*admission.schema_generation().as_bytes()));
@@ -2307,6 +2738,7 @@ impl ActionCodebooks {
             *admission.base_snapshot().digest().as_bytes(),
         ));
         bytes.resize(bytes.len().div_ceil(8) * 8, 0);
+        words[9] = bytes.len() as u64;
         words.extend(
             bytes
                 .as_chunks::<8>()
@@ -2322,6 +2754,7 @@ impl ActionCodebooks {
         words[38] = u64::from(program.is_some());
         words[39] = u64::from(program.is_some());
         let binding = Self::bind_admission_words(admission, owner, program_binding, &mut words)?;
+        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
         let (components, input_cells) = Self::component_geometry(&words, program.is_some())?;
         let components = components.into_iter().collect();
         Ok(Self {
@@ -2344,12 +2777,13 @@ impl ActionCodebooks {
         words: &[u64],
         has_program: bool,
     ) -> Result<([SemanticComponent; COMPONENT_COUNT], usize), SemanticTransitionError> {
-        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
+        // Source preparation also derives this geometry from an already
+        // acquired header. Full recipe validation belongs to the producers.
         if words.len() < model_catalogue::HEADER_WORDS
             || words[39] != u64::from(has_program)
             || [1, 3, 5, 7]
                 .into_iter()
-                .any(|index| words[index] == 0 || words[index] > 65536)
+                .any(|index| words[index] == 0 || words[index] > SEMANTIC_CATEGORY_CAPACITY as u64)
         {
             return Err(publication_input_error(
                 "action codebook geometry requires its original complete header",
@@ -2366,7 +2800,7 @@ impl ActionCodebooks {
                 match component.field {
                     2 => words[1] as u32,
                     3..=6 => words[3] as u32,
-                    7..=10 if words[38] != 0 => words[3] as u32,
+                    7..=10 | 12..=16 if words[38] != 0 => words[3] as u32,
                     1 if words[38] == 0 => 2,
                     11 => words[5] as u32,
                     17 => words[7] as u32,
@@ -7368,6 +7802,7 @@ struct ReplayStateMaterialProofContents {
     directory: Vec<PublicationRange>,
     allocation_geometry: Vec<PublicationAllocationGeometry>,
     codebook_header: [u64; model_catalogue::HEADER_WORDS],
+    task_ground_layout: task_ground::TaskGroundLayout,
     evaluation_fork: Option<SemanticEvaluationForkOrigin>,
     continuation_blocks: Option<usize>,
     model_contract: SemanticReplayLoadedMaterial,
@@ -7564,6 +7999,14 @@ impl SemanticReplayStateMaterialProof {
         }
         Ok(SemanticReplayStateMaterialProof {
             owner: Arc::new(ReplayStateMaterialProofContents {
+                task_ground_layout: task_ground::TaskGroundLayout::material_geometry(
+                    &material
+                        .ranges
+                        .iter()
+                        .find(|range| (range.range.role, range.range.index) == (58, 0))
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?
+                        .bytes,
+                )?,
                 rule_library: material
                     .ranges
                     .iter()
@@ -7728,6 +8171,8 @@ impl SemanticReplayLoadedMaterial {
         data_manifest: Identity256,
         mask_policy: Identity256,
         training_seed: &str,
+        mask_weighting: crate::SemanticMaskWeightingLaw,
+        clean_conditioning: crate::SemanticCleanConditioningLaw,
         task_content: Option<SemanticTaskContentIdentity>,
         origin: Option<SemanticTrainingViewOrigin>,
     ) -> Result<SemanticReplayTrainingViewRow, SemanticTransitionError> {
@@ -7754,6 +8199,8 @@ impl SemanticReplayLoadedMaterial {
             data_manifest,
             mask_policy,
             training_seed: training_seed.to_owned(),
+            mask_weighting,
+            clean_conditioning,
             task_content,
             origin,
             edit_demonstration: None,
@@ -8563,27 +9010,58 @@ fn validate_frozen_codebook_frame(
 ) -> Result<Option<rule_control::FrozenRuleLibraryFrame>, SemanticTransitionError> {
     let invalid =
         || publication_input_error("action codebook changed its complete frozen context frame");
-    if word_count < model_catalogue::HEADER_WORDS {
+    if word_count < model_catalogue::HEADER_WORDS || word(70) != 1 || word(71) != 0 {
         return Err(invalid());
     }
+    let header_extent = |base: usize| -> Result<[u64; 5], SemanticTransitionError> {
+        let extents = std::array::from_fn(|role| word(base + 60 + role));
+        if extents[0] != extents[3]
+            || extents
+                .iter()
+                .any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64)
+            || (0..5).any(|role| word(base + 65 + role) > extents[role])
+            || (word(base + 39) == 0 && extents != [0; 5])
+        {
+            return Err(invalid());
+        }
+        for table in 0..4 {
+            let begin = word(base + 52 + 2 * table);
+            let end = word(base + 53 + 2 * table);
+            if begin == 0
+                || end < begin
+                || end > word(base + 2 * table + 1)
+                || end - begin != model_catalogue::template_count(table, &extents)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(extents)
+    };
+    header_extent(0)?;
     if word(40) == 0 {
-        return if word(41) == 0 && word(42) == 0 && word(43) == 0 {
-            Ok(None)
-        } else {
-            Err(invalid())
-        };
+        if (41..52).any(|index| word(index) != 0) {
+            return Err(invalid());
+        }
+        return Ok(None);
     }
     let start = usize::try_from(word(40) / 8).map_err(|_| invalid())?;
     let length = usize::try_from(word(41) / 8).map_err(|_| invalid())?;
     if word(40) % 8 != 0
         || word(41) % 8 != 0
-        || length < 4
+        || length < model_catalogue::FRAME_HEADER_WORDS
         || start.checked_add(length) != Some(word_count)
         || start < model_catalogue::HEADER_WORDS
         || word(start) != 0x584c4f474d4f444c
-        || word(start + 1) != 3
+        || word(start + 1) != 5
         || word(start + 2) != word(37)
         || word(start + 3) != word(43)
+    {
+        return Err(invalid());
+    }
+    let extents: [u64; 5] = std::array::from_fn(|role| word(start + 4 + role));
+    if extents
+        .iter()
+        .any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64)
     {
         return Err(invalid());
     }
@@ -8594,13 +9072,16 @@ fn validate_frozen_codebook_frame(
         .ok_or_else(invalid)?;
     if members < 2
         || selected >= members
-        || members > (length - 4) / model_catalogue::FRAME_MEMBER_WORDS
+        || members
+            > (length - model_catalogue::FRAME_HEADER_WORDS) / model_catalogue::FRAME_MEMBER_WORDS
     {
         return Err(invalid());
     }
-    let mut cursor = start + 4;
+    let mut cursor = start + model_catalogue::FRAME_HEADER_WORDS;
     let mut counts = [1u64; 4];
     let mut owned = [(0u64, 0u64); 4];
+    let mut maximum = [0; 5];
+    let mut payload_offset = 0u64;
     let mut selected_library = None;
     for member in 0..members {
         if cursor
@@ -8617,49 +9098,157 @@ fn validate_frozen_codebook_frame(
         let library_count = usize::try_from(word(cursor + 28)).map_err(|_| invalid())?;
         cursor += model_catalogue::FRAME_MEMBER_WORDS;
         let end = cursor
-            .checked_add(recipe_words)
-            .filter(|end| *end <= word_count)
+            .checked_add(model_catalogue::HEADER_WORDS)
+            .filter(|&end| end <= word_count)
             .ok_or_else(invalid)?;
         if recipe_words < model_catalogue::HEADER_WORDS
             || has_program > 1
             || word(cursor + 39) != has_program
-            || (40..44).any(|index| word(cursor + index) != 0)
+            || word(cursor + 70) != 1
+            || word(cursor + 71) != 0
+            || (40..52).any(|index| word(cursor + index) != 0)
             || [14, 15, 16, 21, 22, 23, 24]
                 .into_iter()
                 .any(|index| word(cursor + index) != 0)
         {
             return Err(invalid());
         }
-        for (table, width) in [10usize, 6, 3, 18].into_iter().enumerate() {
+        let local_extents = header_extent(cursor)?;
+        for role in 0..5 {
+            maximum[role] = maximum[role].max(local_extents[role]);
+        }
+        if member == selected && (52..72).any(|index| word(index) != word(cursor + index)) {
+            return Err(invalid());
+        }
+        let base_counts = counts;
+        let mut local_starts = [0usize; 4];
+        let mut local_ends = [0usize; 4];
+        let mut local_cursor = model_catalogue::HEADER_WORDS;
+        for (table, width) in model_catalogue::ROW_WIDTHS.into_iter().enumerate() {
             let count = word(cursor + 2 * table + 1);
             let table_start = usize::try_from(word(cursor + 2 * table)).map_err(|_| invalid())?;
+            let table_end = usize::try_from(count)
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .and_then(|size| table_start.checked_add(size))
+                .filter(|&end| end <= recipe_words)
+                .ok_or_else(invalid)?;
             if count == 0
-                || count > 65536
-                || table_start < model_catalogue::HEADER_WORDS
-                || usize::try_from(count)
-                    .ok()
-                    .and_then(|count| count.checked_mul(width))
-                    .and_then(|size| table_start.checked_add(size))
-                    .is_none_or(|end| end > recipe_words)
+                || count > SEMANTIC_CATEGORY_CAPACITY as u64
+                || table_start != local_cursor
             {
                 return Err(invalid());
             }
-            let begin = counts[table];
-            counts[table] = begin
-                .checked_add(count - 1)
-                .filter(|count| *count <= 65536)
+            local_starts[table] = table_start;
+            local_ends[table] = table_end;
+            local_cursor = table_end;
+            let templates = word(cursor + 53 + 2 * table) - word(cursor + 52 + 2 * table);
+            counts[table] = count
+                .checked_sub(1 + templates)
+                .and_then(|ordinary| counts[table].checked_add(ordinary))
+                .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
                 .ok_or_else(invalid)?;
+            let projected_end = usize::try_from(word(2 * table))
+                .ok()
+                .and_then(|table_start| {
+                    usize::try_from(counts[table])
+                        .ok()
+                        .and_then(|count| count.checked_mul(width))
+                        .and_then(|count| table_start.checked_add(count))
+                })
+                .filter(|&end| end <= start)
+                .ok_or_else(invalid)?;
+            if projected_end < model_catalogue::HEADER_WORDS {
+                return Err(invalid());
+            }
             if member == selected {
-                owned[table] = (begin, counts[table]);
+                owned[table] = (base_counts[table], counts[table]);
             }
         }
         let payload = word(cursor + 8);
+        let payload_begin = usize::try_from(payload / 8).map_err(|_| invalid())?;
         if payload % 8 != 0
-            || payload / 8 > recipe_words as u64
-            || word(cursor + 9) != recipe_words as u64 * 8 - payload
+            || payload_begin != local_cursor
+            || payload_begin > recipe_words
+            || recipe_words
+                .checked_mul(8)
+                .and_then(|bytes| bytes.checked_sub(payload as usize))
+                .map(|bytes| bytes as u64)
+                != Some(word(cursor + 9))
         {
             return Err(invalid());
         }
+        let payload_words = recipe_words - payload_begin;
+        let target = word(8)
+            .checked_add(payload_offset)
+            .and_then(|offset| usize::try_from(offset / 8).ok())
+            .filter(|&target| {
+                target
+                    .checked_add(payload_words)
+                    .is_some_and(|end| end <= start)
+            })
+            .ok_or_else(invalid)?;
+        // Recover the exact original local recipe without allocating its rows:
+        // ordinary rows/payload live in the projected banks; relative address
+        // templates follow the original typed extents. The digest binds every
+        // original word, including the normalized header and all local slots.
+        let mut recipe_hash = Sha256::new();
+        for index in 0..recipe_words {
+            let value = if index < model_catalogue::HEADER_WORDS {
+                word(cursor + index)
+            } else if index >= payload_begin {
+                word(target + index - payload_begin)
+            } else {
+                let table = (0..4)
+                    .find(|&table| (local_starts[table]..local_ends[table]).contains(&index))
+                    .ok_or_else(invalid)?;
+                let width = model_catalogue::ROW_WIDTHS[table];
+                let relative = index - local_starts[table];
+                let category = (relative / width) as u64;
+                let column = relative % width;
+                let begin = word(cursor + 52 + 2 * table);
+                let finish = word(cursor + 53 + 2 * table);
+                if category == 0 {
+                    0
+                } else if (begin..finish).contains(&category) {
+                    model_catalogue::template_row(table, category - begin, &local_extents)[column]
+                } else {
+                    let preceding_templates = if category >= finish {
+                        finish - begin
+                    } else {
+                        0
+                    };
+                    let global = base_counts[table] + category - 1 - preceding_templates;
+                    let row = usize::try_from(word(2 * table))
+                        .ok()
+                        .and_then(|start| {
+                            usize::try_from(global)
+                                .ok()
+                                .and_then(|category| category.checked_mul(width))
+                                .and_then(|offset| start.checked_add(offset))
+                        })
+                        .filter(|&row| row.checked_add(width).is_some_and(|end| end <= start))
+                        .ok_or_else(invalid)?;
+                    let value = word(row + column);
+                    if column == 0 && (table == 2 || table == 1 && word(row + 2) != 0) {
+                        value.checked_sub(payload_offset).ok_or_else(invalid)?
+                    } else {
+                        value
+                    }
+                }
+            };
+            recipe_hash.update(value.to_le_bytes());
+        }
+        let recipe_digest: [u8; 32] = recipe_hash.finalize().into();
+        if (0..4).any(|index| {
+            word(metadata + 29 + index)
+                != u64::from_le_bytes(recipe_digest[index * 8..index * 8 + 8].try_into().unwrap())
+        }) {
+            return Err(invalid());
+        }
+        payload_offset = payload_offset
+            .checked_add(word(cursor + 9))
+            .ok_or_else(invalid)?;
         let rule_start = end
             .checked_add(declaration_bytes.div_ceil(8))
             .ok_or_else(invalid)?;
@@ -8724,21 +9313,55 @@ fn validate_frozen_codebook_frame(
                 });
             }
         }
+
         cursor = library_end;
     }
-    if cursor != word_count {
+    if cursor != word_count
+        || maximum != extents
+        || word(8).checked_add(payload_offset) != Some(word(40))
+    {
         return Err(invalid());
     }
-    for table in 0..4 {
-        if word(2 * table + 1) != counts[table]
+    let mut table_cursor = model_catalogue::HEADER_WORDS;
+    for (table, width) in model_catalogue::ROW_WIDTHS.into_iter().enumerate() {
+        let shared_begin = counts[table];
+        let shared_count = model_catalogue::template_count(table, &extents);
+        let count = shared_begin
+            .checked_add(shared_count)
+            .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+            .ok_or_else(invalid)?;
+        if word(2 * table) != table_cursor as u64
+            || word(2 * table + 1) != count
             || word(29 + 2 * table) != owned[table].0
             || word(30 + 2 * table) != owned[table].1
+            || word(44 + 2 * table) != shared_begin
+            || word(45 + 2 * table) != count
         {
             return Err(invalid());
         }
+        let table_end = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(width))
+            .and_then(|count| table_cursor.checked_add(count))
+            .filter(|&end| end <= start)
+            .ok_or_else(invalid)?;
+        if (0..width).any(|index| word(table_cursor + index) != 0) {
+            return Err(invalid());
+        }
+        for ordinal in 0..shared_count {
+            let expected = model_catalogue::template_row(table, ordinal, &extents);
+            let row = table_cursor + (shared_begin + ordinal) as usize * width;
+            if (0..width).any(|index| word(row + index) != expected[index]) {
+                return Err(invalid());
+            }
+        }
+        table_cursor = table_end;
+    }
+    if table_cursor as u64 * 8 != word(8) {
+        return Err(invalid());
     }
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.immutable-model-catalogue.v3\0");
+    hash.update(b"xlog.semantic.immutable-model-catalogue.v5\0");
     hash.update(CATALOGUE_DIGEST);
     for index in start..word_count {
         hash.update(word(index).to_le_bytes());
@@ -8802,9 +9425,10 @@ fn publication_action_receipts_digest_bytes(
 fn publication_semantic_receipts_digest(receipts: &[[u64; 42]; 7]) -> Identity256 {
     let mut hash = Sha256::new();
     for receipt in receipts {
+        let program = matches!(receipt[1], 0x584c4f47494d4544 | 0x584c4f4746515259);
         for (index, &word) in receipt.iter().enumerate() {
             hash.update(
-                if matches!(index, 3..=12 | 34..=41) {
+                if !program && matches!(index, 3..=12 | 34..=41) {
                     0
                 } else {
                     word
@@ -8938,7 +9562,7 @@ fn completed_receipt_material(
     clippy::too_many_arguments,
     reason = "the native rule receipt binds task, lane, slot, current edit, and prior edit independently"
 )]
-fn validated_rule_receipt(
+fn validated_program_edit_receipt(
     codebooks: &ActionCodebooks,
     program: &crate::SemanticProgramAdmission,
     task_identity: Identity256,
@@ -8949,80 +9573,65 @@ fn validated_rule_receipt(
     receipt: &[u64; 42],
     intervention: Option<SemanticEvaluationIntervention>,
     library: Option<&SemanticEvaluationRuleLibrary>,
-) -> Result<
-    (
-        SemanticDecodedRuleInsertion,
-        Option<crate::SemanticProgramRule>,
-    ),
-    SemanticTransitionError,
-> {
+) -> Result<SemanticDecodedProgramEdit, SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
-    if lane >= 2 || slot >= 2 {
+    if lane >= 2 || slot >= 2 || intervention == Some(SemanticEvaluationIntervention::NoEdit) {
         return Err(mismatch());
     }
-    let decoded = codebooks.decoded_rule_insertion(program, choices)?;
-    let previous = match previous_choices {
-        Some(prior) if prior[0] == 1 && prior[1] == 2 => {
-            Some(codebooks.decoded_rule_insertion(program, prior)?.rule)
+    if let Some(previous) = previous_choices {
+        if previous.iter().any(|&choice| choice != 0) {
+            codebooks.decoded_program_edit(program, previous)?;
         }
-        Some(prior) if prior.iter().all(|&choice| choice == 0) => None,
-        None => None,
-        _ => return Err(mismatch()),
-    };
-    let previous_fields = previous
-        .map(|rule| semantic_generated_rule_receipt_words(rule, program))
-        .transpose()?
-        .unwrap_or([0; 10]);
-    if receipt[0] != 0
-        || receipt[1]
-            != if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
-                4
-            } else {
-                3
-            }
+    }
+    let decoded = codebooks.decoded_program_edit(program, choices)?;
+    let control = intervention.unwrap_or(SemanticEvaluationIntervention::Structural) as u64;
+    if receipt[1] != 0x584c4f47494d4544
+        || receipt[0] != if receipt[40] == 0 { 0 } else { 12 }
+        || receipt[40] > 7
         || receipt[2] != lane as u64 + 1
         || receipt[3] != slot as u64
         || receipt[4..8] != identity_words(*task_identity.as_bytes())
         || receipt[8..12] != identity_words(*codebooks.binding.digest.as_bytes())
-        || receipt[12..22] != semantic_generated_rule_receipt_words(decoded.rule, program)?
-        || receipt[22] != program.initial_facts.len() as u64
-        || receipt[23] != program.initial_rules.len() as u64
-        || receipt[24] != u64::from(previous.is_some())
-        || receipt[25..35] != previous_fields
+        || receipt[12] != u64::from(decoded.opcode)
+        || receipt[14..18].iter().all(|&word| word == 0)
+        || receipt[18..22].iter().all(|&word| word == 0)
+        || receipt[22..26].iter().all(|&word| word == 0)
+        || receipt[28] != program.image.roots.len() as u64
+        || receipt[29] != program.image.nodes.len() as u64
+        || receipt[30] != u64::from(decoded.effect)
+        || receipt[31]
+            != u64::from(if decoded.opcode == 2 {
+                decoded.block
+            } else {
+                decoded.target
+            })
+        || receipt[32] != u64::from(decoded.guard)
+        || receipt[33..37] != decoded.children.map(u64::from)
+        || receipt[41] != control
+        || (receipt[40] != 0 && receipt[26] != u64::MAX)
     {
         return Err(mismatch());
     }
     if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
         let library = library.ok_or_else(mismatch)?;
-        let current = library
+        let rule = decoded.rule.ok_or_else(mismatch)?;
+        let index = library
             .rules()
             .iter()
-            .position(|rule| *rule == decoded.rule)
+            .position(|value| *value == rule)
             .ok_or_else(mismatch)?;
-        let prior = previous
-            .map(|previous| {
-                library
-                    .rules()
-                    .iter()
-                    .position(|rule| *rule == previous)
-                    .ok_or_else(mismatch)
-            })
-            .transpose()?;
         let allowed = (1u64 << library.rules().len()) - 1;
-        if receipt[35] != current as u64
-            || receipt[36] != prior.map_or(0, |index| index as u64 + 1)
-            || receipt[37] & !allowed != 0
-            || receipt[38] != receipt[37] ^ (1u64 << current)
-            || receipt[39] != library.rules().len() as u64
-            || receipt[40] != 1
-            || receipt[41] != 0
+        if decoded.opcode != 2
+            || receipt[37] != index as u64 + 1
+            || receipt[38] & !allowed != 0
+            || receipt[39] != receipt[38] ^ (1u64 << index)
         {
             return Err(mismatch());
         }
-    } else if receipt[35..].iter().any(|word| *word != 0) {
+    } else if receipt[37..40].iter().any(|&word| word != 0) {
         return Err(mismatch());
     }
-    Ok((decoded, previous))
+    Ok(decoded)
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -9051,21 +9660,20 @@ fn completed_theory_delta_for_slot(
     if lane >= 2
         || slot >= 2
         || component_receipts.len() != 18
-        || hard_decode[0] != 0
-        || hard_decode[1] > 4
+        || (hard_decode[1] != 0x584c4f47494d4544 && (hard_decode[0] != 0 || hard_decode[1] > 4))
         || lane_refusal > 4
     {
         return Err(SemanticTransitionError::ObservationMismatch);
     }
     if hard_decode[1] == 0 {
-        if choices[0] == 1 && choices[1] == 2 {
+        if choices[0] == 1 && choices[1] >= 2 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         return Ok(None);
     }
-    if hard_decode[1] == 3 || hard_decode[1] == 4 {
+    if hard_decode[1] == 0x584c4f47494d4544 {
         let program = program.ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let (decoded, previous) = validated_rule_receipt(
+        let decoded = validated_program_edit_receipt(
             codebooks,
             program,
             task_identity,
@@ -9077,49 +9685,18 @@ fn completed_theory_delta_for_slot(
             intervention,
             library,
         )?;
-        let previous_fields = previous.map(semantic_program_rule_words).unwrap_or([0; 25]);
-        let program_binding = ActionCodebooks::program_binding(program);
-        let theory_generation = if previous.is_some() {
-            let mut hash = Sha256::new();
-            hash.update(b"xlog.semantic.program-theory.v2\0");
-            hash.update(program_binding.as_bytes());
-            for word in previous_fields {
-                hash.update(word.to_le_bytes());
-            }
-            Identity256::from_bytes(hash.finalize().into())
-        } else {
-            program_binding
-        };
-        let ordinal = (lane * 2 + slot) as u64;
-        let activation = hard_decode[1] == 4;
-        let mut delta_bytes = decoded.bytes.clone();
-        if activation {
-            delta_bytes = b"XLOG-FIXED-RULE-ACTIVATION\0".to_vec();
-            delta_bytes.extend_from_slice(
-                library
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
-                    .binding()
-                    .as_bytes(),
-            );
-            for word in &hard_decode[35..41] {
-                material_u64(&mut delta_bytes, *word);
-            }
-            for word in semantic_program_rule_words(decoded.rule) {
-                material_u64(&mut delta_bytes, word);
-            }
+        if hard_decode[40] != 0 && lane_refusal == 0 {
+            return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let delta = completed_action_child_material(
-            owner,
-            if activation {
-                b"fixed-rule-activation"
-            } else {
-                b"theory-rule-delta"
-            },
-            ordinal,
-            &delta_bytes,
-        );
+        let ordinal = (lane * 2 + slot) as u64;
+        let mut delta_bytes = decoded.bytes;
+        for word in &hard_decode[12..] {
+            material_u64(&mut delta_bytes, *word);
+        }
+        let delta =
+            completed_action_child_material(owner, b"program-image-delta", ordinal, &delta_bytes);
         let mut payload = Vec::new();
-        payload.extend_from_slice(theory_generation.as_bytes());
+        payload.extend_from_slice(predecessor_semantic_root_digest.as_bytes());
         payload.extend_from_slice(task_identity.as_bytes());
         material_u64(&mut payload, lane as u64 + 1);
         material_u64(&mut payload, slot as u64);
@@ -9134,19 +9711,21 @@ fn completed_theory_delta_for_slot(
         }
         let evidence = completed_action_child_material(
             owner,
-            b"theory-rule-delta-evidence",
+            b"program-image-delta-evidence",
             ordinal,
             &payload,
         );
         return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
-            kind: if activation {
+            kind: if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
                 "rule-activation"
-            } else {
+            } else if decoded.opcode == 2 {
                 "rule"
+            } else {
+                "program-image"
             },
             delta,
             theory_generation: predecessor_semantic_root_digest,
-            verdict: if lane_refusal == 0 {
+            verdict: if lane_refusal == 0 && hard_decode[40] == 0 {
                 "accepted"
             } else {
                 "rejected"
@@ -9221,209 +9800,213 @@ fn validate_program_query_receipts(
     library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<(), SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
+    layout.validate(ground)?;
+    let frame =
+        |slot| -> Result<&[u8], SemanticTransitionError> { Ok(&ground[layout.frame(slot)?]) };
+    let word = |bytes: &[u8], index: usize| -> u64 {
+        u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap())
+    };
+    let entry = frame(3)?;
     let expected_queries = program.queries.len() as u64
-        + state
+        * (1 + state
             .task_evaluation
             .lane_refusal
             .iter()
-            .filter(|&&refusal| matches!(refusal, 0 | 2))
-            .count() as u64
-            * program.queries.len() as u64;
+            .filter(|&&cause| matches!(cause, 0 | 2))
+            .count() as u64);
     if state.binding_digest != codebooks.binding.digest
         || state.task_evaluation.query_count != expected_queries
-        || prior_rule_count < program.initial_rules.len() as u64
-        || prior_rule_count > crate::semantic_program::RESIDENT_PROGRAM_RULE_CAPACITY as u64
+        || prior_rule_count != program.initial_rules.len() as u64 + word(entry, 4)
     {
-        return Err(mismatch());
-    }
-    let mut inserted: [Vec<crate::SemanticProgramRule>; 2] = std::array::from_fn(|_| Vec::new());
-    let fixed = intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation);
-    if intervention == Some(SemanticEvaluationIntervention::NoEdit)
-        && edits
-            .iter()
-            .flatten()
-            .any(|choices| choices.iter().any(|value| *value != 0))
-    {
-        return Err(mismatch());
-    }
-    for (lane, actions) in edits.iter().enumerate() {
-        for choices in actions {
-            match (choices[0], choices[1]) {
-                (0, 0) if choices[2..].iter().all(|&value| value == 0) => {}
-                (1, 2) => {
-                    inserted[lane].push(codebooks.decoded_rule_insertion(program, choices)?.rule)
-                }
-                _ => return Err(mismatch()),
-            }
-        }
-    }
-    let mut activity = [0u64; 3];
-    let mut library_indices = [[0u64; 2]; 2];
-    if fixed {
-        let library = library.ok_or_else(mismatch)?;
-        if layout.library_count != library.rules().len() {
-            return Err(mismatch());
-        }
-        activity[0] = layout.query(ground, 0, 0)?.receipt[14];
-        let allowed = (1u64 << library.rules().len()) - 1;
-        if activity[0] & !allowed != 0 {
-            return Err(mismatch());
-        }
-        for lane in 0..2 {
-            activity[lane + 1] = activity[0];
-            let mut count = 0;
-            for slot in 0..2 {
-                if edits[lane][slot][0] == 1 {
-                    let rule = codebooks
-                        .decoded_rule_insertion(program, &edits[lane][slot])?
-                        .rule;
-                    let index = library
-                        .rules()
-                        .iter()
-                        .position(|entry| *entry == rule)
-                        .ok_or_else(mismatch)?;
-                    let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
-                    validated_rule_receipt(
-                        codebooks,
-                        program,
-                        task_identity,
-                        lane,
-                        slot,
-                        &edits[lane][slot],
-                        (slot == 1).then_some(&edits[lane][0]),
-                        receipt,
-                        intervention,
-                        Some(library),
-                    )?;
-                    if receipt[37] != activity[lane + 1] {
-                        return Err(mismatch());
-                    }
-                    activity[lane + 1] ^= 1u64 << index;
-                    library_indices[lane][count] = index as u64 + 1;
-                    count += 1;
-                }
-            }
-            if layout.rule_activity(ground, lane + 1)? != activity[lane + 1] {
-                return Err(mismatch());
-            }
-        }
-        let winner = usize::try_from(state.task_evaluation.winner)
-            .ok()
-            .filter(|winner| *winner < 3)
-            .ok_or_else(mismatch)?;
-        if layout.rule_activity(ground, 0)? != activity[winner] {
-            return Err(mismatch());
-        }
-    } else if (0..3).any(|slot| {
-        layout
-            .rule_activity(ground, slot)
-            .is_ok_and(|mask| mask != 0)
-    }) {
         return Err(mismatch());
     }
     let task_words = identity_words(*task_identity.as_bytes());
     let binding_words = identity_words(*codebooks.binding.digest.as_bytes());
+    let snapshot = &ground[layout.snapshot_offset..layout.inherited_offset - 16];
+    if word(snapshot, 22) != 1 {
+        return Err(mismatch());
+    }
+    let mut applied = [0u64; 2];
+    for lane in 0..2 {
+        let candidate = frame(lane + 1)?;
+        let mut generation = word(entry, 2);
+        let mut count = word(entry, 3);
+        let mut parent = std::array::from_fn::<_, 4, _>(|i| word(entry, 10 + i));
+        let commands = edits[lane].iter().filter(|choices| choices[0] == 1).count() as u64;
+        if state.work[lane].edit_commands != commands {
+            return Err(mismatch());
+        }
+        for slot in 0..2 {
+            let choices = &edits[lane][slot];
+            if choices.iter().all(|&value| value == 0) {
+                continue;
+            }
+            let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
+            validated_program_edit_receipt(
+                codebooks,
+                program,
+                task_identity,
+                lane,
+                slot,
+                choices,
+                (slot == 1).then_some(&edits[lane][0]),
+                receipt,
+                intervention,
+                library,
+            )?;
+            if receipt[14..18] != parent
+                || receipt[22..26]
+                    != entry[6 * 8..10 * 8]
+                        .chunks_exact(8)
+                        .map(|v| u64::from_le_bytes(v.try_into().unwrap()))
+                        .collect::<Vec<_>>()
+            {
+                return Err(mismatch());
+            }
+            if receipt[40] == 0 {
+                generation = generation.checked_add(1).ok_or_else(mismatch)?;
+                if receipt[13] != generation || receipt[26] != count {
+                    return Err(mismatch());
+                }
+                let begin = layout.image.lineage_offset
+                    + count as usize * program_image::IMAGE_LINEAGE_WORDS * 8;
+                let row = candidate
+                    .get(begin..begin + program_image::IMAGE_LINEAGE_WORDS * 8)
+                    .ok_or_else(mismatch)?;
+                if word(row, 0) != generation
+                    || word(row, 1) != state.proposal
+                    || word(row, 2) != slot as u64
+                    || word(row, 3) != u64::from(choices[1])
+                    || (0..18).any(|i| word(row, 4 + i) != u64::from(choices[i]))
+                    || (0..4).any(|i| word(row, 22 + i) != parent[i])
+                    || (0..4).any(|i| word(row, 26 + i) != receipt[18 + i])
+                {
+                    return Err(mismatch());
+                }
+                parent.copy_from_slice(&receipt[18..22]);
+                count += 1;
+                applied[lane] += 1;
+            } else if receipt[13] != generation
+                || receipt[18..22] != parent
+                || state.task_evaluation.lane_refusal[lane] == 0
+            {
+                return Err(mismatch());
+            }
+        }
+        if word(candidate, 2) != generation
+            || word(candidate, 3) != count
+            || (0..4).any(|i| word(candidate, 10 + i) != parent[i])
+        {
+            return Err(mismatch());
+        }
+    }
+    let winner = usize::try_from(state.task_evaluation.winner)
+        .ok()
+        .filter(|&slot| slot < 3)
+        .ok_or_else(mismatch)?;
+    if frame(0)? != frame(if winner == 0 { 3 } else { winner })? {
+        return Err(mismatch());
+    }
     for slot in 0..3 {
-        let rules: &[crate::SemanticProgramRule] =
-            if slot == 0 { &[] } else { &inserted[slot - 1] };
-        let receipts = (0..program.queries.len())
-            .map(|query| {
-                layout
-                    .query(ground, slot, query)
-                    .map(|record| record.receipt)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let facts = &candidate_facts[slot];
-        if slot != 0 && matches!(state.task_evaluation.lane_refusal[slot - 1], 1 | 3 | 4) {
-            let work = state.work[slot - 1];
-            if receipts
-                .iter()
-                .any(|receipt| receipt.iter().any(|&word| word != 0))
-                || !facts.truth.is_empty()
-                || facts
-                    .correct
-                    .as_ref()
-                    .is_some_and(|values| !values.is_empty())
+        let executed = slot == 0 || matches!(state.task_evaluation.lane_refusal[slot - 1], 0 | 2);
+        if !executed {
+            for query in 0..program.queries.len() {
+                if layout
+                    .query(ground, slot, query)?
+                    .receipt
+                    .iter()
+                    .any(|&value| value != 0)
+                {
+                    return Err(mismatch());
+                }
+            }
+            if !facts.truth.is_empty()
                 || !facts.attained.is_empty()
                 || facts.g != 0
                 || facts.p != 0
                 || facts.eligible != 0
-                || work.edit_commands != rules.len() as u64
-                || work.added_supports != 0
-                || work.defined_truth_changes != 0
+                || state.work[slot - 1].added_supports != 0
+                || state.work[slot - 1].defined_truth_changes != 0
             {
                 return Err(mismatch());
             }
             continue;
         }
-        let metrics = &receipts[0][37..40];
-        if metrics[1] > crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
-            || metrics[2] > metrics[1]
+        let image = frame(if slot == 0 { 3 } else { slot })?;
+        let first_query = layout.query(ground, slot, 0)?;
+        let metrics = &first_query.receipt[37..40];
+        if metrics[1] > program.fact_capacity().map_err(publication_input_error)? as u64
+            || metrics[2] > metrics[1].checked_mul(2).ok_or_else(mismatch)?
+            || facts.truth.len() != program.queries.len()
             || facts.truth.iter().any(|&truth| truth > 3)
         {
             return Err(mismatch());
         }
-        for (query, receipt) in receipts.iter().enumerate() {
+        for query in 0..program.queries.len() {
+            let record = layout.query(ground, slot, query)?;
+            let receipt = &record.receipt;
+            let fact = program.queries[query];
             let mut expected = [0u64; 42];
-            expected[1] = if fixed {
-                0x5850524f47515533
-            } else {
-                0x5850524f47515532
-            };
+            expected[1] = 0x584c4f4746515259;
             expected[2] = facts.truth[query];
             expected[3] = slot as u64;
             expected[4] = query as u64;
             expected[5..9].copy_from_slice(&task_words);
             expected[9..13].copy_from_slice(&binding_words);
-            expected[13] = rules.len() as u64;
-            if fixed {
-                let library = library.ok_or_else(mismatch)?;
-                expected[14] = activity[0];
-                expected[15] = activity[slot];
-                expected[16] = library.rules().len() as u64;
-                expected[17..21].copy_from_slice(&identity_words(*library.binding().as_bytes()));
-                if slot != 0 {
-                    expected[21..23].copy_from_slice(&library_indices[slot - 1]);
-                }
-            } else {
-                for (edit, rule) in rules.iter().enumerate() {
-                    expected[14 + edit * 10..24 + edit * 10]
-                        .copy_from_slice(&semantic_generated_rule_receipt_words(*rule, program)?);
-                }
+            expected[13] = if slot == 0 { 0 } else { applied[slot - 1] };
+            for i in 0..4 {
+                expected[14 + i] = word(image, 10 + i);
+                expected[18 + i] = word(image, 6 + i);
+                expected[23 + i] = word(snapshot, 18 + i);
+                expected[27 + i] = word(snapshot, 5 + i);
             }
-            let query_fact = program.queries[query];
+            expected[22] = word(image, 2);
+            for (channel, &reference) in receipt[31..33].iter().enumerate() {
+                if reference != 0 {
+                    if facts.truth[query] & (1 << channel) == 0 {
+                        return Err(mismatch());
+                    }
+                    let encoded = reference - 1;
+                    let root = (encoded >> 32) as usize;
+                    let node = (encoded & u64::from(u32::MAX)) as usize;
+                    if root >= layout.image.roots
+                        || node >= layout.image.nodes
+                        || word(image, layout.image.node_offset / 8 + node * 8) != 2
+                    {
+                        return Err(mismatch());
+                    }
+                }
+                expected[31 + channel] = reference;
+            }
+            expected[33] = u64::from(program.query_records[query]);
             expected[34..37].copy_from_slice(&[
-                u64::from(query_fact.predicate),
-                u64::from(query_fact.first),
-                u64::from(query_fact.second),
+                u64::from(fact.predicate),
+                u64::from(fact.first),
+                u64::from(fact.second),
             ]);
             expected[37..40].copy_from_slice(metrics);
-            expected[40] = prior_rule_count;
-            expected[41] = program.initial_facts.len() as u64;
+            expected[40] = program.initial_rules.len() as u64 + word(image, 4);
+            expected[41] = if slot == 0 {
+                0
+            } else {
+                state.work[slot - 1].added_supports
+            };
             if receipt != &expected {
                 return Err(mismatch());
             }
         }
-        if slot != 0 {
+        if slot > 0 {
             let baseline = &candidate_facts[0];
-            let baseline_derived = layout.query(ground, 0, 0)?.receipt[39];
-            let derived = if fixed {
-                metrics[2].saturating_sub(baseline_derived)
-            } else {
-                metrics[2]
-                    .checked_sub(baseline_derived)
-                    .ok_or_else(mismatch)?
-            };
-            let truth_changes = facts
+            let supports = first_query.receipt[41];
+            let changes = facts
                 .truth
                 .iter()
                 .zip(&baseline.truth)
-                .filter(|(current, original)| **current != **original)
+                .filter(|(a, b)| a != b)
                 .count() as u64;
-            let work = state.work[slot - 1];
-            if work.edit_commands != rules.len() as u64
-                || work.added_supports != derived
-                || work.defined_truth_changes != truth_changes
+            if state.work[slot - 1].added_supports != supports
+                || state.work[slot - 1].defined_truth_changes != changes
             {
                 return Err(mismatch());
             }
@@ -20035,7 +20618,7 @@ impl SemanticTransitionWork {
             return false;
         }
         if editable_program {
-            self.added_supports <= crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64
+            self.added_supports <= u64::from(u32::MAX) * 2
                 && self.defined_truth_changes <= u64::from(queries)
                 && (self.edit_commands != 0
                     || (self.added_supports == 0 && self.defined_truth_changes == 0))
@@ -25444,7 +26027,14 @@ impl SemanticTransitionSession {
                     if let Some(ground) = &branch.task_ground {
                         writes.push(state_restoration::OriginalDeviceWrite::new(
                             &self.stream,
-                            &ground.layout.initial_bytes(),
+                            &ground.layout.initial_bytes(
+                                self.task
+                                    .as_ref()
+                                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                                self.task
+                                    .as_ref()
+                                    .and_then(|(task, _)| task.program_image_owner()),
+                            )?,
                             ground.device.view(),
                             false,
                         )?);
@@ -27969,7 +28559,7 @@ impl SemanticTransitionSession {
                 .scoring
                 .completed_law_bytes(
                     task.identity(),
-                    editable_program,
+                    task.spec().program.editable_program(),
                     task.spec().statement_records.len() as u32,
                 )?
                 .len(),
@@ -28842,7 +29432,9 @@ impl SemanticTransitionSession {
                 0,
                 &scoring.completed_law_bytes(
                     task_identity,
-                    editable_program,
+                    self.task
+                        .as_ref()
+                        .and_then(|(task, _)| task.spec().program.editable_program()),
                     ground_layout.queries as u32,
                 )?,
             ),
@@ -32359,7 +32951,14 @@ impl SemanticTransitionSession {
         parent.records.push(SemanticStateRecord {
             role: SemanticStateRole::TaskGround,
             index: 0,
-            bytes: ground_layout.initial_bytes(),
+            bytes: ground_layout.initial_bytes(
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.program_image_owner()),
+            )?,
             capacity_bytes: ground_layout.bytes,
         });
         let mut layouts = BTreeMap::new();
@@ -40374,8 +40973,34 @@ impl SemanticTransitionSession {
             self.rule_library = Some(Arc::clone(&library));
             spec.rule_library = Some(library);
         }
+        let snapshot_allocation =
+            spec.program
+                .editable_program()
+                .map(|program| {
+                    let bytes =
+                        program
+                            .observation_facts
+                            .len()
+                            .checked_mul(size_of::<(
+                                u32,
+                                crate::SemanticStatementKey,
+                                crate::SemanticProgramFact,
+                            )>())
+                            .and_then(|bytes| {
+                                bytes.checked_add(program.image.nodes.len().checked_mul(
+                                    size_of::<u8>() + 5 * size_of::<(usize, bool)>(),
+                                )?)
+                            })
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                    self.replay_material_budget
+                        .as_ref()
+                        .ok_or(SemanticTransitionError::NotBound)?
+                        .reserve_auxiliary(bytes as u64)
+                })
+                .transpose()?;
         let mut binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
         binding._requirement_allocation = requirement_allocation;
+        binding._snapshot_allocation = snapshot_allocation;
         if self
             .cold_content
             .as_ref()
@@ -40397,6 +41022,16 @@ impl SemanticTransitionSession {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
         }
+        let _task_staging = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .reserve_auxiliary(
+                binding
+                    .word_count()?
+                    .checked_mul(8)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)? as u64,
+            )?;
         let words = binding.words(self.graph.transition_arena()[1]);
         let inherited_capacity = self
             .codebooks
@@ -40413,12 +41048,14 @@ impl SemanticTransitionSession {
         let ground_layout = task_ground::TaskGroundLayout::new(
             binding.spec.statement_records.len(),
             binding.spec.task_ground.bindings().len(),
-            binding
-                .spec
-                .program
-                .editable_program()
-                .map(|program| program.initial_rules.len()),
+            binding.spec.program.editable_program(),
         )?
+        .with_entry_supports(if binding.spec.program.editable_program().is_some() {
+            usize::try_from(self.graph.transition_arena()[4])
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?
+        } else {
+            0
+        })?
         .with_inherited_observations(inherited_capacity)?
         .with_rule_library(
             binding
@@ -40427,6 +41064,9 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .map_or(0, |library| library.rules().len()),
         )?;
+        if let Some(program) = binding.spec.program.editable_program() {
+            ground_layout.require_program_workspace(program)?;
+        }
         let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
         let task_bytes = words
             .len()
@@ -40448,9 +41088,26 @@ impl SemanticTransitionSession {
         let identity = binding.identity();
         self.task = Some((binding, device));
         self.task_ground = Some(ground);
+        let _ground_staging = self
+            .replay_material_budget
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .reserve_auxiliary(
+                ground_layout
+                    .bytes
+                    .checked_add(ground_layout.image.frame_bytes)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)? as u64,
+            )?;
         upload_publication(
             &self.provider,
-            &ground_layout.initial_bytes(),
+            &ground_layout.initial_bytes(
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.program_image_owner()),
+            )?,
             &self
                 .task_ground
                 .as_ref()
@@ -41957,7 +42614,7 @@ impl SemanticTransitionSession {
     ) -> Option<&SemanticActionDescriptor> {
         let entries = match field {
             2 => &self.codebooks.targets,
-            3..=10 => &self.codebooks.operands,
+            3..=10 | 12..=16 => &self.codebooks.operands,
             11 => &self.codebooks.qualifiers,
             17 => &self.codebooks.leaves,
             _ => return None,
@@ -45516,9 +46173,9 @@ impl SemanticTransitionSession {
                     for slot in 0..2 {
                         let choices = &edit_choices[lane][slot];
                         let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
-                        if choices[0] == 1 && choices[1] == 2 {
+                        if choices[0] == 1 && choices[1] >= 2 {
                             let previous = (slot == 1).then_some(&edit_choices[lane][0]);
-                            match validated_rule_receipt(
+                            match validated_program_edit_receipt(
                                 &self.codebooks,
                                 program,
                                 task.identity(),
@@ -45530,13 +46187,13 @@ impl SemanticTransitionSession {
                                 task.spec.evaluation_intervention,
                                 task.spec.rule_library.as_deref(),
                             ) {
-                                Ok((decoded, _)) => program_rules[lane][slot] = Some(decoded.rule),
+                                Ok(decoded) => program_rules[lane][slot] = decoded.rule,
                                 Err(error) => {
                                     self.poisoned = true;
                                     return Err(error);
                                 }
                             }
-                        } else if choices[0] == 1 || matches!(receipt[1], 3 | 4) {
+                        } else if receipt[1] == 0x584c4f47494d4544 {
                             self.poisoned = true;
                             return Err(SemanticTransitionError::ObservationMismatch);
                         }
@@ -45567,7 +46224,7 @@ impl SemanticTransitionSession {
                 }
             }
             let edits = std::array::from_fn(|j| {
-                let result = if program_rules[i][j].is_some() {
+                let result = if edit_choices[i][j][0] == 1 && edit_choices[i][j][1] >= 2 {
                     Ok(None)
                 } else {
                     self.graph

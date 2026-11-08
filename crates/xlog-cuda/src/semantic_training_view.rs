@@ -106,6 +106,42 @@ pub struct SemanticTrainingManifest {
     pub caps: [u64; 4],
 }
 
+/// Frozen objective weighting; the six mask-draw coordinates remain independent.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticMaskWeightingLaw {
+    InverseProbability = 0,
+    Uniform = 1,
+}
+
+impl SemanticMaskWeightingLaw {
+    pub fn from_wire_name(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "dlm-new.mask-weighting/inverse-probability/1" => Ok(Self::InverseProbability),
+            "dlm-new.mask-weighting/uniform/1" => Ok(Self::Uniform),
+            _ => Err("training mask weighting requires its exact original law"),
+        }
+    }
+}
+
+/// Original FOREST prediction conditioning, independent of masking and labels.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticCleanConditioningLaw {
+    MemoryPrefix = 0,
+    PredictionPrefix = 1,
+}
+
+impl SemanticCleanConditioningLaw {
+    pub fn from_wire_name(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "dlm-new.clean-conditioning/memory-prefix/1" => Ok(Self::MemoryPrefix),
+            "dlm-new.clean-conditioning/prediction-prefix/1" => Ok(Self::PredictionPrefix),
+            _ => Err("training clean conditioning requires its exact original law"),
+        }
+    }
+}
+
 /// Prospective training domain fixed before any action, not a selected roster
 /// or a numerical certificate. The application supplies the original sealed
 /// manifests and complete loader geometry; native admission retains them.
@@ -122,6 +158,10 @@ pub struct SemanticTrainingDomain {
     /// Canonical nonnegative decimal, preserving arbitrary-width source seeds.
     pub training_seed: String,
     pub mask_policy: Identity256,
+    pub mask_weighting: SemanticMaskWeightingLaw,
+    /// Canonical FP32 positive zero or one, bound before the first Proposal.
+    pub autoregressive_coefficient_bits: u32,
+    pub clean_conditioning: SemanticCleanConditioningLaw,
 }
 
 impl SemanticTrainingDomain {
@@ -140,6 +180,7 @@ impl SemanticTrainingDomain {
             || self.batch_size == 0
             || !(1..=1000).contains(&self.mask_permille)
             || self.mask_policy == Identity256::default()
+            || !matches!(self.autoregressive_coefficient_bits, 0 | 0x3f800000)
             || !(seed == b"0"
                 || (matches!(seed.first(), Some(b'1'..=b'9'))
                     && seed.iter().all(u8::is_ascii_digit)))
@@ -164,7 +205,7 @@ impl SemanticTrainingDomain {
     /// Cold metadata identity retained by task/checkpoint ownership, not a grant.
     pub fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.training-domain.v1\0");
+        hash.update(b"xlog.semantic.training-domain.v4\0");
         hash.update((self.manifests.len() as u64).to_le_bytes());
         for manifest in &self.manifests {
             hash.update(manifest.identity.as_bytes());
@@ -185,6 +226,9 @@ impl SemanticTrainingDomain {
         hash.update((self.training_seed.len() as u64).to_le_bytes());
         hash.update(self.training_seed.as_bytes());
         hash.update(self.mask_policy.as_bytes());
+        hash.update((self.mask_weighting as u64).to_le_bytes());
+        hash.update(u64::from(self.autoregressive_coefficient_bits).to_le_bytes());
+        hash.update((self.clean_conditioning as u64).to_le_bytes());
         Identity256::from_bytes(hash.finalize().into())
     }
 }
@@ -199,6 +243,8 @@ pub struct SemanticTrainingViewRow<B = Vec<u8>> {
     pub data_manifest: Identity256,
     pub mask_policy: Identity256,
     pub training_seed: String,
+    pub mask_weighting: SemanticMaskWeightingLaw,
+    pub clean_conditioning: SemanticCleanConditioningLaw,
     /// Present only for a symbolic corpus anchor. The three identities must
     /// equal the native task content executed during this cold binding.
     pub task_content: Option<SemanticTaskContentIdentity>,
@@ -411,9 +457,14 @@ pub struct SemanticTrainingObjective {
 }
 
 /// One coefficient law shared by cold task admission and full arena validation.
-pub(crate) fn frozen_training_coefficients(evaluator_min: f64, evaluator_max: f64) -> [f32; 9] {
+pub(crate) fn frozen_training_coefficients(
+    evaluator_min: f64,
+    evaluator_max: f64,
+    autoregressive_coefficient_bits: u32,
+) -> [f32; 9] {
     let return_scale = evaluator_min.abs().max(evaluator_max.abs()).max(1.0);
     let mut coefficients = [1.0f32; 9];
+    coefficients[1] = f32::from_bits(autoregressive_coefficient_bits);
     coefficients[6] = (1.0 / return_scale) as f32;
     coefficients[7] = (1.0 / (return_scale * return_scale)) as f32;
     coefficients
@@ -594,6 +645,8 @@ unsafe impl DeviceRepr for SemanticTrainingViewOriginRecord {}
 pub(crate) struct TrainingViewRowDescriptor {
     pub ordinal: u64,
     pub basis: u64,
+    pub mask_weighting: u64,
+    pub clean_conditioning: u64,
     pub raw_offset: u64,
     pub raw_bytes: u64,
     pub window: u64,
@@ -711,6 +764,9 @@ unsafe impl DeviceRepr for SemanticTrainingViewSelection {}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct TrainingViewLaunch {
+    mask_weighting: u64,
+    autoregressive_coefficient_bits: u64,
+    clean_conditioning: u64,
     descriptors: u64,
     raw: u64,
     row_count: u64,
@@ -1374,6 +1430,11 @@ impl SemanticSelectedTrainingView {
                 (0, 0)
             };
         let launch = TrainingViewLaunch {
+            mask_weighting: self.arena.training_domain.mask_weighting as u64,
+            autoregressive_coefficient_bits: u64::from(
+                self.arena.training_domain.autoregressive_coefficient_bits,
+            ),
+            clean_conditioning: self.arena.training_domain.clean_conditioning as u64,
             descriptors: self.arena.descriptors.device_ptr_value(),
             raw: self.arena.raw.device_ptr_value(),
             row_count: u64::try_from(self.arena.row_count)
@@ -2005,7 +2066,7 @@ impl SemanticTrainingViewArena {
             multiply(original_rows, candidates)?,
             multiply(append_slots, append_slots)?,
             multiply(8, append_slots)?,
-            7,
+            12,
         ])?;
         let canonical_bytes = sum(&[
             multiply(2, extent(size_of::<SemanticTrainingViewSelection>())?)?,
@@ -2467,6 +2528,7 @@ impl SemanticTrainingViewArena {
                     task_content,
                     canary_source,
                     record_limit,
+                    training_domain.autoregressive_coefficient_bits,
                 )?,
                 None => (
                     SemanticTrainingObjectiveRecord::default(),
@@ -2950,6 +3012,7 @@ fn validate_objective(
     _task_content: SemanticTaskContentIdentity,
     canary_source: &SemanticTrainingCanarySource,
     record_limit: u64,
+    autoregressive_coefficient_bits: u32,
 ) -> Result<ValidatedTrainingObjective, SemanticTransitionError> {
     if objective.groups.len() != 8 || objective.canaries.len() != 5 {
         return Err(input_error(
@@ -2962,7 +3025,15 @@ fn validate_objective(
         || objective
             .coefficients
             .iter()
-            .any(|value| !value.is_finite() || *value <= 0.0)
+            .enumerate()
+            .any(|(index, value)| {
+                !value.is_finite()
+                    || if index == 1 {
+                        value.to_bits() != autoregressive_coefficient_bits
+                    } else {
+                        *value <= 0.0
+                    }
+            })
         || objective.cost_unit == Identity256::default()
         || objective.cost_cap == 0
         || task_identity == Identity256::default()
@@ -3066,8 +3137,12 @@ fn validate_objective(
         ));
     }
     if objective.coefficients.map(f32::to_bits)
-        != frozen_training_coefficients(objective.evaluator_min, objective.evaluator_max)
-            .map(f32::to_bits)
+        != frozen_training_coefficients(
+            objective.evaluator_min,
+            objective.evaluator_max,
+            autoregressive_coefficient_bits,
+        )
+        .map(f32::to_bits)
     {
         return Err(input_error(
             "training coefficients differ from the frozen primary and evaluator-scaled law",
@@ -3341,12 +3416,12 @@ fn canary_identity(
     Identity256::from_bytes(hasher.finalize().into())
 }
 
-/// Check the original v2 byte layout before either cold admission or device allocation.
+/// Check the original v4 byte layout before either cold admission or device allocation.
 pub fn validate_training_view_layout(
     bytes: &[u8],
 ) -> Result<SemanticTrainingViewLayout, SemanticTransitionError> {
     let mut schema = [0u8; 32];
-    let tag = b"dlm-new/training-view/v2";
+    let tag = b"dlm-new/training-view/v4";
     schema[..tag.len()].copy_from_slice(tag);
     if bytes.len() < TRAINING_VIEW_HEADER_BYTES || bytes[..32] != schema {
         return Err(input_error("training-view row has another schema"));
@@ -3447,6 +3522,8 @@ fn validate_row<B: AsRef<[u8]>>(
             .is_none_or(|extent| extent > training_domain.window)
         || row.mask_policy != training_domain.mask_policy
         || row.training_seed != training_domain.training_seed
+        || row.mask_weighting != training_domain.mask_weighting
+        || row.clean_conditioning != training_domain.clean_conditioning
         || training_domain
             .manifests
             .binary_search_by(|manifest| {
@@ -3467,6 +3544,19 @@ fn validate_row<B: AsRef<[u8]>>(
         let kind_offset = kinds_offset + slot * 8;
         let token = i64::from_le_bytes(bytes[token_offset..token_offset + 8].try_into().unwrap());
         let kind = i64::from_le_bytes(bytes[kind_offset..kind_offset + 8].try_into().unwrap());
+        if row.mask_weighting == SemanticMaskWeightingLaw::Uniform {
+            let label_offset = TRAINING_VIEW_HEADER_BYTES + layout.window * 8 + slot * 8;
+            let weight_offset = TRAINING_VIEW_HEADER_BYTES + layout.window * 16 + slot * 4;
+            let label =
+                i64::from_le_bytes(bytes[label_offset..label_offset + 8].try_into().unwrap());
+            let weight_bits =
+                u32::from_le_bytes(bytes[weight_offset..weight_offset + 4].try_into().unwrap());
+            if label != -100 && weight_bits != 1.0f32.to_bits() {
+                return Err(input_error(
+                    "uniform MASK supervision requires its exact unit coefficient",
+                ));
+            }
+        }
         if (kind == 0 && u64::try_from(token).ok() != Some(training_domain.pad_id))
             || (kind == 2 && u64::try_from(token).ok() != Some(training_domain.mask_id))
         {
@@ -3505,6 +3595,8 @@ fn validate_row<B: AsRef<[u8]>>(
         ordinal: u64::try_from(ordinal)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         basis: row.basis as u64,
+        mask_weighting: row.mask_weighting as u64,
+        clean_conditioning: row.clean_conditioning as u64,
         raw_offset: u64::try_from(raw_offset)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         raw_bytes: u64::try_from(bytes.len())

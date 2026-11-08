@@ -164,13 +164,8 @@ impl SemanticEvaluationRuleLibrary {
         field: usize,
         index: usize,
     ) -> Result<u32, SemanticTransitionError> {
-        let table = if field == 2 { 0 } else { 1 };
-        let begin = codebooks.words[29 + 2 * table];
-        let end = codebooks.words[30 + 2 * table];
-        begin
-            .checked_add(index as u64)
-            .filter(|value| *value < end)
-            .and_then(|value| u32::try_from(value).ok())
+        codebooks
+            .global_category(field as u32, index)
             .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 

@@ -179,15 +179,27 @@ pub(super) fn child_constructor_native_work_ceiling(
     // argument, statement qualifier bundle and support can contribute once.
     // Every table also contains its genuine NULL row. The empty qualifier
     // bundle is present even when the original admission has no statement.
-    let targets = ceiling_sum([predicate_count, additional, 1])?;
+    let targets = ceiling_sum([
+        predicate_count,
+        additional,
+        1,
+        program.map_or(0, |program| program.image.nodes.len() as u64),
+        program.map_or(0, |program| program.image.roots.len() as u64),
+    ])?;
     let operands = ceiling_sum([
         arguments,
         additional,
         if program.is_some() { 4 } else { 0 },
+        program.map_or(0, |program| program.image.guards.len() as u64),
+        program.map_or(0, |program| program.image.nodes.len() as u64),
         1,
     ])?;
     let qualifier_rows = ceiling_sum([record_count, 2])?;
-    let leaves = ceiling_sum([support_count, 1])?;
+    let leaves = ceiling_sum([
+        support_count,
+        1,
+        program.map_or(0, |program| program.image.leaves.len() as u64),
+    ])?;
     // Canonical typed operand encodings fit in sixteen fixed bytes plus their
     // original UTF-8 symbols. The admission's checked UTF-8 limit includes all
     // copied occurrences, so dedup cannot increase this payload extent.
@@ -1543,9 +1555,14 @@ pub(super) fn feedback_native_work_ceiling(
         slots,
         capacity,
         &feedback.schema,
-        descriptor.arena[2],
         descriptor.arena[3],
+        descriptor.arena[5],
         &task.spec,
+        source
+            .task_ground
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .layout,
     )
 }
 
@@ -1561,6 +1578,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
     statement_capacity: u64,
     versions: u64,
     task: &SemanticTaskEvaluationSpec,
+    ground: task_ground::TaskGroundLayout,
 ) -> Result<[u64; 9], SemanticTransitionError> {
     let ranges = u64::try_from(directory.len()).map_err(|_| native_work_ceiling_overflow())?;
     let records = directory
@@ -1625,14 +1643,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
         ],
     )?;
     let editable = task.program.editable_program().is_some();
-    let calls = ceiling_product(
-        slots,
-        if editable {
-            task.task_ground.bindings().len() as u64
-        } else {
-            1
-        },
-    )?;
+    let calls = ceiling_product(slots, if editable { 0 } else { 1 })?;
     let truth = [
         1,
         ceiling_sum([ceiling_product(4, statement_capacity)?, 8])?,
@@ -1666,13 +1677,34 @@ pub(super) fn feedback_geometry_native_work_ceiling(
         calls,
     )?;
     if editable {
-        // Same fixed PROGRAM_FUEL used by task_program_closure. Every charged
-        // pair checks the fuel before increment, including failed prefixes,
-        // inherited read-only observation rows, protected-head scans and all
-        // inherited provenance words. The limit is unchanged by a fork.
+        let dependencies = ground.support_binding_capacity() as u64;
+        let entry_supports = ground.image.entry_supports as u64;
+        // For each actual feedback query: signed dependency probes, inherited
+        // key resolution, frozen support scans and canonical-event deduplication.
+        let scans = ceiling_sum([
+            ceiling_product(4, dependencies)?,
+            ceiling_product(
+                dependencies,
+                ceiling_sum([
+                    ground.image.statements as u64,
+                    entry_supports,
+                    ceiling_product(entry_supports, entry_supports)?,
+                ])?,
+            )?,
+        ])?;
         add_native_work_ceiling(
             &mut ceiling,
-            [0, ceiling_sum([ranges, 1_000_000])?, 0, 0, 0, 0, 0, 0, 0],
+            [
+                0,
+                ceiling_sum([ranges, 1_000_000, ceiling_product(slots, scans)?])?,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ceiling_product(96, ceiling_product(slots, entry_supports)?)?,
+            ],
         )?;
     }
     native_work_ceiling_units(ceiling)?;
@@ -2018,6 +2050,14 @@ fn rule_prefix_native_work_ceiling(
             ceiling[3] = ceiling[3].max(positions);
         }
     }
+    let operands = source.codebooks.words[3];
+    let leaves = source.codebooks.words[7];
+    // Context qualification inspects the full typed row (at most eighteen
+    // slots). Forest completion scans one target range and six operand/leaf
+    // roles; no per-target Cartesian scan is used.
+    let forest = ceiling_sum([predicate_bound, ceiling_product(5, operands)?, leaves, 18])?;
+    ceiling[1] = ceiling_sum([ceiling[1], ceiling_product(96, forest)?])?;
+    ceiling[3] = ceiling_sum([ceiling[3], ceiling_product(4, forest)?])?;
     native_work_ceiling_units(ceiling)?;
     Ok(ceiling)
 }
@@ -2686,7 +2726,15 @@ fn attainment_native_work_ceiling(
         ceiling[1] = ceiling_sum([
             ceiling_product(
                 task.statement_records.len() as u64,
-                crate::semantic_program::RESIDENT_PROGRAM_FACT_CAPACITY as u64 + 1,
+                u64::try_from(
+                    task.program
+                        .editable_program()
+                        .ok_or(SemanticTransitionError::InvalidTaskBank)?
+                        .fact_capacity()
+                        .map_err(publication_input_error)?,
+                )
+                .map_err(|_| native_work_ceiling_overflow())?
+                    + 1,
             )?,
             task.task_ground.mandatory_edge_count()?,
         ])?;
@@ -3169,7 +3217,33 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                 ceiling,
                 [
                     0,
-                    3 * 1_000_000,
+                    ceiling_sum([
+                        3 * 1_000_000,
+                        ceiling_product(
+                            3,
+                            ceiling_product(
+                                task.0
+                                    .spec
+                                    .program
+                                    .editable_program()
+                                    .ok_or(SemanticTransitionError::InvalidTaskBank)?
+                                    .fact_capacity()
+                                    .map_err(publication_input_error)?
+                                    as u64,
+                                ceiling_sum([
+                                    task.0
+                                        .spec
+                                        .program
+                                        .editable_program()
+                                        .ok_or(SemanticTransitionError::InvalidTaskBank)?
+                                        .fact_capacity()
+                                        .map_err(publication_input_error)?
+                                        as u64,
+                                    queries,
+                                ])?,
+                            )?,
+                        )?,
+                    ])?,
                     0,
                     0,
                     0,
@@ -3179,7 +3253,66 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                     ceiling_product(ceiling_product(3, queries)?, receipt_bytes)?,
                 ],
             )?;
-            let rules = crate::semantic_program::RESIDENT_PROGRAM_RULE_CAPACITY as u64;
+            let program = task
+                .0
+                .spec
+                .program
+                .editable_program()
+                .ok_or(SemanticTransitionError::InvalidTaskBank)?;
+            let ground = child
+                .task_ground
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?
+                .layout;
+            let rules = ceiling_sum([
+                program.initial_rules.len() as u64,
+                program.image.mutation_capacity as u64,
+                ground.library_count as u64,
+            ])?;
+            let snapshot_queries = task.0.snapshot_statements.len() as u64;
+            repeat_native_ceiling(ceiling, truth, snapshot_queries)?;
+            let chain_visits = ceiling_product(snapshot_queries, ceiling_sum([versions, 1])?)?;
+            add_native_work_ceiling(
+                ceiling,
+                [
+                    1,
+                    ceiling_sum([
+                        ceiling_product(statements, ceiling_sum([snapshot_queries, 1])?)?,
+                        ceiling_product(snapshot_queries, snapshot_queries)?,
+                        ceiling_product(8, chain_visits)?,
+                    ])?,
+                    chain_visits,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ceiling_sum([ground.bytes as u64, 72])? / 64,
+                    ceiling_product(8, ground.bytes as u64)?,
+                ],
+            )?;
+            // Four possible mutations hash their complete selected payload,
+            // journals and typed proof. All three candidate copies and the
+            // immutable entry copy remain in the original task-ground bank.
+            add_native_work_ceiling(
+                ceiling,
+                [
+                    0,
+                    ceiling_product(
+                        4,
+                        ceiling_sum([ceiling_product(8, ground.image.nodes as u64)?, rules, 160])?,
+                    )?,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ceiling_product(
+                        4,
+                        ceiling_sum([ground.image.frame_bytes as u64, 38 * 8, 72])? / 64,
+                    )?,
+                    ceiling_product(8, ground.image.frame_bytes as u64)?,
+                ],
+            )?;
             add_native_work_ceiling(
                 ceiling,
                 [

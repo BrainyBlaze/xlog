@@ -75,6 +75,7 @@ pub(crate) mod model_context_continuation;
 pub(crate) mod model_evaluation;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod model_forward_stream;
+pub(crate) mod program_image;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod segment_resource_observation;
 #[cfg(feature = "semantic-policy")]
@@ -9284,7 +9285,7 @@ fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDo
             caps: unsigned_array(&manifest[1])?,
         });
     }
-    let loader = fields[1].fields(5)?;
+    let loader = fields[1].fields(8)?;
     let batch = unsigned_array::<4>(&loader[0])?;
     let ColdValue::Integer(training_seed) = &loader[3] else {
         return Err(invalid(
@@ -9301,6 +9302,14 @@ fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDo
         mask_permille: loader[2].unsigned()?,
         training_seed: training_seed.clone(),
         mask_policy: replay_digest_identity(loader[4].text()?)?,
+        mask_weighting: xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(loader[5].text()?)
+            .map_err(invalid)?,
+        autoregressive_coefficient_bits: u32::try_from(loader[6].unsigned()?)
+            .map_err(|_| invalid("original auxiliary AR coefficient exceeds FP32 bits"))?,
+        clean_conditioning: xlog_cuda::SemanticCleanConditioningLaw::from_wire_name(
+            loader[7].text()?,
+        )
+        .map_err(invalid)?,
     }))
 }
 
@@ -9682,7 +9691,7 @@ impl ReplayRow {
         }
         let bytes = material.load_original()?;
         let identity = self.identity.fields(6)?;
-        let view = identity[0].fields(9)?;
+        let view = identity[0].fields(11)?;
         let ColdValue::Integer(training_seed) = &view[6] else {
             return Err(invalid("training view seed is not its original integer"));
         };
@@ -9723,6 +9732,10 @@ impl ReplayRow {
                 replay_digest_identity(view[0].text()?)?,
                 replay_digest_identity(view[5].text()?)?,
                 training_seed,
+                xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(view[9].text()?)
+                    .map_err(invalid)?,
+                xlog_cuda::SemanticCleanConditioningLaw::from_wire_name(view[10].text()?)
+                    .map_err(invalid)?,
                 task_content,
                 origin,
             )
@@ -10192,7 +10205,7 @@ fn validate_replay_training_identity(
     identity: &[ColdValue],
     record: &ReplayJsonObject,
 ) -> PyResult<()> {
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 11] = [
         "data_manifest_hash",
         "example_id",
         "final_split",
@@ -10202,15 +10215,23 @@ fn validate_replay_training_identity(
         "training_seed",
         "epoch_index",
         "variant_index",
+        "mask_weighting",
+        "clean_conditioning",
     ];
     let view = identity[0].fields(NAMES.len())?;
     let original = replay_json_object(replay_json_field(record, "training_view")?)?;
     if original.len() != NAMES.len() {
-        return Err(invalid("training view requires its original nine fields"));
+        return Err(invalid("training view requires its original eleven fields"));
     }
     for (index, name) in NAMES.iter().enumerate() {
         if index < 6 {
             view[index].text()?;
+        } else if index == 9 {
+            xlog_cuda::SemanticMaskWeightingLaw::from_wire_name(view[index].text()?)
+                .map_err(invalid)?;
+        } else if index == 10 {
+            xlog_cuda::SemanticCleanConditioningLaw::from_wire_name(view[index].text()?)
+                .map_err(invalid)?;
         } else if !matches!(&view[index], ColdValue::Integer(value) if !value.starts_with('-')) {
             return Err(invalid(
                 "training view seed, epoch and variant require nonnegative integers",
@@ -10238,7 +10259,7 @@ fn validate_replay_training_identity(
         }
     }
     let canonical = replay_identity_json(&identity[0])?;
-    if replay_hash(format!("[\"dlm-new/training-view-identity/v1\",{canonical}]").as_bytes())
+    if replay_hash(format!("[\"dlm-new/training-view-identity/v3\",{canonical}]").as_bytes())
         != identity[1].text()?
     {
         return Err(invalid("training-view identity digest differs"));
@@ -10263,7 +10284,7 @@ fn validate_anchor_admission(
         "training_view",
         "training_view_identity",
     ];
-    let view = identity[0].fields(9)?;
+    let view = identity[0].fields(11)?;
     let group = match replay_json_value(replay_json_field(record, "group")?)?.as_str() {
         Some("language") => ReplayAnchorGroup::Language,
         Some("symbolic") => ReplayAnchorGroup::Symbolic,
@@ -10443,6 +10464,10 @@ fn validate_replay_training_payload(
     let loaded = material.load_original()?;
     let bytes = loaded.as_bytes();
     let layout = xlog_cuda::validate_training_view_layout(bytes).map_err(xlog_err)?;
+    let view = identity[0].fields(11)?;
+    let clean_conditioning =
+        xlog_cuda::SemanticCleanConditioningLaw::from_wire_name(view[10].text()?)
+            .map_err(invalid)?;
     if bytes[32..64] != *replay_digest_identity(identity[1].text()?)?.as_bytes()
         || bytes[64..96] != *replay_digest_identity(source)?.as_bytes()
     {
@@ -10598,7 +10623,14 @@ fn validate_replay_training_payload(
                     if block_start == 0 {
                         -1
                     } else {
-                        block_start as i64 - 1
+                        match clean_conditioning {
+                            xlog_cuda::SemanticCleanConditioningLaw::MemoryPrefix => {
+                                block_start as i64 - 1
+                            }
+                            xlog_cuda::SemanticCleanConditioningLaw::PredictionPrefix => {
+                                physical as i64 - 1
+                            }
+                        }
                     }
                 } else {
                     physical as i64 - 1
@@ -11832,7 +11864,7 @@ impl TaskAuthority {
         let mut targets = BTreeSet::new();
         for (row, replay) in self.replay.iter().enumerate() {
             let fields = replay.identity.fields(6)?;
-            let context = fields[0].fields(9)?;
+            let context = fields[0].fields(11)?;
             if !matches!(context[2].text()?, "train" | "dev" | "request-local-replay") {
                 return Err(invalid("replay task cannot contain sealed evaluation rows"));
             }
@@ -12314,7 +12346,7 @@ impl TaskAuthority {
 
     fn require_replay_learning_scope(&self, rows: &[ReplayRow], purpose: &str) -> PyResult<()> {
         for row in rows {
-            let split = row.identity.fields(6)?[0].fields(9)?[2].text()?;
+            let split = row.identity.fields(6)?[0].fields(11)?[2].text()?;
             if (purpose == "current-request-fast-adaptation" && split != "request-local-replay")
                 || (purpose == "durable-slow-consolidation" && !matches!(split, "train" | "dev"))
             {
@@ -20686,6 +20718,21 @@ fn descriptor_meaning_object(
         SemanticActionDescriptor::RuleVariable { index } => {
             ("rule_variable", *index).into_pyobject(py)?.into_any()
         }
+        SemanticActionDescriptor::ProgramNode { index } => {
+            ("program_node", *index).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::ProgramRoot { index } => {
+            ("program_root", *index).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::ProgramGuard { index } => {
+            ("program_guard", *index).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::ProgramChild { index } => {
+            ("program_child", *index).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::ProgramLeaf { effect } => {
+            ("program_leaf", *effect).into_pyobject(py)?.into_any()
+        }
     };
     Ok(value.unbind())
 }
@@ -21902,8 +21949,14 @@ impl PySemanticTransitionController {
             u32::try_from(program.program.query_records.len())
                 .map_err(|_| invalid("original editable query roster exceeds u32"))
         })?;
-        let descriptor =
-            xlog_cuda::semantic_structural_cost_descriptor(editable.program.is_some(), query_count);
+        let descriptor = xlog_cuda::semantic_structural_cost_descriptor(
+            editable
+                .program
+                .as_ref()
+                .map(|source| source.program.as_ref()),
+            query_count,
+        )
+        .map_err(xlog_err)?;
         Ok(
             (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
                 .into_pyobject(py)?
@@ -24276,7 +24329,8 @@ impl PySemanticTransitionController {
     /// ``training_domain`` is the original ``(manifests, loader)`` projection:
     /// manifests are sorted ``(sha256_hex, (entries, keys, records, bytes))``
     /// rows, and loader is ``((window, pad_id, mask_id, block_size), batch_size,
-    /// mask_permille, training_seed, mask_policy_sha256_hex)``. The application
+    /// mask_permille, training_seed, mask_policy_sha256_hex, mask_weighting,
+    /// AR_bits, clean_conditioning)``. The application
     /// must extract it from validated sealed inputs before the first action;
     /// native binding does not authenticate external manifest ownership. None
     /// explicitly means no prospective training arena and cannot be expanded

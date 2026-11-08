@@ -17,6 +17,7 @@ pub mod multi_gpu_memory;
 pub mod provider;
 mod semantic_hypergraph;
 mod semantic_program;
+mod semantic_program_image;
 mod semantic_training_view;
 mod semantic_transition;
 mod semantic_work;
@@ -76,9 +77,13 @@ pub use semantic_program::{
     SemanticProgramAdmission, SemanticProgramAtom, SemanticProgramFact, SemanticProgramRule,
     SemanticProgramTerm,
 };
+pub use semantic_program_image::{
+    SemanticProgramImageAdmission, SemanticProgramLeaf, SemanticProgramNode,
+};
 pub use semantic_training_view::{
-    validate_training_view_layout, SemanticSelectedTrainingView, SemanticTrainingCanary,
-    SemanticTrainingCanaryKind, SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
+    validate_training_view_layout, SemanticCleanConditioningLaw, SemanticMaskWeightingLaw,
+    SemanticSelectedTrainingView, SemanticTrainingCanary, SemanticTrainingCanaryKind,
+    SemanticTrainingCanaryRecord, SemanticTrainingCanaryRefusalReason,
     SemanticTrainingCanaryRefusalRecord, SemanticTrainingCanarySource, SemanticTrainingDomain,
     SemanticTrainingManifest, SemanticTrainingObjective, SemanticTrainingObjectiveGroup,
     SemanticTrainingObjectiveGroupKind, SemanticTrainingObjectiveGroupRecord,
