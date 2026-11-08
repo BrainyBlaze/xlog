@@ -143,4 +143,148 @@ __device__ __forceinline__ double forward_node(
     return value;
 }
 
+// These sinks borrow the original device buffers. They allocate nothing and
+// retain neither an independent circuit nor a mutable publication selector.
+struct AtomicNodeAdjoints {
+    double* values;
+
+    __device__ __forceinline__ void add(uint32_t node, double value) const {
+        atomicAdd(values + node, value);
+    }
+};
+
+struct AtomicWeightGradients {
+    double* true_values;
+    double* false_values;
+
+    __device__ __forceinline__ void add_true(uint32_t variable, double value) const {
+        atomicAdd(true_values + variable, value);
+    }
+    __device__ __forceinline__ void add_false(uint32_t variable, double value) const {
+        atomicAdd(false_values + variable, value);
+    }
+};
+
+// Pull back the supplied node cotangent through the same log-space operation
+// used by forward_node. The caller owns reverse topological order, seeding and
+// completion/numerical status; a cotangent need not be a unit root seed.
+template<class Circuit, class Values, class Adjoints>
+__device__ __forceinline__ void propagate_node_adjoint(
+    const Circuit& circuit, uint32_t node, double adjoint,
+    const double* var_log_true, const double* var_log_false,
+    const Values& values, const Adjoints& output
+) {
+    if (adjoint == 0.0) {
+        return;
+    }
+    switch (circuit.type(node)) {
+        case XGCF_AND: {
+            uint32_t begin = circuit.child_begin(node);
+            uint32_t end = circuit.child_end(node);
+            for (uint32_t edge = begin; edge < end; ++edge) {
+                output.add(circuit.child(edge), adjoint);
+            }
+            break;
+        }
+        case XGCF_OR: {
+            double parent = values[node];
+            if (isinf(parent) && parent < 0.0) {
+                return;
+            }
+            uint32_t begin = circuit.child_begin(node);
+            uint32_t end = circuit.child_end(node);
+            for (uint32_t edge = begin; edge < end; ++edge) {
+                uint32_t child = circuit.child(edge);
+                double value = values[child];
+                if (isinf(value) && value < 0.0) {
+                    continue;
+                }
+                double ratio = exp(value - parent);
+                if (ratio != 0.0) {
+                    output.add(child, adjoint * ratio);
+                }
+            }
+            break;
+        }
+        case XGCF_DECISION: {
+            double parent = values[node];
+            if (isinf(parent) && parent < 0.0) {
+                return;
+            }
+            uint32_t variable = circuit.decision_variable(node);
+            uint32_t child_false = circuit.false_child(node);
+            uint32_t child_true = circuit.true_child(node);
+            double false_weight = var_log_false[variable];
+            double true_weight = var_log_true[variable];
+            double false_value = values[child_false];
+            double true_value = values[child_true];
+            if (!(isinf(false_value) && false_value < 0.0)) {
+                double ratio = exp((false_weight + false_value) - parent);
+                if (ratio != 0.0) {
+                    output.add(child_false, adjoint * ratio);
+                }
+            }
+            if (!(isinf(true_value) && true_value < 0.0)) {
+                double ratio = exp((true_weight + true_value) - parent);
+                if (ratio != 0.0) {
+                    output.add(child_true, adjoint * ratio);
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// These are derivatives with respect to the original log literal potentials.
+// Parameterization and any chain rule into authored coefficients remain with
+// their actual producer; a discrete coefficient code has no implied Jacobian.
+template<class Circuit, class Values, class Gradients>
+__device__ __forceinline__ void accumulate_node_weight_gradients(
+    const Circuit& circuit, uint32_t node, double adjoint,
+    const double* var_log_true, const double* var_log_false,
+    const Values& values, const Gradients& output
+) {
+    if (adjoint == 0.0) {
+        return;
+    }
+    if (circuit.type(node) == XGCF_DECISION) {
+        double parent = values[node];
+        if (isinf(parent) && parent < 0.0) {
+            return;
+        }
+        uint32_t variable = circuit.decision_variable(node);
+        uint32_t child_false = circuit.false_child(node);
+        uint32_t child_true = circuit.true_child(node);
+        double false_weight = var_log_false[variable];
+        double true_weight = var_log_true[variable];
+        double false_value = values[child_false];
+        double true_value = values[child_true];
+        double false_probability = 0.0;
+        double true_probability = 0.0;
+        if (!(isinf(false_value) && false_value < 0.0)) {
+            false_probability = exp((false_weight + false_value) - parent);
+        }
+        if (!(isinf(true_value) && true_value < 0.0)) {
+            true_probability = exp((true_weight + true_value) - parent);
+        }
+        if (false_probability != 0.0) {
+            output.add_false(variable, adjoint * false_probability);
+        }
+        if (true_probability != 0.0) {
+            output.add_true(variable, adjoint * true_probability);
+        }
+    } else if (circuit.type(node) == XGCF_LIT) {
+        int32_t literal = circuit.literal(node);
+        uint32_t variable = literal > 0
+            ? static_cast<uint32_t>(literal) : static_cast<uint32_t>(-literal);
+        if (literal > 0) {
+            output.add_true(variable, adjoint);
+        } else if (literal < 0) {
+            output.add_false(variable, adjoint);
+        }
+    }
+}
+
 } // namespace semantic_measure
