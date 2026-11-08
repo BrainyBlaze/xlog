@@ -1364,7 +1364,7 @@ impl TaskEvaluationBinding {
     }
 
     fn word_count(&self) -> Result<usize, SemanticTransitionError> {
-        let mut count = 46usize;
+        let mut count = 47usize;
         for (rows, width) in [
             (self.statements.len(), 7usize),
             (self.allowed_supports.len(), 5),
@@ -1501,7 +1501,7 @@ impl TaskEvaluationBinding {
             .map(|level| level.goals.len())
             .sum::<usize>();
         let mut words = Vec::with_capacity(count);
-        words.extend([12, owner]);
+        words.extend([13, owner]);
         words.extend(identity_words(
             *self.identity_with_intervention(intervention).as_bytes(),
         ));
@@ -1615,6 +1615,13 @@ impl TaskEvaluationBinding {
                     u64::from(domain.autoregressive_coefficient_bits)
                 }),
         ]);
+        // An absent prospective training domain has no conditioning law.
+        words.push(
+            self.spec
+                .training_domain
+                .as_ref()
+                .map_or(u64::MAX, |domain| domain.clean_conditioning as u64),
+        );
         debug_assert_eq!(words.len(), count);
         words
     }
@@ -8165,6 +8172,7 @@ impl SemanticReplayLoadedMaterial {
         mask_policy: Identity256,
         training_seed: &str,
         mask_weighting: crate::SemanticMaskWeightingLaw,
+        clean_conditioning: crate::SemanticCleanConditioningLaw,
         task_content: Option<SemanticTaskContentIdentity>,
         origin: Option<SemanticTrainingViewOrigin>,
     ) -> Result<SemanticReplayTrainingViewRow, SemanticTransitionError> {
@@ -8192,6 +8200,7 @@ impl SemanticReplayLoadedMaterial {
             mask_policy,
             training_seed: training_seed.to_owned(),
             mask_weighting,
+            clean_conditioning,
             task_content,
             origin,
             edit_demonstration: None,

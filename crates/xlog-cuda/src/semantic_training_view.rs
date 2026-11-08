@@ -124,6 +124,24 @@ impl SemanticMaskWeightingLaw {
     }
 }
 
+/// Original FOREST prediction conditioning, independent of masking and labels.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticCleanConditioningLaw {
+    MemoryPrefix = 0,
+    PredictionPrefix = 1,
+}
+
+impl SemanticCleanConditioningLaw {
+    pub fn from_wire_name(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "dlm-new.clean-conditioning/memory-prefix/1" => Ok(Self::MemoryPrefix),
+            "dlm-new.clean-conditioning/prediction-prefix/1" => Ok(Self::PredictionPrefix),
+            _ => Err("training clean conditioning requires its exact original law"),
+        }
+    }
+}
+
 /// Prospective training domain fixed before any action, not a selected roster
 /// or a numerical certificate. The application supplies the original sealed
 /// manifests and complete loader geometry; native admission retains them.
@@ -143,6 +161,7 @@ pub struct SemanticTrainingDomain {
     pub mask_weighting: SemanticMaskWeightingLaw,
     /// Canonical FP32 positive zero or one, bound before the first Proposal.
     pub autoregressive_coefficient_bits: u32,
+    pub clean_conditioning: SemanticCleanConditioningLaw,
 }
 
 impl SemanticTrainingDomain {
@@ -186,7 +205,7 @@ impl SemanticTrainingDomain {
     /// Cold metadata identity retained by task/checkpoint ownership, not a grant.
     pub fn identity(&self) -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.training-domain.v3\0");
+        hash.update(b"xlog.semantic.training-domain.v4\0");
         hash.update((self.manifests.len() as u64).to_le_bytes());
         for manifest in &self.manifests {
             hash.update(manifest.identity.as_bytes());
@@ -209,6 +228,7 @@ impl SemanticTrainingDomain {
         hash.update(self.mask_policy.as_bytes());
         hash.update((self.mask_weighting as u64).to_le_bytes());
         hash.update(u64::from(self.autoregressive_coefficient_bits).to_le_bytes());
+        hash.update((self.clean_conditioning as u64).to_le_bytes());
         Identity256::from_bytes(hash.finalize().into())
     }
 }
@@ -224,6 +244,7 @@ pub struct SemanticTrainingViewRow<B = Vec<u8>> {
     pub mask_policy: Identity256,
     pub training_seed: String,
     pub mask_weighting: SemanticMaskWeightingLaw,
+    pub clean_conditioning: SemanticCleanConditioningLaw,
     /// Present only for a symbolic corpus anchor. The three identities must
     /// equal the native task content executed during this cold binding.
     pub task_content: Option<SemanticTaskContentIdentity>,
@@ -625,6 +646,7 @@ pub(crate) struct TrainingViewRowDescriptor {
     pub ordinal: u64,
     pub basis: u64,
     pub mask_weighting: u64,
+    pub clean_conditioning: u64,
     pub raw_offset: u64,
     pub raw_bytes: u64,
     pub window: u64,
@@ -744,6 +766,7 @@ unsafe impl DeviceRepr for SemanticTrainingViewSelection {}
 struct TrainingViewLaunch {
     mask_weighting: u64,
     autoregressive_coefficient_bits: u64,
+    clean_conditioning: u64,
     descriptors: u64,
     raw: u64,
     row_count: u64,
@@ -1411,6 +1434,7 @@ impl SemanticSelectedTrainingView {
             autoregressive_coefficient_bits: u64::from(
                 self.arena.training_domain.autoregressive_coefficient_bits,
             ),
+            clean_conditioning: self.arena.training_domain.clean_conditioning as u64,
             descriptors: self.arena.descriptors.device_ptr_value(),
             raw: self.arena.raw.device_ptr_value(),
             row_count: u64::try_from(self.arena.row_count)
@@ -2042,7 +2066,7 @@ impl SemanticTrainingViewArena {
             multiply(original_rows, candidates)?,
             multiply(append_slots, append_slots)?,
             multiply(8, append_slots)?,
-            11,
+            12,
         ])?;
         let canonical_bytes = sum(&[
             multiply(2, extent(size_of::<SemanticTrainingViewSelection>())?)?,
@@ -3392,12 +3416,12 @@ fn canary_identity(
     Identity256::from_bytes(hasher.finalize().into())
 }
 
-/// Check the original v3 byte layout before either cold admission or device allocation.
+/// Check the original v4 byte layout before either cold admission or device allocation.
 pub fn validate_training_view_layout(
     bytes: &[u8],
 ) -> Result<SemanticTrainingViewLayout, SemanticTransitionError> {
     let mut schema = [0u8; 32];
-    let tag = b"dlm-new/training-view/v3";
+    let tag = b"dlm-new/training-view/v4";
     schema[..tag.len()].copy_from_slice(tag);
     if bytes.len() < TRAINING_VIEW_HEADER_BYTES || bytes[..32] != schema {
         return Err(input_error("training-view row has another schema"));
@@ -3499,6 +3523,7 @@ fn validate_row<B: AsRef<[u8]>>(
         || row.mask_policy != training_domain.mask_policy
         || row.training_seed != training_domain.training_seed
         || row.mask_weighting != training_domain.mask_weighting
+        || row.clean_conditioning != training_domain.clean_conditioning
         || training_domain
             .manifests
             .binary_search_by(|manifest| {
@@ -3571,6 +3596,7 @@ fn validate_row<B: AsRef<[u8]>>(
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         basis: row.basis as u64,
         mask_weighting: row.mask_weighting as u64,
+        clean_conditioning: row.clean_conditioning as u64,
         raw_offset: u64::try_from(raw_offset)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         raw_bytes: u64::try_from(bytes.len())
