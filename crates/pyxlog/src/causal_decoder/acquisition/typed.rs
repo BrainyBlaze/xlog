@@ -22,6 +22,7 @@ pub(super) struct EntryRequirements {
 struct OutputDependencies {
     callees: BTreeMap<String, TensorOutputDependencies>,
     values: Vec<TensorOutputDependencies>,
+    reserve_frontier: bool,
 }
 
 impl OutputDependencies {
@@ -43,6 +44,88 @@ impl OutputDependencies {
                 })
             },
         )
+    }
+}
+
+/// Disjoint required facts that no available value or intrinsic callee output
+/// joins yet. Transitive overlap is deliberately optimistic: this is a row
+/// lower bound, not a synthesized completion or a shape-reachability proof.
+struct DependencyFrontier {
+    definitions: BTreeMap<String, usize>,
+    parameters: BTreeMap<String, usize>,
+    parents: Vec<usize>,
+    groups: usize,
+}
+
+impl DependencyFrontier {
+    fn new(required: &EntryRequirements) -> Self {
+        // Group zero represents either numeric input or raw tokens.
+        let definitions = required
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index + 1))
+            .collect();
+        let parameters = required
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index + 1 + required.calls.len()))
+            .collect();
+        let groups = 1 + required.calls.len() + required.parameters.len();
+        Self {
+            definitions,
+            parameters,
+            parents: (0..groups).collect(),
+            groups,
+        }
+    }
+
+    fn contains(&self, dependencies: &TensorOutputDependencies) -> bool {
+        dependencies.tokens
+            || dependencies
+                .definitions
+                .iter()
+                .any(|name| self.definitions.contains_key(name))
+            || dependencies
+                .parameters
+                .iter()
+                .any(|name| self.parameters.contains_key(name))
+    }
+
+    fn root(&self, mut index: usize) -> usize {
+        while self.parents[index] != index {
+            index = self.parents[index];
+        }
+        index
+    }
+
+    fn connect(&mut self, dependencies: &TensorOutputDependencies, numeric_input: bool) {
+        let indices = dependencies
+            .definitions
+            .iter()
+            .filter_map(|name| self.definitions.get(name).copied())
+            .chain(
+                dependencies
+                    .parameters
+                    .iter()
+                    .filter_map(|name| self.parameters.get(name).copied()),
+            )
+            .chain(
+                (dependencies.tokens || (numeric_input && dependencies.has_input())).then_some(0),
+            )
+            .collect::<Vec<_>>();
+        let Some(&first) = indices.first() else {
+            return;
+        };
+        let first = self.root(first);
+        for index in indices.into_iter().skip(1) {
+            let other = self.root(index);
+            if first != other {
+                self.parents[other] = first;
+                self.groups -= 1;
+            }
+        }
     }
 }
 
@@ -83,10 +166,12 @@ impl Program {
     pub(super) fn set_output_dependencies(
         &mut self,
         callees: BTreeMap<String, TensorOutputDependencies>,
+        reserve_frontier: bool,
     ) {
         self.dependencies = Some(OutputDependencies {
             callees,
             values: Vec::new(),
+            reserve_frontier,
         });
     }
 
@@ -403,6 +488,72 @@ impl Program {
         let needed = roots.len() + parameters.len() + usize::from(input_row);
         if remaining < needed {
             return false;
+        }
+        if facts.reserve_frontier {
+            let mut frontier = DependencyFrontier::new(required);
+            for dependencies in values() {
+                frontier.connect(dependencies, true);
+            }
+            // A helper's own output-reaching facts are one producer group.
+            // Formal arguments remain separate until an actual call uses them.
+            for dependencies in facts.callees.values() {
+                frontier.connect(dependencies, false);
+            }
+            let call_capacity = |name: &str| {
+                let dependencies = &facts.callees[name];
+                let intrinsic = usize::from(frontier.contains(dependencies));
+                let call = (dependencies.arguments.len() + intrinsic).saturating_sub(1);
+                let scan = match signatures.get(name) {
+                    Some(TensorSignature::Pure { input_widths, .. }) if input_widths.len() == 2 => {
+                        // Scan always carries initial; item is output-used only
+                        // when the canonical cell facts name numeric formal 1.
+                        (1 + usize::from(dependencies.arguments.contains(&1)) + intrinsic)
+                            .saturating_sub(1)
+                    }
+                    _ => 0,
+                };
+                call.max(scan)
+            };
+            // Select joins at most three existing groups. A call or scan may
+            // additionally join its intrinsic group and output-used operands.
+            let capacity = facts
+                .callees
+                .keys()
+                .map(|name| call_capacity(name))
+                .max()
+                .unwrap_or(0)
+                .max(2);
+            let mandatory_capacity =
+                roots.iter().map(|name| call_capacity(name)).sum::<usize>()
+                    + parameters
+                        .iter()
+                        .map(|name| {
+                            // The acquired grammar reads a physical parameter with
+                            // Parameter or Linear; only a matrix can join an input.
+                            usize::from(body.parameters.iter().any(|parameter| {
+                                &parameter.name == name && parameter.shape.len() == 2
+                            }))
+                        })
+                        .sum::<usize>()
+                    + if input_row {
+                        facts
+                            .callees
+                            .iter()
+                            .filter(|(_, dependencies)| dependencies.tokens)
+                            .map(|(name, _)| call_capacity(name))
+                            .max()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+            let joins = frontier
+                .groups
+                .saturating_sub(1)
+                .saturating_sub(mandatory_capacity)
+                .div_ceil(capacity);
+            if remaining < needed + joins {
+                return false;
+            }
         }
         if needed == 0 || remaining > needed {
             return true;

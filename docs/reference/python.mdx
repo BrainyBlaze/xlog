@@ -267,7 +267,7 @@ or replace the constructor's remaining shape and causal checks.
 With `require_output_dependencies=True`, the same constructor instead requires
 every new definition and physical constant to reach the returned entry value.
 The entry value must also possibly depend on raw tokens or current hidden.
-This explicit opt-in accompanies acquisition language version12 below; it is
+This explicit opt-in accompanies acquisition language versions12 and13 below; it is
 independent of source encoding. Earlier callers retain the default admission.
 
 The wheel and source distribution include the canonical JSON Schema resource
@@ -563,7 +563,22 @@ separate. This version does not remove unrelated dead operations. Packets1–11,
 their usage rules and saved snapshots keep their existing semantics; snapshot
 restoration does not apply a new admission rule.
 
-For a version4 through version12 packet,
+Version13 (`xlog-contextual-acquisition-v13`) keeps the same context2 facts,
+constructor predicate and `numerical-rows-v3` source. It adds a necessary reserve
+for connecting separate groups of required dependencies in the current value
+frontier. Facts occurring together in an existing value or a callee's intrinsic
+output are grouped by physical identity. Transitive overlap is optimistic;
+numeric callee formals join groups only through their actual output-used
+arguments. The bound accounts for the connection capacity of mandatory calls
+and parameter reads, then reserves additional joining rows. In particular,
+several unrelated reads or constant-returning helper calls cannot exhaust all
+but the final row while still needing multiple operations to join their results.
+No graph, operand or constant is supplied. Shapes and causal rules remain with
+the canonical compiler; this lower bound does not guarantee a constructible
+completion, token termination or useful dependence on history. Packets1–12
+retain their literal mask semantics and saved replay behavior.
+
+For a version4 through version13 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -578,9 +593,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; version12 entry values must also satisfy its output dependencies. Zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12 and13 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–12). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–13). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
