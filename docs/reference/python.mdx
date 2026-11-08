@@ -593,12 +593,19 @@ the distinction between raw-token and numeric-argument reads needed by causal
 scans. Equivalent frontiers are memoized within one mask call. Candidate widths
 come from the actual frontier, parameter dimensions and declared input/output
 ABIs; column selection values do not change structural dependency coverage.
-Empty entry-plan answers are retained across tokens for one exact environment,
-including the ABI, parameter declarations, raw-token alphabet, callee signatures
-and dependency facts, required definitions and physical parameters, and width
-bound. Reparsing an already delimited operation count reuses that proof; changing
-the environment discards those answers. The cache holds at most one answer per
-output slot; intermediate search frontiers are reset for each mask.
+Empty entry-plan and external typed-prefix answers are retained across tokens
+for one exact environment, including the ABI, parameter declarations, raw-token
+alphabet, callee signatures and dependency facts, required definitions and
+physical parameters, and width bound. Typed-prefix keys are the complete existing
+search-state keys after canonical producer scheduling: remaining rows and sorted
+frontier shape pairs, dependency facts and numeric-read flags. Reparsing a completed
+operation count, operation or operand prefix can reuse its exact proof.
+Changing the environment discards those answers. Empty plans retain at most one
+answer per output slot. Serialized typed-prefix keys share a 1 MiB allowance,
+matching the native source-byte bound; exceeding it evicts prefix answers for
+recomputation and does not evict empty plans or reject a program. Intermediate
+search frontiers are still reset for each mask. The native mask instance owns
+this cache; saved model state and decoder audits do not depend on cache residency.
 Mandatory direct vector reads and calls that ignore all numeric formals can be
 scheduled first inside the search when doing so preserves the causal boundary;
 scan-capable cells remain choices. This removes equivalent scheduling orders
