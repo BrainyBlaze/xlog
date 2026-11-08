@@ -32,6 +32,7 @@ const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
 const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
 const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
 const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
+const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -47,7 +48,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=12) {
+    if !matches!(version, 1..=13) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -271,6 +272,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 13 {
+            schema["description"] = json!(format!(
+                "{} Prefix plans also reserve rows to connect separate required dependency groups in the existing value frontier. Intrinsic callee facts form producer groups; only output-used Call arguments and the canonical Scan initial/item dependencies can join them. Mandatory producers contribute their own connection capacity. This optimistic lower bound preserves final shape and output admission without guaranteeing constructibility or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -281,6 +288,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                13 => FRONTIER_COMPLETION_LANGUAGE,
                 12 => OUTPUT_DEPENDENCY_LANGUAGE,
                 11 => ENTRY_BUDGET_LANGUAGE,
                 10 => INTENT_LANGUAGE,
@@ -396,6 +404,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     has_intent: bool,
     entry_budget: bool,
     output_dependencies: bool,
+    frontier_completion: bool,
 }
 
 #[pymethods]
@@ -404,7 +413,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let output_dependencies = language["id"] == OUTPUT_DEPENDENCY_LANGUAGE;
+        let frontier_completion = language["id"] == FRONTIER_COMPLETION_LANGUAGE;
+        let output_dependencies =
+            language["id"] == OUTPUT_DEPENDENCY_LANGUAGE || frontier_completion;
         if (language["id"] != LANGUAGE
             && language["id"] != ORDERED_LANGUAGE
             && language["id"] != OPERAND_LANGUAGE
@@ -513,6 +524,7 @@ impl PyNativeAcquisitionMask {
             has_intent,
             entry_budget,
             output_dependencies,
+            frontier_completion,
             ordered,
             planned_output,
             check_single_operation,
@@ -562,6 +574,7 @@ impl PyNativeAcquisitionMask {
                     self.canonical_entry_formals,
                     self.entry_budget,
                     self.output_dependencies,
+                    self.frontier_completion,
                 )
                 .is_err()
                 {
@@ -593,6 +606,7 @@ impl PyNativeAcquisitionMask {
             self.canonical_entry_formals,
             self.entry_budget,
             self.output_dependencies,
+            self.frontier_completion,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -689,6 +703,7 @@ struct Resources<'a> {
     canonical_entry_formals: bool,
     entry_budget: bool,
     output_dependencies: bool,
+    frontier_completion: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
@@ -723,6 +738,7 @@ fn resource_prefix<'a>(
     canonical_entry_formals: bool,
     entry_budget: bool,
     output_dependencies: bool,
+    frontier_completion: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -736,6 +752,7 @@ fn resource_prefix<'a>(
         canonical_entry_formals,
         entry_budget,
         output_dependencies,
+        frontier_completion,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -1101,7 +1118,10 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                 .typed
                                 .as_mut()
                                 .unwrap()
-                                .set_output_dependencies(self.resources.dependencies.clone());
+                                .set_output_dependencies(
+                                    self.resources.dependencies.clone(),
+                                    self.resources.frontier_completion,
+                                );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;
                     }
