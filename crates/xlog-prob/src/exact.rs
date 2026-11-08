@@ -25,8 +25,6 @@ use crate::compilation::{
     CircuitCompilationLedger, CircuitCompileProfile, DeviceRandomVarList, GpuCompileConfig,
     GpuPirGraph, GpuPirRoots,
 };
-#[cfg(feature = "host-io")]
-use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{extract_from_program, extract_from_source, GroundAtom, Provenance};
 #[cfg(feature = "host-io")]
@@ -37,6 +35,8 @@ use xlog_cuda::provider::{
     NEURAL_MODULE, WEIGHTS_MODULE,
 };
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+#[cfg(feature = "host-io")]
+use xlog_ir::circuit_numeric::{validate_circuit_gradient_values, validate_circuit_value};
 
 #[derive(Debug, Clone)]
 /// Exact probability reported for one ground query.

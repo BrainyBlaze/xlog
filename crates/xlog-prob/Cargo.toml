@@ -25,7 +25,7 @@ criterion = "0.5"
 
 [features]
 default = []
-host-io = []
+host-io = ["xlog-cuda/host-io"]
 
 [[bench]]
 name = "prob_bench"

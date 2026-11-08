@@ -2,19 +2,19 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::LaunchConfig;
-use xlog_core::{Result, XlogError};
-use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{
+use crate::memory::TrackedCudaSlice;
+use crate::provider::{
     arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE,
 };
-use xlog_cuda::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
+use crate::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
+use cudarc::driver::LaunchConfig;
+use xlog_core::{Result, XlogError};
 
-use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
-use crate::logsumexp::validate_circuit_log_weight_pair;
+use crate::gpu_scan::exclusive_scan_u32_inplace;
+use xlog_ir::circuit_numeric::validate_circuit_log_weight_pair;
 #[cfg(feature = "host-io")]
-use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
-use crate::xgcf::{Xgcf, XgcfNodeType};
+use xlog_ir::circuit_numeric::{validate_circuit_gradient_values, validate_circuit_value};
+use xlog_ir::semantic_measure::{Xgcf, XgcfNodeType};
 
 /// Device-resident circuit buffers produced by the GPU compiler.
 ///

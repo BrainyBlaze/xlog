@@ -4,14 +4,13 @@ use std::ffi::c_void;
 
 use cudarc::driver::{DeviceRepr, LaunchConfig};
 use xlog_core::{Result, XlogError};
+use xlog_cuda::gpu_scan::exclusive_scan_u32_inplace;
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, D4_MODULE};
 use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
-use super::{
-    bitset_words_per_item, checked_pool_len_usize, exclusive_scan_u32_inplace, GpuCompileConfig,
-};
+use super::{bitset_words_per_item, checked_pool_len_usize, GpuCompileConfig};
 
 // ---------------------------------------------------------------------------
 // Frontier work queues for device-resident breadth-first expansion

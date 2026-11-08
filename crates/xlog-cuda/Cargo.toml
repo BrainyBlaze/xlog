@@ -51,6 +51,8 @@ xlog-logic = { path = "../xlog-logic" }
 
 [features]
 default = []
+# Explicit host readback of shared circuit values and gradients.
+host-io = []
 arrow-device-import = []
 # Compile the semantic loop with its pinned external numerical policy header.
 # XLOG_SEMANTIC_POLICY_HEADER names the delivered artifact at build time.

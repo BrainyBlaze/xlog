@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use xlog_core::{Result, XlogError};
 
-use crate::xgcf::XgcfNodeType;
+use xlog_ir::semantic_measure::XgcfNodeType;
 
 const MAGIC: u32 = 0x584C4743; // "XLGC"
 const FORMAT_VERSION: u32 = 1;

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::CudaKernelProvider;
 
+use xlog_cuda::semantic_measure::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
+use xlog_ir::semantic_measure::XgcfNodeType;
 use xlog_prob::compilation::{validate_equivalence_gpu, GpuEquivalenceConfig};
-use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
-use xlog_prob::xgcf::XgcfNodeType;
 
 use xlog_solve::{GpuCnf, SolveInstance};
 
