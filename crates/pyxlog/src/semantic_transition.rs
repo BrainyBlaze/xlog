@@ -590,6 +590,7 @@ pub(crate) struct PySemanticTransitionSession {
     training_canary_owner: Mutex<Option<TrainingCanaryOwner>>,
     detached_cold_context: Mutex<Option<Arc<xlog_cuda::SemanticDetachedColdTaskContext>>>,
     evaluation_source_registry: Mutex<Option<Arc<material_source::MaterialSourceRegistry>>>,
+    semantic_context: Mutex<Option<Arc<world::ContextSourceData>>>,
     owner_thread: ThreadId,
     device_ordinal: usize,
     capacities: (u32, u32, u32, u32),
@@ -598,6 +599,35 @@ pub(crate) struct PySemanticTransitionSession {
 }
 
 impl PySemanticTransitionSession {
+    fn bind_semantic_context(&self, context: Arc<world::ContextSourceData>) -> PyResult<()> {
+        self.require_creator()?;
+        self.material_sources.bind_semantic_world(&context.owner)?;
+        let mut selected = self
+            .semantic_context
+            .lock()
+            .map_err(|_| invalid("original semantic context owner is poisoned"))?;
+        if let Some(original) = selected.as_ref() {
+            if !world::same_context(original, &context) {
+                return Err(invalid(
+                    "session cannot replace its original semantic context binding",
+                ));
+            }
+        } else {
+            *selected = Some(context);
+        }
+        Ok(())
+    }
+
+    fn require_semantic_context(&self) -> PyResult<Arc<world::ContextSourceData>> {
+        self.require_creator()?;
+        self.semantic_context
+            .lock()
+            .map_err(|_| invalid("original semantic context owner is poisoned"))?
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| invalid("task session requires its original native semantic context"))
+    }
+
     fn evaluation_source_registry(&self) -> PyResult<Arc<material_source::MaterialSourceRegistry>> {
         self.require_creator()?;
         self.evaluation_source_registry
@@ -1606,6 +1636,7 @@ impl PySemanticTransitionSession {
             training_canary_owner: Mutex::new(training_canary_owner),
             detached_cold_context: Mutex::new(None),
             evaluation_source_registry: Mutex::new(None),
+            semantic_context: Mutex::new(None),
             owner_thread: std::thread::current().id(),
             device_ordinal,
             capacities,
@@ -3176,7 +3207,7 @@ impl PySemanticTransitionSession {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (checkpoint, *, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, material_source, max_resolved_material_bytes, original_program=None, original_task_use=None, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None, target_task_use=None, prepare_restore_context=None, restore_context=None))]
+    #[pyo3(signature = (checkpoint, *, semantic_context, device_ordinal, snapshot, restore_model, training_domain, training_canary_source, material_source, max_resolved_material_bytes, original_program=None, original_task_use=None, referent=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, refresh_snapshot=None, learning_phase_issuer=None, learning_phase_records=None, learning_phase_record_limits=None, learning_phase_fence=None, learning_phase_checkpoint_issuer=None, target_task_use=None, prepare_restore_context=None, restore_context=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "restore uses the original bounded checkpoint-source resolver"
@@ -3184,6 +3215,7 @@ impl PySemanticTransitionSession {
     fn restore_checkpoint(
         py: Python<'_>,
         checkpoint: &Bound<'_, PyAny>,
+        semantic_context: &Bound<'_, PyAny>,
         device_ordinal: usize,
         snapshot: &Bound<'_, PyAny>,
         restore_model: &Bound<'_, PyAny>,
@@ -3245,6 +3277,9 @@ impl PySemanticTransitionSession {
             ));
         }
         let material_sources = material_owner::original_registry(material_source)?;
+        let expected_context = world::context_source(semantic_context)?;
+        material_sources.bind_semantic_world(&expected_context.owner)?;
+
         if material_sources.saved_caps()? != Some((item_cap, store_cap, resolved_cap)) {
             return Err(invalid(
                 "checkpoint restore changed its original material source caps",
@@ -3255,6 +3290,25 @@ impl PySemanticTransitionSession {
             checkpoint_material.original_loaded(&material_sources.native_budget()?)?;
         let (seed, _, phase, binding) =
             TaskCheckpointSeed::decode_bound(manifest.task, &material_sources)?;
+        let saved_context = seed.semantic_context()?;
+        if !world::same_context(&saved_context, &expected_context) {
+            return Err(invalid(
+                "checkpoint restore changed its original semantic context",
+            ));
+        }
+        for task in [original_task_use.as_ref(), target_task_use.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let task = task.borrow(py);
+            let context = task.checkpoint.semantic_context()?;
+            if !Arc::ptr_eq(&context.owner, &expected_context.owner) {
+                return Err(invalid(
+                    "paired restoration requires the original common world namespace",
+                ));
+            }
+        }
+
         let expense = seed.proposal_expense()?;
         let model_context = original_task_use.as_ref().map(|original| {
             let original = original.borrow(py);
@@ -4153,7 +4207,7 @@ impl PySemanticTransitionSession {
             .map(|callback| callback.bind(py).as_any())
             .or(refresh_snapshot);
         let (canary_source, canary_owner, canary_projection) =
-            read_training_canary_source(py, training_canary_source)?;
+            read_training_canary_source(py, training_canary_source, &seed.semantic_context()?)?;
         if canary_projection != seed.training_canary_source {
             return Err(invalid(
                 "checkpoint symbolic canary source differs from its original native observation",
@@ -4395,6 +4449,8 @@ impl PySemanticTransitionSession {
             canary_source.clone().zip(canary_owner.clone()),
             seed.native_model_context.as_ref(),
         )?;
+        restored_session.bind_semantic_context(seed.semantic_context()?)?;
+
         if let Some(registry) = evaluation_source_registry {
             restored_session.retain_evaluation_source_registry(Arc::clone(registry))?;
         }
@@ -10852,6 +10908,50 @@ fn read_task_evaluation_values(
     Ok(values)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "evaluation content and its authentic common-world binding remain explicit"
+)]
+fn read_bound_task_evaluation_values(
+    statements: &Bound<'_, PyAny>,
+    supports: &Bound<'_, PyAny>,
+    source: &Bound<'_, PyAny>,
+    queries: &Bound<'_, PyAny>,
+    scoring: &Bound<'_, PyAny>,
+    truth_masks: &Bound<'_, PyAny>,
+    actor_eligible: &Bound<'_, PyAny>,
+    task_ground: &Bound<'_, PyAny>,
+    semantic_context: &Bound<'_, PyAny>,
+    session: &PySemanticTransitionSession,
+    budget: &mut usize,
+) -> PyResult<Vec<ColdValue>> {
+    let context = world::context_source(semantic_context)?;
+    let mut values = read_task_evaluation_values(
+        statements,
+        supports,
+        source,
+        queries,
+        scoring,
+        truth_masks,
+        actor_eligible,
+        task_ground,
+        budget,
+    )?;
+    let binding = world::binding_value(&context);
+    *budget = budget
+        .checked_sub(
+            context
+                .material
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| invalid("semantic binding extent overflows"))?,
+        )
+        .ok_or_else(|| invalid("evaluation binding exceeds its original metadata budget"))?;
+    session.bind_semantic_context(context)?;
+    values.push(binding);
+    Ok(values)
+}
+
 fn read_task_ground(value: &Bound<'_, PyAny>, budget: &mut usize) -> PyResult<ColdValue> {
     fn tuple<'py>(
         value: &Bound<'py, PyAny>,
@@ -11057,8 +11157,14 @@ fn task_evaluation_spec_with_allocation_owner(
     initial_program_source: Option<&str>,
     material_sources: &material_source::MaterialSourceRegistry,
 ) -> PyResult<xlog_cuda::SemanticTaskEvaluationSpec> {
+    if values.len() != 9 {
+        return Err(invalid(
+            "evaluation requires its eight content fields and native semantic context",
+        ));
+    }
+    material_sources.semantic_context(&values[8])?;
     task_evaluation_spec_owned(
-        values,
+        &values[..8],
         priority_levels,
         editable_program,
         training_domain,
@@ -12911,11 +13017,17 @@ type TrainingCanarySourceRead = (
 fn read_training_canary_source(
     py: Python<'_>,
     value: Option<&Bound<'_, PyAny>>,
+    context: &world::ContextSourceData,
 ) -> PyResult<TrainingCanarySourceRead> {
     let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok((None, None, ColdValue::None));
     };
     let owner = value.extract::<Py<cold_task::PySemanticTransitionColdTask>>()?;
+    if !Arc::ptr_eq(&owner.borrow(py).semantic_context.owner, &context.owner) {
+        return Err(invalid(
+            "training canary requires the original common world owner",
+        ));
+    }
     let source = owner.borrow(py).canary_source(py)?;
     let bytes = source
         .projection_words()
@@ -13350,6 +13462,21 @@ impl PySemanticTransitionTaskUse {
 
 #[pymethods]
 impl PySemanticTransitionTaskUse {
+    #[getter]
+    fn semantic_context(&self, py: Python<'_>) -> PyResult<Py<world::PySemanticContextSource>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        let context = self.checkpoint.semantic_context()?;
+        let original = session.require_semantic_context()?;
+        if !world::same_context(&original, &context) {
+            return Err(invalid(
+                "task use semantic context differs from its bound native session",
+            ));
+        }
+        // The original immutable binding remains readable after native task retirement.
+        world::context_python(py, context)
+    }
+
     /// Immutable fork restriction: one mode byte (0, 1 or 3), followed by the
     /// original 32-byte library digest. The result owns its actual byte budget.
     #[cfg(feature = "semantic-policy")]
@@ -13504,6 +13631,15 @@ fn checkpoint_task_phase(state: &TaskUseState) -> PyResult<CheckpointTaskPhase> 
 }
 
 impl TaskCheckpointSeed {
+    fn semantic_context(&self) -> PyResult<Arc<world::ContextSourceData>> {
+        if self.evaluation.len() != 9 {
+            return Err(invalid(
+                "task evaluation requires its eight content fields and native context",
+            ));
+        }
+        self.material_sources.semantic_context(&self.evaluation[8])
+    }
+
     fn with_dormant_evaluation_source(&self, source: Arc<DormantEvaluationSource>) -> Self {
         let mut seed = self.clone();
         seed.actor_refresh_assignments = source.program_assignments.clone();
@@ -13796,6 +13932,7 @@ impl TaskCheckpointSeed {
         original.require_saved(&seed.material_sources)?;
         seed.material_sources = Arc::clone(original);
         seed.material_metadata = Some(Arc::new(reservation));
+        seed.semantic_context()?;
         seed.bind_material_payloads()?;
         Ok((seed, snapshot, phase, binding))
     }
@@ -24187,7 +24324,7 @@ impl PySemanticTransitionController {
     /// device receipts or use grants. A derived target remains None even when
     /// its value equals an admitted query. import_task independently recomputes
     /// this coverage and requires original targets before issuing its TaskUse.
-    #[pyo3(signature = (*, task_scope, live_authorities, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, task_ground, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes, material_source, max_resolved_material_bytes))]
+    #[pyo3(signature = (*, task_scope, live_authorities, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, admissible_truth_masks, actor_eligible, task_ground, semantic_context, replay_rows, replay_selection, max_material_bytes, max_total_material_bytes, max_evidence_bytes, material_source, max_resolved_material_bytes))]
     #[expect(
         clippy::too_many_arguments,
         reason = "observation coverage retains every independent task and replay input"
@@ -24205,6 +24342,7 @@ impl PySemanticTransitionController {
         admissible_truth_masks: &Bound<'_, PyAny>,
         actor_eligible: &Bound<'_, PyAny>,
         task_ground: &Bound<'_, PyAny>,
+        semantic_context: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         replay_selection: &Bound<'_, PyAny>,
         max_material_bytes: &Bound<'_, PyAny>,
@@ -24228,7 +24366,7 @@ impl PySemanticTransitionController {
             max_evidence_bytes,
             &mut budget,
         )?;
-        let evaluation = read_task_evaluation_values(
+        let evaluation = read_bound_task_evaluation_values(
             statement_records,
             allowed_support_records,
             task_program_source,
@@ -24237,6 +24375,8 @@ impl PySemanticTransitionController {
             admissible_truth_masks,
             actor_eligible,
             task_ground,
+            semantic_context,
+            &session,
             &mut budget,
         )?;
         let editable = session.editable_source()?;
@@ -24488,7 +24628,7 @@ impl PySemanticTransitionController {
     /// Only then does this same TaskUse become Imported. Any failed import
     /// permanently aborts the shared Session, including saved callback references.
     /// No Session, task-state or reader mutex is held across a Python callback.
-    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, material_source, max_resolved_material_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, original_program=None, actor_refresh_initial_kit=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false, prepare_invocation=None))]
+    #[pyo3(signature = (*, task_ref, task_scope, statement_records, allowed_support_records, task_program_source, task_query_ordinals, task_scoring, task_priority_levels, admissible_truth_masks, actor_eligible, task_ground, semantic_context, live_authorities, replay_rows, training_objective, training_domain, training_canary_source, replay_capacity, max_material_bytes, max_total_material_bytes, max_evidence_bytes, material_source, max_resolved_material_bytes, dependencies, feedback_roots, publication_grants, inference_grants, training_grants, initial_sources, source_mapping, snapshot, replay_selection, replay_operation, restore_invocation, pack_policy, finish_invocation, refresh_snapshot, proposal_capacity, original_program=None, actor_refresh_initial_kit=None, resolve_checkpoint=None, max_checkpoint_bytes=None, max_total_checkpoint_bytes=None, retain_policy=false, prepare_invocation=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "task import binds the complete authority, replay, and callback contract"
@@ -24507,6 +24647,7 @@ impl PySemanticTransitionController {
         admissible_truth_masks: &Bound<'_, PyAny>,
         actor_eligible: &Bound<'_, PyAny>,
         task_ground: &Bound<'_, PyAny>,
+        semantic_context: &Bound<'_, PyAny>,
         live_authorities: &Bound<'_, PyAny>,
         replay_rows: &Bound<'_, PyAny>,
         training_objective: &Bound<'_, PyAny>,
@@ -24675,8 +24816,11 @@ impl PySemanticTransitionController {
             target_training_objective_value.clone()
         };
         let training_domain_value = ColdValue::read(training_domain, &mut budget, 0)?;
-        let (canary_source, canary_owner, canary_projection) =
-            read_training_canary_source(py, Some(training_canary_source))?;
+        let (canary_source, canary_owner, canary_projection) = read_training_canary_source(
+            py,
+            Some(training_canary_source),
+            &world::context_source(semantic_context)?,
+        )?;
         let replay_capacity_value = replay_capacity_value(replay_capacity, &mut budget)?;
         let replay_capacity = read_replay_capacity(&replay_capacity_value)?;
         let training_objective = read_training_objective(&training_objective_value)?;
@@ -24690,7 +24834,7 @@ impl PySemanticTransitionController {
         authority.bind_initial_sources(&initial_sources, &source_mapping)?;
         let mut snapshot = AuthoritySnapshot::parse(&ColdValue::read(snapshot, &mut budget, 0)?)?;
         authority.check_snapshot(&snapshot)?;
-        let evaluation = read_task_evaluation_values(
+        let evaluation = read_bound_task_evaluation_values(
             statement_records,
             allowed_support_records,
             task_program_source,
@@ -24699,6 +24843,8 @@ impl PySemanticTransitionController {
             admissible_truth_masks,
             actor_eligible,
             task_ground,
+            semantic_context,
+            &session,
             &mut budget,
         )?;
         if let Some(source) = &source_checkpoint {
