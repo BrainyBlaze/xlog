@@ -201,6 +201,7 @@ pub(super) struct ActorRefreshProgram {
     pub(super) bytes: Vec<u8>,
     pub(super) identity: Identity256,
     pub(super) proposals: u64,
+    pub(super) program_mutation_capacity: u32,
     pub(super) updates: u64,
     pub(super) logical_updates: u64,
     pub(super) steps: Vec<ProgramStep>,
@@ -845,15 +846,26 @@ impl ActorRefreshProgram {
                 "schedule",
                 "budgets",
                 "family_binding",
+                "program_image_capacity",
             ],
         )?;
-        if operation(&root["kind"])? != "dlm-new.original-self-source-program/2" {
+        if operation(&root["kind"])? != "dlm-new.original-self-source-program/3" {
             return Err(invalid_program());
         }
         for field in ["run_sha256", "resources_sha256", "frozen_run_sha256"] {
             digest(&root[field])?;
         }
         program_family_binding(&root["family_binding"])?;
+        let capacity = object(
+            &root["program_image_capacity"],
+            &["law", "mutation_capacity"],
+        )?;
+        if operation(&capacity["law"])? != "dlm-new.authored-program-image-capacity/1" {
+            return Err(invalid_program());
+        }
+        let program_mutation_capacity =
+            u32::try_from(integer(&capacity["mutation_capacity"])?)
+                .map_err(|_| invalid_program())?;
         let budgets = object(
             &root["budgets"],
             &[
@@ -1336,11 +1348,15 @@ impl ActorRefreshProgram {
         if schedule["updates"] != Value::Array(expected_updates) {
             return Err(invalid_program());
         }
+        if proposals.checked_mul(4).is_none_or(|count| count > u64::from(program_mutation_capacity)) {
+            return Err(invalid_program());
+        }
         Ok(Self {
             owner: Arc::new(()),
             bytes: bytes.to_vec(),
             identity: Identity256::from_bytes(Sha256::digest(bytes).into()),
             proposals,
+            program_mutation_capacity,
             updates,
             logical_updates,
             steps,
@@ -3003,6 +3019,13 @@ impl SemanticTransitionSession {
         }
         let program = ActorRefreshProgram::decode(program_bytes)?;
         let quantities = self.program_quantities(&program)?;
+        let original = self.task.as_ref().and_then(|(task, _)| task.spec.program.editable_program())
+            .ok_or_else(invalid_program)?;
+        // Evaluation composition retains two disjoint original pools. Its
+        // local image still carries exactly the authored whole-program bound.
+        if original.image.local_mutation_capacity != program.program_mutation_capacity {
+            return Err(invalid_program());
+        }
         self.actor_refresh_program = Some(program);
         Ok(quantities)
     }

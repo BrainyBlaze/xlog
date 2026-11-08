@@ -1674,6 +1674,10 @@ fn compile_positive_task_owned(
     let result_bytes = [
         (theory.predicates.len(), std::mem::size_of::<u32>()),
         (fact_count, std::mem::size_of::<SemanticProgramFact>()),
+        (1, std::mem::size_of::<u32>() + std::mem::size_of::<xlog_cuda::SemanticProgramNode>() +
+            2 * std::mem::size_of::<xlog_cuda::SemanticProgramLeaf>() + std::mem::size_of::<Vec<u32>>()),
+        (rule_count, std::mem::size_of::<u32>()),
+        (query_records.len(), std::mem::size_of::<SemanticProgramFact>() + std::mem::size_of::<u32>()),
         (
             rule_count,
             std::mem::size_of::<xlog_cuda::SemanticProgramRule>(),
@@ -1759,12 +1763,16 @@ fn compile_positive_task_owned(
         LogicProgram::compile_program_owned(compiler_input.program, &mut reserve)?;
     drop(compiled);
     drop(certificate_owner);
-    let queries = query_records
+    let queries: Vec<SemanticProgramFact> = query_records
         .iter()
         .map(|record| observation_facts[*record as usize].1)
         .collect();
+    let image = xlog_cuda::SemanticProgramImageAdmission::flat(
+        &queries, query_records, initial_rules.len(),
+    ).map_err(|message| XlogError::Compilation(message.into()))?;
     Ok((
         SemanticProgramAdmission {
+            image,
             predicate_count: theory.predicates.len() as u32,
             predicate_arities,
             initial_facts,

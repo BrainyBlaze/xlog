@@ -191,14 +191,18 @@ impl SemanticTransitionSession {
                 "inherited observations differ from their original finite donor geometry",
             ));
         }
-        if records.is_empty() {
-            return Ok(());
-        }
         let program = self
             .task
             .as_ref()
             .and_then(|(binding, _)| binding.spec.program.editable_program())
             .ok_or(SemanticTransitionError::NotBound)?;
+        let owner = binding.program_image_owner().ok_or(SemanticTransitionError::NotBound)?;
+        let donor = &source_ground.bytes[source_layout.frame(0)?];
+        for slot in 0..4 {
+            layout.image.require_donor_prefix(
+                &ground.bytes[layout.frame(slot)?], source_layout.image, donor, program, owner,
+            )?;
+        }
         for (binding, &record) in records.iter().enumerate() {
             let row = &ground.bytes[layout.inherited_row(binding)?];
             let fact = program
@@ -884,22 +888,16 @@ impl SemanticTransitionSession {
                 "selected source query geometry changed its original program",
             ));
         }
-        let source_layout = task_ground::TaskGroundLayout::new(
-            usize::try_from(source_queries)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            usize::try_from(source_bindings)
-                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            context
-                .source_program_admission
-                .as_ref()
-                .map(|program| program.initial_rules.len()),
-        )?
-        .with_rule_library(
-            catalogue
-                .member_rule_library(SELECTED_TRAINING_CONTEXT)
-                .as_ref()
-                .map_or(0, |library| library.rules().len()),
-        )?;
+        let source_layout = task_ground::TaskGroundLayout::from_material(&old_ground.bytes)?;
+        let expected_image = program_image::ProgramImageLayout::new(context.source_program_admission.as_ref())?
+            .with_library(catalogue.member_rule_library(SELECTED_TRAINING_CONTEXT)
+                .as_ref().map_or(0, |library| library.rules().len()))?
+            .with_entry_supports(source_layout.image.entry_supports)?;
+        if source_layout.queries != source_queries as usize ||
+            source_layout.bindings != source_bindings as usize ||
+            source_layout.inherited_capacity != 0 || source_layout.image != expected_image {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         source_layout.validate(&old_ground.bytes)?;
         if (0..3).any(|slot| {
             source_layout
@@ -910,43 +908,17 @@ impl SemanticTransitionSession {
                 "ordinary training donor cannot carry an evaluation rule activity mask",
             ));
         }
-        let source_rule_offset = source_layout.rule_offset;
-        let rule_bytes = usize::try_from(source_rule_count)
-            .ok()
-            .and_then(|count| count.checked_mul(size_of::<crate::SemanticProgramRule>()))
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        if source_rule_count > ground_layout.rule_capacity as u64 {
-            return Err(publication_input_error(
-                "inherited selected program exceeds the frozen evaluation context",
-            ));
+        let target_program = self.task.as_ref()
+            .and_then(|(task, _)| task.spec.program.editable_program());
+        let mut ground = ground_layout.initial_bytes(target_program, self.task.as_ref().and_then(|(task, _)| task.program_image_owner()))?;
+        for slot in 0..4 {
+            ground_layout.image.inherit_source(
+                &mut ground[ground_layout.frame(slot)?],
+                source_layout.image,
+                &old_ground.bytes[source_layout.frame(0)?],
+            )?;
         }
-        let reserve_rules = match restriction.map(|(mode, _)| mode) {
-            Some(SemanticEvaluationIntervention::NoEdit) => 0,
-            Some(SemanticEvaluationIntervention::FixedRuleActivation) => {
-                rule_control::RULE_LIBRARY_COUNT
-            }
-            Some(SemanticEvaluationIntervention::Structural) => 2,
-            None => 0,
-        };
-        if source_rule_count
-            .checked_add(reserve_rules as u64)
-            .is_none_or(|count| count > ground_layout.rule_capacity as u64)
-        {
-            return Err(publication_input_error("selected source and frozen intervention exceed the existing resident rule capacity"));
-        }
-        let selected_rules = old_ground
-            .bytes
-            .get(
-                source_rule_offset
-                    ..source_rule_offset
-                        .checked_add(rule_bytes)
-                        .ok_or(SemanticTransitionError::GenerationExhausted)?,
-            )
-            .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let mut ground = ground_layout.initial_bytes();
         ground[48..56].copy_from_slice(&source_rule_count.to_le_bytes());
-        ground[ground_layout.rule_offset..ground_layout.rule_offset + rule_bytes]
-            .copy_from_slice(selected_rules);
         let inherited_records = catalogue.member_observation_records(SELECTED_TRAINING_CONTEXT)?;
         if inherited_records.len() != source_layout.bindings
             || inherited_records.len() != ground_layout.inherited_capacity

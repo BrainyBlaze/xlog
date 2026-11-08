@@ -1030,6 +1030,8 @@ impl SemanticTransitionSession {
             })
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         ground.layout.validate(&saved_ground.bytes)?;
+        self.task.as_ref().ok_or(SemanticTransitionError::NotBound)?.0
+            .validate_program_ground(ground.layout, &saved_ground.bytes)?;
         let observations_authenticated = !saved_ground.bytes[64..ground.layout.query_offset]
             .chunks_exact(144)
             .any(|observation| observation[..8] != [0; 8]);

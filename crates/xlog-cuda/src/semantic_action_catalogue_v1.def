@@ -1,13 +1,14 @@
 # Canonical encoding: non-comment lines, single spaces between tokens, LF terminator.
 # SHA-256 of that encoding is the catalogue identity, generated at build time.
-domain xlog.semantic-action-catalogue.v2
-generation 5
+domain xlog.semantic-action-catalogue.v3
+generation 6
 constant TEXT_CARDINALITY 248077
 constant MASK_TOKEN 248078
 constant TEXT_NULL 0xffffffff
 constant OPERAND_CAPACITY 4
 constant BINDING_CAPACITY 4
 constant SCRATCH_BYTES 25165824
+constant SEMANTIC_CATEGORY_CAPACITY 262144
 constant COMPONENT_COUNT 136
 constant FIELD_COUNT 18
 constant COMPONENT_KIND_TEXT 0
@@ -17,10 +18,16 @@ constant NO_EDIT_ACTIVE_MASK 0x00001
 constant NO_EDIT_NULL_MASK 0x3fffe
 constant INSERT_SUPPORT_ACTIVE_MASK 0x2087f
 constant INSERT_SUPPORT_NULL_MASK 0x1f780
-constant INSERT_RULE_ACTIVE_MASK 0x007ff
-constant INSERT_RULE_NULL_MASK 0x3f800
+constant INSERT_RULE_ACTIVE_MASK 0x207ff
+constant INSERT_RULE_NULL_MASK 0x1f800
+constant REPLACE_BRANCH_ACTIVE_MASK 0x1f007
+constant REPLACE_BRANCH_NULL_MASK 0x20ff8
+constant REPLACE_LEAF_ACTIVE_MASK 0x20007
+constant REPLACE_LEAF_NULL_MASK 0x1fff8
+constant REPLACE_ROOT_ACTIVE_MASK 0x02007
+constant REPLACE_ROOT_NULL_MASK 0x3dff8
 field 0 action_class ACTION_CLASS 2
-field 1 opcode SEMANTIC_OPCODE 3
+field 1 opcode SEMANTIC_OPCODE 6
 field 2 target_handle PREDICATE_SCHEMA_DESCRIPTOR 1
 field 3 operand_0 TYPED_OPERAND_DESCRIPTOR 1
 field 4 operand_1 TYPED_OPERAND_DESCRIPTOR 1
@@ -36,18 +43,24 @@ field 13 edge_TRUE EDGE_DESCRIPTOR 1
 field 14 edge_FALSE EDGE_DESCRIPTOR 1
 field 15 edge_BOTH EDGE_DESCRIPTOR 1
 field 16 edge_NEITHER EDGE_DESCRIPTOR 1
-field 17 leaf_payload SUPPORT_EVENT_DESCRIPTOR 1
+field 17 leaf_payload LEAF_EFFECT_DESCRIPTOR 1
 action 0 NO_EDIT NO_EDIT_ACTIVE_MASK NO_EDIT_NULL_MASK
 action 1 APPLY OPCODE_SIGNATURE OPCODE_SIGNATURE
 opcode 0 NULL ONLY_UNDER_NO_EDIT
 opcode 1 INSERT_SUPPORT INSERT_SUPPORT_ACTIVE_MASK INSERT_SUPPORT_NULL_MASK
 opcode 2 INSERT_RULE INSERT_RULE_ACTIVE_MASK INSERT_RULE_NULL_MASK
+opcode 3 REPLACE_BRANCH REPLACE_BRANCH_ACTIVE_MASK REPLACE_BRANCH_NULL_MASK
+opcode 4 REPLACE_LEAF REPLACE_LEAF_ACTIVE_MASK REPLACE_LEAF_NULL_MASK
+opcode 5 REPLACE_ROOT REPLACE_ROOT_ACTIVE_MASK REPLACE_ROOT_NULL_MASK
 rule TARGET_ARITY_PREFIX target_arity_0_to_4 operand_i_non_NULL_iff_i_lt_arity
 rule QUALIFIER_EMPTY distinct_EMPTY_BUNDLE_non_NULL
 rule SUPPORT_EVENT PRO_or_CONTRA unit_presence provenance source context scope ABSTAIN_illegal
-rule INSERT_RULE positive_range_restricted_head two_positive_body_atoms declared_arity_1_or_2 four_variable_slots active_argument_bindings immutable_input_facts
+rule INSERT_RULE positive_range_restricted_head two_positive_body_atoms declared_arity_1_or_2 four_variable_slots active_argument_bindings invoke_rule_block_leaf
+rule PROGRAM_IMAGE roots nodes four_labeled_edges query_guards evidence_rule_block_abstain acquired_owner_generation acyclic initialized_children_only
+rule IMAGE_MUTATION REPLACE_BRANCH node_guard_four_children REPLACE_LEAF node_effect REPLACE_ROOT root_node frozen_unused_slot_initialization native_successor_lineage
+rule FOREST_EXECUTION every_tree one_leaf immutable_step_entry_snapshot independent_pro_contra_fixed_order_max staged_effects sole_joint_publication
 rule RULE_ARGUMENTS unary_second_argument_NULL category_0 inactive_not_a_variable prefix_completion_uses_real_arguments
-rule PROGRAM_BANK encoding_v2 declaration_order typed_u32 variable_kind_0 constant_kind_1 authored_body_count_1_to_3 shared_substitution exact_constants canonical_inactive_zero
+rule PROGRAM_BANK encoding_v3 canonical_forest declaration_order typed_u32 variable_kind_0 constant_kind_1 authored_body_count_1_to_3 shared_substitution exact_constants canonical_inactive_zero
 rule RULE_RECEIPT generated_variable_two_body_recipe_10_words program_bank_digest_binding authored_rules_full_25_words
 rule NULL entry_0 inactive_singleton still_consumes_Philox P_1 Q_1 mass_2pow63
 rule TEXT_ACTIVITY acquired_valid_MASK_and_retained_selected_bitmap original_ring_slot_and_logical_position

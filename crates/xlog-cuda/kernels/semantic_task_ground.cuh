@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "semantic_program.cuh"
+#include "semantic_program_image.cuh"
 
 namespace semantic_task_ground {
 
@@ -23,6 +24,9 @@ struct Task {
     uint64_t coding, support_count, level_count, goal_count;
     const uint64_t *scoring, *goal_witness, *query_rows, *supports, *levels, *goals, *binding_rows;
     const uint64_t* observation_rows;
+    uint32_t snapshot_count;
+    const uint64_t* snapshot_rows;
+    const uint64_t* program_image_owner;
     const uint64_t *requirements, *requirement_offsets, *attainment_order;
     uint64_t actor_eligible;
     semantic_program::Bank program;
@@ -51,7 +55,7 @@ struct Task {
 // One exact decoder for the native owner's variable-length task bank. No
 // consumer derives an extent from a public pointer or an unbounded sentinel.
 __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
-    if(!words || !output || count<47 || words[0]!=10 || !words[1] ||
+    if(!words || !output || count<47 || words[0]!=11 || !words[1] ||
        !words[6] || words[6]>UINT32_MAX || words[7]>UINT32_MAX || words[8]>1 ||
        (words[8]==0 ? words[7]!=0 : words[7]==0) || words[10]>words[6] ||
        words[11]>words[6] || words[37]>1)return false;
@@ -77,7 +81,7 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
         task.requirement_offsets=task.requirements+1;
         task.attainment_order=task.requirement_offsets+task.queries;
         uint64_t row_offset=1+uint64_t(task.queries)*2;
-        for(uint32_t query=0;query<task.queries;++query) {
+            for(uint32_t query=0;query<task.queries;++query) {
             if(task.requirement_offsets[query]!=row_offset || requirement_words-row_offset<3)return false;
             const auto* row=task.requirements+row_offset;
             if(row[0]!=query || row[1]>task.queries || row[2]>task.bindings ||
@@ -111,7 +115,7 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
     if(words[12]>count-offset)return false;
     task.editable=words[12]!=0;
     if(task.editable && (!semantic_program::decode_bank(words+offset,words[12],&task.program) ||
-       task.program.query_count!=task.queries || task.program.rule_count>semantic_program::kRuleCapacity))return false;
+       task.program.query_count!=task.queries))return false;
     if(task.coding && !task.editable)return false;
     offset+=words[12];
     if(count-offset<8 || words[offset]!=kRuleControlMagic || words[offset+1]!=1 ||
@@ -125,7 +129,8 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
     if(task.library_count && !(task.library_digest[0]|task.library_digest[1]|
        task.library_digest[2]|task.library_digest[3]))return false;
     offset+=8;
-    if(count-offset!=uint64_t(task.library_count)*(semantic_program::kRuleWords+18))return false;
+    const uint64_t library_words=uint64_t(task.library_count)*(semantic_program::kRuleWords+18);
+    if(count-offset<library_words+5)return false;
     task.library_rules=words+offset;
     task.library_actions=task.library_rules+uint64_t(task.library_count)*semantic_program::kRuleWords;
     for(uint32_t member=0;member<task.library_count;++member) {
@@ -138,6 +143,21 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
         for(uint32_t field=2;field<18;++field)
             if(action[field]>UINT32_MAX || (field>=11 && action[field]))return false;
     }
+    offset+=library_words;
+    if(words[offset]>UINT32_MAX || words[offset]!=uint64_t(task.editable ? task.program.statement_count : 0))return false;
+    task.snapshot_count=uint32_t(words[offset++]);task.snapshot_rows=words+offset;
+    if(count-offset!=uint64_t(task.snapshot_count)*9+4)return false;
+    for(uint32_t index=0;index<task.snapshot_count;++index) {
+        const auto* row=task.snapshot_rows+uint64_t(index)*9;
+        const auto* native=task.program.statement_rows+uint64_t(index)*5;
+        if(!(row[0]|row[1]|row[2]|row[3]))return false;
+        for(uint32_t field=0;field<5;++field)if(row[4+field]!=native[field])return false;
+    }
+    task.program_image_owner=task.snapshot_rows+uint64_t(task.snapshot_count)*9;
+    if(task.editable) {
+        if(!(task.program_image_owner[0]|task.program_image_owner[1]|
+             task.program_image_owner[2]|task.program_image_owner[3]))return false;
+    } else for(uint32_t word=0;word<4;++word)if(task.program_image_owner[word])return false;
     for(uint32_t query=0;query<task.queries;++query) {
         const uint64_t* row=task.query(query);
         if(!(row[0]|row[1]|row[2]|row[3]) || row[4]>UINT32_MAX || row[5]>3 || !row[6] || row[6]>15)return false;
@@ -185,7 +205,9 @@ struct Plane {
     semantic_program::Rule* selected_rules;
     const InheritedObservation* inherited;
     uint32_t inherited_capacity;
-    uint64_t* rule_activity;
+    semantic_program_image::Geometry image_geometry;
+    semantic_program_image::Frame images[4];
+    uint64_t* snapshot;
     __device__ Query& query(uint32_t candidate,uint32_t query) const {
         return query_rows[uint64_t(candidate)*header[2]+query];
     }
@@ -194,30 +216,44 @@ struct Plane {
 __device__ bool decode_plane(uint64_t address,uint64_t bytes,const Task& task,Plane* output) {
     if(!address || address%alignof(uint64_t) || bytes>UINT64_MAX-address || bytes<64)return false;
     auto* header=reinterpret_cast<uint64_t*>(address);
-    const uint64_t capacity=task.editable ? semantic_program::kRuleCapacity-uint64_t(task.program.rule_count) : 0;
+    const uint64_t footer_bytes=semantic_program_image::kGeometryWords*8;
+    if(bytes<64+footer_bytes)return false;
+    semantic_program_image::Geometry geometry{};
+    if(!semantic_program_image::decode_geometry(reinterpret_cast<const uint64_t*>(address+bytes-footer_bytes),
+            task.editable ? &task.program : nullptr,task.library_count,&geometry))return false;
+    const uint64_t capacity=geometry.mutations;
     const uint64_t query_offset=64+uint64_t(task.bindings)*sizeof(Observation);
-    const uint64_t rule_offset=query_offset+3*uint64_t(task.queries)*sizeof(Query);
-    if(header[0]!=kMagic || header[1]!=5 || header[2]!=task.queries || header[3]!=task.bindings ||
+    const uint64_t image_offset=query_offset+3*uint64_t(task.queries)*sizeof(Query);
+    const uint64_t snapshot_offset=image_offset+4*geometry.frame_bytes;
+    const auto* footer=reinterpret_cast<const uint64_t*>(address+bytes-footer_bytes);
+    if(footer[31]>UINT32_MAX-task.bindings ||
+       footer[31]+task.bindings+task.snapshot_count>UINT32_MAX/2)return false;
+    const uint64_t inherited_offset=snapshot_offset+256+uint64_t(task.bindings)*144+
+        footer[31]*sizeof(InheritedObservation)+uint64_t(geometry.statements)*42*8+uint64_t(geometry.entry_supports)*13*8+16;
+    if(header[0]!=kMagic || header[1]!=6 || header[2]!=task.queries || header[3]!=task.bindings ||
        header[4]!=kQueryWords || header[5]!=kObservationWords || header[6]>capacity || header[7]!=capacity ||
-       bytes<rule_offset+capacity*sizeof(semantic_program::Rule)+56)return false;
-    const uint64_t inherited_offset=((rule_offset+capacity*sizeof(semantic_program::Rule)+7)&~uint64_t(7))+16;
-    if(bytes<inherited_offset+40)return false;
+       bytes<inherited_offset+footer_bytes)return false;
     const auto* inherited_header=reinterpret_cast<const uint64_t*>(address+inherited_offset-16);
-    if(inherited_header[0]!=kInheritedMagic || inherited_header[1]>UINT32_MAX-task.bindings ||
-       inherited_header[1]>(bytes-inherited_offset-40)/sizeof(InheritedObservation) ||
-       bytes!=inherited_offset+inherited_header[1]*sizeof(InheritedObservation)+40)return false;
-    auto* activity=reinterpret_cast<uint64_t*>(address+bytes-40);
-    if(activity[0]!=kRuleActivityMagic || activity[1]!=task.library_count)return false;
-    if(task.rule_control==kFixedRuleActivation &&
-       uint64_t(task.program.rule_count)+header[6]+task.library_count>semantic_program::kRuleCapacity)return false;
-    const uint64_t permitted=task.library_count==64 ? UINT64_MAX :
-        (uint64_t(1)<<task.library_count)-1;
-    for(uint32_t candidate=0;candidate<3;++candidate)
-        if((activity[2+candidate]&~permitted) ||
-           (task.rule_control!=kFixedRuleActivation && activity[2+candidate]))return false;
-    Plane plane{header,reinterpret_cast<Observation*>(address+64),
-        reinterpret_cast<Query*>(address+query_offset),reinterpret_cast<semantic_program::Rule*>(address+rule_offset),
-        reinterpret_cast<const InheritedObservation*>(address+inherited_offset),uint32_t(inherited_header[1]),activity+2};
+    if(inherited_header[0]!=kInheritedMagic || inherited_header[1]!=footer[31] || inherited_header[1]>UINT32_MAX-task.bindings ||
+       inherited_header[1]>(bytes-inherited_offset-footer_bytes)/sizeof(InheritedObservation) ||
+       bytes!=inherited_offset+inherited_header[1]*sizeof(InheritedObservation)+footer_bytes)return false;
+    Plane plane{};
+    plane.header=header;plane.observations=reinterpret_cast<Observation*>(address+64);
+    plane.query_rows=reinterpret_cast<Query*>(address+query_offset);
+    plane.inherited=reinterpret_cast<const InheritedObservation*>(address+inherited_offset);
+    plane.inherited_capacity=uint32_t(inherited_header[1]);plane.image_geometry=geometry;
+    plane.snapshot=reinterpret_cast<uint64_t*>(address+snapshot_offset);
+    for(uint32_t slot=0;slot<4;++slot) {
+        if(!semantic_program_image::decode_frame(address+image_offset+uint64_t(slot)*geometry.frame_bytes,
+                geometry,task.editable ? &task.program : nullptr,&plane.images[slot]))return false;
+        if(task.editable)for(uint32_t word=0;word<4;++word)
+            if(plane.images[slot].header[6+word]!=task.program_image_owner[word])return false;
+        if(task.rule_control!=kFixedRuleActivation)
+            for(uint32_t block=0;block<geometry.blocks;++block)
+                if(plane.images[slot].activity[block])return false;
+    }
+    plane.selected_rules=plane.images[0].rules;
+    if(plane.images[0].header[4]!=header[6])return false;
     for(uint32_t index=0;index<task.bindings+plane.inherited_capacity;++index) {
         const bool inherited=index>=task.bindings;
         if(inherited) {
@@ -248,6 +284,7 @@ struct Observations {
     Task task;
     Plane plane;
     __device__ uint32_t size() const { return task.bindings+plane.inherited_capacity; }
+    __device__ uint32_t protected_size() const { return size(); }
     __device__ semantic_program::Observation operator[](uint32_t index) const {
         if(index>=task.bindings) {
             const auto& row=plane.inherited[index-task.bindings];
@@ -284,8 +321,8 @@ __device__ bool attained(const Task& task,const Plane& plane,uint32_t slot,uint3
         if(observed.predicate!=query_fact.predicate || observed.arity!=query_fact.arity ||
            observed.first!=query_fact.first ||
            (query_fact.arity==2 && observed.second!=query_fact.second))return false;
-        const uint64_t sources=support.lineage[(uint64_t(fact_index)*2)*support.words+binding/64];
-        if(!(sources&(uint64_t(1)<<(binding%64))))return false;
+        const uint64_t sources=support.lineage[(uint64_t(fact_index)*2)*support.words+(uint64_t(binding)*2)/64];
+        if(!(sources&(uint64_t(1)<<((uint64_t(binding)*2)%64))))return false;
     }
     return true;
 }

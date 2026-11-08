@@ -1955,10 +1955,11 @@ pub(super) fn source_task_projection(
     let mut extent = add(
         python_metadata_tuple_extent(py, 2)?,
         add(
-            python_metadata_tuple_extent(py, 5)?,
+            python_metadata_tuple_extent(py, 6)?,
             python_metadata_tuple_extent(py, 6)?,
         )?,
     )?;
+    extent = add(extent, material_bytes::python_instance_extent::<program_image::PySemanticProgramImage>(py)?)?;
     let mut scratch_extent = 0;
     for text in [&cold.initial_theory, &cold.input_facts] {
         extent = add(extent, python_metadata_text_extent(py, text)?)?;
@@ -2021,6 +2022,9 @@ pub(super) fn source_task_projection(
         cold.observer_source.as_deref(),
         PyTuple::new(py, &cold.statements)?,
         PyTuple::new(py, &cold.query_records)?,
+        Py::new(py, program_image::PySemanticProgramImage {
+            inner: Arc::clone(&cold.image_declaration),
+        })?,
     )
         .into_pyobject(py)?
         .unbind()

@@ -333,7 +333,7 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
                 ));
             }
             ["domain", name] => {
-                assert_eq!(*name, "xlog.semantic-action-catalogue.v2");
+                assert_eq!(*name, "xlog.semantic-action-catalogue.v3");
             }
             [kind @ ("action" | "opcode"), value, name, signature @ ..] => {
                 assert!(!signature.is_empty());
@@ -369,6 +369,10 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
         "INSERT_SUPPORT_NULL_MASK",
         "INSERT_RULE_ACTIVE_MASK",
         "INSERT_RULE_NULL_MASK",
+        "REPLACE_BRANCH_ACTIVE_MASK", "REPLACE_BRANCH_NULL_MASK",
+        "REPLACE_LEAF_ACTIVE_MASK", "REPLACE_LEAF_NULL_MASK",
+        "REPLACE_ROOT_ACTIVE_MASK", "REPLACE_ROOT_NULL_MASK",
+        "SEMANTIC_CATEGORY_CAPACITY",
     ] {
         if name != "NULL_CATEGORY" {
             rust.push_str(&format!("const {name}: usize = {};\n", constants[name]));
@@ -403,6 +407,24 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
     }
     rust.push_str("];\n");
     cuda.push_str("};\n");
+    rust.push_str("fn semantic_opcode_masks(value: u32) -> Option<(u32,u32)> { match value {\n");
+    cuda.push_str("__device__ uint32_t semantic_opcode_active(uint32_t value) { switch(value) {\n");
+    for (kind, value, _, signature) in &declarations {
+        if *kind != "opcode" || *value == 0 { continue; }
+        let masks: Vec<_> = signature.split(' ').collect();
+        assert_eq!(masks.len(), 2);
+        rust.push_str(&format!("{value} => Some(({},{})),\n", constants[masks[0]], constants[masks[1]]));
+        cuda.push_str(&format!("case {value}: return {};\n", constants[masks[0]]));
+    }
+    rust.push_str("_ => None, } }\n");
+    cuda.push_str("default: return 0; } }\n");
+    cuda.push_str("__device__ uint32_t semantic_opcode_null(uint32_t value) { switch(value) {\n");
+    for (kind, value, _, signature) in &declarations {
+        if *kind != "opcode" || *value == 0 { continue; }
+        let masks: Vec<_> = signature.split(' ').collect();
+        cuda.push_str(&format!("case {value}: return {};\n", constants[masks[1]]));
+    }
+    cuda.push_str("default: return 0; } }\n");
     for (kind, name) in [("action", "NO_EDIT"), ("action", "APPLY")] {
         let value = declarations
             .iter()

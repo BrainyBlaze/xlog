@@ -841,13 +841,43 @@ class SemanticCancelledModelEvaluation:
     ]: ...
     def belongs_to(self, original: SemanticModelEvaluation) -> bool: ...
 
+class SemanticProgramImage:
+    """Immutable authored native forest; selected generations remain Session-owned."""
+    def __init__(
+        self, *, roots: tuple[int, ...], nodes: tuple[Any, ...],
+        rule_blocks: tuple[Any, ...], mutation_capacity: int,
+    ) -> None: ...
+    @property
+    def material(self) -> bytes:
+        """Canonical declaration bytes, including the original mutation capacity."""
+        ...
+    @property
+    def mutation_capacity(self) -> int: ...
+
 class SemanticTransitionColdTask:
     """Original admitted statement roster and its explicit ordered query selection."""
+
+    @staticmethod
+    def admission_requirements(
+        cold_source: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
+                           tuple[int, ...], SemanticProgramImage],
+    ) -> tuple[int, int, int, int]:
+        """Exact native admission records, terms, references and UTF-8 byte extents."""
+        ...
+    @staticmethod
+    def evaluation_statement_records(
+        source: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
+                      tuple[int, ...], SemanticProgramImage],
+        target: tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
+                      tuple[int, ...], SemanticProgramImage],
+        *, admission_limits: tuple[int, int, int, int],
+    ) -> tuple[int, ...]: ...
 
     def __init__(
         self, *, initial_theory: str, input_facts: str,
         observer_program: Optional[str], statements: tuple[tuple[str, int], ...],
-        query_records: tuple[int, ...], task_ground: tuple[str, tuple[Any, ...]],
+        query_records: tuple[int, ...], program_image: SemanticProgramImage,
+        task_ground: tuple[str, tuple[Any, ...]],
         training_canary_source: Optional[SemanticTransitionColdTask],
         capacities: tuple[int, int, int, int],
         admission_limits: tuple[int, int, int, int], device_ordinal: int,

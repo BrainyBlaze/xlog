@@ -2,10 +2,56 @@ use super::*;
 
 // The first 25 words still identify the context's actual semantic bytes. The
 // remaining header binds model rows, owned category ranges and the cold frame.
-pub(super) const HEADER_WORDS: usize = 44;
+pub(super) const HEADER_WORDS: usize = 72;
 const FRAME_MAGIC: u64 = 0x584c4f474d4f444c;
 pub(super) const FRAME_MEMBER_WORDS: usize = 29;
-const ROW_WIDTHS: [usize; 4] = [10, 6, 3, 18];
+pub(super) const ROW_WIDTHS: [usize; 4] = [10, 6, 3, 18];
+pub(super) const FRAME_HEADER_WORDS: usize = 9;
+
+/// One immutable address-template bank, sized from every real composed context.
+pub(super) fn template_count(table: usize, extents: &[u64; 5]) -> u64 {
+    match table { 0 => extents[0] + extents[1], 1 => extents[2] + extents[3],
+        2 => 0, 3 => extents[4], _ => unreachable!() }
+}
+
+pub(super) fn template_row(table: usize, mut ordinal: u64, extents: &[u64; 5]) -> [u64; 18] {
+    let mut row = [0; 18];
+    match table {
+        0 => {
+            if ordinal < extents[0] { row[1] = u64::MAX - 1; }
+            else { ordinal -= extents[0]; row[1] = u64::MAX - 2; }
+            row[0] = ordinal;
+        }
+        1 => {
+            if ordinal < extents[2] { row[3] = 3; }
+            else { ordinal -= extents[2]; row[3] = 4; }
+            row[4] = ordinal;
+        }
+        3 => { row[0] = u64::MAX; row[1] = ordinal; }
+        _ => unreachable!(),
+    }
+    row
+}
+
+pub(super) fn template_role(table: usize, row: &[u64]) -> Option<(usize, u64)> {
+    match table {
+        0 if row[1] == u64::MAX - 1 && row[2..10].iter().all(|&word| word == 0) => Some((0, row[0])),
+        0 if row[1] == u64::MAX - 2 && row[2..10].iter().all(|&word| word == 0) => Some((1, row[0])),
+        1 if row[0..3] == [0, 0, 0] && row[3] == 3 && row[5] == 0 => Some((2, row[4])),
+        1 if row[0..3] == [0, 0, 0] && row[3] == 4 && row[5] == 0 => Some((3, row[4])),
+        3 if row[0] == u64::MAX && row[2..18].iter().all(|&word| word == 0) => Some((4, row[1])),
+        _ => None,
+    }
+}
+
+fn template_word_bound(extents: &[u64; 5]) -> Result<usize, SemanticTransitionError> {
+    ROW_WIDTHS.into_iter().enumerate().try_fold(0usize, |bound, (table, width)| {
+        usize::try_from(template_count(table, extents)).ok()
+            .and_then(|count| count.checked_mul(width))
+            .and_then(|count| bound.checked_add(count))
+            .ok_or(SemanticTransitionError::GenerationExhausted)
+    })
+}
 
 /// Process-local authority derived only from a completed native cold domain.
 /// Fresh restoration reissues it from the complete ordered cold roster.
@@ -92,6 +138,7 @@ impl ModelContextPreseal {
 pub(super) struct FrozenModelCatalogue {
     members: Vec<CatalogueMember>,
     frame: Vec<u64>,
+    pub(super) template_extents: [u64; 5],
     binding: SemanticCatalogueBinding,
     statement_bytes: usize,
     _reservation: Arc<SemanticReplayMaterialReservation>,
@@ -150,20 +197,17 @@ impl FrozenModelCatalogue {
         let mut begin = 1;
         let mut end = 1;
         for (ordinal, context) in self.members.iter().enumerate() {
-            if ordinal == member {
-                begin = total;
-            }
-            total = context.words[count_word]
-                .checked_sub(1)
+            if ordinal == member { begin = total; }
+            let templates = context.words[53 + 2 * table] - context.words[52 + 2 * table];
+            total = context.words[count_word].checked_sub(1 + templates)
                 .and_then(|count| total.checked_add(count))
-                .filter(|&count| count <= 65536)
-                .ok_or_else(|| {
-                    publication_input_error("immutable model field exceeds 65536 categories")
-                })?;
-            if ordinal == member {
-                end = total;
-            }
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            if ordinal == member { end = total; }
         }
+        total = total.checked_add(template_count(table, &self.template_extents))
+            .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+            .ok_or_else(|| publication_input_error(
+                "immutable model field exceeds the categorical proof domain"))?;
         Ok((total, begin, end))
     }
 
@@ -180,12 +224,15 @@ impl FrozenModelCatalogue {
             && header[42] == member as u64 + 1
             && header[43] == self.members.len() as u64
             && header[10..14] == selected.words[10..14]
+            && header[52..72] == selected.words[52..72]
             && (0..ROW_WIDTHS.len()).all(|table| {
                 self.category_range(table, member)
                     .is_ok_and(|(count, begin, end)| {
                         header[2 * table + 1] == count
                             && header[29 + 2 * table] == begin
                             && header[30 + 2 * table] == end
+                            && header[44 + 2 * table] == count - template_count(table, &self.template_extents)
+                            && header[45 + 2 * table] == count
                     })
             })
     }
@@ -219,13 +266,17 @@ impl FrozenModelCatalogue {
         members
             .try_reserve_exact(sessions.len())
             .map_err(|error| runtime_error("model context roster allocation", error))?;
-        let mut frame_words = 4usize;
+        let mut frame_words = FRAME_HEADER_WORDS;
+        let mut template_extents = [0; 5];
         for session in sessions {
             let mut words = Vec::new();
             words
                 .try_reserve_exact(session.codebooks.words.len())
                 .map_err(|error| runtime_error("model context recipe allocation", error))?;
             words.extend(normalized(&session.codebooks.words));
+            for (role, extent) in template_extents.iter_mut().enumerate() {
+                *extent = (*extent).max(words[60 + role]);
+            }
             frame_words = frame_words
                 .checked_add(FRAME_MEMBER_WORDS)
                 .and_then(|size| size.checked_add(words.len()))
@@ -262,7 +313,8 @@ impl FrozenModelCatalogue {
         frame
             .try_reserve_exact(frame_words)
             .map_err(|error| runtime_error("model context frame allocation", error))?;
-        frame.extend([FRAME_MAGIC, 3, statement_bytes as u64, members.len() as u64]);
+        frame.extend([FRAME_MAGIC, 4, statement_bytes as u64, members.len() as u64]);
+        frame.extend(template_extents);
         for member in &members {
             for identity in [
                 member.content.query,
@@ -316,7 +368,7 @@ impl FrozenModelCatalogue {
             }
         }
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.immutable-model-catalogue.v3\0");
+        hash.update(b"xlog.semantic.immutable-model-catalogue.v4\0");
         hash.update(CATALOGUE_DIGEST);
         for &word in &frame {
             hash.update(word.to_le_bytes());
@@ -328,6 +380,7 @@ impl FrozenModelCatalogue {
         Ok(Arc::new(Self {
             members,
             frame,
+            template_extents,
             binding,
             statement_bytes,
             _reservation: Arc::new(reservation),
@@ -356,6 +409,7 @@ impl FrozenModelCatalogue {
             self.frame
                 .len()
                 .checked_add(HEADER_WORDS)
+                .and_then(|count| count.checked_add(template_word_bound(&self.template_extents).ok()?))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?,
             |bound, member| {
                 bound
@@ -369,6 +423,7 @@ impl FrozenModelCatalogue {
             .map_err(|error| runtime_error("model context projection allocation", error))?;
         words.resize(HEADER_WORDS, 0);
         words[..25].copy_from_slice(&original_words[..25]);
+        words[52..72].copy_from_slice(&original_words[52..72]);
         words[21..25].fill(0);
         words[25..29].copy_from_slice(&identity_words(*self.binding.digest.as_bytes()));
         words[37] = self.statement_bytes as u64;
@@ -383,12 +438,16 @@ impl FrozenModelCatalogue {
             words[count_word] = count;
             words[29 + 2 * table] = begin;
             words[30 + 2 * table] = end;
+            words[44 + 2 * table] = count - template_count(table, &self.template_extents);
+            words[45 + 2 * table] = count;
             // One intrinsic NULL, followed by every ordered occurrence roster.
             words.extend(std::iter::repeat_n(0, width));
             let mut payload_offset = 0u64;
             for context in &self.members {
                 let start = context.words[2 * table] as usize;
                 for category in 1..context.words[count_word] as usize {
+                    if (context.words[52 + 2 * table]..context.words[53 + 2 * table])
+                        .contains(&(category as u64)) { continue; }
                     let row = words.len();
                     words.extend_from_slice(
                         &context.words[start + width * category..start + width * (category + 1)],
@@ -404,6 +463,9 @@ impl FrozenModelCatalogue {
                     .and_then(|length| length.checked_sub(context.words[8]))
                     .and_then(|length| payload_offset.checked_add(length))
                     .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
+            for ordinal in 0..template_count(table, &self.template_extents) {
+                words.extend_from_slice(&template_row(table, ordinal, &self.template_extents)[..width]);
             }
         }
         words[8] = (words.len() * 8) as u64;
@@ -485,7 +547,12 @@ impl ActionCodebooks {
                     SemanticActionDescriptor::Target { .. }
                     | SemanticActionDescriptor::SupportEvent { .. }
                     | SemanticActionDescriptor::RulePredicate { .. }
-                    | SemanticActionDescriptor::RuleVariable { .. } => Some(0),
+                    | SemanticActionDescriptor::RuleVariable { .. }
+                    | SemanticActionDescriptor::ProgramNode { .. }
+                    | SemanticActionDescriptor::ProgramRoot { .. }
+                    | SemanticActionDescriptor::ProgramGuard { .. }
+                    | SemanticActionDescriptor::ProgramChild { .. }
+                    | SemanticActionDescriptor::ProgramLeaf { .. } => Some(0),
                 }
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
                 bytes = bytes
@@ -576,12 +643,14 @@ impl ActionCodebooks {
             }
         }
         let additional = program.map_or(0, |program| program.predicate_count as usize);
-        let targets = add(records.predicates.len(), additional)?;
+        let image_targets = program.map_or(0, |p| p.image.nodes.len() + p.image.roots.len());
+        let image_operands = program.map_or(0, |p| p.image.guards.len() + p.image.nodes.len());
+        let targets = add(add(records.predicates.len(), additional)?, image_targets)?;
         let operands = add(
-            add(argument_count, additional)?,
+            add(add(argument_count, additional)?, image_operands)?,
             if program.is_some() { 4 } else { 0 },
         )?;
-        let leaves = records.supports.len();
+        let leaves = add(records.supports.len(), program.map_or(0, |p| p.image.leaves.len()))?;
         let payload = add(
             operand_bytes,
             add(mul(qualifier_rows, 4)?, mul(qualifier_references, 32)?)?,
@@ -763,6 +832,7 @@ impl ActionCodebooks {
             .frame
             .len()
             .checked_add(HEADER_WORDS)
+            .and_then(|count| count.checked_add(template_word_bound(&catalogue.template_extents).ok()?))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let word_bound = catalogue
             .members
@@ -1276,15 +1346,21 @@ impl SemanticTransitionSession {
                 "frozen model contexts change the common ordered rule library",
             ));
         }
-        for count_word in [1, 3, 5, 7] {
-            contexts.iter().try_fold(1u64, |total, context| {
-                context.codebooks.words[count_word]
-                    .checked_sub(1)
+        let mut template_extents = [0; 5];
+        for context in contexts.iter() {
+            for (role, extent) in template_extents.iter_mut().enumerate() {
+                *extent = (*extent).max(context.codebooks.words[60 + role]);
+            }
+        }
+        for table in 0..4 {
+            contexts.iter().try_fold(1 + template_count(table, &template_extents), |total, context| {
+                let words = &context.codebooks.words;
+                words[2 * table + 1]
+                    .checked_sub(1 + words[53 + 2 * table] - words[52 + 2 * table])
                     .and_then(|count| total.checked_add(count))
-                    .filter(|&count| count <= 65536)
-                    .ok_or_else(|| {
-                        publication_input_error("immutable model field exceeds 65536 categories")
-                    })
+                    .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+                    .ok_or_else(|| publication_input_error(
+                        "immutable model field exceeds the categorical proof domain"))
             })?;
         }
         let word_count = contexts
@@ -1296,7 +1372,7 @@ impl SemanticTransitionSession {
         let frame_words = contexts
             .len()
             .checked_mul(FRAME_MEMBER_WORDS)
-            .and_then(|count| count.checked_add(4))
+            .and_then(|count| count.checked_add(FRAME_HEADER_WORDS))
             .and_then(|count| count.checked_add(word_count))
             .and_then(|count| {
                 contexts.iter().try_fold(count, |count, context| {
@@ -1309,6 +1385,7 @@ impl SemanticTransitionSession {
         let projection_words = frame_words
             .checked_add(word_count)
             .and_then(|count| count.checked_add(HEADER_WORDS))
+            .and_then(|count| count.checked_add(template_word_bound(&template_extents).ok()?))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         // Every recipe, frame, projection and overlapping pinned upload is
         // charged before allocation. The common learned banks are not copied.

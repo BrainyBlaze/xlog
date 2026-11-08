@@ -19,14 +19,64 @@ template <typename Charge = UnaccountedPrefixWork>
 __device__ bool context_category(const uint64_t* books, uint32_t field,
                                 uint32_t category, Charge charge = {}) {
     if (!category) return true;
-    const uint32_t range = field == 2 ? 0 : field >= 3 && field <= 10 ? 1 :
+    const uint32_t range = field == 2 ? 0 : ((field >= 3 && field <= 10) || (field >= 12 && field <= 16)) ? 1 :
                            field == 11 ? 2 : field == 17 ? 3 : UINT32_MAX;
     if (range == UINT32_MAX) return true;
     charge(PrefixWorkEvent::TableSlot);
-    const uint64_t begin = books[29 + 2 * range];
+    if (category >= books[2 * range + 1]) return false;
+    const uint32_t width = range == 0 ? 10 : range == 1 ? 6 : range == 2 ? 3 : 18;
+    const auto* row = books + books[2 * range] + uint64_t(category) * width;
+    uint32_t role = UINT32_MAX;
+    uint64_t relative = 0;
+    if (range == 0 && (row[1] == UINT64_MAX - 1 || row[1] == UINT64_MAX - 2)) {
+        role = row[1] == UINT64_MAX - 1 ? 0 : 1; relative = row[0];
+        for (uint32_t i = 2; i < 10; ++i) {
+            charge(PrefixWorkEvent::TableSlot);
+            if (row[i]) { role = UINT32_MAX; break; }
+        }
+    } else if (range == 1 && !row[0] && !row[1] && !row[2] &&
+               (row[3] == 3 || row[3] == 4) && !row[5]) {
+        role = row[3] == 3 ? 2 : 3; relative = row[4];
+    } else if (range == 3 && row[0] == UINT64_MAX) {
+        role = 4; relative = row[1];
+        for (uint32_t i = 2; i < 18; ++i) {
+            charge(PrefixWorkEvent::TableSlot);
+            if (row[i]) { role = UINT32_MAX; break; }
+        }
+    }
     charge(PrefixWorkEvent::TableSlot);
-    const uint64_t end = books[30 + 2 * range];
-    return category >= begin && category < end;
+    if (role != UINT32_MAX) {
+        if (relative >= books[65 + role]) return false;
+        return !books[40] ||
+            (category >= books[44 + 2 * range] && category < books[45 + 2 * range]);
+    }
+    charge(PrefixWorkEvent::TableSlot);
+    return category >= books[29 + 2 * range] && category < books[30 + 2 * range];
+}
+
+template<class Charge>
+__device__ bool block_leaf(const uint64_t* books,uint32_t category,
+        const semantic_program::Bank& bank,Charge charge) {
+    if(!category || category>=books[7] || !context_category(books,17,category,charge))return false;
+    const auto* row=books+books[6]+uint64_t(category)*18;
+    charge(PrefixWorkEvent::TableSlot);
+    if(row[0]!=UINT64_MAX || row[1]>=bank.image.leaf_count-bank.image.local_leaf_begin)return false;
+    for(uint32_t i=2;i<18;++i) { charge(PrefixWorkEvent::TableSlot);if(row[i])return false; }
+    const auto* leaf=bank.image.leaves+(bank.image.local_leaf_begin+row[1])*4;
+    charge(PrefixWorkEvent::TableSlot);
+    return leaf[0]==2 && leaf[1]>=bank.image.local_block_begin && leaf[1]<bank.image.block_count;
+}
+template<class Component,class Charge>
+__device__ bool block_prefix_completes(const uint64_t* books,const Component* components,
+        const uint8_t* support,uint32_t start,const uint32_t choices[18],uint32_t field,
+        uint32_t category,const semantic_program::Bank& bank,Charge charge) {
+    const auto& component=components[start+17];
+    for(uint32_t value=1;value<component.cardinality;++value) {
+        charge(PrefixWorkEvent::Category);
+        if(support[component.offset+value] &&
+           (field<17 || value==category) && block_leaf(books,value,bank,charge))return true;
+    }
+    return false;
 }
 
 // Structural descriptors occupy disjoint, typed ranges after the ordinary
@@ -110,11 +160,12 @@ __device__ bool decode(const uint64_t* books, const uint32_t choices[18],
     charge(PrefixWorkEvent::Category);
     if (!books || !choices || !rule || !bank.predicate_count || choices[0] != 1 ||
         choices[1] != 2) return false;
-    for (uint32_t field = 11; field < 18; ++field) {
+    for (uint32_t field = 11; field < 17; ++field) {
         charge(PrefixWorkEvent::TableSlot);
         charge(PrefixWorkEvent::Category);
         if (choices[field]) return false;
     }
+    if(!block_leaf(books,choices[17],bank,charge))return false;
     semantic_program::Rule decoded{};
     decoded.body_count = 2;
     if (!head_predicate(books, choices[2], bank,
@@ -194,8 +245,9 @@ __device__ bool prefix_completes(const uint64_t* books,
                (position > field ||
                 candidate == (position == field ? category : choices[position]));
     };
-    for (uint32_t position = 11; position < 18; ++position)
+    for (uint32_t position = 11; position < 17; ++position)
         if (!admitted(position, 0)) return false;
+    if(!block_prefix_completes(books,components,support,start,choices,field,category,bank,charge))return false;
     uint32_t arities[3] = {};
     for (uint32_t position = 2; position <= 4; ++position) {
         charge(PrefixWorkEvent::TableSlot);
@@ -295,12 +347,13 @@ __device__ bool library_prefix_completes(const uint64_t* books,
                                         const uint8_t* support,uint32_t start,
                                         const uint32_t choices[18],uint32_t field,
                                         uint32_t category,const uint64_t* tuples,
-                                        uint32_t count,Charge charge = {}) {
+                                        uint32_t count,const semantic_program::Bank& bank,Charge charge = {}) {
     if (!books || !components || !support || !choices || !tuples || !count ||
         count > 64 || field < 1 || field >= 18) return false;
+    if(!block_prefix_completes(books,components,support,start,choices,field,category,bank,charge))return false;
     for (uint32_t member = 0; member < count; ++member) {
         bool admitted = true;
-        for (uint32_t position = 0; position < 18; ++position) {
+        for (uint32_t position = 0; position < 17; ++position) {
             charge(PrefixWorkEvent::TableSlot);
             const uint64_t encoded = tuples[uint64_t(member) * 18 + position];
             charge(PrefixWorkEvent::Category);
@@ -332,7 +385,7 @@ __device__ bool library_member(const uint64_t* books,const uint32_t choices[18],
     if (!decode(books,choices,bank,&decoded,charge)) return false;
     for (uint32_t member = 0; member < count; ++member) {
         bool equal = true;
-        for (uint32_t field = 0; field < 18; ++field) {
+        for (uint32_t field = 0; field < 17; ++field) {
             charge(PrefixWorkEvent::TableSlot);
             equal &= tuples[uint64_t(member) * 18 + field] == choices[field];
         }
@@ -352,34 +405,6 @@ __device__ bool library_member(const uint64_t* books,const uint32_t choices[18],
         return true;
     }
     return false;
-}
-
-struct Evaluation {
-    semantic_program::Result closure;
-    uint64_t truth[3];
-};
-
-__device__ Evaluation evaluate(const semantic_program::Bank& bank,
-                               const semantic_program::Rule* inserted,
-                               uint32_t inserted_count,
-                               semantic_program::Fact* input,
-                               uint32_t input_capacity,
-                               semantic_program::Rule* rules,
-                               uint32_t rule_capacity,
-                               semantic_program::Fact* output,
-                               uint32_t output_capacity,
-                               uint64_t fuel) {
-    Evaluation evaluation{};
-    evaluation.closure = semantic_program::materialize_bank(
-        bank, inserted, inserted_count, input, input_capacity, rules,
-        rule_capacity, output, output_capacity, fuel);
-    if (evaluation.closure.status != semantic_program::Status::Ok) return evaluation;
-    for (uint32_t query = 0; query < 3; ++query) {
-        const auto fact = semantic_program::bank_fact(bank, query);
-        evaluation.truth[query] = semantic_program::contains(
-            output, evaluation.closure.fact_count, fact) ? 1 : 0;
-    }
-    return evaluation;
 }
 
 } // namespace semantic_rule_action

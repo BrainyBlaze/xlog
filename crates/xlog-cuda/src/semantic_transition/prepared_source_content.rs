@@ -1540,7 +1540,7 @@ impl SemanticPreparedSourceContentGeometry {
     pub fn task_objective_law(&self) -> Result<SemanticTaskObjectiveLaw, SemanticTransitionError> {
         let task = self.task_spec();
         task.scoring.objective_law(
-            task.program.editable_program().is_some(),
+            task.program.editable_program(),
             u32::try_from(task.statement_records.len())
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
         )
@@ -2349,6 +2349,7 @@ impl SourcePublicationGeometry {
             capacities[1],
             capacities[3],
             &seed.task,
+            original.task_ground_layout,
         )?;
         let (components, support_cells) =
             ActionCodebooks::component_geometry(&original.codebook_header, seed.program.is_some())?;

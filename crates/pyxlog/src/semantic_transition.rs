@@ -53,6 +53,7 @@ pub(crate) mod actor_refresh;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod cancelled_checkpoint;
 pub(crate) mod cold_task;
+pub(crate) mod program_image;
 mod evaluation_authority;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod evaluation_fork;
@@ -20686,6 +20687,16 @@ fn descriptor_meaning_object(
         SemanticActionDescriptor::RuleVariable { index } => {
             ("rule_variable", *index).into_pyobject(py)?.into_any()
         }
+        SemanticActionDescriptor::ProgramNode { index } =>
+            ("program_node", *index).into_pyobject(py)?.into_any(),
+        SemanticActionDescriptor::ProgramRoot { index } =>
+            ("program_root", *index).into_pyobject(py)?.into_any(),
+        SemanticActionDescriptor::ProgramGuard { index } =>
+            ("program_guard", *index).into_pyobject(py)?.into_any(),
+        SemanticActionDescriptor::ProgramChild { index } =>
+            ("program_child", *index).into_pyobject(py)?.into_any(),
+        SemanticActionDescriptor::ProgramLeaf { effect } =>
+            ("program_leaf", *effect).into_pyobject(py)?.into_any(),
     };
     Ok(value.unbind())
 }
@@ -21903,7 +21914,9 @@ impl PySemanticTransitionController {
                 .map_err(|_| invalid("original editable query roster exceeds u32"))
         })?;
         let descriptor =
-            xlog_cuda::semantic_structural_cost_descriptor(editable.program.is_some(), query_count);
+            xlog_cuda::semantic_structural_cost_descriptor(
+                editable.program.as_ref().map(|source| source.program.as_ref()), query_count,
+            ).map_err(xlog_err)?;
         Ok(
             (PyBytes::new(py, descriptor.unit.as_bytes()), descriptor.cap)
                 .into_pyobject(py)?
