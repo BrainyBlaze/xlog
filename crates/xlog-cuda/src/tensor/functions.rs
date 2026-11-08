@@ -35,7 +35,7 @@ impl TensorExecutor {
             ),
             Op::Finite { input: source } => {
                 let source = input(*source)?;
-                self.require_finite(source)?;
+                self.require_finite(source, "function result")?;
                 self.launch(
                     self.recorder(&[source], output),
                     "tensor_scale_f32",

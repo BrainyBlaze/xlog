@@ -77,11 +77,13 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v6 excludes impossible single-operation output plans."""
+        """Exact native context/schema; v14 also checks joint typed completion."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
         insertion_layer: int = 17, train_down_projection: bool = True,
+        source_encoding: str = "funcdef-json-v1",
+        require_output_dependencies: bool = False,
     ) -> NativeCausalModel: ...
     @property
     def adaptation_manifest(self) -> str: ...
@@ -112,7 +114,9 @@ class NativeAcquisitionMask:
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
     def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4/5/6 prefix facts as JSON; no token selection or final admission."""
+        """Version4–9 prefix facts as JSON; no token selection or final admission."""
+    def decode_definition(self, source_bytes: bytes) -> str:
+        """Elaborate complete v7–9 source into canonical JSON using the captured context."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int
