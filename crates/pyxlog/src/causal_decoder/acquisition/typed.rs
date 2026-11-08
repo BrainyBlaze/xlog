@@ -2,6 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::Arc;
+
+mod completion;
+pub(super) use completion::CompletionCache;
 
 use serde_json::{Map, Value};
 use xlog_core::XlogError;
@@ -23,6 +27,7 @@ struct OutputDependencies {
     callees: BTreeMap<String, TensorOutputDependencies>,
     values: Vec<TensorOutputDependencies>,
     reserve_frontier: bool,
+    completion_cache: Option<Arc<CompletionCache>>,
 }
 
 impl OutputDependencies {
@@ -167,11 +172,13 @@ impl Program {
         &mut self,
         callees: BTreeMap<String, TensorOutputDependencies>,
         reserve_frontier: bool,
+        completion_cache: Option<Arc<CompletionCache>>,
     ) {
         self.dependencies = Some(OutputDependencies {
             callees,
             values: Vec::new(),
             reserve_frontier,
+            completion_cache,
         });
     }
 
@@ -268,6 +275,29 @@ impl Program {
             .output([1, self.body.max_context][length], self.body.vocabulary)
             .ok()
             == Some(shape)
+    }
+
+    fn completion_widths(&self, signatures: &Signatures) -> BTreeSet<usize> {
+        let mut widths = BTreeSet::from([1]);
+        for signature in std::iter::once(&self.body.signature).chain(signatures.values()) {
+            if let Ok(shape) = signature.output(1, self.body.vocabulary) {
+                widths.insert(shape.columns);
+            }
+            if let Ok(arguments) = signature.arguments(1) {
+                widths.extend(arguments.into_iter().map(|shape| shape.columns));
+            }
+        }
+        for parameter in &self.body.parameters {
+            widths.extend(parameter.shape.iter().copied());
+        }
+        widths.extend(self.shapes[0].iter().map(|shape| shape.columns));
+        widths
+    }
+
+    fn searches_completion(&self) -> bool {
+        self.dependencies
+            .as_ref()
+            .is_some_and(|facts| facts.completion_cache.is_some())
     }
 
     pub(super) fn outputs(&self) -> Vec<usize> {
@@ -555,6 +585,9 @@ impl Program {
                 return false;
             }
         }
+        if let Some(cache) = &facts.completion_cache {
+            return completion::possible(self, body, output, signatures, cache);
+        }
         if needed == 0 || remaining > needed {
             return true;
         }
@@ -700,6 +733,25 @@ impl Program {
             return false;
         };
         let count = self.body.operations.len();
+        if self.searches_completion() {
+            return completion::call_arguments(
+                self,
+                function,
+                signature,
+                &arguments,
+                &(0..count).collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .any(|arguments| {
+                self.compatible(
+                    Op::Call {
+                        function: function.into(),
+                        arguments,
+                    },
+                    signatures,
+                )
+            });
+        }
         let mut abstract_arguments = arguments.clone();
         let mut abstract_values = BTreeMap::new();
         for slot in arguments.len()..first.len() {
@@ -801,7 +853,7 @@ impl Program {
         value: usize,
         signatures: &Signatures,
     ) -> bool {
-        if name == "indices" {
+        if name == "indices" && !self.searches_completion() {
             // The contiguous domain is exact; the complete array still uses
             // canonical gather inference in array_can_end.
             return true;
@@ -852,9 +904,17 @@ impl Program {
         };
         let check = |operation| self.compatible(operation, signatures);
         match tag {
-            "zeros" => check(Op::Zeros {
-                columns: scalar("columns", self.output_columns().unwrap_or(1)),
-            }),
+            "zeros" => {
+                if self.searches_completion() && !fields.contains_key("columns") {
+                    self.completion_widths(signatures)
+                        .into_iter()
+                        .any(|columns| check(Op::Zeros { columns }))
+                } else {
+                    check(Op::Zeros {
+                        columns: scalar("columns", self.output_columns().unwrap_or(1)),
+                    })
+                }
+            }
             "argument" => self
                 .references(
                     fields,
@@ -869,6 +929,30 @@ impl Program {
                 .any(|weight| check(Op::Parameter { weight })),
             "token_indicators" => {
                 let mut token_ids = array("token_ids").unwrap_or_default();
+                if self.searches_completion()
+                    && (!fields.contains_key("token_ids") || open_array == Some("token_ids"))
+                {
+                    let mut widths = self.completion_widths(signatures);
+                    widths.insert(token_ids.len().max(1));
+                    return widths
+                        .into_iter()
+                        .filter(|&columns| columns >= token_ids.len())
+                        .any(|columns| {
+                            let mut candidate = token_ids.clone();
+                            for &id in &self.raw_tokens {
+                                if candidate.len() >= columns {
+                                    break;
+                                }
+                                if !candidate.contains(&(id as usize)) {
+                                    candidate.push(id as usize);
+                                }
+                            }
+                            candidate.len() == columns
+                                && check(Op::TokenIndicators {
+                                    token_ids: candidate.into_iter().map(|id| id as u32).collect(),
+                                })
+                        });
+                }
                 if !fields.contains_key("token_ids") || open_array == Some("token_ids") {
                     let columns = self.output_columns().unwrap_or(1);
                     // Prospective distinct IDs prove that a continuation exists;
@@ -920,6 +1004,23 @@ impl Program {
             }),
             "gather_columns" => refs("input").into_iter().any(|input| {
                 let mut indices = array("indices").unwrap_or_else(|| vec![0]);
+                if self.searches_completion()
+                    && (!fields.contains_key("indices") || open_array == Some("indices"))
+                {
+                    let mut widths = self.completion_widths(signatures);
+                    widths.insert(indices.len().max(1));
+                    return widths
+                        .into_iter()
+                        .filter(|&columns| columns >= indices.len())
+                        .any(|columns| {
+                            let mut candidate = indices.clone();
+                            candidate.resize(columns, 0);
+                            check(Op::GatherColumns {
+                                input,
+                                indices: candidate,
+                            })
+                        });
+                }
                 if let Some(columns) = self.output_columns() {
                     if !fields.contains_key("indices") || open_array == Some("indices") {
                         if indices.len() > columns {

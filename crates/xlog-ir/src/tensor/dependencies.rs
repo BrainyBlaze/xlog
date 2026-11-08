@@ -7,7 +7,7 @@ use super::*;
 /// Output-reaching identities and inputs in the canonical numerical ABI.
 /// Arguments address numeric arguments; causal tokens are a separate input.
 /// These are structural dependencies, not a proof of semantic nonconstancy.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TensorOutputDependencies {
     /// Used numeric formals in `TensorSignature::arguments` order.

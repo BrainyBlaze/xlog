@@ -170,14 +170,30 @@ impl TensorOperation {
 }
 
 impl TensorProgram {
+    /// Numeric-argument reads of every value, including unused call operands.
+    /// This causal boundary is deliberately distinct from output dependencies.
+    pub fn value_argument_dependencies(&self) -> Vec<bool> {
+        let mut arguments = Vec::with_capacity(self.operations.len());
+        for operation in &self.operations {
+            arguments.push(
+                matches!(operation, TensorOperation::Argument { .. })
+                    || operation
+                        .inputs()
+                        .iter()
+                        .any(|&id| arguments.get(id).copied().unwrap_or(true)),
+            );
+        }
+        arguments
+    }
+
     /// Enforce the executable acquisition grammar and its causal information boundary.
     pub fn validate_acquired_body(&self) -> Result<()> {
         use TensorOperation::*;
         if matches!(self.signature, TensorSignature::Decoder) {
             return Ok(());
         }
-        let mut arguments = Vec::with_capacity(self.operations.len());
-        for operation in &self.operations {
+        let arguments = self.value_argument_dependencies();
+        for (index, operation) in self.operations.iter().enumerate() {
             if !matches!(
                 operation,
                 Zeros { .. }
@@ -198,17 +214,11 @@ impl TensorProgram {
             ) {
                 return Err(invalid("operation is outside the acquired FP32 grammar"));
             }
-            let dependent = matches!(operation, Argument { .. })
-                || operation
-                    .inputs()
-                    .iter()
-                    .any(|&id| arguments.get(id).copied().unwrap_or(true));
-            if matches!(operation, Scan { .. }) && dependent {
+            if matches!(operation, Scan { .. }) && arguments[index] {
                 return Err(invalid(
                     "causal scans read raw-prefix features, not other positions' hidden states",
                 ));
             }
-            arguments.push(dependent);
         }
         if self.parameters.iter().any(|parameter| !parameter.float32) {
             return Err(invalid(
