@@ -141,6 +141,7 @@ pub(super) fn possible(
         &body.parameters,
         body.vocabulary,
         body.max_context,
+        source.column_limit,
         &source.raw_tokens,
         signatures,
         &facts.callees,

@@ -44,6 +44,12 @@ fn integer(minimum: usize, maximum: usize) -> Value {
     json!({"type": "integer", "minimum": minimum, "maximum": maximum})
 }
 
+fn maximum_width(context: &Value) -> usize {
+    (context["signature"]["input_width"].as_u64().unwrap() as usize)
+        .max(context["vocabulary"].as_u64().unwrap() as usize)
+        .max(ACQUIRED_SCALARS)
+}
+
 /// Specialize the sole wire schema with the native model's actual ABI/registry.
 pub(super) fn language(
     mut context: Value,
@@ -60,7 +66,6 @@ pub(super) fn language(
     schema["description"] = json!(
         "Contextual acquisition wire language. The native prefix mask additionally enforces cumulative new scalar/node/source budgets. Native compilation owns remaining shape, reference, reachability and causal checks."
     );
-    let width = context["signature"]["input_width"].as_u64().unwrap() as usize;
     let vocabulary = context["vocabulary"].as_u64().unwrap() as usize;
     if version >= 2 {
         let tokens = raw_token_ids.ok_or_else(|| {
@@ -74,7 +79,7 @@ pub(super) fn language(
         ));
     }
     let max_context = context["max_context"].as_u64().unwrap() as usize;
-    let maximum_width = width.max(vocabulary).max(ACQUIRED_SCALARS);
+    let maximum_width = maximum_width(&context);
     let function_name = json!({"type": "string", "pattern": format!(
         "^{}[a-zA-Z_][a-zA-Z0-9_]{{0,63}}$", context["function_prefix"].as_str().unwrap())});
     let parameter_name = json!({"type": "string", "pattern": format!(
@@ -1133,6 +1138,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             context["vocabulary"].as_u64().unwrap() as usize,
                             context["max_context"].as_u64().unwrap() as usize,
                             self.resources.raw_tokens.iter().copied().collect(),
+                            maximum_width(context),
                         ));
                         if self.resources.output_dependencies {
                             self.resources
@@ -1213,6 +1219,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             true
                         };
                         let choice = map.next_value_seed(NumberChoice {
+                            extensions: None,
                             values: 0..ACQUIRED_NODES - self.resources.nodes,
                             accepts: |output| {
                                 (output != 0 || zero_available)
@@ -1238,6 +1245,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     } else if let Some(program) = &self.resources.program.typed {
                         let outputs = program.outputs();
                         let choice = map.next_value_seed(NumberChoice {
+                            extensions: None,
                             values: 0..program.body.operations.len(),
                             accepts: |output| outputs.contains(&output),
                             bytes: self.resources.bytes,
@@ -1649,15 +1657,27 @@ impl<'de> Visitor<'de> for Operation<'_> {
             let extent = reference_extent(self.program, &key);
             if let Some(program) = &self.program.typed {
                 let choices = if key == "columns" {
-                    program.output_columns().map(|columns| columns..columns + 1)
+                    if program.searches_completion() {
+                        Some(program.column_range())
+                    } else {
+                        program.output_columns().map(|columns| columns..columns + 1)
+                    }
                 } else {
                     extent.map(|extent| 0..extent)
                 };
                 let value = if let Some(values) = choices {
                     let choice = map.next_value_seed(NumberChoice {
                         values,
+                        extensions: (key == "columns" && program.searches_completion()).then(
+                            || {
+                                program
+                                    .completion_widths(self.signatures)
+                                    .into_iter()
+                                    .collect()
+                            },
+                        ),
                         accepts: |value| {
-                            key == "columns"
+                            (key == "columns" && !program.searches_completion())
                                 || program.number_possible(&material, &key, value, self.signatures)
                         },
                         bytes: self.bytes,
@@ -1770,6 +1790,7 @@ struct ChosenNumber {
 }
 struct NumberChoice<'a, F> {
     values: Range<usize>,
+    extensions: Option<Vec<usize>>,
     accepts: F,
     bytes: &'a [u8],
 }
@@ -1782,9 +1803,23 @@ impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
         let viable = if end == self.bytes.len() {
             // Only unfinished decimals need a search for compatible extensions.
-            self.values
-                .clone()
-                .any(|id| id.to_string().starts_with(spelling) && (self.accepts)(id))
+            let accepts = |id: usize| {
+                self.values.contains(&id)
+                    && id.to_string().starts_with(spelling)
+                    && (self.accepts)(id)
+            };
+            if let Some(widths) = &self.extensions {
+                // ABI/frontier widths are distinct structural classes. Any
+                // other width can only feed column-preserving operations or
+                // a gather, so the current decimal represents that class.
+                widths
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(value))
+                    .any(accepts)
+            } else {
+                self.values.clone().any(accepts)
+            }
         } else {
             self.values.contains(&value) && (self.accepts)(value)
         };
@@ -1819,6 +1854,7 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
         let mut values = Vec::new();
         loop {
             let Some(value) = sequence.next_element_seed(NumberChoice {
+                extensions: None,
                 values: self.program.array_range(self.material, self.field, &values),
                 accepts: |value| {
                     self.program.array_number_possible(
