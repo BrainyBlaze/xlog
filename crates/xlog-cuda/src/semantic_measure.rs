@@ -1884,3 +1884,100 @@ impl GpuXgcf {
         Ok((log_z, host_grad_true, host_grad_false))
     }
 }
+
+/// Computes the bounded resident construction workspace from the complete authored
+/// program family. This performs no CUDA allocation or evaluation.
+///
+/// Root slots include every signed fact and joint query in every permitted image
+/// version. Decision storage reserves a variable spine per root; exact APPLY is
+/// still subject to the declared arena and the original native work budget.
+/// Exhausting either is an incomplete/refused evaluation, never a valid value or
+/// an implicit change of representation.
+pub fn semantic_measure_capacity_requirements(
+    programs: &[std::sync::Arc<crate::SemanticProgramAdmission>],
+    event_nodes: &[xlog_ir::semantic_world::SemanticEventNode],
+    measure_factors: &[xlog_ir::semantic_world::SemanticMeasureFactor],
+) -> Result<xlog_ir::semantic_world::SemanticMeasureCapacities> {
+    use xlog_ir::semantic_world::{
+        SemanticEventNode, SemanticMeasureCapacities, SemanticMeasureFactor,
+    };
+    let overflow = || {
+        XlogError::Compilation("shared semantic workspace exceeds the native index domain".into())
+    };
+    let add = |left: u64, right: u64| left.checked_add(right).ok_or_else(overflow);
+    let mul = |left: u64, right: u64| left.checked_mul(right).ok_or_else(overflow);
+    if programs.is_empty() {
+        return Err(overflow());
+    }
+    let base_variables = measure_factors
+        .iter()
+        .filter_map(|factor| match factor {
+            SemanticMeasureFactor::Bernoulli { variable, .. } => Some(u64::from(*variable)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut variables = base_variables;
+    let mut roots = programs.len() as u64;
+    let mut dependencies = measure_factors.len() as u64;
+    for program in programs {
+        program
+            .validate()
+            .map_err(|detail| XlogError::Compilation(detail.into()))?;
+        let facts = program
+            .fact_capacity()
+            .map_err(|detail| XlogError::Compilation(detail.into()))? as u64;
+        let mutations = u64::from(program.image.mutation_capacity);
+        let versions = add(mutations, 1)?;
+        let rule_cells = add(program.initial_rules.len() as u64, mutations)?;
+        variables = add(variables, rule_cells)?;
+        // Both support channels and all four cells of every joint query survive
+        // independently of which edits are accepted or which answer is observed.
+        let signed_roots = mul(facts, 2)?;
+        let query_roots = mul(program.queries.len() as u64, 4)?;
+        roots = add(roots, mul(add(signed_roots, query_roots)?, versions)?)?;
+        let initial_body_edges = program
+            .initial_rules
+            .iter()
+            .try_fold(0u64, |count, rule| add(count, u64::from(rule.body_count)))?;
+        // The admitted grammar permits three body atoms for every future rule.
+        let body_edges = add(initial_body_edges, mul(mutations, 3)?)?;
+        dependencies = add(dependencies, mul(mul(facts, body_edges)?, versions)?)?;
+        dependencies = add(dependencies, mul(rule_cells, 2)?)?;
+        roots = add(roots, program.image.nodes.len() as u64)?;
+    }
+    let path_slots = add(variables, 1)?;
+    let nodes = add(event_nodes.len() as u64, mul(roots, path_slots)?)?.max(2);
+    let unique_minimum = add(mul(nodes, 2)?, 1)?;
+    let unique_slots = unique_minimum
+        .checked_next_power_of_two()
+        .ok_or_else(overflow)?;
+    let event_edges = event_nodes.iter().try_fold(0u64, |count, node| {
+        add(
+            count,
+            match node {
+                SemanticEventNode::And(children) | SemanticEventNode::Or(children) => {
+                    children.len() as u64
+                }
+                SemanticEventNode::Not(_) => 1,
+                _ => 0,
+            },
+        )
+    })?;
+    let edges = add(event_edges, mul(nodes, 2)?)?;
+    // APPLY frames are depth-first over the fixed variable order. Memo storage
+    // shares the checked unique-table enclosure, but owns its own live entries.
+    let frontier_entries = mul(mul(roots, path_slots)?, 2)?;
+    dependencies = add(dependencies, add(edges, mul(roots, 2)?)?)?;
+    let narrow = |count: u64| u32::try_from(count).map_err(|_| overflow());
+    Ok(SemanticMeasureCapacities {
+        nodes: narrow(nodes)?,
+        edges: narrow(edges)?,
+        unique_slots: narrow(unique_slots)?,
+        apply_entries: narrow(unique_slots)?,
+        dependency_edges: narrow(dependencies)?,
+        frontier_entries: narrow(frontier_entries)?,
+        particles: 0,
+        variables: narrow(variables)?,
+    })
+}
