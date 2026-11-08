@@ -501,7 +501,7 @@ fn checkpoint_scoring_law_identity(
 )]
 fn validate_completed_task_scoring(
     scoring: SemanticTaskScoring,
-    editable_program: bool,
+    program: Option<&crate::SemanticProgramAdmission>,
     queries: u32,
     priority_levels: &[SemanticTaskPriorityLevel],
     facts: &[SemanticTaskFacts; 3],
@@ -511,7 +511,8 @@ fn validate_completed_task_scoring(
     winner: u64,
     return_value: i64,
 ) -> bool {
-    if scoring.validate(editable_program, queries).is_err()
+    let editable_program = program.is_some();
+    if scoring.validate(program, queries).is_err()
         || query_count > 3 * u64::from(queries)
         || winner > 2
         || lane_refusal.iter().any(|&refusal| refusal > 4)
@@ -28848,7 +28849,7 @@ impl SemanticTransitionSession {
             expected_truth,
             original_task_ground,
             scoring,
-            editable_program,
+            program_owner,
             objective_law,
             goal,
             priority_levels,
@@ -28865,7 +28866,7 @@ impl SemanticTransitionSession {
                 task.expected_truth().map(<[_]>::to_vec),
                 task.spec().task_ground.clone(),
                 task.spec().scoring,
-                task.spec().program.editable_program().is_some(),
+                Arc::clone(&task.spec().program),
                 task.objective_law,
                 task.goal_witness()
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
@@ -28930,7 +28931,7 @@ impl SemanticTransitionSession {
             });
         let invalid_task_scoring = !validate_completed_task_scoring(
             scoring,
-            editable_program,
+            program_owner.editable_program(),
             ground_layout.queries as u32,
             &priority_levels,
             &task_facts,
@@ -29432,9 +29433,7 @@ impl SemanticTransitionSession {
                 0,
                 &scoring.completed_law_bytes(
                     task_identity,
-                    self.task
-                        .as_ref()
-                        .and_then(|(task, _)| task.spec().program.editable_program()),
+                    program_owner.editable_program(),
                     ground_layout.queries as u32,
                 )?,
             ),
