@@ -8,10 +8,8 @@ mod decision_order;
 pub mod epistemic;
 pub mod epistemic_production;
 pub mod exact;
-pub mod gpu;
 /// Knowledge-compilation circuit representations.
 pub mod kc;
-mod logsumexp;
 pub mod mc;
 pub mod neural_fast_path;
 pub mod pir;

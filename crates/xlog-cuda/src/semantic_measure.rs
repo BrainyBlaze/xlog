@@ -2,19 +2,19 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::LaunchConfig;
-use xlog_core::{Result, XlogError};
-use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{
+use crate::memory::TrackedCudaSlice;
+use crate::provider::{
     arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE,
 };
-use xlog_cuda::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
+use crate::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
+use cudarc::driver::LaunchConfig;
+use xlog_core::{Result, XlogError};
 
-use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
-use crate::logsumexp::validate_circuit_log_weight_pair;
+use crate::gpu_scan::exclusive_scan_u32_inplace;
+use xlog_ir::circuit_numeric::validate_circuit_log_weight_pair;
 #[cfg(feature = "host-io")]
-use crate::logsumexp::{validate_circuit_gradient_values, validate_circuit_value};
-use crate::xgcf::{Xgcf, XgcfNodeType};
+use xlog_ir::circuit_numeric::{validate_circuit_gradient_values, validate_circuit_value};
+use xlog_ir::semantic_measure::{Xgcf, XgcfNodeType};
 
 /// Device-resident circuit buffers produced by the GPU compiler.
 ///
@@ -1883,4 +1883,147 @@ impl GpuXgcf {
 
         Ok((log_z, host_grad_true, host_grad_false))
     }
+}
+
+/// Returns the single declared cumulative mutation budget shared by the complete
+/// context roster. Every image carries the same ceiling for a possible target;
+/// those ceilings are not independent per-context allowances.
+pub(crate) fn semantic_cumulative_mutation_capacity(
+    programs: &[std::sync::Arc<crate::SemanticProgramAdmission>],
+) -> Result<u32> {
+    let first = programs
+        .first()
+        .ok_or_else(|| XlogError::Compilation("shared semantic source roster is empty".into()))?
+        .image
+        .mutation_capacity;
+    if programs
+        .iter()
+        .any(|program| program.image.mutation_capacity != first)
+    {
+        return Err(XlogError::Compilation(
+            "shared semantic images require one declared cumulative mutation capacity".into(),
+        ));
+    }
+    Ok(first)
+}
+
+/// Computes the shared bounded resident workspace from the complete authored
+/// program family without CUDA allocation or evaluation.
+///
+/// Initial roots and syntax occur once. The single cumulative edit allowance
+/// reserves a shared append arena; untouched roots and retired versions retain
+/// persistent references to existing nodes. Exact APPLY remains bounded by that
+/// arena and the original native work/memory budget. An actual capacity
+/// exhaustion cannot become a completed value or a different representation.
+pub fn semantic_measure_capacity_requirements(
+    programs: &[std::sync::Arc<crate::SemanticProgramAdmission>],
+    event_nodes: &[xlog_ir::semantic_world::SemanticEventNode],
+    measure_factors: &[xlog_ir::semantic_world::SemanticMeasureFactor],
+) -> Result<xlog_ir::semantic_world::SemanticMeasureCapacities> {
+    use xlog_ir::semantic_world::{
+        SemanticEventNode, SemanticMeasureCapacities, SemanticMeasureFactor,
+    };
+    let overflow = || {
+        XlogError::Compilation("shared semantic workspace exceeds the native index domain".into())
+    };
+    let add = |left: u64, right: u64| left.checked_add(right).ok_or_else(overflow);
+    let mul = |left: u64, right: u64| left.checked_mul(right).ok_or_else(overflow);
+    let mutations = u64::from(semantic_cumulative_mutation_capacity(programs)?);
+    let base_variables = measure_factors
+        .iter()
+        .filter_map(|factor| match factor {
+            SemanticMeasureFactor::Bernoulli { variable, .. } => Some(u64::from(*variable)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    // A potential is represented by a selector constrained to its authored
+    // event, weighted (potential, 1) in the same joint measure.
+    let selectors = measure_factors
+        .iter()
+        .filter(|factor| matches!(factor, SemanticMeasureFactor::EventWeight { .. }))
+        .count() as u64;
+    let mut initial_rule_cells = 0u64;
+    let mut roots = programs.len() as u64;
+    let mut syntax_nodes = 0u64;
+    let mut body_dependencies = 0u64;
+    let mut largest_leaf_events = 0u64;
+    for program in programs {
+        program
+            .validate()
+            .map_err(|detail| XlogError::Compilation(detail.into()))?;
+        let facts = program
+            .fact_capacity()
+            .map_err(|detail| XlogError::Compilation(detail.into()))? as u64;
+        initial_rule_cells = add(initial_rule_cells, program.initial_rules.len() as u64)?;
+        roots = add(
+            roots,
+            add(mul(facts, 2)?, mul(program.queries.len() as u64, 4)?)?,
+        )?;
+        syntax_nodes = add(
+            syntax_nodes,
+            program
+                .image
+                .nodes
+                .iter()
+                .filter(|node| !matches!(node, crate::SemanticProgramNode::Unused))
+                .count() as u64,
+        )?;
+        for rule in &program.initial_rules {
+            body_dependencies = add(body_dependencies, u64::from(rule.body_count))?;
+        }
+        for leaf in &program.image.leaves {
+            if let crate::SemanticProgramLeaf::Evidence(events) = leaf {
+                largest_leaf_events = largest_leaf_events.max(events.len() as u64);
+            }
+        }
+    }
+    let coefficient_cells = add(initial_rule_cells, mutations)?;
+    let variables = add(add(base_variables, selectors)?, coefficient_cells)?;
+    // The source grammar has at most three body atoms. Each signed rule effect
+    // owns its body/gate/head references; evidence effects retain their complete
+    // declared event vector. These are shared edit records, not root copies.
+    let rule_effect_roots = mul(2, 3 + 2)?;
+    let edit_roots = add(rule_effect_roots, mul(largest_leaf_events, 2)?)?;
+    let append_nodes = mul(mutations, edit_roots)?;
+    let initial_nodes = add(add(event_nodes.len() as u64, roots)?, syntax_nodes)?;
+    let literal_nodes = mul(add(initial_rule_cells, selectors)?, 2)?;
+    let nodes = add(add(initial_nodes, literal_nodes)?, append_nodes)?.max(2);
+    let unique_slots = add(mul(nodes, 2)?, 1)?
+        .checked_next_power_of_two()
+        .ok_or_else(overflow)?;
+    let event_edges = event_nodes.iter().try_fold(0u64, |count, node| {
+        add(
+            count,
+            match node {
+                SemanticEventNode::And(children) | SemanticEventNode::Or(children) => {
+                    children.len() as u64
+                }
+                SemanticEventNode::Not(_) => 1,
+                _ => 0,
+            },
+        )
+    })?;
+    let edges = add(event_edges, mul(nodes, 2)?)?;
+    let dependencies = add(
+        add(edges, mul(roots, 2)?)?,
+        add(
+            body_dependencies,
+            mul(mutations, add(3, largest_leaf_events)?)?,
+        )?,
+    )?;
+    // One depth-first APPLY traversal plus the affected-node queue. The fixed
+    // order includes the full shared coefficient reserve and potential selectors.
+    let frontier_entries = add(nodes, mul(add(variables, 1)?, 2)?)?;
+    let narrow = |count: u64| u32::try_from(count).map_err(|_| overflow());
+    Ok(SemanticMeasureCapacities {
+        nodes: narrow(nodes)?,
+        edges: narrow(edges)?,
+        unique_slots: narrow(unique_slots)?,
+        apply_entries: narrow(unique_slots)?,
+        dependency_edges: narrow(dependencies)?,
+        frontier_entries: narrow(frontier_entries)?,
+        particles: 0,
+        variables: narrow(variables)?,
+    })
 }

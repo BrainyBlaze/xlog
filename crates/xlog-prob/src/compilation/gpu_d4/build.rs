@@ -11,11 +11,9 @@ use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use super::frontier::build_frontier_bitset;
-use super::{
-    checked_pool_len_usize, exclusive_scan_u32_inplace, memset_u8_sync, validate_cnf_gpu,
-    GpuCompileConfig,
-};
-use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
+use super::{checked_pool_len_usize, memset_u8_sync, validate_cnf_gpu, GpuCompileConfig};
+use xlog_cuda::gpu_scan::exclusive_scan_u32_inplace;
+use xlog_cuda::semantic_measure::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
 type ComponentScratch = (
     TrackedCudaSlice<u32>,
@@ -671,9 +669,9 @@ mod tests {
         let mut edge_offsets = memory.alloc::<u32>(max_items as usize).unwrap();
         device.dtod_copy(&node_counts, &mut node_offsets).unwrap();
         device.dtod_copy(&edge_counts, &mut edge_offsets).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items)
+        exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items)
             .expect("node scan must succeed");
-        super::super::exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items)
+        exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items)
             .expect("edge scan must succeed");
 
         let compile_emit = device
@@ -773,7 +771,7 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
+        exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
             .expect("level scan must succeed");
 
         let lvl_emit = device
@@ -806,7 +804,7 @@ mod tests {
             .synchronize()
             .expect("sync after d4_levelize_emit must succeed");
 
-        let builder = crate::gpu::GpuCircuitBuilder {
+        let builder = xlog_cuda::semantic_measure::GpuCircuitBuilder {
             node_type,
             child_offsets,
             child_indices,
@@ -815,7 +813,7 @@ mod tests {
             decision_child_false,
             decision_child_true,
         };
-        let layout = crate::gpu::GpuCircuitLayout {
+        let layout = xlog_cuda::semantic_measure::GpuCircuitLayout {
             num_nodes: node_cap,
             num_edges: edge_cap,
             num_levels,
@@ -827,7 +825,7 @@ mod tests {
             num_edges_device: None,
         };
 
-        let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider)
+        let circuit = xlog_cuda::semantic_measure::GpuXgcf::from_device(builder, layout, &provider)
             .expect("GpuXgcf::from_device must succeed");
 
         crate::compilation::validate_equivalence_gpu(
@@ -963,8 +961,8 @@ mod tests {
         let mut edge_offsets = memory.alloc::<u32>(max_items as usize).unwrap();
         device.dtod_copy(&node_counts, &mut node_offsets).unwrap();
         device.dtod_copy(&edge_counts, &mut edge_offsets).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
         provider
             .device()
             .synchronize()
@@ -1073,8 +1071,7 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
-            .unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
 
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
@@ -1103,7 +1100,7 @@ mod tests {
         }
         provider.device().synchronize().unwrap();
 
-        let builder = crate::gpu::GpuCircuitBuilder {
+        let builder = xlog_cuda::semantic_measure::GpuCircuitBuilder {
             node_type,
             child_offsets,
             child_indices,
@@ -1112,7 +1109,7 @@ mod tests {
             decision_child_false,
             decision_child_true,
         };
-        let layout = crate::gpu::GpuCircuitLayout {
+        let layout = xlog_cuda::semantic_measure::GpuCircuitLayout {
             num_nodes: node_cap,
             num_edges: edge_cap,
             num_levels,
@@ -1123,7 +1120,8 @@ mod tests {
             num_nodes_device: None,
             num_edges_device: None,
         };
-        let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
+        let circuit =
+            xlog_cuda::semantic_measure::GpuXgcf::from_device(builder, layout, &provider).unwrap();
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
@@ -1254,8 +1252,8 @@ mod tests {
         let mut edge_offsets = memory.alloc::<u32>(max_items as usize).unwrap();
         device.dtod_copy(&node_counts, &mut node_offsets).unwrap();
         device.dtod_copy(&edge_counts, &mut edge_offsets).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
 
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
@@ -1356,8 +1354,7 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
-            .unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
         provider
             .device()
             .synchronize()
@@ -1393,7 +1390,7 @@ mod tests {
             .synchronize()
             .expect("sync after d4_levelize_emit must succeed");
 
-        let builder = crate::gpu::GpuCircuitBuilder {
+        let builder = xlog_cuda::semantic_measure::GpuCircuitBuilder {
             node_type,
             child_offsets,
             child_indices,
@@ -1402,7 +1399,7 @@ mod tests {
             decision_child_false,
             decision_child_true,
         };
-        let layout = crate::gpu::GpuCircuitLayout {
+        let layout = xlog_cuda::semantic_measure::GpuCircuitLayout {
             num_nodes: node_cap,
             num_edges: edge_cap,
             num_levels,
@@ -1413,7 +1410,8 @@ mod tests {
             num_nodes_device: None,
             num_edges_device: None,
         };
-        let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
+        let circuit =
+            xlog_cuda::semantic_measure::GpuXgcf::from_device(builder, layout, &provider).unwrap();
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
@@ -1544,8 +1542,8 @@ mod tests {
         let mut edge_offsets = memory.alloc::<u32>(max_items as usize).unwrap();
         device.dtod_copy(&node_counts, &mut node_offsets).unwrap();
         device.dtod_copy(&edge_counts, &mut edge_offsets).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
 
         let compile_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
@@ -1643,8 +1641,7 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
-            .unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
 
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
@@ -1672,7 +1669,7 @@ mod tests {
                 .unwrap();
         }
 
-        let builder = crate::gpu::GpuCircuitBuilder {
+        let builder = xlog_cuda::semantic_measure::GpuCircuitBuilder {
             node_type,
             child_offsets,
             child_indices,
@@ -1681,7 +1678,7 @@ mod tests {
             decision_child_false,
             decision_child_true,
         };
-        let layout = crate::gpu::GpuCircuitLayout {
+        let layout = xlog_cuda::semantic_measure::GpuCircuitLayout {
             num_nodes: node_cap,
             num_edges: edge_cap,
             num_levels,
@@ -1692,7 +1689,8 @@ mod tests {
             num_nodes_device: None,
             num_edges_device: None,
         };
-        let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
+        let circuit =
+            xlog_cuda::semantic_measure::GpuXgcf::from_device(builder, layout, &provider).unwrap();
         provider
             .device()
             .synchronize()
@@ -1838,8 +1836,8 @@ mod tests {
         let mut edge_offsets = memory.alloc::<u32>(max_items as usize).unwrap();
         device.dtod_copy(&node_counts, &mut node_offsets).unwrap();
         device.dtod_copy(&edge_counts, &mut edge_offsets).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut node_offsets, max_items).unwrap();
+        exclusive_scan_u32_inplace(&provider, &mut edge_offsets, max_items).unwrap();
         provider
             .device()
             .synchronize()

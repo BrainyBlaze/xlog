@@ -11,10 +11,10 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
+use xlog_cuda::semantic_measure::GpuXgcf;
 use xlog_cuda::{CudaKernelProvider, CudaProviderBuilder};
+use xlog_ir::semantic_measure::{Xgcf, XgcfNodeType};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
-use xlog_prob::gpu::GpuXgcf;
-use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     match CudaProviderBuilder::new(0, MemoryBudget::with_limit(1 << 30)).build() {

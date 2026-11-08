@@ -72,7 +72,11 @@ fn immutable(value: &Bound<'_, PyAny>, depth: usize) -> PyResult<()> {
 }
 
 impl ProgramImageDeclaration {
-    fn from_value(value: ColdValue) -> PyResult<Self> {
+    pub(super) fn material_value(&self) -> &ColdValue {
+        &self.value
+    }
+
+    pub(super) fn from_value(value: ColdValue) -> PyResult<Self> {
         let fields = sequence(&value)?;
         if fields.len() != 4 {
             return Err(invalid(
