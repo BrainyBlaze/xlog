@@ -897,7 +897,11 @@ class SemanticWorldDeclaration:
 
 class SemanticWorldOwner:
     """Common allocation lifetime and namespace; publication remains Session-owned."""
-    def __init__(self, *, declaration: SemanticWorldDeclaration) -> None: ...
+    def __init__(
+        self, *, declaration: SemanticWorldDeclaration, seed_material: bytes,
+    ) -> None:
+        """Canonical unsigned minimal big-endian original seed; zero is one zero byte."""
+        ...
     def context_source(self, context_index: int) -> SemanticContextSource: ...
 
 class SemanticContextSource:
