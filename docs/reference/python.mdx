@@ -606,6 +606,17 @@ matching the native source-byte bound; exceeding it evicts prefix answers for
 recomputation and does not evict empty plans or reject a program. Intermediate
 search frontiers are still reset for each mask. The native mask instance owns
 this cache; saved model state and decoder audits do not depend on cache residency.
+The same mask also retains one parsed operation-prefix checkpoint from the actual
+input, never from a hypothetical next spelling. Exact canonical bytes and the
+definition position bind the checkpoint to the mask's captured context. Only
+completed operations with a visible following comma are reused through the same
+resource visitor and typed program; their syntax is consumed without repeating
+operand inference or completion search. The remaining tail still undergoes all
+original checks, including commas after the output slot, unfinished decimals and
+open operand or raw-token arrays. Prefix bytes, serialized program metadata and
+fixed checkpoint storage share a separate 1 MiB allowance; this is not a total RSS
+limit. A mismatch or an oversized checkpoint recomputes through the same visitors
+and never rejects a permitted program. Earlier packets do not use checkpoints.
 Mandatory direct vector reads and calls that ignore all numeric formals can be
 scheduled first inside the search when doing so preserves the causal boundary;
 scan-capable cells remain choices. This removes equivalent scheduling orders

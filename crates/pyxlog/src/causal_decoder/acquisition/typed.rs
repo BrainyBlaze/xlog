@@ -146,6 +146,48 @@ pub(super) struct Program {
 }
 
 impl Program {
+    /// Bound retained prefix state without allocating a serialized copy. The
+    /// shared completion cache is not copied into an operation checkpoint.
+    pub(super) fn fits_prefix_cache(&self, limit: usize) -> bool {
+        struct Extent(usize);
+        impl std::io::Write for Extent {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_sub(bytes.len())
+                    .ok_or(std::io::ErrorKind::WriteZero)?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let shapes = self.shapes.each_ref().map(|shapes| {
+            shapes
+                .iter()
+                .map(|shape| (shape.rows, shape.columns, shape.float32))
+                .collect::<Vec<_>>()
+        });
+        serde_json::to_writer(
+            Extent(limit),
+            &(
+                &self.body,
+                self.planned_output,
+                self.entry_requirements
+                    .as_ref()
+                    .map(|required| (&required.calls, &required.parameters)),
+                shapes,
+                &self.raw_tokens,
+                self.column_limit,
+                self.dependencies
+                    .as_ref()
+                    .map(|facts| (&facts.callees, &facts.values, facts.reserve_frontier)),
+            ),
+        )
+        .is_ok()
+    }
+
     pub(super) fn new(
         signature: TensorSignature,
         vocabulary: usize,
