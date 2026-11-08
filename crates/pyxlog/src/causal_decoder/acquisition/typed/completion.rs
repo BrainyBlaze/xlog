@@ -3,9 +3,10 @@
 use std::cmp::Reverse;
 use std::sync::Mutex;
 
+use super::super::ACQUIRED_SOURCE_BYTES;
 use super::*;
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 struct ValueKey {
     shapes: [(usize, usize, bool); 2],
     dependencies: TensorOutputDependencies,
@@ -32,25 +33,39 @@ impl ValueKey {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 struct StateKey {
     remaining: usize,
     values: Vec<ValueKey>,
 }
 
 #[derive(Default)]
-struct EmptyPlans {
+struct CompletionProofs {
     environment: Vec<u8>,
-    outcomes: BTreeMap<usize, bool>,
+    empty_plans: BTreeMap<usize, bool>,
+    prefixes: BTreeMap<Vec<u8>, bool>,
+    prefix_bytes: usize,
 }
 
-/// Structural answers only; no model state or authored source. Empty entry
-/// plans survive mask calls for one exact environment, at most one answer per
-/// output slot. Intermediate search states are reset for each mask.
+impl CompletionProofs {
+    fn bind(&mut self, environment: &[u8]) {
+        if self.environment != environment {
+            *self = Self {
+                environment: environment.to_vec(),
+                ..Self::default()
+            };
+        }
+    }
+}
+
+/// Structural answers only; no model state or authored source. One exact
+/// environment retains at most one empty-plan answer per output slot and a
+/// source-byte allowance of serialized external-query keys. Intermediate search
+/// states are reset for each mask; prefix eviction changes only recomputation.
 #[derive(Default)]
 pub(crate) struct CompletionCache {
     entries: Mutex<BTreeMap<Vec<u8>, BTreeMap<StateKey, bool>>>,
-    empty_plans: Mutex<EmptyPlans>,
+    proofs: Mutex<CompletionProofs>,
 }
 
 impl CompletionCache {
@@ -59,20 +74,43 @@ impl CompletionCache {
     }
 
     fn empty_plan(&self, environment: &[u8], output: usize) -> Option<bool> {
-        let plans = self.empty_plans.lock().unwrap();
-        if plans.environment != environment {
+        let proofs = self.proofs.lock().unwrap();
+        if proofs.environment != environment {
             return None;
         }
-        plans.outcomes.get(&output).copied()
+        proofs.empty_plans.get(&output).copied()
     }
 
     fn remember_empty_plan(&self, environment: &[u8], output: usize, result: bool) {
-        let mut plans = self.empty_plans.lock().unwrap();
-        if plans.environment != environment {
-            plans.environment = environment.to_vec();
-            plans.outcomes.clear();
+        let mut proofs = self.proofs.lock().unwrap();
+        proofs.bind(environment);
+        proofs.empty_plans.insert(output, result);
+    }
+
+    fn prefix(&self, environment: &[u8], key: &[u8]) -> Option<bool> {
+        let proofs = self.proofs.lock().unwrap();
+        if proofs.environment != environment {
+            return None;
         }
-        plans.outcomes.insert(output, result);
+        proofs.prefixes.get(key).copied()
+    }
+
+    fn remember_prefix(&self, environment: &[u8], key: Vec<u8>, result: bool) {
+        let mut proofs = self.proofs.lock().unwrap();
+        proofs.bind(environment);
+        if let Some(answer) = proofs.prefixes.get_mut(&key) {
+            *answer = result;
+            return;
+        }
+        if key.len() > ACQUIRED_SOURCE_BYTES {
+            return;
+        }
+        if proofs.prefix_bytes + key.len() > ACQUIRED_SOURCE_BYTES {
+            proofs.prefixes.clear();
+            proofs.prefix_bytes = 0;
+        }
+        proofs.prefix_bytes += key.len();
+        proofs.prefixes.insert(key, result);
     }
 }
 
@@ -204,7 +242,7 @@ pub(super) fn possible(
         signatures,
         cache,
     };
-    let result = search.visit(program);
+    let result = search.visit(program, !empty_plan);
     if empty_plan {
         cache.remember_empty_plan(&search.environment, output, result);
     }
@@ -311,7 +349,7 @@ impl Search<'_> {
         Some(program)
     }
 
-    fn visit(&self, program: Program) -> bool {
+    fn visit(&self, program: Program, retain_prefix: bool) -> bool {
         let Some(program) = self.producers(program) else {
             return false;
         };
@@ -338,14 +376,27 @@ impl Search<'_> {
             remaining,
             values: keys,
         };
-        if let Some(&result) = self
+        // Serialize the complete existing memo key only for an external typed
+        // query. Recursive expansion keeps the mask-local cache and does not
+        // consume the persistent prefix allowance.
+        let prefix_key = retain_prefix.then(|| serde_json::to_vec(&key).unwrap());
+        if let Some(key) = prefix_key.as_deref() {
+            if let Some(result) = self.cache.prefix(&self.environment, key) {
+                return result;
+            }
+        }
+        let cached = self
             .cache
             .entries
             .lock()
             .unwrap()
             .get(&self.environment)
             .and_then(|entries| entries.get(&key))
-        {
+            .copied();
+        if let Some(result) = cached {
+            if let Some(key) = prefix_key {
+                self.cache.remember_prefix(&self.environment, key, result);
+            }
             return result;
         }
         let mut next = BTreeMap::new();
@@ -392,7 +443,9 @@ impl Search<'_> {
                 !value.numeric_arguments,
             ))
         });
-        let result = next.into_iter().any(|(_, candidate)| self.visit(candidate));
+        let result = next
+            .into_iter()
+            .any(|(_, candidate)| self.visit(candidate, false));
         self.cache
             .entries
             .lock()
@@ -400,6 +453,9 @@ impl Search<'_> {
             .entry(self.environment.clone())
             .or_default()
             .insert(key, result);
+        if let Some(key) = prefix_key {
+            self.cache.remember_prefix(&self.environment, key, result);
+        }
         result
     }
 
