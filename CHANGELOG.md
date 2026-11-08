@@ -6,7 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(circuits)* [**breaking**] share XGCF circuit material through `xlog-ir::semantic_measure` and GPU buffers/evaluation through `xlog-cuda::semantic_measure`. The probabilistic compiler converts decision-DNNF with `xlog_prob::xgcf::from_ddnnf`; native semantic consumers use the same representation and arithmetic without depending on the probabilistic compiler.
 - Epistemic execution classifies modal dependencies before single-pass planning.
   Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
   ordinary founded least fixpoint; supported positive exact-tuple
