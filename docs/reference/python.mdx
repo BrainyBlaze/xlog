@@ -248,7 +248,8 @@ state. It also reads loss/norm scalars to the host. `checkpoint_identity` contin
 to identify the imported checkpoint, not the subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
 `fork_acquired(definition_json, parameter_values, insertion_layer=17,
-train_down_projection=True, source_encoding="funcdef-json-v1")` constructs an independent acquired candidate. The default JSON
+train_down_projection=True, source_encoding="funcdef-json-v1",
+require_output_dependencies=False)` constructs an independent acquired candidate. The default JSON
 object has exactly `entrypoint` (a new registry name) and `definitions` (canonical
 `FuncDef` records). Each definition includes its actual `params`, `return_type`,
 `body: {"Numerical": ...}`, and `is_private`. Numerical bodies carry `signature`,
@@ -257,11 +258,17 @@ object has exactly `entrypoint` (a new registry name) and `definitions` (canonic
 proposals. Definitions cannot replace old names; calls resolve the original
 bodies and parameter identities from that registry.
 
-Every new definition must be reachable from the entrypoint, and every new
+By default, every new definition must be reachable from the entrypoint, and every new
 constant must be read by an operation in a reachable body. A refusal lists the
 unreachable definition names and unused constant names in sorted order so a
 subsequent proposal can address the actual omissions. It does not select a graph
 or replace the constructor's remaining shape and causal checks.
+
+With `require_output_dependencies=True`, the same constructor instead requires
+every new definition and physical constant to reach the returned entry value.
+The entry value must also possibly depend on raw tokens or current hidden.
+This explicit opt-in accompanies acquisition language version12 below; it is
+independent of source encoding. Earlier callers retain the default admission.
 
 The wheel and source distribution include the canonical JSON Schema resource
 `pyxlog/acquired_funcdef_wire_v1.schema.json`. On Python 3.9 or later, read its
@@ -523,7 +530,40 @@ that generation will terminate, or that the result depends usefully on history.
 Actual shape, causal and terminal usage admission remain unchanged. Earlier
 packets keep their literal prefix behavior; restoration selects the saved version.
 
-For a version4 through version11 packet,
+Version12 (`xlog-contextual-acquisition-v12`) retains `numerical-rows-v3` and
+uses one canonical numerical IR analysis for prefix choices and the opt-in
+constructor. It counts only definitions and physical constants reached from
+the returned entry value, including at least one possible raw-token or
+current-hidden dependency. Each value carries its possible input, definition
+and physical parameter dependencies. `Call` substitutes only numeric arguments
+actually used by the callee output. `Scan` always carries its initial state's
+dependencies because it returns that state before or outside the raw span;
+item dependencies propagate only when the pure cell uses numeric argument1.
+Physical aliases count by name, across entry and helper tables.
+
+The native context has `version: 2`,
+`dependency_contract: "output-dependencies-v1"`, and exact
+`output_dependencies` for every retained callee. Those records contain
+`arguments` (numeric `TensorSignature` argument indices), `tokens` (raw-token
+dependence), `definitions` (registry identities) and `parameters` (physical
+identities). Causal hidden is numeric argument0; raw tokens are separate from
+that list. Native registry bodies produce the facts; callers preserve the
+packet without reconstructing or guessing those dependencies.
+
+The prefix owner uses the same analysis in plan, operation, operand and output
+choices. Its necessary row bound counts missing output-reaching root calls,
+direct physical reads and an input producer when no missing call supplies raw
+tokens. Incomplete call arguments use an optimistic union of shape-compatible
+values until the model chooses them; completed operands and output admission
+use their exact facts. These bounds do not guarantee constructibility or token
+termination. Possible structural dependence does not prove semantic
+nonconstancy: cancellation or equal select branches can still return a
+constant. Usefulness, independent selection and scientific acceptance remain
+separate. This version does not remove unrelated dead operations. Packets1–11,
+their usage rules and saved snapshots keep their existing semantics; snapshot
+restoration does not apply a new admission rule.
+
+For a version4 through version12 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -538,9 +578,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; version12 entry values must also satisfy its output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–10). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–12). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix

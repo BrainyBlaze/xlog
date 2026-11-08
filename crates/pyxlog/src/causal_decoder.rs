@@ -130,18 +130,19 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        acquisition::language(
+        let context = if language_version == 12 {
             self.inner
-                .acquisition_context(insertion_layer)
-                .map_err(xlog_err)?,
-            language_version,
-            raw_token_ids,
-        )
+                .acquisition_context_with_output_dependencies(insertion_layer)
+        } else {
+            self.inner.acquisition_context(insertion_layer)
+        }
+        .map_err(xlog_err)?;
+        acquisition::language(context, language_version, raw_token_ids)
     }
 
     /// Construct an acquired candidate from actual canonical definitions and FP32 arrays.
     #[cfg(feature = "host-io")]
-    #[pyo3(signature = (definition_json, parameter_values, *, insertion_layer=17, train_down_projection=true, source_encoding="funcdef-json-v1"))]
+    #[pyo3(signature = (definition_json, parameter_values, *, insertion_layer=17, train_down_projection=true, source_encoding="funcdef-json-v1", require_output_dependencies=false))]
     fn fork_acquired(
         &self,
         py: Python<'_>,
@@ -150,15 +151,17 @@ impl PyNativeCausalModel {
         insertion_layer: usize,
         train_down_projection: bool,
         source_encoding: &str,
+        require_output_dependencies: bool,
     ) -> PyResult<Self> {
         py.detach(|| match source_encoding {
             "funcdef-json-v1" => self
                 .inner
-                .fork_acquired(
+                .fork_acquired_with_dependencies(
                     &definition_json,
                     parameter_values,
                     insertion_layer,
                     train_down_projection,
+                    require_output_dependencies,
                 )
                 .map_err(xlog_err),
             acquisition::NUMERICAL_ROWS_ENCODING
@@ -175,12 +178,13 @@ impl PyNativeCausalModel {
                     source_encoding == acquisition::INTENT_ROWS_ENCODING,
                 )?;
                 self.inner
-                    .fork_acquired_definitions(
+                    .fork_acquired_definitions_with_dependencies(
                         entrypoint,
                         definitions,
                         parameter_values,
                         insertion_layer,
                         train_down_projection,
+                        require_output_dependencies,
                     )
                     .map_err(xlog_err)
             }
