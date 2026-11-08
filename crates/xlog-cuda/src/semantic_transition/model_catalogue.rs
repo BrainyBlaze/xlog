@@ -4,7 +4,7 @@ use super::*;
 // remaining header binds model rows, owned category ranges and the cold frame.
 pub(super) const HEADER_WORDS: usize = 72;
 const FRAME_MAGIC: u64 = 0x584c4f474d4f444c;
-pub(super) const FRAME_MEMBER_WORDS: usize = 29;
+pub(super) const FRAME_MEMBER_WORDS: usize = 33;
 pub(super) const ROW_WIDTHS: [usize; 4] = [10, 6, 3, 18];
 pub(super) const FRAME_HEADER_WORDS: usize = 9;
 
@@ -313,7 +313,7 @@ impl FrozenModelCatalogue {
             }
             frame_words = frame_words
                 .checked_add(FRAME_MEMBER_WORDS)
-                .and_then(|size| size.checked_add(words.len()))
+                .and_then(|size| size.checked_add(HEADER_WORDS))
                 .and_then(|size| {
                     size.checked_add(session.rule_library.as_ref().map_or(0, |library| {
                         library.declaration().len().div_ceil(8) + 25 * library.rules().len()
@@ -347,7 +347,7 @@ impl FrozenModelCatalogue {
         frame
             .try_reserve_exact(frame_words)
             .map_err(|error| runtime_error("model context frame allocation", error))?;
-        frame.extend([FRAME_MAGIC, 4, statement_bytes as u64, members.len() as u64]);
+        frame.extend([FRAME_MAGIC, 5, statement_bytes as u64, members.len() as u64]);
         frame.extend(template_extents);
         for member in &members {
             for identity in [
@@ -389,7 +389,15 @@ impl FrozenModelCatalogue {
                     .as_ref()
                     .map_or(0, |library| library.rules().len()) as u64,
             );
-            frame.extend_from_slice(&member.words);
+            // The complete recipe already has one immutable owner. Its rows
+            // and payload are resolved from the projection; address templates
+            // are reconstructed from the original local extents.
+            let mut recipe_hash = Sha256::new();
+            for &word in &member.words {
+                recipe_hash.update(word.to_le_bytes());
+            }
+            frame.extend(identity_words(recipe_hash.finalize().into()));
+            frame.extend_from_slice(&member.words[..HEADER_WORDS]);
             if let Some(library) = &member.rule_library {
                 for chunk in library.declaration().chunks(8) {
                     let mut bytes = [0; 8];
@@ -402,7 +410,7 @@ impl FrozenModelCatalogue {
             }
         }
         let mut hash = Sha256::new();
-        hash.update(b"xlog.semantic.immutable-model-catalogue.v4\0");
+        hash.update(b"xlog.semantic.immutable-model-catalogue.v5\0");
         hash.update(CATALOGUE_DIGEST);
         for &word in &frame {
             hash.update(word.to_le_bytes());
@@ -419,6 +427,30 @@ impl FrozenModelCatalogue {
             statement_bytes,
             _reservation: Arc::new(reservation),
         }))
+    }
+
+    fn projection_word_bound(&self) -> Result<usize, SemanticTransitionError> {
+        let overflow = || SemanticTransitionError::GenerationExhausted;
+        let mut words = HEADER_WORDS
+            .checked_add(self.frame.len())
+            .ok_or_else(overflow)?;
+        for (table, width) in ROW_WIDTHS.into_iter().enumerate() {
+            let (count, _, _) = self.category_range(table, 0)?;
+            words = usize::try_from(count)
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .and_then(|count| words.checked_add(count))
+                .ok_or_else(overflow)?;
+        }
+        for member in &self.members {
+            words = member
+                .words
+                .len()
+                .checked_sub(member.words[8] as usize / 8)
+                .and_then(|count| words.checked_add(count))
+                .ok_or_else(overflow)?;
+        }
+        Ok(words)
     }
 
     fn project(
@@ -439,20 +471,7 @@ impl FrozenModelCatalogue {
                 "model catalogue requires its original cold context recipe",
             ));
         }
-        let word_bound = self.members.iter().try_fold(
-            self.frame
-                .len()
-                .checked_add(HEADER_WORDS)
-                .and_then(|count| {
-                    count.checked_add(template_word_bound(&self.template_extents).ok()?)
-                })
-                .ok_or(SemanticTransitionError::GenerationExhausted)?,
-            |bound, member| {
-                bound
-                    .checked_add(member.words.len())
-                    .ok_or(SemanticTransitionError::GenerationExhausted)
-            },
-        )?;
+        let word_bound = self.projection_word_bound()?;
         let mut words = Vec::new();
         words
             .try_reserve_exact(word_bound)
@@ -524,6 +543,7 @@ impl FrozenModelCatalogue {
             hash.update(word.to_le_bytes());
         }
         words[21..25].copy_from_slice(&identity_words(hash.finalize().into()));
+        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
         Ok(words)
     }
 }
@@ -872,21 +892,7 @@ impl ActionCodebooks {
         catalogue: Arc<FrozenModelCatalogue>,
         member: usize,
     ) -> Result<(), SemanticTransitionError> {
-        let frame_bound = catalogue
-            .frame
-            .len()
-            .checked_add(HEADER_WORDS)
-            .and_then(|count| {
-                count.checked_add(template_word_bound(&catalogue.template_extents).ok()?)
-            })
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let word_bound = catalogue
-            .members
-            .iter()
-            .try_fold(frame_bound, |bound, member| {
-                bound.checked_add(member.words.len())
-            })
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let word_bound = catalogue.projection_word_bound()?;
         let bytes = word_bound
             .checked_mul(3 * size_of::<u64>())
             .and_then(|bytes| {
@@ -1423,9 +1429,8 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let frame_words = contexts
             .len()
-            .checked_mul(FRAME_MEMBER_WORDS)
+            .checked_mul(FRAME_MEMBER_WORDS + HEADER_WORDS)
             .and_then(|count| count.checked_add(FRAME_HEADER_WORDS))
-            .and_then(|count| count.checked_add(word_count))
             .and_then(|count| {
                 contexts.iter().try_fold(count, |count, context| {
                     count.checked_add(context.rule_library.as_ref().map_or(0, |library| {
@@ -1434,11 +1439,35 @@ impl SemanticTransitionSession {
                 })
             })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let projection_words = frame_words
-            .checked_add(word_count)
-            .and_then(|count| count.checked_add(HEADER_WORDS))
-            .and_then(|count| count.checked_add(template_word_bound(&template_extents).ok()?))
+        let mut projection_words = frame_words
+            .checked_add(HEADER_WORDS)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        for (table, width) in ROW_WIDTHS.into_iter().enumerate() {
+            let count = contexts.iter().try_fold(
+                1 + template_count(table, &template_extents),
+                |count, context| {
+                    let words = &context.codebooks.words;
+                    words[2 * table + 1]
+                        .checked_sub(1 + words[53 + 2 * table] - words[52 + 2 * table])
+                        .and_then(|ordinary| count.checked_add(ordinary))
+                        .ok_or(SemanticTransitionError::GenerationExhausted)
+                },
+            )?;
+            projection_words = usize::try_from(count)
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .and_then(|count| projection_words.checked_add(count))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        }
+        for context in contexts.iter() {
+            projection_words = context
+                .codebooks
+                .words
+                .len()
+                .checked_sub(context.codebooks.words[8] as usize / 8)
+                .and_then(|count| projection_words.checked_add(count))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        }
         // Every recipe, frame, projection and overlapping pinned upload is
         // charged before allocation. The common learned banks are not copied.
         let per_context_bytes = projection_words

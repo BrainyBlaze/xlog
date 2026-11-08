@@ -2723,6 +2723,7 @@ impl ActionCodebooks {
         words[38] = u64::from(program.is_some());
         words[39] = u64::from(program.is_some());
         let binding = Self::bind_admission_words(admission, owner, program_binding, &mut words)?;
+        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
         let (components, input_cells) = Self::component_geometry(&words, program.is_some())?;
         let components = components.into_iter().collect();
         Ok(Self {
@@ -2745,7 +2746,8 @@ impl ActionCodebooks {
         words: &[u64],
         has_program: bool,
     ) -> Result<([SemanticComponent; COMPONENT_COUNT], usize), SemanticTransitionError> {
-        validate_frozen_codebook_frame(words.len(), |index| words[index])?;
+        // Source preparation also derives this geometry from an already
+        // acquired header. Full recipe validation belongs to the producers.
         if words.len() < model_catalogue::HEADER_WORDS
             || words[39] != u64::from(has_program)
             || [1, 3, 5, 7]
@@ -9015,7 +9017,7 @@ fn validate_frozen_codebook_frame(
         || start.checked_add(length) != Some(word_count)
         || start < model_catalogue::HEADER_WORDS
         || word(start) != 0x584c4f474d4f444c
-        || word(start + 1) != 4
+        || word(start + 1) != 5
         || word(start + 2) != word(37)
         || word(start + 3) != word(43)
     {
@@ -9061,7 +9063,7 @@ fn validate_frozen_codebook_frame(
         let library_count = usize::try_from(word(cursor + 28)).map_err(|_| invalid())?;
         cursor += model_catalogue::FRAME_MEMBER_WORDS;
         let end = cursor
-            .checked_add(recipe_words)
+            .checked_add(model_catalogue::HEADER_WORDS)
             .filter(|&end| end <= word_count)
             .ok_or_else(invalid)?;
         if recipe_words < model_catalogue::HEADER_WORDS
@@ -9083,71 +9085,65 @@ fn validate_frozen_codebook_frame(
         if member == selected && (52..72).any(|index| word(index) != word(cursor + index)) {
             return Err(invalid());
         }
+        let base_counts = counts;
+        let mut local_starts = [0usize; 4];
+        let mut local_ends = [0usize; 4];
+        let mut local_cursor = model_catalogue::HEADER_WORDS;
         for (table, width) in model_catalogue::ROW_WIDTHS.into_iter().enumerate() {
             let count = word(cursor + 2 * table + 1);
             let table_start = usize::try_from(word(cursor + 2 * table)).map_err(|_| invalid())?;
+            let table_end = usize::try_from(count)
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .and_then(|size| table_start.checked_add(size))
+                .filter(|&end| end <= recipe_words)
+                .ok_or_else(invalid)?;
             if count == 0
                 || count > SEMANTIC_CATEGORY_CAPACITY as u64
-                || table_start < model_catalogue::HEADER_WORDS
-                || usize::try_from(count)
-                    .ok()
-                    .and_then(|count| count.checked_mul(width))
-                    .and_then(|size| table_start.checked_add(size))
-                    .is_none_or(|end| end > recipe_words)
+                || table_start != local_cursor
             {
                 return Err(invalid());
             }
-            let templates = word(cursor + 52 + 2 * table)..word(cursor + 53 + 2 * table);
-            let begin = counts[table];
-            for category in 1..count {
-                let source = cursor + table_start + category as usize * width;
-                if templates.contains(&category) {
-                    let expected = model_catalogue::template_row(
-                        table,
-                        category - templates.start,
-                        &local_extents,
-                    );
-                    if (0..width).any(|index| word(source + index) != expected[index]) {
-                        return Err(invalid());
-                    }
-                    continue;
-                }
-                let target = usize::try_from(word(2 * table))
-                    .ok()
-                    .and_then(|start| {
-                        counts[table]
-                            .checked_mul(width as u64)
-                            .and_then(|offset| usize::try_from(offset).ok())
-                            .and_then(|offset| start.checked_add(offset))
-                    })
-                    .filter(|&target| target.checked_add(width).is_some_and(|end| end <= start))
-                    .ok_or_else(invalid)?;
-                for index in 0..width {
-                    let mut expected = word(source + index);
-                    if index == 0 && (table == 2 || table == 1 && word(source + 2) != 0) {
-                        expected = expected.checked_add(payload_offset).ok_or_else(invalid)?;
-                    }
-                    if word(target + index) != expected {
-                        return Err(invalid());
-                    }
-                }
-                counts[table] = counts[table]
-                    .checked_add(1)
-                    .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
-                    .ok_or_else(invalid)?;
+            local_starts[table] = table_start;
+            local_ends[table] = table_end;
+            local_cursor = table_end;
+            let templates = word(cursor + 53 + 2 * table) - word(cursor + 52 + 2 * table);
+            counts[table] = count
+                .checked_sub(1 + templates)
+                .and_then(|ordinary| counts[table].checked_add(ordinary))
+                .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+                .ok_or_else(invalid)?;
+            let projected_end = usize::try_from(word(2 * table))
+                .ok()
+                .and_then(|table_start| {
+                    usize::try_from(counts[table])
+                        .ok()
+                        .and_then(|count| count.checked_mul(width))
+                        .and_then(|count| table_start.checked_add(count))
+                })
+                .filter(|&end| end <= start)
+                .ok_or_else(invalid)?;
+            if projected_end < model_catalogue::HEADER_WORDS {
+                return Err(invalid());
             }
             if member == selected {
-                owned[table] = (begin, counts[table]);
+                owned[table] = (base_counts[table], counts[table]);
             }
         }
         let payload = word(cursor + 8);
+        let payload_begin = usize::try_from(payload / 8).map_err(|_| invalid())?;
         if payload % 8 != 0
-            || payload / 8 > recipe_words as u64
-            || word(cursor + 9) != recipe_words as u64 * 8 - payload
+            || payload_begin != local_cursor
+            || payload_begin > recipe_words
+            || recipe_words
+                .checked_mul(8)
+                .and_then(|bytes| bytes.checked_sub(payload as usize))
+                .map(|bytes| bytes as u64)
+                != Some(word(cursor + 9))
         {
             return Err(invalid());
         }
-        let payload_words = recipe_words - payload as usize / 8;
+        let payload_words = recipe_words - payload_begin;
         let target = word(8)
             .checked_add(payload_offset)
             .and_then(|offset| usize::try_from(offset / 8).ok())
@@ -9157,9 +9153,62 @@ fn validate_frozen_codebook_frame(
                     .is_some_and(|end| end <= start)
             })
             .ok_or_else(invalid)?;
-        if (0..payload_words)
-            .any(|index| word(target + index) != word(cursor + payload as usize / 8 + index))
-        {
+        // Recover the exact original local recipe without allocating its rows:
+        // ordinary rows/payload live in the projected banks; relative address
+        // templates follow the original typed extents. The digest binds every
+        // original word, including the normalized header and all local slots.
+        let mut recipe_hash = Sha256::new();
+        for index in 0..recipe_words {
+            let value = if index < model_catalogue::HEADER_WORDS {
+                word(cursor + index)
+            } else if index >= payload_begin {
+                word(target + index - payload_begin)
+            } else {
+                let table = (0..4)
+                    .find(|&table| (local_starts[table]..local_ends[table]).contains(&index))
+                    .ok_or_else(invalid)?;
+                let width = model_catalogue::ROW_WIDTHS[table];
+                let relative = index - local_starts[table];
+                let category = (relative / width) as u64;
+                let column = relative % width;
+                let begin = word(cursor + 52 + 2 * table);
+                let finish = word(cursor + 53 + 2 * table);
+                if category == 0 {
+                    0
+                } else if (begin..finish).contains(&category) {
+                    model_catalogue::template_row(table, category - begin, &local_extents)[column]
+                } else {
+                    let preceding_templates = if category >= finish {
+                        finish - begin
+                    } else {
+                        0
+                    };
+                    let global = base_counts[table] + category - 1 - preceding_templates;
+                    let row = usize::try_from(word(2 * table))
+                        .ok()
+                        .and_then(|start| {
+                            usize::try_from(global)
+                                .ok()
+                                .and_then(|category| category.checked_mul(width))
+                                .and_then(|offset| start.checked_add(offset))
+                        })
+                        .filter(|&row| row.checked_add(width).is_some_and(|end| end <= start))
+                        .ok_or_else(invalid)?;
+                    let value = word(row + column);
+                    if column == 0 && (table == 2 || table == 1 && word(row + 2) != 0) {
+                        value.checked_sub(payload_offset).ok_or_else(invalid)?
+                    } else {
+                        value
+                    }
+                }
+            };
+            recipe_hash.update(value.to_le_bytes());
+        }
+        let recipe_digest: [u8; 32] = recipe_hash.finalize().into();
+        if (0..4).any(|index| {
+            word(metadata + 29 + index)
+                != u64::from_le_bytes(recipe_digest[index * 8..index * 8 + 8].try_into().unwrap())
+        }) {
             return Err(invalid());
         }
         payload_offset = payload_offset
@@ -9277,7 +9326,7 @@ fn validate_frozen_codebook_frame(
         return Err(invalid());
     }
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.immutable-model-catalogue.v4\0");
+    hash.update(b"xlog.semantic.immutable-model-catalogue.v5\0");
     hash.update(CATALOGUE_DIGEST);
     for index in start..word_count {
         hash.update(word(index).to_le_bytes());
