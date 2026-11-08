@@ -849,7 +849,7 @@ impl PySemanticTransitionFreshParent {
     }
 }
 
-struct ColdTaskSource {
+pub(super) struct ColdTaskSource {
     program_image: Arc<super::program_image::ProgramImageDeclaration>,
     initial_theory: String,
     input_facts: String,
@@ -902,7 +902,7 @@ impl ColdTaskSource {
         })
     }
 
-    fn from_tuple(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub(super) fn from_tuple(value: &Bound<'_, PyAny>) -> PyResult<Self> {
         if !value.is_exact_instance_of::<PyTuple>() {
             return Err(invalid("cold source requires an exact builtin six-tuple"));
         }

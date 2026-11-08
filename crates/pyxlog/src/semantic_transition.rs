@@ -78,6 +78,7 @@ pub(crate) mod model_forward_stream;
 pub(crate) mod program_image;
 #[cfg(feature = "semantic-policy")]
 pub(crate) mod segment_resource_observation;
+pub(crate) mod world;
 #[cfg(feature = "semantic-policy")]
 use model_forward_stream::PySemanticModelCanaryWitness;
 pub(crate) mod model_work_port;

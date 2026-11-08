@@ -858,6 +858,57 @@ class SemanticProgramImage:
     @property
     def mutation_capacity(self) -> int: ...
 
+class SemanticWorldDeclaration:
+    """Complete immutable common-world declaration; identities stay in native metadata.
+
+    Each contexts row is (source6, context_view, signed_program, rule_cells,
+    query_views). The native parser owns exact nested tags, arities and bounds.
+    The source6 image owner is retained, never reconstructed by a dependent caller.
+    """
+    def __init__(
+        self, *, contexts: tuple[tuple[Any, ...], ...],
+        event_nodes: tuple[tuple[Any, ...], ...],
+        measure_factors: tuple[tuple[Any, ...], ...],
+        numeric_law: tuple[str, str, str, str, str],
+        capacities: tuple[int, int, int, int, int, int, int, int],
+    ) -> None: ...
+    @staticmethod
+    def from_material(material: bytes) -> SemanticWorldDeclaration: ...
+    @property
+    def material(self) -> bytes: ...
+    @property
+    def identity(self) -> bytes: ...
+    @property
+    def context_local_identities(self) -> tuple[bytes, ...]: ...
+    @property
+    def context_count(self) -> int: ...
+    def feedback_schema(self, statement_bytes: int) -> tuple[Any, ...]:
+        """Structural tuple11; task answers and world identities do not seed it."""
+        ...
+
+class SemanticWorldOwner:
+    """Common allocation lifetime and namespace; publication remains Session-owned."""
+    def __init__(self, *, declaration: SemanticWorldDeclaration) -> None: ...
+    def context_source(self, context_index: int) -> SemanticContextSource: ...
+
+class SemanticContextSource:
+    """Original context/source binding, constructed only by its common world owner."""
+    @property
+    def original_source(
+        self,
+    ) -> tuple[str, str, Optional[str], tuple[tuple[str, int], ...],
+               tuple[int, ...], SemanticProgramImage]: ...
+    @property
+    def world_declaration(self) -> SemanticWorldDeclaration: ...
+    @property
+    def material(self) -> bytes: ...
+    @property
+    def world_identity(self) -> bytes: ...
+    @property
+    def context_identity(self) -> bytes: ...
+    @property
+    def context_index(self) -> int: ...
+
 class SemanticTransitionColdTask:
     """Original admitted statement roster and its explicit ordered query selection."""
 
