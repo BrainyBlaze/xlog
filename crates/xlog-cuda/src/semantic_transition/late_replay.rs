@@ -54,7 +54,7 @@ const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, recei
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, rows) == 144);
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, observations) == 192);
 const _: () = assert!(std::mem::offset_of!(PublicationReplayDeliveryInput, native_work) == 224);
-const _: () = assert!(size_of::<PublicationReplayDeliveryRow>() == 1072);
+const _: () = assert!(size_of::<PublicationReplayDeliveryRow>() == 1088);
 
 type LoadedReplayDeliveryAcquisition<V> = (
     SemanticReplayMaterial,
