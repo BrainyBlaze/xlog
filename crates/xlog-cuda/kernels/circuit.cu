@@ -114,72 +114,13 @@ extern "C" __global__ void xgcf_backward_level_propagate(
     }
 
     uint32_t node = level_nodes[level_offset + tid];
-    double a = adj[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    uint8_t ty = node_type[node];
-    switch (ty) {
-        case XGCF_AND: {
-            uint32_t c0 = child_offsets[node];
-            uint32_t c1 = child_offsets[node + 1];
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices[i];
-                atomicAdd(&adj[child], a);
-            }
-            break;
-        }
-        case XGCF_OR: {
-            double parent_v = values[node];
-            if (isinf(parent_v) && parent_v < 0.0) {
-                return;
-            }
-            uint32_t c0 = child_offsets[node];
-            uint32_t c1 = child_offsets[node + 1];
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices[i];
-                double child_v = values[child];
-                if (isinf(child_v) && child_v < 0.0) {
-                    continue;
-                }
-                double ratio = exp(child_v - parent_v);
-                if (ratio != 0.0) {
-                    atomicAdd(&adj[child], a * ratio);
-                }
-            }
-            break;
-        }
-        case XGCF_DECISION: {
-            double parent_v = values[node];
-            if (isinf(parent_v) && parent_v < 0.0) {
-                return;
-            }
-            uint32_t var = decision_var[node];
-            uint32_t child_f = decision_child_false[node];
-            uint32_t child_t = decision_child_true[node];
-            double log_t = var_log_true[var];
-            double log_f = var_log_false[var];
-
-            double vf = values[child_f];
-            double vt = values[child_t];
-            if (!(isinf(vf) && vf < 0.0)) {
-                double ratio_f = exp((log_f + vf) - parent_v);
-                if (ratio_f != 0.0) {
-                    atomicAdd(&adj[child_f], a * ratio_f);
-                }
-            }
-            if (!(isinf(vt) && vt < 0.0)) {
-                double ratio_t = exp((log_t + vt) - parent_v);
-                if (ratio_t != 0.0) {
-                    atomicAdd(&adj[child_t], a * ratio_t);
-                }
-            }
-            break;
-        }
-        default:
-            break;
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type, child_offsets, child_indices, nullptr, decision_var,
+        decision_child_false, decision_child_true
+    };
+    semantic_measure::propagate_node_adjoint(
+        circuit, node, adj[node], var_log_true, var_log_false, values,
+        semantic_measure::AtomicNodeAdjoints{adj});
 }
 
 /**
@@ -218,41 +159,13 @@ extern "C" __global__ void xgcf_backward_level_decision_grad(
     if (node_type[node] != XGCF_DECISION) {
         return;
     }
-
-    double a = adj[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    double parent_v = values[node];
-    if (isinf(parent_v) && parent_v < 0.0) {
-        return;
-    }
-
-    uint32_t var = decision_var[node];
-    uint32_t child_f = decision_child_false[node];
-    uint32_t child_t = decision_child_true[node];
-    double log_t = var_log_true[var];
-    double log_f = var_log_false[var];
-
-    double vf = values[child_f];
-    double vt = values[child_t];
-
-    double p_false = 0.0;
-    double p_true = 0.0;
-    if (!(isinf(vf) && vf < 0.0)) {
-        p_false = exp((log_f + vf) - parent_v);
-    }
-    if (!(isinf(vt) && vt < 0.0)) {
-        p_true = exp((log_t + vt) - parent_v);
-    }
-
-    if (p_false != 0.0) {
-        atomicAdd(&grad_false[var], a * p_false);
-    }
-    if (p_true != 0.0) {
-        atomicAdd(&grad_true[var], a * p_true);
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type, nullptr, nullptr, nullptr, decision_var,
+        decision_child_false, decision_child_true
+    };
+    semantic_measure::accumulate_node_weight_gradients(
+        circuit, node, adj[node], var_log_true, var_log_false, values,
+        semantic_measure::AtomicWeightGradients{grad_true, grad_false});
 }
 
 /**
@@ -283,19 +196,13 @@ extern "C" __global__ void xgcf_backward_level_lit_grad(
     if (node_type[node] != XGCF_LIT) {
         return;
     }
-
-    double a = adj[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    int32_t l = lit[node];
-    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-    if (l > 0) {
-        atomicAdd(&grad_true[var], a);
-    } else if (l < 0) {
-        atomicAdd(&grad_false[var], a);
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type, nullptr, nullptr, lit, nullptr, nullptr, nullptr
+    };
+    const double* unused_values = nullptr;
+    semantic_measure::accumulate_node_weight_gradients(
+        circuit, node, adj[node], nullptr, nullptr, unused_values,
+        semantic_measure::AtomicWeightGradients{grad_true, grad_false});
 }
 
 /**
@@ -670,115 +577,23 @@ extern "C" __global__ void xgcf_backward_all_levels_cached_batched(
     double* grad_true_q = grad_true_batch + q_grad_base;
     double* grad_false_q = grad_false_batch + q_grad_base;
 
+    const semantic_measure::CircuitView circuit{
+        node_type_s, child_offsets_s, child_indices_s, lit_s, decision_var_s,
+        decision_child_false_s, decision_child_true_s
+    };
     uint32_t num_levels = meta_num_levels[slot];
     for (int32_t level = static_cast<int32_t>(num_levels) - 1; level >= 0; --level) {
         uint32_t level_off = level_offsets_s[level];
         uint32_t num_level_nodes = level_offsets_s[level + 1] - level_off;
         for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
             uint32_t node = level_nodes_s[level_off + idx];
-            double a = adj_q[node];
-
-            if (a != 0.0) {
-                uint8_t ty = node_type_s[node];
-                switch (ty) {
-                    case XGCF_AND: {
-                        uint32_t c0 = child_offsets_s[node];
-                        uint32_t c1 = child_offsets_s[node + 1];
-                        for (uint32_t i = c0; i < c1; i++) {
-                            uint32_t child = child_indices_s[i];
-                            atomicAdd(&adj_q[child], a);
-                        }
-                        break;
-                    }
-                    case XGCF_OR: {
-                        double parent_v = values_q[node];
-                        if (!(isinf(parent_v) && parent_v < 0.0)) {
-                            uint32_t c0 = child_offsets_s[node];
-                            uint32_t c1 = child_offsets_s[node + 1];
-                            for (uint32_t i = c0; i < c1; i++) {
-                                uint32_t child = child_indices_s[i];
-                                double child_v = values_q[child];
-                                if (isinf(child_v) && child_v < 0.0) {
-                                    continue;
-                                }
-                                double ratio = exp(child_v - parent_v);
-                                if (ratio != 0.0) {
-                                    atomicAdd(&adj_q[child], a * ratio);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    case XGCF_DECISION: {
-                        double parent_v = values_q[node];
-                        if (!(isinf(parent_v) && parent_v < 0.0)) {
-                            uint32_t var = decision_var_s[node];
-                            uint32_t child_f = decision_child_false_s[node];
-                            uint32_t child_t = decision_child_true_s[node];
-                            double log_t = var_log_true_q[var];
-                            double log_f = var_log_false_q[var];
-
-                            double vf = values_q[child_f];
-                            double vt = values_q[child_t];
-                            if (!(isinf(vf) && vf < 0.0)) {
-                                double ratio_f = exp((log_f + vf) - parent_v);
-                                if (ratio_f != 0.0) {
-                                    atomicAdd(&adj_q[child_f], a * ratio_f);
-                                }
-                            }
-                            if (!(isinf(vt) && vt < 0.0)) {
-                                double ratio_t = exp((log_t + vt) - parent_v);
-                                if (ratio_t != 0.0) {
-                                    atomicAdd(&adj_q[child_t], a * ratio_t);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    default:
-                        break;
-                }
-
-                if (ty == XGCF_DECISION) {
-                    double parent_v = values_q[node];
-                    if (!(isinf(parent_v) && parent_v < 0.0)) {
-                        uint32_t var = decision_var_s[node];
-                        uint32_t child_f = decision_child_false_s[node];
-                        uint32_t child_t = decision_child_true_s[node];
-                        double log_t = var_log_true_q[var];
-                        double log_f = var_log_false_q[var];
-
-                        double vf = values_q[child_f];
-                        double vt = values_q[child_t];
-
-                        double p_false = 0.0;
-                        double p_true = 0.0;
-                        if (!(isinf(vf) && vf < 0.0)) {
-                            p_false = exp((log_f + vf) - parent_v);
-                        }
-                        if (!(isinf(vt) && vt < 0.0)) {
-                            p_true = exp((log_t + vt) - parent_v);
-                        }
-
-                        if (p_false != 0.0) {
-                            atomicAdd(&grad_false_q[var], a * p_false);
-                        }
-                        if (p_true != 0.0) {
-                            atomicAdd(&grad_true_q[var], a * p_true);
-                        }
-                    }
-                }
-
-                if (ty == XGCF_LIT) {
-                    int32_t l = lit_s[node];
-                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-                    if (l > 0) {
-                        atomicAdd(&grad_true_q[var], a);
-                    } else if (l < 0) {
-                        atomicAdd(&grad_false_q[var], a);
-                    }
-                }
-            }
+            double adjoint = adj_q[node];
+            semantic_measure::propagate_node_adjoint(
+                circuit, node, adjoint, var_log_true_q, var_log_false_q, values_q,
+                semantic_measure::AtomicNodeAdjoints{adj_q});
+            semantic_measure::accumulate_node_weight_gradients(
+                circuit, node, adjoint, var_log_true_q, var_log_false_q, values_q,
+                semantic_measure::AtomicWeightGradients{grad_true_q, grad_false_q});
         }
         __syncthreads();
     }
@@ -874,72 +689,13 @@ extern "C" __global__ void xgcf_backward_level_propagate_cached(
     }
 
     uint32_t node = level_nodes_s[level_offset + tid];
-    double a = adj_s[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    uint8_t ty = node_type_s[node];
-    switch (ty) {
-        case XGCF_AND: {
-            uint32_t c0 = child_offsets_s[node];
-            uint32_t c1 = child_offsets_s[node + 1];
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices_s[i];
-                atomicAdd(&adj_s[child], a);
-            }
-            break;
-        }
-        case XGCF_OR: {
-            double parent_v = values_s[node];
-            if (isinf(parent_v) && parent_v < 0.0) {
-                return;
-            }
-            uint32_t c0 = child_offsets_s[node];
-            uint32_t c1 = child_offsets_s[node + 1];
-            for (uint32_t i = c0; i < c1; i++) {
-                uint32_t child = child_indices_s[i];
-                double child_v = values_s[child];
-                if (isinf(child_v) && child_v < 0.0) {
-                    continue;
-                }
-                double ratio = exp(child_v - parent_v);
-                if (ratio != 0.0) {
-                    atomicAdd(&adj_s[child], a * ratio);
-                }
-            }
-            break;
-        }
-        case XGCF_DECISION: {
-            double parent_v = values_s[node];
-            if (isinf(parent_v) && parent_v < 0.0) {
-                return;
-            }
-            uint32_t var = decision_var_s[node];
-            uint32_t child_f = decision_child_false_s[node];
-            uint32_t child_t = decision_child_true_s[node];
-            double log_t = var_log_true_s[var];
-            double log_f = var_log_false_s[var];
-
-            double vf = values_s[child_f];
-            double vt = values_s[child_t];
-            if (!(isinf(vf) && vf < 0.0)) {
-                double ratio_f = exp((log_f + vf) - parent_v);
-                if (ratio_f != 0.0) {
-                    atomicAdd(&adj_s[child_f], a * ratio_f);
-                }
-            }
-            if (!(isinf(vt) && vt < 0.0)) {
-                double ratio_t = exp((log_t + vt) - parent_v);
-                if (ratio_t != 0.0) {
-                    atomicAdd(&adj_s[child_t], a * ratio_t);
-                }
-            }
-            break;
-        }
-        default:
-            break;
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type_s, child_offsets_s, child_indices_s, nullptr, decision_var_s,
+        decision_child_false_s, decision_child_true_s
+    };
+    semantic_measure::propagate_node_adjoint(
+        circuit, node, adj_s[node], var_log_true_s, var_log_false_s, values_s,
+        semantic_measure::AtomicNodeAdjoints{adj_s});
 }
 
 extern "C" __global__ void xgcf_backward_level_decision_grad_cached(
@@ -997,41 +753,13 @@ extern "C" __global__ void xgcf_backward_level_decision_grad_cached(
     if (node_type_s[node] != XGCF_DECISION) {
         return;
     }
-
-    double a = adj_s[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    double parent_v = values_s[node];
-    if (isinf(parent_v) && parent_v < 0.0) {
-        return;
-    }
-
-    uint32_t var = decision_var_s[node];
-    uint32_t child_f = decision_child_false_s[node];
-    uint32_t child_t = decision_child_true_s[node];
-    double log_t = var_log_true_s[var];
-    double log_f = var_log_false_s[var];
-
-    double vf = values_s[child_f];
-    double vt = values_s[child_t];
-
-    double p_false = 0.0;
-    double p_true = 0.0;
-    if (!(isinf(vf) && vf < 0.0)) {
-        p_false = exp((log_f + vf) - parent_v);
-    }
-    if (!(isinf(vt) && vt < 0.0)) {
-        p_true = exp((log_t + vt) - parent_v);
-    }
-
-    if (p_false != 0.0) {
-        atomicAdd(&grad_false_s[var], a * p_false);
-    }
-    if (p_true != 0.0) {
-        atomicAdd(&grad_true_s[var], a * p_true);
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type_s, nullptr, nullptr, nullptr, decision_var_s,
+        decision_child_false_s, decision_child_true_s
+    };
+    semantic_measure::accumulate_node_weight_gradients(
+        circuit, node, adj_s[node], var_log_true_s, var_log_false_s, values_s,
+        semantic_measure::AtomicWeightGradients{grad_true_s, grad_false_s});
 }
 
 extern "C" __global__ void xgcf_backward_level_lit_grad_cached(
@@ -1079,19 +807,13 @@ extern "C" __global__ void xgcf_backward_level_lit_grad_cached(
     if (node_type_s[node] != XGCF_LIT) {
         return;
     }
-
-    double a = adj_s[node];
-    if (a == 0.0) {
-        return;
-    }
-
-    int32_t l = lit_s[node];
-    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-    if (l > 0) {
-        atomicAdd(&grad_true_s[var], a);
-    } else if (l < 0) {
-        atomicAdd(&grad_false_s[var], a);
-    }
+    const semantic_measure::CircuitView circuit{
+        node_type_s, nullptr, nullptr, lit_s, nullptr, nullptr, nullptr
+    };
+    const double* unused_values = nullptr;
+    semantic_measure::accumulate_node_weight_gradients(
+        circuit, node, adj_s[node], nullptr, nullptr, unused_values,
+        semantic_measure::AtomicWeightGradients{grad_true_s, grad_false_s});
 }
 
 // Fused backward pass: all levels in a single kernel (cached layout).
@@ -1147,118 +869,23 @@ extern "C" __global__ void xgcf_backward_all_levels_cached(
     double* grad_true_s = grad_true + var_base;
     double* grad_false_s = grad_false + var_base;
 
+    const semantic_measure::CircuitView circuit{
+        node_type_s, child_offsets_s, child_indices_s, lit_s, decision_var_s,
+        decision_child_false_s, decision_child_true_s
+    };
     uint32_t num_levels = meta_num_levels[slot];
     for (int32_t level = static_cast<int32_t>(num_levels) - 1; level >= 0; --level) {
         uint32_t level_off = level_offsets_s[level];
         uint32_t num_level_nodes = level_offsets_s[level + 1] - level_off;
         for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
             uint32_t node = level_nodes_s[level_off + idx];
-            double a = adj_s[node];
-
-            // --- propagate (from xgcf_backward_level_propagate_cached) ---
-            if (a != 0.0) {
-                uint8_t ty = node_type_s[node];
-                switch (ty) {
-                    case XGCF_AND: {
-                        uint32_t c0 = child_offsets_s[node];
-                        uint32_t c1 = child_offsets_s[node + 1];
-                        for (uint32_t i = c0; i < c1; i++) {
-                            uint32_t child = child_indices_s[i];
-                            atomicAdd(&adj_s[child], a);
-                        }
-                        break;
-                    }
-                    case XGCF_OR: {
-                        double parent_v = values_s[node];
-                        if (!(isinf(parent_v) && parent_v < 0.0)) {
-                            uint32_t c0 = child_offsets_s[node];
-                            uint32_t c1 = child_offsets_s[node + 1];
-                            for (uint32_t i = c0; i < c1; i++) {
-                                uint32_t child = child_indices_s[i];
-                                double child_v = values_s[child];
-                                if (isinf(child_v) && child_v < 0.0) {
-                                    continue;
-                                }
-                                double ratio = exp(child_v - parent_v);
-                                if (ratio != 0.0) {
-                                    atomicAdd(&adj_s[child], a * ratio);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    case XGCF_DECISION: {
-                        double parent_v = values_s[node];
-                        if (!(isinf(parent_v) && parent_v < 0.0)) {
-                            uint32_t var = decision_var_s[node];
-                            uint32_t child_f = decision_child_false_s[node];
-                            uint32_t child_t = decision_child_true_s[node];
-                            double log_t = var_log_true_s[var];
-                            double log_f = var_log_false_s[var];
-
-                            double vf = values_s[child_f];
-                            double vt = values_s[child_t];
-                            if (!(isinf(vf) && vf < 0.0)) {
-                                double ratio_f = exp((log_f + vf) - parent_v);
-                                if (ratio_f != 0.0) {
-                                    atomicAdd(&adj_s[child_f], a * ratio_f);
-                                }
-                            }
-                            if (!(isinf(vt) && vt < 0.0)) {
-                                double ratio_t = exp((log_t + vt) - parent_v);
-                                if (ratio_t != 0.0) {
-                                    atomicAdd(&adj_s[child_t], a * ratio_t);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    default:
-                        break;
-                }
-
-                // --- decision_grad (from xgcf_backward_level_decision_grad_cached) ---
-                if (ty == XGCF_DECISION) {
-                    double parent_v = values_s[node];
-                    if (!(isinf(parent_v) && parent_v < 0.0)) {
-                        uint32_t var = decision_var_s[node];
-                        uint32_t child_f = decision_child_false_s[node];
-                        uint32_t child_t = decision_child_true_s[node];
-                        double log_t = var_log_true_s[var];
-                        double log_f = var_log_false_s[var];
-
-                        double vf = values_s[child_f];
-                        double vt = values_s[child_t];
-
-                        double p_false = 0.0;
-                        double p_true = 0.0;
-                        if (!(isinf(vf) && vf < 0.0)) {
-                            p_false = exp((log_f + vf) - parent_v);
-                        }
-                        if (!(isinf(vt) && vt < 0.0)) {
-                            p_true = exp((log_t + vt) - parent_v);
-                        }
-
-                        if (p_false != 0.0) {
-                            atomicAdd(&grad_false_s[var], a * p_false);
-                        }
-                        if (p_true != 0.0) {
-                            atomicAdd(&grad_true_s[var], a * p_true);
-                        }
-                    }
-                }
-
-                // --- lit_grad (from xgcf_backward_level_lit_grad_cached) ---
-                if (ty == XGCF_LIT) {
-                    int32_t l = lit_s[node];
-                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
-                    if (l > 0) {
-                        atomicAdd(&grad_true_s[var], a);
-                    } else if (l < 0) {
-                        atomicAdd(&grad_false_s[var], a);
-                    }
-                }
-            }
+            double adjoint = adj_s[node];
+            semantic_measure::propagate_node_adjoint(
+                circuit, node, adjoint, var_log_true_s, var_log_false_s, values_s,
+                semantic_measure::AtomicNodeAdjoints{adj_s});
+            semantic_measure::accumulate_node_weight_gradients(
+                circuit, node, adjoint, var_log_true_s, var_log_false_s, values_s,
+                semantic_measure::AtomicWeightGradients{grad_true_s, grad_false_s});
         }
         __syncthreads();
     }
