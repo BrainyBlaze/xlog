@@ -38,15 +38,41 @@ struct StateKey {
     values: Vec<ValueKey>,
 }
 
-/// Shared only within a native mask call; no model state or authored source.
+#[derive(Default)]
+struct EmptyPlans {
+    environment: Vec<u8>,
+    outcomes: BTreeMap<usize, bool>,
+}
+
+/// Structural answers only; no model state or authored source. Empty entry
+/// plans survive mask calls for one exact environment, at most one answer per
+/// output slot. Intermediate search states are reset for each mask.
 #[derive(Default)]
 pub(crate) struct CompletionCache {
     entries: Mutex<BTreeMap<Vec<u8>, BTreeMap<StateKey, bool>>>,
+    empty_plans: Mutex<EmptyPlans>,
 }
 
 impl CompletionCache {
-    pub(crate) fn clear(&self) {
+    pub(crate) fn clear_search(&self) {
         self.entries.lock().unwrap().clear();
+    }
+
+    fn empty_plan(&self, environment: &[u8], output: usize) -> Option<bool> {
+        let plans = self.empty_plans.lock().unwrap();
+        if plans.environment != environment {
+            return None;
+        }
+        plans.outcomes.get(&output).copied()
+    }
+
+    fn remember_empty_plan(&self, environment: &[u8], output: usize, result: bool) {
+        let mut plans = self.empty_plans.lock().unwrap();
+        if plans.environment != environment {
+            plans.environment = environment.to_vec();
+            plans.outcomes.clear();
+        }
+        plans.outcomes.insert(output, result);
     }
 }
 
@@ -149,6 +175,15 @@ pub(super) fn possible(
         &required.parameters,
     ))
     .unwrap();
+    // Parsing a cumulative prefix revisits the completed operation count even
+    // after later operations have arrived. Its empty-body feasibility proof is
+    // unchanged by those bytes; reuse it only under the full original inputs.
+    let empty_plan = body.operations.is_empty();
+    if empty_plan {
+        if let Some(result) = cache.empty_plan(&environment, output) {
+            return result;
+        }
+    }
     let mut program = source.clone();
     program.body = body.clone();
     program.body.output = output;
@@ -164,12 +199,16 @@ pub(super) fn possible(
     {
         return false;
     }
-    Search {
+    let search = Search {
         environment,
         signatures,
         cache,
+    };
+    let result = search.visit(program);
+    if empty_plan {
+        cache.remember_empty_plan(&search.environment, output, result);
     }
-    .visit(program)
+    result
 }
 
 struct Search<'a> {

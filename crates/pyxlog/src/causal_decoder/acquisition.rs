@@ -565,7 +565,7 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("acquisition mask vocabulary differs"));
         }
         if let Some(cache) = &self.completion_cache {
-            cache.clear();
+            cache.clear_search();
         }
         let mask = py.detach(|| {
             let mut mask = allowed_mask.to_vec();
