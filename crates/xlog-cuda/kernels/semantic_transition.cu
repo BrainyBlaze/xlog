@@ -555,7 +555,7 @@ struct TrainingOriginalMaterializationInput {
 };
 static_assert(sizeof(TrainingOriginalMaterializationInput)==176,"original training materialization ABI");
 static_assert(sizeof(SemanticTrainingReplayAppendHeader)==128 && sizeof(SemanticTrainingReplayAppendEntry)==384 &&
-    sizeof(PublicationReplayDeliveryRow)==1072 && sizeof(PublicationReplayDeliveryInput)==232,
+    sizeof(PublicationReplayDeliveryRow)==1088 && sizeof(PublicationReplayDeliveryInput)==232,
     "replay append queue ABI");
 static_assert(offsetof(PublicationReplayDeliveryInput,receiver_outcome)==88 &&
     offsetof(PublicationReplayDeliveryInput,rows)==144 &&

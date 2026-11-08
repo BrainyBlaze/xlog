@@ -899,7 +899,7 @@ impl SemanticTransitionSession {
         }
         let source_layout = task_ground::TaskGroundLayout::from_material(&old_ground.bytes)?;
         let expected_image =
-            program_image::ProgramImageLayout::new(context.source_program_admission.as_ref())?
+            program_image::ProgramImageLayout::new(context.source_program_admission.as_deref())?
                 .with_library(
                     catalogue
                         .member_rule_library(SELECTED_TRAINING_CONTEXT)
