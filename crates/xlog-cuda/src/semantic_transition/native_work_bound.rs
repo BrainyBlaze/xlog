@@ -1730,6 +1730,121 @@ pub(super) struct OriginalStepInputPreparation {
     pub(super) native_work: Option<DeviceMemoryView<u64>>,
 }
 
+/// Enclose the same immutable entry rebase used by acquisition and activation.
+/// RootTruth replies use the original statement table. The additional complete
+/// support-chain visit validates each version digest before archiving its event.
+fn program_entry_native_work_ceiling(
+    source: &SemanticTransitionSession,
+) -> Result<[u64; 9], SemanticTransitionError> {
+    let task = &source
+        .task
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?
+        .0;
+    let ground = source
+        .task_ground
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?
+        .layout;
+    let arena = source.graph.transition_arena();
+    let statements = arena[3];
+    let versions = arena[5];
+    let queries = task.snapshot_statements.len() as u64;
+    let supports = ground.image.entry_supports as u64;
+    let receipt = size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64;
+    let reply_bytes = ceiling_sum([ceiling_product(3, receipt)?, 32 * 8])?;
+    let chains = ceiling_product(queries, ceiling_sum([versions, 1])?)?;
+    // The original observation and inherited-observation records are eighteen
+    // and twenty-two words. They precede the forty-two-word RootTruth archive.
+    let observations = ceiling_sum([
+        ceiling_product(ground.bindings as u64, 18 * 8)?,
+        ceiling_product(ground.inherited_capacity as u64, 22 * 8)?,
+    ])?;
+    let observation_hash = ceiling_sum([16, observations])?;
+    let snapshot_hash = ceiling_sum([
+        18 * 8 + 8,
+        observations,
+        ceiling_product(queries, 42 * 8)?,
+        ceiling_product(supports, 13 * 8)?,
+    ])?;
+    let result = [
+        ceiling_sum([queries, 1])?,
+        ceiling_sum([
+            32,
+            ceiling_product(statements, ceiling_sum([queries, 1])?)?,
+            ceiling_product(queries, queries)?,
+            ceiling_product(queries, ceiling_sum([ceiling_product(4, statements)?, 8])?)?,
+            ceiling_product(9, chains)?,
+        ])?,
+        chains,
+        0,
+        0,
+        0,
+        0,
+        ceiling_sum([
+            ceiling_product(2, chains)?,
+            ceiling_sum([observation_hash, 72])? / 64,
+            ceiling_sum([snapshot_hash, 72])? / 64,
+        ])?,
+        ceiling_sum([
+            ceiling_product(3, ground.image.frame_bytes as u64)?,
+            reply_bytes,
+            32 * 8 + 5 * 8 + 4 * 32,
+            observations,
+            ceiling_product(supports, 13 * 8)?,
+            // Version validation writes at most 265 bytes per chain link;
+            // the canonical collector also writes thirteen words and one ID.
+            ceiling_product(chains, 265)?,
+            ceiling_product(supports, 13 * 8 + 32)?,
+            ceiling_product(queries, ceiling_sum([reply_bytes, 42 * 8])?)?,
+        ])?,
+    ];
+    native_work_ceiling_units(result)?;
+    Ok(result)
+}
+
+/// Enclose one forest execution and its complete query receipt set. The native
+/// executor shares its existing remaining fuel across all trees and blocks;
+/// baseline/delta lookups and receipt copies occur outside that fuel counter.
+fn program_query_native_work_ceiling(
+    source: &SemanticTransitionSession,
+) -> Result<[u64; 9], SemanticTransitionError> {
+    let task = &source
+        .task
+        .as_ref()
+        .ok_or(SemanticTransitionError::NotBound)?
+        .0;
+    let program = task
+        .spec
+        .program
+        .editable_program()
+        .ok_or(SemanticTransitionError::InvalidTaskBank)?;
+    let facts = u64::try_from(program.fact_capacity().map_err(publication_input_error)?)
+        .map_err(|_| native_work_ceiling_overflow())?;
+    let queries = task.spec.statement_records.len() as u64;
+    let receipt = size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64;
+    let result = [
+        0,
+        ceiling_sum([
+            1_000_000,
+            ceiling_product(facts, facts)?,
+            ceiling_product(2, ceiling_product(queries, facts)?)?,
+        ])?,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ceiling_sum([
+            ceiling_product(facts, size_of::<crate::SemanticProgramFact>() as u64)?,
+            ceiling_product(queries, ceiling_sum([receipt, 4 * 32])?)?,
+        ])?,
+    ];
+    native_work_ceiling_units(result)?;
+    Ok(result)
+}
+
 /// Finite producer geometry of the original native model-context seal. The
 /// acquired SOURCE supplies immutable extents, not observed execution counts.
 pub(super) fn model_context_activation_native_work_ceiling(
@@ -1866,24 +1981,9 @@ pub(super) fn model_context_activation_native_work_ceiling(
         .ok_or(SemanticTransitionError::NotBound)?;
     let queries = count(task.spec.statement_records.len())?;
     if task.spec.program.editable_program().is_some() {
-        let attainment = attainment_native_work_ceiling(&task.spec)?;
-        add_native_work_ceiling(
-            &mut ceiling,
-            [
-                0,
-                ceiling_sum([1_000_000, attainment[1]])?,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                ceiling_product(
-                    queries,
-                    size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64,
-                )?,
-            ],
-        )?;
+        add_native_work_ceiling(&mut ceiling, program_entry_native_work_ceiling(target)?)?;
+        add_native_work_ceiling(&mut ceiling, program_query_native_work_ceiling(target)?)?;
+        add_native_work_ceiling(&mut ceiling, attainment_native_work_ceiling(&task.spec)?)?;
     }
     add_native_work_ceiling(
         &mut ceiling,
@@ -3211,48 +3311,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
         repeat_native_ceiling(ceiling, insertion, 4)?;
         repeat_native_ceiling(ceiling, terminal, 3)?;
         if editable {
-            // materialize checks charged==fuel before every increment, including
-            // failure. Exactly three task_program_queries can reach the owner.
-            add_native_work_ceiling(
-                ceiling,
-                [
-                    0,
-                    ceiling_sum([
-                        3 * 1_000_000,
-                        ceiling_product(
-                            3,
-                            ceiling_product(
-                                task.0
-                                    .spec
-                                    .program
-                                    .editable_program()
-                                    .ok_or(SemanticTransitionError::InvalidTaskBank)?
-                                    .fact_capacity()
-                                    .map_err(publication_input_error)?
-                                    as u64,
-                                ceiling_sum([
-                                    task.0
-                                        .spec
-                                        .program
-                                        .editable_program()
-                                        .ok_or(SemanticTransitionError::InvalidTaskBank)?
-                                        .fact_capacity()
-                                        .map_err(publication_input_error)?
-                                        as u64,
-                                    queries,
-                                ])?,
-                            )?,
-                        )?,
-                    ])?,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ceiling_product(ceiling_product(3, queries)?, receipt_bytes)?,
-                ],
-            )?;
+            repeat_native_ceiling(ceiling, program_query_native_work_ceiling(child)?, 3)?;
             let program = task
                 .0
                 .spec
@@ -3269,27 +3328,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                 program.image.mutation_capacity as u64,
                 ground.library_count as u64,
             ])?;
-            let snapshot_queries = task.0.snapshot_statements.len() as u64;
-            repeat_native_ceiling(ceiling, truth, snapshot_queries)?;
-            let chain_visits = ceiling_product(snapshot_queries, ceiling_sum([versions, 1])?)?;
-            add_native_work_ceiling(
-                ceiling,
-                [
-                    1,
-                    ceiling_sum([
-                        ceiling_product(statements, ceiling_sum([snapshot_queries, 1])?)?,
-                        ceiling_product(snapshot_queries, snapshot_queries)?,
-                        ceiling_product(8, chain_visits)?,
-                    ])?,
-                    chain_visits,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ceiling_sum([ground.bytes as u64, 72])? / 64,
-                    ceiling_product(8, ground.bytes as u64)?,
-                ],
-            )?;
+            add_native_work_ceiling(ceiling, program_entry_native_work_ceiling(child)?)?;
             // Four possible mutations hash their complete selected payload,
             // journals and typed proof. All three candidate copies and the
             // immutable entry copy remain in the original task-ground bank.
