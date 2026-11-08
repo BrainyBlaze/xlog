@@ -1682,6 +1682,11 @@ impl<'de> Visitor<'de> for Operation<'_> {
                         alphabet: self.raw_tokens,
                         bytes: self.bytes,
                         required_length: program.output_columns(),
+                        typed_completion: program.searches_completion().then_some((
+                            program,
+                            &material,
+                            self.signatures,
+                        )),
                     })?)
                     .map_err(A::Error::custom)?
                 } else if key == "function" {
@@ -1716,6 +1721,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     alphabet: self.raw_tokens,
                     bytes: self.bytes,
                     required_length: None,
+                    typed_completion: None,
                 })?;
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -1870,6 +1876,22 @@ struct TokenIds<'a> {
     alphabet: &'a BTreeSet<u32>,
     bytes: &'a [u8],
     required_length: Option<usize>,
+    typed_completion: Option<(
+        &'a typed::Program,
+        &'a serde_json::Map<String, Value>,
+        &'a typed::Signatures,
+    )>,
+}
+
+impl TokenIds<'_> {
+    fn permits_prefix(&self, values: &[u32]) -> bool {
+        let Some((program, material, signatures)) = self.typed_completion else {
+            return true;
+        };
+        let mut candidate = material.clone();
+        candidate.insert("token_ids".into(), json!(values));
+        program.possible(&candidate, Some("token_ids"), signatures)
+    }
 }
 impl<'de> DeserializeSeed<'de> for TokenIds<'_> {
     type Value = Vec<u32>;
@@ -1885,6 +1907,9 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = BTreeSet::new();
         let mut values = Vec::new();
+        if !self.permits_prefix(&values) {
+            return Err(A::Error::custom("raw-token array has no typed completion"));
+        }
         while let Some(raw) = sequence.next_element::<&'de serde_json::value::RawValue>()? {
             if self
                 .required_length
@@ -1897,11 +1922,17 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
             // a decimal may still extend across BPE tokens (e.g. "1" -> "15").
             // Once a delimiter follows it, membership/uniqueness are final.
             if spelling.as_bytes().as_ptr_range().end == self.bytes.as_ptr_range().end {
-                if !self
-                    .alphabet
-                    .iter()
-                    .any(|id| !seen.contains(id) && id.to_string().starts_with(spelling))
-                {
+                if !self.alphabet.iter().any(|id| {
+                    if seen.contains(id) || !id.to_string().starts_with(spelling) {
+                        return false;
+                    }
+                    if self.typed_completion.is_none() {
+                        return true;
+                    }
+                    let mut next = values.clone();
+                    next.push(*id);
+                    self.permits_prefix(&next)
+                }) {
                     return Err(A::Error::custom(
                         "no unused raw-token ID extends this decimal prefix",
                     ));
@@ -1915,8 +1946,25 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
                     "token indicator must name a distinct raw-alphabet ID",
                 ));
             }
+            if !self.permits_prefix(&values) {
+                return Err(A::Error::custom("raw-token prefix has no typed completion"));
+            }
             let end =
                 spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+            if self.typed_completion.is_some()
+                && self.bytes[end..].trim_ascii_start().starts_with(b",")
+                && !self
+                    .alphabet
+                    .iter()
+                    .filter(|id| !seen.contains(*id))
+                    .any(|id| {
+                        let mut next = values.clone();
+                        next.push(*id);
+                        self.permits_prefix(&next)
+                    })
+            {
+                return Err(A::Error::custom("raw-token array has no typed next slot"));
+            }
             if self.required_length == Some(values.len())
                 && self.bytes[end..].trim_ascii_start().starts_with(b",")
             {

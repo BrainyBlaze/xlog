@@ -294,7 +294,7 @@ impl Program {
         widths
     }
 
-    fn searches_completion(&self) -> bool {
+    pub(super) fn searches_completion(&self) -> bool {
         self.dependencies
             .as_ref()
             .is_some_and(|facts| facts.completion_cache.is_some())
