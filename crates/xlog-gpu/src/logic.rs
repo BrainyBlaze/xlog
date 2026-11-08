@@ -1674,10 +1674,18 @@ fn compile_positive_task_owned(
     let result_bytes = [
         (theory.predicates.len(), std::mem::size_of::<u32>()),
         (fact_count, std::mem::size_of::<SemanticProgramFact>()),
-        (1, std::mem::size_of::<u32>() + std::mem::size_of::<xlog_cuda::SemanticProgramNode>() +
-            2 * std::mem::size_of::<xlog_cuda::SemanticProgramLeaf>() + std::mem::size_of::<Vec<u32>>()),
+        (
+            1,
+            std::mem::size_of::<u32>()
+                + std::mem::size_of::<xlog_cuda::SemanticProgramNode>()
+                + 2 * std::mem::size_of::<xlog_cuda::SemanticProgramLeaf>()
+                + std::mem::size_of::<Vec<u32>>(),
+        ),
         (rule_count, std::mem::size_of::<u32>()),
-        (query_records.len(), std::mem::size_of::<SemanticProgramFact>() + std::mem::size_of::<u32>()),
+        (
+            query_records.len(),
+            std::mem::size_of::<SemanticProgramFact>() + std::mem::size_of::<u32>(),
+        ),
         (
             rule_count,
             std::mem::size_of::<xlog_cuda::SemanticProgramRule>(),
@@ -1768,8 +1776,11 @@ fn compile_positive_task_owned(
         .map(|record| observation_facts[*record as usize].1)
         .collect();
     let image = xlog_cuda::SemanticProgramImageAdmission::flat(
-        &queries, query_records, initial_rules.len(),
-    ).map_err(|message| XlogError::Compilation(message.into()))?;
+        &queries,
+        query_records,
+        initial_rules.len(),
+    )
+    .map_err(|message| XlogError::Compilation(message.into()))?;
     Ok((
         SemanticProgramAdmission {
             image,

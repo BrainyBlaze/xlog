@@ -78,7 +78,10 @@ impl SemanticProgramImageAdmission {
     pub fn reserve_mutations(&mut self, mutations: u32) -> Result<(), &'static str> {
         if self.mutation_capacity != 0
             || self.roots.iter().any(|&root| root == PROGRAM_IMAGE_NULL)
-            || self.nodes.iter().any(|node| matches!(node, SemanticProgramNode::Unused))
+            || self
+                .nodes
+                .iter()
+                .any(|node| matches!(node, SemanticProgramNode::Unused))
         {
             return Err("program mutation storage is already bound");
         }
@@ -136,7 +139,10 @@ impl SemanticProgramImageAdmission {
         }
         for block in &self.rule_blocks {
             if block.iter().any(|&rule| rule as usize >= rule_count)
-                || block.iter().enumerate().any(|(index, rule)| block[..index].contains(rule))
+                || block
+                    .iter()
+                    .enumerate()
+                    .any(|(index, rule)| block[..index].contains(rule))
             {
                 return Err("program rule block changes its original rule references");
             }
@@ -154,7 +160,10 @@ impl SemanticProgramImageAdmission {
                         || events.iter().any(|&(guard, polarity)| {
                             guard as usize >= self.guards.len() || !(1..=2).contains(&polarity)
                         })
-                        || events.iter().enumerate().any(|(index, event)| events[..index].contains(event))
+                        || events
+                            .iter()
+                            .enumerate()
+                            .any(|(index, event)| events[..index].contains(event))
                     {
                         return Err("program evidence leaf has an invalid support event");
                     }
@@ -167,9 +176,9 @@ impl SemanticProgramImageAdmission {
                 SemanticProgramNode::Branch { guard, children } => {
                     if *guard as usize >= self.guards.len()
                         || children.iter().any(|&child| {
-                            self.nodes.get(child as usize).is_none_or(|node| {
-                                matches!(node, SemanticProgramNode::Unused)
-                            })
+                            self.nodes
+                                .get(child as usize)
+                                .is_none_or(|node| matches!(node, SemanticProgramNode::Unused))
                         })
                     {
                         return Err("program branch has an absent guard or child");
@@ -185,9 +194,10 @@ impl SemanticProgramImageAdmission {
         if !self.roots.iter().any(|&root| root != PROGRAM_IMAGE_NULL)
             || self.roots.iter().any(|&root| {
                 root != PROGRAM_IMAGE_NULL
-                    && self.nodes.get(root as usize).is_none_or(|node| {
-                        matches!(node, SemanticProgramNode::Unused)
-                    })
+                    && self
+                        .nodes
+                        .get(root as usize)
+                        .is_none_or(|node| matches!(node, SemanticProgramNode::Unused))
             })
         {
             return Err("program image has no live tree or an absent root node");
@@ -195,7 +205,10 @@ impl SemanticProgramImageAdmission {
         // Validate all initialized nodes, including a not-yet-rooted invention.
         // A completed guard walk can therefore never conceal a dangling cycle.
         let mut colors = vec![0u8; self.nodes.len()];
-        let stack_capacity = self.nodes.len().checked_mul(5)
+        let stack_capacity = self
+            .nodes
+            .len()
+            .checked_mul(5)
             .ok_or("program traversal allocation exceeds addressable storage")?;
         let mut stack = Vec::with_capacity(stack_capacity);
         for start in 0..self.nodes.len() {
@@ -240,16 +253,16 @@ impl SemanticProgramImageAdmission {
         target_record_offset: u32,
         map_fact: impl Fn(SemanticProgramFact) -> Result<SemanticProgramFact, &'static str>,
     ) -> Result<Self, &'static str> {
-        let count = |value: usize| {
-            u32::try_from(value).map_err(|_| "program context exceeds u32")
-        };
+        let count = |value: usize| u32::try_from(value).map_err(|_| "program context exceeds u32");
         let node_offset = count(source.nodes.len())?;
         let guard_offset = count(source.guards.len())?;
         let leaf_offset = count(source.leaves.len())?;
         let block_offset = count(source.rule_blocks.len())?;
         let rule_offset = count(source_rule_count)?;
         let add = |value: u32, offset: u32| {
-            value.checked_add(offset).ok_or("program context index exceeds u32")
+            value
+                .checked_add(offset)
+                .ok_or("program context index exceeds u32")
         };
         let mut result = source.clone();
         result.local_root_begin = count(source.roots.len())?;
@@ -290,7 +303,9 @@ impl SemanticProgramImageAdmission {
             result.guards.push(map_fact(fact)?);
         }
         for &record in &target.guard_records {
-            result.guard_records.push(add(record, target_record_offset)?);
+            result
+                .guard_records
+                .push(add(record, target_record_offset)?);
         }
         for leaf in &target.leaves {
             result.leaves.push(match leaf {
@@ -299,15 +314,19 @@ impl SemanticProgramImageAdmission {
                     SemanticProgramLeaf::RuleBlock(add(*block, block_offset)?)
                 }
                 SemanticProgramLeaf::Evidence(events) => SemanticProgramLeaf::Evidence(
-                    events.iter().map(|&(guard, polarity)| {
-                        Ok((add(guard, guard_offset)?, polarity))
-                    }).collect::<Result<_, &'static str>>()?
+                    events
+                        .iter()
+                        .map(|&(guard, polarity)| Ok((add(guard, guard_offset)?, polarity)))
+                        .collect::<Result<_, &'static str>>()?,
                 ),
             });
         }
         for block in &target.rule_blocks {
             result.rule_blocks.push(
-                block.iter().map(|&rule| add(rule, rule_offset)).collect::<Result<_, _>>()?
+                block
+                    .iter()
+                    .map(|&rule| add(rule, rule_offset))
+                    .collect::<Result<_, _>>()?,
             );
         }
         result.local_mutation_capacity = target.local_mutation_capacity;
@@ -320,28 +339,46 @@ impl SemanticProgramImageAdmission {
         for (count, width) in [
             (self.roots.len(), std::mem::size_of::<u32>()),
             (self.nodes.len(), std::mem::size_of::<SemanticProgramNode>()),
-            (self.guards.len(), std::mem::size_of::<SemanticProgramFact>()),
+            (
+                self.guards.len(),
+                std::mem::size_of::<SemanticProgramFact>(),
+            ),
             (self.guard_records.len(), std::mem::size_of::<u32>()),
-            (self.leaves.len(), std::mem::size_of::<SemanticProgramLeaf>()),
+            (
+                self.leaves.len(),
+                std::mem::size_of::<SemanticProgramLeaf>(),
+            ),
             (self.rule_blocks.len(), std::mem::size_of::<Vec<u32>>()),
             (self.nodes.len(), std::mem::size_of::<u8>()),
         ] {
-            bytes = count.checked_mul(width).and_then(|n| bytes.checked_add(n))
+            bytes = count
+                .checked_mul(width)
+                .and_then(|n| bytes.checked_add(n))
                 .ok_or_else(overflow)?;
         }
         // One deferred leave and four child visits per initialized branch.
-        bytes = self.nodes.len().checked_mul(5)
+        bytes = self
+            .nodes
+            .len()
+            .checked_mul(5)
             .and_then(|n| n.checked_mul(std::mem::size_of::<(usize, bool)>()))
-            .and_then(|n| bytes.checked_add(n)).ok_or_else(overflow)?;
+            .and_then(|n| bytes.checked_add(n))
+            .ok_or_else(overflow)?;
         for leaf in &self.leaves {
             if let SemanticProgramLeaf::Evidence(events) = leaf {
-                bytes = events.len().checked_mul(std::mem::size_of::<(u32, u32)>())
-                    .and_then(|n| bytes.checked_add(n)).ok_or_else(overflow)?;
+                bytes = events
+                    .len()
+                    .checked_mul(std::mem::size_of::<(u32, u32)>())
+                    .and_then(|n| bytes.checked_add(n))
+                    .ok_or_else(overflow)?;
             }
         }
         for block in &self.rule_blocks {
-            bytes = block.len().checked_mul(std::mem::size_of::<u32>())
-                .and_then(|n| bytes.checked_add(n)).ok_or_else(overflow)?;
+            bytes = block
+                .len()
+                .checked_mul(std::mem::size_of::<u32>())
+                .and_then(|n| bytes.checked_add(n))
+                .ok_or_else(overflow)?;
         }
         Ok(bytes)
     }
@@ -353,9 +390,10 @@ impl SemanticProgramImageAdmission {
                 _ => 0,
             })
         })?;
-        let references = self.rule_blocks.iter().try_fold(0usize, |sum, block| {
-            sum.checked_add(block.len())
-        })?;
+        let references = self
+            .rule_blocks
+            .iter()
+            .try_fold(0usize, |sum, block| sum.checked_add(block.len()))?;
         PROGRAM_IMAGE_HEADER_WORDS
             .checked_add(self.roots.len())?
             .checked_add(self.nodes.len().checked_mul(PROGRAM_IMAGE_NODE_WORDS)?)?
@@ -367,10 +405,14 @@ impl SemanticProgramImageAdmission {
     }
 
     pub(crate) fn visit_words(&self, mut visit: impl FnMut(u64)) {
-        let events: usize = self.leaves.iter().map(|leaf| match leaf {
-            SemanticProgramLeaf::Evidence(events) => events.len(),
-            _ => 0,
-        }).sum();
+        let events: usize = self
+            .leaves
+            .iter()
+            .map(|leaf| match leaf {
+                SemanticProgramLeaf::Evidence(events) => events.len(),
+                _ => 0,
+            })
+            .sum();
         let references: usize = self.rule_blocks.iter().map(Vec::len).sum();
         for word in [
             0x584c4f47464f5253,

@@ -196,11 +196,17 @@ impl SemanticTransitionSession {
             .as_ref()
             .and_then(|(binding, _)| binding.spec.program.editable_program())
             .ok_or(SemanticTransitionError::NotBound)?;
-        let owner = binding.program_image_owner().ok_or(SemanticTransitionError::NotBound)?;
+        let owner = binding
+            .program_image_owner()
+            .ok_or(SemanticTransitionError::NotBound)?;
         let donor = &source_ground.bytes[source_layout.frame(0)?];
         for slot in 0..4 {
             layout.image.require_donor_prefix(
-                &ground.bytes[layout.frame(slot)?], source_layout.image, donor, program, owner,
+                &ground.bytes[layout.frame(slot)?],
+                source_layout.image,
+                donor,
+                program,
+                owner,
             )?;
         }
         for (binding, &record) in records.iter().enumerate() {
@@ -889,13 +895,20 @@ impl SemanticTransitionSession {
             ));
         }
         let source_layout = task_ground::TaskGroundLayout::from_material(&old_ground.bytes)?;
-        let expected_image = program_image::ProgramImageLayout::new(context.source_program_admission.as_ref())?
-            .with_library(catalogue.member_rule_library(SELECTED_TRAINING_CONTEXT)
-                .as_ref().map_or(0, |library| library.rules().len()))?
-            .with_entry_supports(source_layout.image.entry_supports)?;
-        if source_layout.queries != source_queries as usize ||
-            source_layout.bindings != source_bindings as usize ||
-            source_layout.inherited_capacity != 0 || source_layout.image != expected_image {
+        let expected_image =
+            program_image::ProgramImageLayout::new(context.source_program_admission.as_ref())?
+                .with_library(
+                    catalogue
+                        .member_rule_library(SELECTED_TRAINING_CONTEXT)
+                        .as_ref()
+                        .map_or(0, |library| library.rules().len()),
+                )?
+                .with_entry_supports(source_layout.image.entry_supports)?;
+        if source_layout.queries != source_queries as usize
+            || source_layout.bindings != source_bindings as usize
+            || source_layout.inherited_capacity != 0
+            || source_layout.image != expected_image
+        {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         source_layout.validate(&old_ground.bytes)?;
@@ -908,9 +921,16 @@ impl SemanticTransitionSession {
                 "ordinary training donor cannot carry an evaluation rule activity mask",
             ));
         }
-        let target_program = self.task.as_ref()
+        let target_program = self
+            .task
+            .as_ref()
             .and_then(|(task, _)| task.spec.program.editable_program());
-        let mut ground = ground_layout.initial_bytes(target_program, self.task.as_ref().and_then(|(task, _)| task.program_image_owner()))?;
+        let mut ground = ground_layout.initial_bytes(
+            target_program,
+            self.task
+                .as_ref()
+                .and_then(|(task, _)| task.program_image_owner()),
+        )?;
         for slot in 0..4 {
             ground_layout.image.inherit_source(
                 &mut ground[ground_layout.frame(slot)?],

@@ -116,8 +116,8 @@ pub(crate) mod state_restoration;
 pub use state_restoration::{
     SemanticPrivateModelContextCheckpointOrigin, SemanticPrivateModelContextCheckpointSave,
 };
-mod task_ground;
 mod program_image;
+mod task_ground;
 mod task_retirement;
 mod verification_receipts;
 #[cfg(feature = "semantic-policy")]
@@ -378,8 +378,7 @@ impl SemanticTaskScoring {
         // path retains its support-attachment bound. Priority selection need
         // not maximize value, so both signs of the return must fit.
         let editable_program = program.is_some();
-        let max_cost =
-            u128::from(semantic_structural_cost_descriptor(program, query_count)?.cap);
+        let max_cost = u128::from(semantic_structural_cost_descriptor(program, query_count)?.cap);
         let queries = u128::from(query_count);
         let max_spent = if editable_program {
             5 * queries + 4
@@ -444,11 +443,7 @@ impl SemanticTaskScoring {
         for weight in self.words() {
             material_u64(&mut bytes, weight);
         }
-        bytes.extend_from_slice(
-            &self
-                .return_bound(program, query_count)?
-                .to_le_bytes(),
-        );
+        bytes.extend_from_slice(&self.return_bound(program, query_count)?.to_le_bytes());
         Ok(bytes)
     }
 }
@@ -1056,12 +1051,23 @@ impl TaskEvaluationBinding {
             &spec.statement_records,
             &spec.allowed_support_records,
         )?;
-        let snapshot_statements = spec.program.editable_program()
-            .map(|program| program.observation_facts.iter().map(|&(record, fact)| {
-                admission.statement_key(record)
-                    .map(|key| (record, key, fact))
-                    .map_err(SemanticTransitionError::Semantic)
-            }).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default();
+        let snapshot_statements = spec
+            .program
+            .editable_program()
+            .map(|program| {
+                program
+                    .observation_facts
+                    .iter()
+                    .map(|&(record, fact)| {
+                        admission
+                            .statement_key(record)
+                            .map(|key| (record, key, fact))
+                            .map_err(SemanticTransitionError::Semantic)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let observation_statements = spec
             .task_ground
             .bindings()
@@ -1214,7 +1220,9 @@ impl TaskEvaluationBinding {
         for &(record, ref statement, fact) in &self.snapshot_statements {
             hash.update(record.to_le_bytes());
             hash.update(statement.identity().as_bytes());
-            for value in [fact.predicate, fact.arity, fact.first, fact.second] { hash.update(value.to_le_bytes()); }
+            for value in [fact.predicate, fact.arity, fact.first, fact.second] {
+                hash.update(value.to_le_bytes());
+            }
         }
         for (statement, fact) in &self.observation_statements {
             hash.update(statement.identity().as_bytes());
@@ -1416,35 +1424,50 @@ impl TaskEvaluationBinding {
         Some(identity_words(hash.finalize().into()))
     }
     fn validate_program_ground(
-        &self, layout: task_ground::TaskGroundLayout, bytes: &[u8],
+        &self,
+        layout: task_ground::TaskGroundLayout,
+        bytes: &[u8],
     ) -> Result<(), SemanticTransitionError> {
-        let Some(program) = self.spec.program.editable_program() else { return Ok(()); };
-        let owner = self.program_image_owner().ok_or(SemanticTransitionError::NotBound)?;
+        let Some(program) = self.spec.program.editable_program() else {
+            return Ok(());
+        };
+        let owner = self
+            .program_image_owner()
+            .ok_or(SemanticTransitionError::NotBound)?;
         for slot in 0..4 {
             let frame = &bytes[layout.frame(slot)?];
-            if (0..4).any(|index| frame[(6+index)*8..(7+index)*8] != owner[index].to_le_bytes()) {
-                return Err(publication_input_error("restored selected image changed its qualified native owner"));
+            if (0..4)
+                .any(|index| frame[(6 + index) * 8..(7 + index) * 8] != owner[index].to_le_bytes())
+            {
+                return Err(publication_input_error(
+                    "restored selected image changed its qualified native owner",
+                ));
             }
             if layout.image.local_roots == 0 {
                 let origin = layout.image.origin_genome(program, owner, None)?;
-                if (0..4).any(|index| frame[(26+index)*8..(27+index)*8] != origin[index].to_le_bytes()) {
-                    return Err(publication_input_error("restored selected image changed its original cold genome"));
+                if (0..4).any(|index| {
+                    frame[(26 + index) * 8..(27 + index) * 8] != origin[index].to_le_bytes()
+                }) {
+                    return Err(publication_input_error(
+                        "restored selected image changed its original cold genome",
+                    ));
                 }
             }
         }
-        let snapshot = &bytes[layout.snapshot_offset..layout.inherited_offset-16];
+        let snapshot = &bytes[layout.snapshot_offset..layout.inherited_offset - 16];
         if snapshot[..8] != [0; 8] {
-            let begin = 256 + layout.bindings*144 + layout.inherited_capacity*176;
+            let begin = 256 + layout.bindings * 144 + layout.inherited_capacity * 176;
             for (index, &(_, ref key, _)) in self.snapshot_statements.iter().enumerate() {
-                let row = &snapshot[begin + index*42*8..begin + (index+1)*42*8];
-                if row[20*8..24*8] != key.identity().as_bytes()[..] {
-                    return Err(publication_input_error("restored native entry query changed its qualified statement"));
+                let row = &snapshot[begin + index * 42 * 8..begin + (index + 1) * 42 * 8];
+                if row[20 * 8..24 * 8] != key.identity().as_bytes()[..] {
+                    return Err(publication_input_error(
+                        "restored native entry query changed its qualified statement",
+                    ));
                 }
             }
         }
         Ok(())
     }
-
 
     pub(crate) fn words(&self, owner: u64) -> Vec<u64> {
         self.words_with_intervention(owner, self.spec.evaluation_intervention)
@@ -1559,8 +1582,13 @@ impl TaskEvaluationBinding {
         words.push(self.snapshot_statements.len() as u64);
         for &(record, ref statement, fact) in &self.snapshot_statements {
             words.extend(identity_words(*statement.identity().as_bytes()));
-            words.extend([u64::from(record), u64::from(fact.predicate), u64::from(fact.arity),
-                u64::from(fact.first), u64::from(fact.second)]);
+            words.extend([
+                u64::from(record),
+                u64::from(fact.predicate),
+                u64::from(fact.arity),
+                u64::from(fact.first),
+                u64::from(fact.second),
+            ]);
         }
         words.extend(self.program_image_owner().unwrap_or([0; 4]));
         debug_assert_eq!(words.len(), count);
@@ -1665,9 +1693,18 @@ impl SemanticActionCatalogue {
                 INSERT_SUPPORT_NULL_MASK as u32,
             ),
             (INSERT_RULE_ACTIVE_MASK as u32, INSERT_RULE_NULL_MASK as u32),
-            (REPLACE_BRANCH_ACTIVE_MASK as u32, REPLACE_BRANCH_NULL_MASK as u32),
-            (REPLACE_LEAF_ACTIVE_MASK as u32, REPLACE_LEAF_NULL_MASK as u32),
-            (REPLACE_ROOT_ACTIVE_MASK as u32, REPLACE_ROOT_NULL_MASK as u32),
+            (
+                REPLACE_BRANCH_ACTIVE_MASK as u32,
+                REPLACE_BRANCH_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_LEAF_ACTIVE_MASK as u32,
+                REPLACE_LEAF_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_ROOT_ACTIVE_MASK as u32,
+                REPLACE_ROOT_NULL_MASK as u32,
+            ),
         ]
     }
 }
@@ -1812,12 +1849,24 @@ pub enum SemanticActionDescriptor {
         predicate: u32,
         arity: u32,
     },
-    RuleVariable { index: u32 },
-    ProgramNode { index: u32 },
-    ProgramRoot { index: u32 },
-    ProgramGuard { index: u32 },
-    ProgramChild { index: u32 },
-    ProgramLeaf { effect: u32 },
+    RuleVariable {
+        index: u32,
+    },
+    ProgramNode {
+        index: u32,
+    },
+    ProgramRoot {
+        index: u32,
+    },
+    ProgramGuard {
+        index: u32,
+    },
+    ProgramChild {
+        index: u32,
+    },
+    ProgramLeaf {
+        effect: u32,
+    },
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -1844,8 +1893,6 @@ struct SemanticDecodedProgramEdit {
     rule: Option<crate::SemanticProgramRule>,
     bytes: Vec<u8>,
 }
-
-
 
 fn semantic_program_rule_words(rule: crate::SemanticProgramRule) -> [u64; 25] {
     rule.words()
@@ -1918,29 +1965,45 @@ struct ActionCodebooks {
 
 impl ActionCodebooks {
     fn descriptor_table(field: u32) -> Option<usize> {
-        match field { 2 => Some(0), 3..=10 | 12..=16 => Some(1),
-            11 => Some(2), 17 => Some(3), _ => None }
+        match field {
+            2 => Some(0),
+            3..=10 | 12..=16 => Some(1),
+            11 => Some(2),
+            17 => Some(3),
+            _ => None,
+        }
     }
 
     fn local_category(&self, field: u32, category: u32) -> Option<usize> {
         let table = Self::descriptor_table(field)?;
         let value = u64::from(category);
-        if value == 0 || value >= self.words[2 * table + 1] { return None; }
+        if value == 0 || value >= self.words[2 * table + 1] {
+            return None;
+        }
         let width = model_catalogue::ROW_WIDTHS[table];
         let offset = self.words[2 * table] as usize + category as usize * width;
         let row = self.words.get(offset..offset + width)?;
         if let Some((role, relative)) = model_catalogue::template_role(table, row) {
-            if relative >= self.words[65 + role] { return None; }
-            if self.words[40] != 0 &&
-                !(self.words[44 + 2 * table]..self.words[45 + 2 * table]).contains(&value) {
+            if relative >= self.words[65 + role] {
                 return None;
             }
-            let preceding = match role { 1 => self.words[60], 3 => self.words[62], _ => 0 };
+            if self.words[40] != 0
+                && !(self.words[44 + 2 * table]..self.words[45 + 2 * table]).contains(&value)
+            {
+                return None;
+            }
+            let preceding = match role {
+                1 => self.words[60],
+                3 => self.words[62],
+                _ => 0,
+            };
             return usize::try_from(self.words[52 + 2 * table] + preceding + relative - 1).ok();
         }
         let begin = self.words[29 + 2 * table];
         let end = self.words[30 + 2 * table];
-        if !(begin..end).contains(&value) { return None; }
+        if !(begin..end).contains(&value) {
+            return None;
+        }
         let mut local = value - begin + 1;
         if self.words[40] != 0 && local >= self.words[52 + 2 * table] {
             local += self.words[53 + 2 * table] - self.words[52 + 2 * table];
@@ -1961,7 +2024,9 @@ impl ActionCodebooks {
                 self.model_catalogue.as_ref()?.0.template_extents[0] - self.words[60]
             } else if table == 1 && role_index >= self.words[62] {
                 self.model_catalogue.as_ref()?.0.template_extents[2] - self.words[62]
-            } else { 0 };
+            } else {
+                0
+            };
             self.words[44 + 2 * table] + role_index + offset
         } else {
             self.words[29 + 2 * table] + local - 1 - if local >= end { end - begin } else { 0 }
@@ -2040,20 +2105,30 @@ impl ActionCodebooks {
             }
         }
         semantic_generated_rule_receipt_words(rule, program)?;
-        let block = self.program_leaf_effect(program, choices[17], true)?.1
+        let block = self
+            .program_leaf_effect(program, choices[17], true)?
+            .1
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         Ok(SemanticDecodedRuleInsertion { rule, block })
     }
 
     fn program_leaf_effect(
-        &self, program: &crate::SemanticProgramAdmission, category: u32,
+        &self,
+        program: &crate::SemanticProgramAdmission,
+        category: u32,
         block_only: bool,
     ) -> Result<(u32, Option<u32>), SemanticTransitionError> {
         let mismatch = || SemanticTransitionError::ObservationMismatch;
-        let effect = match self.local_category(17, category).and_then(|i| self.leaves.get(i)) {
+        let effect = match self
+            .local_category(17, category)
+            .and_then(|i| self.leaves.get(i))
+        {
             Some(SemanticActionDescriptor::ProgramLeaf { effect })
-                if (*effect as usize) < program.image.leaves.len() - program.image.local_leaf_begin as usize =>
-                    program.image.local_leaf_begin + *effect,
+                if (*effect as usize)
+                    < program.image.leaves.len() - program.image.local_leaf_begin as usize =>
+            {
+                program.image.local_leaf_begin + *effect
+            }
             _ => return Err(mismatch()),
         };
         let block = match program.image.leaves[effect as usize] {
@@ -2067,7 +2142,9 @@ impl ActionCodebooks {
     }
 
     fn decoded_program_edit(
-        &self, program: &crate::SemanticProgramAdmission, choices: &[u32; 18],
+        &self,
+        program: &crate::SemanticProgramAdmission,
+        choices: &[u32; 18],
     ) -> Result<SemanticDecodedProgramEdit, SemanticTransitionError> {
         let mismatch = || SemanticTransitionError::ObservationMismatch;
         if self.program_binding != Some(Self::program_binding(program)) || choices[0] != 1 {
@@ -2076,44 +2153,74 @@ impl ActionCodebooks {
         let opcode = choices[1];
         let (_, nulls) = semantic_opcode_masks(opcode).ok_or_else(mismatch)?;
         if !(2..=5).contains(&opcode)
-            || choices.iter().enumerate().any(|(field, &value)| nulls & (1 << field) != 0 && value != 0)
-        { return Err(mismatch()); }
+            || choices
+                .iter()
+                .enumerate()
+                .any(|(field, &value)| nulls & (1 << field) != 0 && value != 0)
+        {
+            return Err(mismatch());
+        }
         let mut edit = SemanticDecodedProgramEdit {
-            opcode, target: 0, guard: 0, children: [0; 4], effect: 0, block: 0,
-            rule: None, bytes: Vec::new(),
+            opcode,
+            target: 0,
+            guard: 0,
+            children: [0; 4],
+            effect: 0,
+            block: 0,
+            rule: None,
+            bytes: Vec::new(),
         };
         let operand = |field: u32, child: bool| -> Result<u32, SemanticTransitionError> {
-            let index = self.local_category(field, choices[field as usize])
-                .and_then(|index| self.operands.get(index)).ok_or_else(mismatch)?;
+            let index = self
+                .local_category(field, choices[field as usize])
+                .and_then(|index| self.operands.get(index))
+                .ok_or_else(mismatch)?;
             match (child, index) {
                 (true, SemanticActionDescriptor::ProgramChild { index })
-                    if (*index as usize) < program.image.nodes.len() - program.image.local_node_begin as usize =>
-                    Ok(program.image.local_node_begin + *index),
+                    if (*index as usize)
+                        < program.image.nodes.len() - program.image.local_node_begin as usize =>
+                {
+                    Ok(program.image.local_node_begin + *index)
+                }
                 (false, SemanticActionDescriptor::ProgramGuard { index })
-                    if (*index as usize) < program.image.guards.len() - program.image.local_guard_begin as usize =>
-                    Ok(program.image.local_guard_begin + *index),
+                    if (*index as usize)
+                        < program.image.guards.len() - program.image.local_guard_begin as usize =>
+                {
+                    Ok(program.image.local_guard_begin + *index)
+                }
                 _ => Err(mismatch()),
             }
         };
         if opcode == 2 {
             let value = self.decoded_rule_insertion(program, choices)?;
-            edit.rule = Some(value.rule);edit.block = value.block;
+            edit.rule = Some(value.rule);
+            edit.block = value.block;
             edit.effect = self.program_leaf_effect(program, choices[17], true)?.0;
         } else {
-            let target = self.local_category(2, choices[2]).and_then(|index| self.targets.get(index))
+            let target = self
+                .local_category(2, choices[2])
+                .and_then(|index| self.targets.get(index))
                 .ok_or_else(mismatch)?;
             edit.target = match (opcode, target) {
                 (3 | 4, SemanticActionDescriptor::ProgramNode { index })
-                    if (*index as usize) < program.image.nodes.len() - program.image.local_node_begin as usize =>
-                    program.image.local_node_begin + *index,
+                    if (*index as usize)
+                        < program.image.nodes.len() - program.image.local_node_begin as usize =>
+                {
+                    program.image.local_node_begin + *index
+                }
                 (5, SemanticActionDescriptor::ProgramRoot { index })
-                    if (*index as usize) < program.image.roots.len() - program.image.local_root_begin as usize =>
-                    program.image.local_root_begin + *index,
+                    if (*index as usize)
+                        < program.image.roots.len() - program.image.local_root_begin as usize =>
+                {
+                    program.image.local_root_begin + *index
+                }
                 _ => return Err(mismatch()),
             };
             if opcode == 3 {
                 edit.guard = operand(12, false)?;
-                for edge in 0..4 { edit.children[edge] = operand(13 + edge as u32, true)?; }
+                for edge in 0..4 {
+                    edit.children[edge] = operand(13 + edge as u32, true)?;
+                }
             } else if opcode == 4 {
                 edit.effect = self.program_leaf_effect(program, choices[17], false)?.0;
             } else {
@@ -2123,12 +2230,27 @@ impl ActionCodebooks {
         edit.bytes.extend_from_slice(b"XLOG-DECODED-PROGRAM-EDIT\0");
         material_u64(&mut edit.bytes, 1);
         edit.bytes.extend_from_slice(self.binding.digest.as_bytes());
-        edit.bytes.extend_from_slice(Self::program_binding(program).as_bytes());
-        for &choice in choices { material_u32(&mut edit.bytes, choice); }
-        for value in [edit.opcode, edit.target, edit.guard, edit.effect, edit.block]
-            .into_iter().chain(edit.children) { material_u32(&mut edit.bytes, value); }
+        edit.bytes
+            .extend_from_slice(Self::program_binding(program).as_bytes());
+        for &choice in choices {
+            material_u32(&mut edit.bytes, choice);
+        }
+        for value in [
+            edit.opcode,
+            edit.target,
+            edit.guard,
+            edit.effect,
+            edit.block,
+        ]
+        .into_iter()
+        .chain(edit.children)
+        {
+            material_u32(&mut edit.bytes, value);
+        }
         if let Some(rule) = edit.rule {
-            for value in rule.words() { material_u32(&mut edit.bytes, value as u32); }
+            for value in rule.words() {
+                material_u32(&mut edit.bytes, value as u32);
+            }
         }
         Ok(edit)
     }
@@ -2388,16 +2510,27 @@ impl ActionCodebooks {
             );
         }
         let additional_targets = program
-            .map(|program| program.predicate_count as usize + program.image.nodes.len() + program.image.roots.len())
+            .map(|program| {
+                program.predicate_count as usize
+                    + program.image.nodes.len()
+                    + program.image.roots.len()
+            })
             .unwrap_or(0);
         let additional_operands = program
-            .map(|program| program.predicate_count as usize + 4 + program.image.guards.len() + program.image.nodes.len())
+            .map(|program| {
+                program.predicate_count as usize
+                    + 4
+                    + program.image.guards.len()
+                    + program.image.nodes.len()
+            })
             .unwrap_or(0);
         if [
             targets.len().saturating_add(additional_targets),
             operands.len().saturating_add(additional_operands),
             qualifiers.len(),
-            leaves.len().saturating_add(program.map_or(0, |p| p.image.leaves.len())),
+            leaves
+                .len()
+                .saturating_add(program.map_or(0, |p| p.image.leaves.len())),
         ]
         .into_iter()
         .any(|n| n >= SEMANTIC_CATEGORY_CAPACITY)
@@ -2422,11 +2555,15 @@ impl ActionCodebooks {
         if let Some(program) = program {
             for index in 0..program.image.nodes.len() {
                 words.extend([index as u64, u64::MAX - 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-                target_views.push(SemanticActionDescriptor::ProgramNode { index: index as u32 });
+                target_views.push(SemanticActionDescriptor::ProgramNode {
+                    index: index as u32,
+                });
             }
             for index in 0..program.image.roots.len() {
                 words.extend([index as u64, u64::MAX - 2, 0, 0, 0, 0, 0, 0, 0, 0]);
-                target_views.push(SemanticActionDescriptor::ProgramRoot { index: index as u32 });
+                target_views.push(SemanticActionDescriptor::ProgramRoot {
+                    index: index as u32,
+                });
             }
             words[53] = target_views.len() as u64 + 1;
             for predicate in 0..program.predicate_count {
@@ -2446,7 +2583,9 @@ impl ActionCodebooks {
                 target_views.push(SemanticActionDescriptor::RulePredicate { predicate, arity });
             }
         }
-        if words[53] == 0 { words[53] = words[52]; }
+        if words[53] == 0 {
+            words[53] = words[52];
+        }
         words[2] = words.len() as u64;
         words[3] = (operands.len() + additional_operands) as u64 + 1;
         words.extend([0; 6]);
@@ -2469,11 +2608,15 @@ impl ActionCodebooks {
         if let Some(program) = program {
             for index in 0..program.image.guards.len() {
                 words.extend([0, 0, 0, 3, index as u64, 0]);
-                operand_views.push(SemanticActionDescriptor::ProgramGuard { index: index as u32 });
+                operand_views.push(SemanticActionDescriptor::ProgramGuard {
+                    index: index as u32,
+                });
             }
             for index in 0..program.image.nodes.len() {
                 words.extend([0, 0, 0, 4, index as u64, 0]);
-                operand_views.push(SemanticActionDescriptor::ProgramChild { index: index as u32 });
+                operand_views.push(SemanticActionDescriptor::ProgramChild {
+                    index: index as u32,
+                });
             }
             words[55] = operand_views.len() as u64 + 1;
             for predicate in 0..program.predicate_count {
@@ -2486,8 +2629,11 @@ impl ActionCodebooks {
                 operand_views.push(SemanticActionDescriptor::RuleVariable { index });
             }
         }
-        if words[55] == 0 { words[55] = words[54]; }
-        words[56] = 1; words[57] = 1;
+        if words[55] == 0 {
+            words[55] = words[54];
+        }
+        words[56] = 1;
+        words[57] = 1;
         words[4] = words.len() as u64;
         words[5] = qualifiers.len() as u64 + 1;
         words.extend([0; 3]);
@@ -2526,18 +2672,30 @@ impl ActionCodebooks {
                 row[0] = u64::MAX;
                 row[1] = effect as u64;
                 words.extend(row);
-                leaf_views.push(SemanticActionDescriptor::ProgramLeaf { effect: effect as u32 });
+                leaf_views.push(SemanticActionDescriptor::ProgramLeaf {
+                    effect: effect as u32,
+                });
             }
         }
         words[59] = leaf_views.len() as u64 + 1;
         if let Some(program) = program {
             words[60..65].copy_from_slice(&[
-                program.image.nodes.len() as u64, program.image.roots.len() as u64,
-                program.image.guards.len() as u64, program.image.nodes.len() as u64,
-                program.image.leaves.len() as u64]);
-            for (role, begin) in [program.image.local_node_begin, program.image.local_root_begin,
-                program.image.local_guard_begin, program.image.local_node_begin,
-                program.image.local_leaf_begin].into_iter().enumerate() {
+                program.image.nodes.len() as u64,
+                program.image.roots.len() as u64,
+                program.image.guards.len() as u64,
+                program.image.nodes.len() as u64,
+                program.image.leaves.len() as u64,
+            ]);
+            for (role, begin) in [
+                program.image.local_node_begin,
+                program.image.local_root_begin,
+                program.image.local_guard_begin,
+                program.image.local_node_begin,
+                program.image.local_leaf_begin,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 words[65 + role] = words[60 + role] - u64::from(begin);
             }
         }
@@ -7809,9 +7967,13 @@ impl SemanticReplayStateMaterialProof {
         Ok(SemanticReplayStateMaterialProof {
             owner: Arc::new(ReplayStateMaterialProofContents {
                 task_ground_layout: task_ground::TaskGroundLayout::material_geometry(
-                    &material.ranges.iter()
+                    &material
+                        .ranges
+                        .iter()
                         .find(|range| (range.range.role, range.range.index) == (58, 0))
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?.bytes)?,
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?
+                        .bytes,
+                )?,
                 rule_library: material
                     .ranges
                     .iter()
@@ -8816,18 +8978,23 @@ fn validate_frozen_codebook_frame(
     }
     let header_extent = |base: usize| -> Result<[u64; 5], SemanticTransitionError> {
         let extents = std::array::from_fn(|role| word(base + 60 + role));
-        if extents[0] != extents[3] ||
-            extents.iter().any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64) ||
-            (0..5).any(|role| word(base + 65 + role) > extents[role]) ||
-            (word(base + 39) == 0 && extents != [0; 5]) {
+        if extents[0] != extents[3]
+            || extents
+                .iter()
+                .any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64)
+            || (0..5).any(|role| word(base + 65 + role) > extents[role])
+            || (word(base + 39) == 0 && extents != [0; 5])
+        {
             return Err(invalid());
         }
         for table in 0..4 {
             let begin = word(base + 52 + 2 * table);
             let end = word(base + 53 + 2 * table);
-            if begin == 0 || end < begin ||
-                end > word(base + 2 * table + 1) ||
-                end - begin != model_catalogue::template_count(table, &extents) {
+            if begin == 0
+                || end < begin
+                || end > word(base + 2 * table + 1)
+                || end - begin != model_catalogue::template_count(table, &extents)
+            {
                 return Err(invalid());
             }
         }
@@ -8835,28 +9002,42 @@ fn validate_frozen_codebook_frame(
     };
     header_extent(0)?;
     if word(40) == 0 {
-        if (41..52).any(|index| word(index) != 0) { return Err(invalid()); }
+        if (41..52).any(|index| word(index) != 0) {
+            return Err(invalid());
+        }
         return Ok(None);
     }
     let start = usize::try_from(word(40) / 8).map_err(|_| invalid())?;
     let length = usize::try_from(word(41) / 8).map_err(|_| invalid())?;
-    if word(40) % 8 != 0 || word(41) % 8 != 0 ||
-        length < model_catalogue::FRAME_HEADER_WORDS ||
-        start.checked_add(length) != Some(word_count) ||
-        start < model_catalogue::HEADER_WORDS || word(start) != 0x584c4f474d4f444c ||
-        word(start + 1) != 4 || word(start + 2) != word(37) ||
-        word(start + 3) != word(43) {
+    if word(40) % 8 != 0
+        || word(41) % 8 != 0
+        || length < model_catalogue::FRAME_HEADER_WORDS
+        || start.checked_add(length) != Some(word_count)
+        || start < model_catalogue::HEADER_WORDS
+        || word(start) != 0x584c4f474d4f444c
+        || word(start + 1) != 4
+        || word(start + 2) != word(37)
+        || word(start + 3) != word(43)
+    {
         return Err(invalid());
     }
     let extents: [u64; 5] = std::array::from_fn(|role| word(start + 4 + role));
-    if extents.iter().any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64) {
+    if extents
+        .iter()
+        .any(|&count| count >= SEMANTIC_CATEGORY_CAPACITY as u64)
+    {
         return Err(invalid());
     }
     let members = usize::try_from(word(43)).map_err(|_| invalid())?;
-    let selected = usize::try_from(word(42)).map_err(|_| invalid())?
-        .checked_sub(1).ok_or_else(invalid)?;
-    if members < 2 || selected >= members ||
-        members > (length - model_catalogue::FRAME_HEADER_WORDS) / model_catalogue::FRAME_MEMBER_WORDS {
+    let selected = usize::try_from(word(42))
+        .map_err(|_| invalid())?
+        .checked_sub(1)
+        .ok_or_else(invalid)?;
+    if members < 2
+        || selected >= members
+        || members
+            > (length - model_catalogue::FRAME_HEADER_WORDS) / model_catalogue::FRAME_MEMBER_WORDS
+    {
         return Err(invalid());
     }
     let mut cursor = start + model_catalogue::FRAME_HEADER_WORDS;
@@ -8866,8 +9047,12 @@ fn validate_frozen_codebook_frame(
     let mut payload_offset = 0u64;
     let mut selected_library = None;
     for member in 0..members {
-        if cursor.checked_add(model_catalogue::FRAME_MEMBER_WORDS)
-            .is_none_or(|end| end > word_count) { return Err(invalid()); }
+        if cursor
+            .checked_add(model_catalogue::FRAME_MEMBER_WORDS)
+            .is_none_or(|end| end > word_count)
+        {
+            return Err(invalid());
+        }
         let has_program = word(cursor + 12);
         let recipe_words = usize::try_from(word(cursor + 17)).map_err(|_| invalid())?;
         let metadata = cursor;
@@ -8875,28 +9060,41 @@ fn validate_frozen_codebook_frame(
         let declaration_bytes = usize::try_from(word(cursor + 27)).map_err(|_| invalid())?;
         let library_count = usize::try_from(word(cursor + 28)).map_err(|_| invalid())?;
         cursor += model_catalogue::FRAME_MEMBER_WORDS;
-        let end = cursor.checked_add(recipe_words).filter(|&end| end <= word_count)
+        let end = cursor
+            .checked_add(recipe_words)
+            .filter(|&end| end <= word_count)
             .ok_or_else(invalid)?;
-        if recipe_words < model_catalogue::HEADER_WORDS || has_program > 1 ||
-            word(cursor + 39) != has_program || word(cursor + 70) != 1 ||
-            word(cursor + 71) != 0 ||
-            (40..52).any(|index| word(cursor + index) != 0) ||
-            [14, 15, 16, 21, 22, 23, 24].into_iter().any(|index| word(cursor + index) != 0) {
+        if recipe_words < model_catalogue::HEADER_WORDS
+            || has_program > 1
+            || word(cursor + 39) != has_program
+            || word(cursor + 70) != 1
+            || word(cursor + 71) != 0
+            || (40..52).any(|index| word(cursor + index) != 0)
+            || [14, 15, 16, 21, 22, 23, 24]
+                .into_iter()
+                .any(|index| word(cursor + index) != 0)
+        {
             return Err(invalid());
         }
         let local_extents = header_extent(cursor)?;
-        for role in 0..5 { maximum[role] = maximum[role].max(local_extents[role]); }
+        for role in 0..5 {
+            maximum[role] = maximum[role].max(local_extents[role]);
+        }
         if member == selected && (52..72).any(|index| word(index) != word(cursor + index)) {
             return Err(invalid());
         }
         for (table, width) in model_catalogue::ROW_WIDTHS.into_iter().enumerate() {
             let count = word(cursor + 2 * table + 1);
             let table_start = usize::try_from(word(cursor + 2 * table)).map_err(|_| invalid())?;
-            if count == 0 || count > SEMANTIC_CATEGORY_CAPACITY as u64 ||
-                table_start < model_catalogue::HEADER_WORDS ||
-                usize::try_from(count).ok().and_then(|count| count.checked_mul(width))
+            if count == 0
+                || count > SEMANTIC_CATEGORY_CAPACITY as u64
+                || table_start < model_catalogue::HEADER_WORDS
+                || usize::try_from(count)
+                    .ok()
+                    .and_then(|count| count.checked_mul(width))
                     .and_then(|size| table_start.checked_add(size))
-                    .is_none_or(|end| end > recipe_words) {
+                    .is_none_or(|end| end > recipe_words)
+            {
                 return Err(invalid());
             }
             let templates = word(cursor + 52 + 2 * table)..word(cursor + 53 + 2 * table);
@@ -8904,16 +9102,24 @@ fn validate_frozen_codebook_frame(
             for category in 1..count {
                 let source = cursor + table_start + category as usize * width;
                 if templates.contains(&category) {
-                    let expected = model_catalogue::template_row(table, category - templates.start, &local_extents);
+                    let expected = model_catalogue::template_row(
+                        table,
+                        category - templates.start,
+                        &local_extents,
+                    );
                     if (0..width).any(|index| word(source + index) != expected[index]) {
                         return Err(invalid());
                     }
                     continue;
                 }
-                let target = usize::try_from(word(2 * table)).ok()
-                    .and_then(|start| counts[table].checked_mul(width as u64)
-                        .and_then(|offset| usize::try_from(offset).ok())
-                        .and_then(|offset| start.checked_add(offset)))
+                let target = usize::try_from(word(2 * table))
+                    .ok()
+                    .and_then(|start| {
+                        counts[table]
+                            .checked_mul(width as u64)
+                            .and_then(|offset| usize::try_from(offset).ok())
+                            .and_then(|offset| start.checked_add(offset))
+                    })
                     .filter(|&target| target.checked_add(width).is_some_and(|end| end <= start))
                     .ok_or_else(invalid)?;
                 for index in 0..width {
@@ -8921,28 +9127,44 @@ fn validate_frozen_codebook_frame(
                     if index == 0 && (table == 2 || table == 1 && word(source + 2) != 0) {
                         expected = expected.checked_add(payload_offset).ok_or_else(invalid)?;
                     }
-                    if word(target + index) != expected { return Err(invalid()); }
+                    if word(target + index) != expected {
+                        return Err(invalid());
+                    }
                 }
-                counts[table] = counts[table].checked_add(1)
+                counts[table] = counts[table]
+                    .checked_add(1)
                     .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
                     .ok_or_else(invalid)?;
             }
-            if member == selected { owned[table] = (begin, counts[table]); }
+            if member == selected {
+                owned[table] = (begin, counts[table]);
+            }
         }
         let payload = word(cursor + 8);
-        if payload % 8 != 0 || payload / 8 > recipe_words as u64 ||
-            word(cursor + 9) != recipe_words as u64 * 8 - payload {
+        if payload % 8 != 0
+            || payload / 8 > recipe_words as u64
+            || word(cursor + 9) != recipe_words as u64 * 8 - payload
+        {
             return Err(invalid());
         }
         let payload_words = recipe_words - payload as usize / 8;
-        let target = word(8).checked_add(payload_offset).and_then(|offset| usize::try_from(offset / 8).ok())
-            .filter(|&target| target.checked_add(payload_words).is_some_and(|end| end <= start))
+        let target = word(8)
+            .checked_add(payload_offset)
+            .and_then(|offset| usize::try_from(offset / 8).ok())
+            .filter(|&target| {
+                target
+                    .checked_add(payload_words)
+                    .is_some_and(|end| end <= start)
+            })
             .ok_or_else(invalid)?;
-        if (0..payload_words).any(|index|
-            word(target + index) != word(cursor + payload as usize / 8 + index)) {
+        if (0..payload_words)
+            .any(|index| word(target + index) != word(cursor + payload as usize / 8 + index))
+        {
             return Err(invalid());
         }
-        payload_offset = payload_offset.checked_add(word(cursor + 9)).ok_or_else(invalid)?;
+        payload_offset = payload_offset
+            .checked_add(word(cursor + 9))
+            .ok_or_else(invalid)?;
         let rule_start = end
             .checked_add(declaration_bytes.div_ceil(8))
             .ok_or_else(invalid)?;
@@ -9010,40 +9232,61 @@ fn validate_frozen_codebook_frame(
 
         cursor = library_end;
     }
-    if cursor != word_count || maximum != extents ||
-        word(8).checked_add(payload_offset) != Some(word(40)) {
+    if cursor != word_count
+        || maximum != extents
+        || word(8).checked_add(payload_offset) != Some(word(40))
+    {
         return Err(invalid());
     }
     let mut table_cursor = model_catalogue::HEADER_WORDS;
     for (table, width) in model_catalogue::ROW_WIDTHS.into_iter().enumerate() {
         let shared_begin = counts[table];
         let shared_count = model_catalogue::template_count(table, &extents);
-        let count = shared_begin.checked_add(shared_count)
-            .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64).ok_or_else(invalid)?;
-        if word(2 * table) != table_cursor as u64 || word(2 * table + 1) != count ||
-            word(29 + 2 * table) != owned[table].0 || word(30 + 2 * table) != owned[table].1 ||
-            word(44 + 2 * table) != shared_begin || word(45 + 2 * table) != count {
+        let count = shared_begin
+            .checked_add(shared_count)
+            .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+            .ok_or_else(invalid)?;
+        if word(2 * table) != table_cursor as u64
+            || word(2 * table + 1) != count
+            || word(29 + 2 * table) != owned[table].0
+            || word(30 + 2 * table) != owned[table].1
+            || word(44 + 2 * table) != shared_begin
+            || word(45 + 2 * table) != count
+        {
             return Err(invalid());
         }
-        let table_end = usize::try_from(count).ok().and_then(|count| count.checked_mul(width))
+        let table_end = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(width))
             .and_then(|count| table_cursor.checked_add(count))
-            .filter(|&end| end <= start).ok_or_else(invalid)?;
-        if (0..width).any(|index| word(table_cursor + index) != 0) { return Err(invalid()); }
+            .filter(|&end| end <= start)
+            .ok_or_else(invalid)?;
+        if (0..width).any(|index| word(table_cursor + index) != 0) {
+            return Err(invalid());
+        }
         for ordinal in 0..shared_count {
             let expected = model_catalogue::template_row(table, ordinal, &extents);
             let row = table_cursor + (shared_begin + ordinal) as usize * width;
-            if (0..width).any(|index| word(row + index) != expected[index]) { return Err(invalid()); }
+            if (0..width).any(|index| word(row + index) != expected[index]) {
+                return Err(invalid());
+            }
         }
         table_cursor = table_end;
     }
-    if table_cursor as u64 * 8 != word(8) { return Err(invalid()); }
+    if table_cursor as u64 * 8 != word(8) {
+        return Err(invalid());
+    }
     let mut hash = Sha256::new();
     hash.update(b"xlog.semantic.immutable-model-catalogue.v4\0");
     hash.update(CATALOGUE_DIGEST);
-    for index in start..word_count { hash.update(word(index).to_le_bytes()); }
+    for index in start..word_count {
+        hash.update(word(index).to_le_bytes());
+    }
     let digest: [u8; 32] = hash.finalize().into();
     for index in 0..4 {
-        if word(25 + index) != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap()) {
+        if word(25 + index)
+            != u64::from_le_bytes(digest[index * 8..index * 8 + 8].try_into().unwrap())
+        {
             return Err(invalid());
         }
     }
@@ -9236,9 +9479,14 @@ fn completed_receipt_material(
     reason = "the native rule receipt binds task, lane, slot, current edit, and prior edit independently"
 )]
 fn validated_program_edit_receipt(
-    codebooks: &ActionCodebooks, program: &crate::SemanticProgramAdmission,
-    task_identity: Identity256, lane: usize, slot: usize, choices: &[u32; 18],
-    previous_choices: Option<&[u32; 18]>, receipt: &[u64; 42],
+    codebooks: &ActionCodebooks,
+    program: &crate::SemanticProgramAdmission,
+    task_identity: Identity256,
+    lane: usize,
+    slot: usize,
+    choices: &[u32; 18],
+    previous_choices: Option<&[u32; 18]>,
+    receipt: &[u64; 42],
     intervention: Option<SemanticEvaluationIntervention>,
     library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<SemanticDecodedProgramEdit, SemanticTransitionError> {
@@ -9247,13 +9495,17 @@ fn validated_program_edit_receipt(
         return Err(mismatch());
     }
     if let Some(previous) = previous_choices {
-        if previous.iter().any(|&choice| choice != 0) { codebooks.decoded_program_edit(program, previous)?; }
+        if previous.iter().any(|&choice| choice != 0) {
+            codebooks.decoded_program_edit(program, previous)?;
+        }
     }
     let decoded = codebooks.decoded_program_edit(program, choices)?;
     let control = intervention.unwrap_or(SemanticEvaluationIntervention::Structural) as u64;
     if receipt[1] != 0x584c4f47494d4544
         || receipt[0] != if receipt[40] == 0 { 0 } else { 12 }
-        || receipt[40] > 7 || receipt[2] != lane as u64 + 1 || receipt[3] != slot as u64
+        || receipt[40] > 7
+        || receipt[2] != lane as u64 + 1
+        || receipt[3] != slot as u64
         || receipt[4..8] != identity_words(*task_identity.as_bytes())
         || receipt[8..12] != identity_words(*codebooks.binding.digest.as_bytes())
         || receipt[12] != u64::from(decoded.opcode)
@@ -9263,20 +9515,35 @@ fn validated_program_edit_receipt(
         || receipt[28] != program.image.roots.len() as u64
         || receipt[29] != program.image.nodes.len() as u64
         || receipt[30] != u64::from(decoded.effect)
-        || receipt[31] != u64::from(if decoded.opcode == 2 { decoded.block } else { decoded.target })
+        || receipt[31]
+            != u64::from(if decoded.opcode == 2 {
+                decoded.block
+            } else {
+                decoded.target
+            })
         || receipt[32] != u64::from(decoded.guard)
         || receipt[33..37] != decoded.children.map(u64::from)
         || receipt[41] != control
         || (receipt[40] != 0 && receipt[26] != u64::MAX)
-    { return Err(mismatch()); }
+    {
+        return Err(mismatch());
+    }
     if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
         let library = library.ok_or_else(mismatch)?;
         let rule = decoded.rule.ok_or_else(mismatch)?;
-        let index = library.rules().iter().position(|value| *value == rule).ok_or_else(mismatch)?;
+        let index = library
+            .rules()
+            .iter()
+            .position(|value| *value == rule)
+            .ok_or_else(mismatch)?;
         let allowed = (1u64 << library.rules().len()) - 1;
-        if decoded.opcode != 2 || receipt[37] != index as u64 + 1
-            || receipt[38] & !allowed != 0 || receipt[39] != receipt[38] ^ (1u64 << index)
-        { return Err(mismatch()); }
+        if decoded.opcode != 2
+            || receipt[37] != index as u64 + 1
+            || receipt[38] & !allowed != 0
+            || receipt[39] != receipt[38] ^ (1u64 << index)
+        {
+            return Err(mismatch());
+        }
     } else if receipt[37..40].iter().any(|&word| word != 0) {
         return Err(mismatch());
     }
@@ -9323,16 +9590,27 @@ fn completed_theory_delta_for_slot(
     if hard_decode[1] == 0x584c4f47494d4544 {
         let program = program.ok_or(SemanticTransitionError::ObservationMismatch)?;
         let decoded = validated_program_edit_receipt(
-            codebooks, program, task_identity, lane, slot, choices, previous_choices,
-            hard_decode, intervention, library,
+            codebooks,
+            program,
+            task_identity,
+            lane,
+            slot,
+            choices,
+            previous_choices,
+            hard_decode,
+            intervention,
+            library,
         )?;
         if hard_decode[40] != 0 && lane_refusal == 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
         let ordinal = (lane * 2 + slot) as u64;
         let mut delta_bytes = decoded.bytes;
-        for word in &hard_decode[12..] { material_u64(&mut delta_bytes, *word); }
-        let delta = completed_action_child_material(owner, b"program-image-delta", ordinal, &delta_bytes);
+        for word in &hard_decode[12..] {
+            material_u64(&mut delta_bytes, *word);
+        }
+        let delta =
+            completed_action_child_material(owner, b"program-image-delta", ordinal, &delta_bytes);
         let mut payload = Vec::new();
         payload.extend_from_slice(predecessor_semantic_root_digest.as_bytes());
         payload.extend_from_slice(task_identity.as_bytes());
@@ -9340,17 +9618,37 @@ fn completed_theory_delta_for_slot(
         material_u64(&mut payload, slot as u64);
         material_u64(&mut payload, lane_refusal);
         for receipt in [hard_decode, lane_admission] {
-            for &word in receipt { material_u64(&mut payload, word); }
+            for &word in receipt {
+                material_u64(&mut payload, word);
+            }
         }
-        for receipt in component_receipts { encode_completed_component_receipt(&mut payload, *receipt); }
-        let evidence = completed_action_child_material(owner, b"program-image-delta-evidence", ordinal, &payload);
+        for receipt in component_receipts {
+            encode_completed_component_receipt(&mut payload, *receipt);
+        }
+        let evidence = completed_action_child_material(
+            owner,
+            b"program-image-delta-evidence",
+            ordinal,
+            &payload,
+        );
         return Ok(Some(SemanticCompletedTheoryDeltaMaterial {
             kind: if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
                 "rule-activation"
-            } else if decoded.opcode == 2 { "rule" } else { "program-image" },
-            delta, theory_generation: predecessor_semantic_root_digest,
-            verdict: if lane_refusal == 0 && hard_decode[40] == 0 { "accepted" } else { "rejected" },
-            evidence, lane: lane as u32 + 1, slot: slot as u32,
+            } else if decoded.opcode == 2 {
+                "rule"
+            } else {
+                "program-image"
+            },
+            delta,
+            theory_generation: predecessor_semantic_root_digest,
+            verdict: if lane_refusal == 0 && hard_decode[40] == 0 {
+                "accepted"
+            } else {
+                "rejected"
+            },
+            evidence,
+            lane: lane as u32 + 1,
+            slot: slot as u32,
         }));
     }
     if program.is_some() {
@@ -9405,28 +9703,45 @@ fn completed_theory_delta_for_slot(
     reason = "query receipts bind the original program, publication bank and completed candidate evidence"
 )]
 fn validate_program_query_receipts(
-    program: &crate::SemanticProgramAdmission, task_identity: Identity256, codebooks: &ActionCodebooks,
-    state: &DeviceState, edits: &[[[u32; 18]; 2]; 2], layout: task_ground::TaskGroundLayout,
-    ground: &[u8], prior_rule_count: u64, candidate_facts: &[SemanticTaskFacts; 3],
-    intervention: Option<SemanticEvaluationIntervention>, library: Option<&SemanticEvaluationRuleLibrary>,
+    program: &crate::SemanticProgramAdmission,
+    task_identity: Identity256,
+    codebooks: &ActionCodebooks,
+    state: &DeviceState,
+    edits: &[[[u32; 18]; 2]; 2],
+    layout: task_ground::TaskGroundLayout,
+    ground: &[u8],
+    prior_rule_count: u64,
+    candidate_facts: &[SemanticTaskFacts; 3],
+    intervention: Option<SemanticEvaluationIntervention>,
+    library: Option<&SemanticEvaluationRuleLibrary>,
 ) -> Result<(), SemanticTransitionError> {
     let mismatch = || SemanticTransitionError::ObservationMismatch;
     layout.validate(ground)?;
-    let frame = |slot| -> Result<&[u8], SemanticTransitionError> { Ok(&ground[layout.frame(slot)?]) };
+    let frame =
+        |slot| -> Result<&[u8], SemanticTransitionError> { Ok(&ground[layout.frame(slot)?]) };
     let word = |bytes: &[u8], index: usize| -> u64 {
-        u64::from_le_bytes(bytes[index*8..index*8+8].try_into().unwrap())
+        u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap())
     };
     let entry = frame(3)?;
-    let expected_queries = program.queries.len() as u64 *
-        (1 + state.task_evaluation.lane_refusal.iter().filter(|&&cause| matches!(cause, 0 | 2)).count() as u64);
+    let expected_queries = program.queries.len() as u64
+        * (1 + state
+            .task_evaluation
+            .lane_refusal
+            .iter()
+            .filter(|&&cause| matches!(cause, 0 | 2))
+            .count() as u64);
     if state.binding_digest != codebooks.binding.digest
         || state.task_evaluation.query_count != expected_queries
         || prior_rule_count != program.initial_rules.len() as u64 + word(entry, 4)
-    { return Err(mismatch()); }
+    {
+        return Err(mismatch());
+    }
     let task_words = identity_words(*task_identity.as_bytes());
     let binding_words = identity_words(*codebooks.binding.digest.as_bytes());
-    let snapshot = &ground[layout.snapshot_offset..layout.inherited_offset-16];
-    if word(snapshot, 22) != 1 { return Err(mismatch()); }
+    let snapshot = &ground[layout.snapshot_offset..layout.inherited_offset - 16];
+    if word(snapshot, 22) != 1 {
+        return Err(mismatch());
+    }
     let mut applied = [0u64; 2];
     for lane in 0..2 {
         let candidate = frame(lane + 1)?;
@@ -9434,56 +9749,104 @@ fn validate_program_query_receipts(
         let mut count = word(entry, 3);
         let mut parent = std::array::from_fn::<_, 4, _>(|i| word(entry, 10 + i));
         let commands = edits[lane].iter().filter(|choices| choices[0] == 1).count() as u64;
-        if state.work[lane].edit_commands != commands { return Err(mismatch()); }
+        if state.work[lane].edit_commands != commands {
+            return Err(mismatch());
+        }
         for slot in 0..2 {
             let choices = &edits[lane][slot];
-            if choices.iter().all(|&value| value == 0) { continue; }
+            if choices.iter().all(|&value| value == 0) {
+                continue;
+            }
             let receipt = &state.semantic_receipts[1 + lane * 3 + slot];
             validated_program_edit_receipt(
-                codebooks, program, task_identity, lane, slot, choices,
-                (slot == 1).then_some(&edits[lane][0]), receipt, intervention, library,
+                codebooks,
+                program,
+                task_identity,
+                lane,
+                slot,
+                choices,
+                (slot == 1).then_some(&edits[lane][0]),
+                receipt,
+                intervention,
+                library,
             )?;
             if receipt[14..18] != parent
-                || receipt[22..26] != entry[6*8..10*8].chunks_exact(8)
-                    .map(|v| u64::from_le_bytes(v.try_into().unwrap())).collect::<Vec<_>>()
-            { return Err(mismatch()); }
+                || receipt[22..26]
+                    != entry[6 * 8..10 * 8]
+                        .chunks_exact(8)
+                        .map(|v| u64::from_le_bytes(v.try_into().unwrap()))
+                        .collect::<Vec<_>>()
+            {
+                return Err(mismatch());
+            }
             if receipt[40] == 0 {
                 generation = generation.checked_add(1).ok_or_else(mismatch)?;
-                if receipt[13] != generation || receipt[26] != count { return Err(mismatch()); }
-                let begin = layout.image.lineage_offset + count as usize * program_image::IMAGE_LINEAGE_WORDS * 8;
-                let row = candidate.get(begin..begin + program_image::IMAGE_LINEAGE_WORDS * 8).ok_or_else(mismatch)?;
-                if word(row, 0) != generation || word(row, 1) != state.proposal
-                    || word(row, 2) != slot as u64 || word(row, 3) != u64::from(choices[1])
+                if receipt[13] != generation || receipt[26] != count {
+                    return Err(mismatch());
+                }
+                let begin = layout.image.lineage_offset
+                    + count as usize * program_image::IMAGE_LINEAGE_WORDS * 8;
+                let row = candidate
+                    .get(begin..begin + program_image::IMAGE_LINEAGE_WORDS * 8)
+                    .ok_or_else(mismatch)?;
+                if word(row, 0) != generation
+                    || word(row, 1) != state.proposal
+                    || word(row, 2) != slot as u64
+                    || word(row, 3) != u64::from(choices[1])
                     || (0..18).any(|i| word(row, 4 + i) != u64::from(choices[i]))
                     || (0..4).any(|i| word(row, 22 + i) != parent[i])
                     || (0..4).any(|i| word(row, 26 + i) != receipt[18 + i])
-                { return Err(mismatch()); }
+                {
+                    return Err(mismatch());
+                }
                 parent.copy_from_slice(&receipt[18..22]);
-                count += 1;applied[lane] += 1;
-            } else if receipt[13] != generation || receipt[18..22] != parent
+                count += 1;
+                applied[lane] += 1;
+            } else if receipt[13] != generation
+                || receipt[18..22] != parent
                 || state.task_evaluation.lane_refusal[lane] == 0
-            { return Err(mismatch()); }
+            {
+                return Err(mismatch());
+            }
         }
-        if word(candidate, 2) != generation || word(candidate, 3) != count
+        if word(candidate, 2) != generation
+            || word(candidate, 3) != count
             || (0..4).any(|i| word(candidate, 10 + i) != parent[i])
-        { return Err(mismatch()); }
+        {
+            return Err(mismatch());
+        }
     }
-    let winner = usize::try_from(state.task_evaluation.winner).ok()
-        .filter(|&slot| slot < 3).ok_or_else(mismatch)?;
-    if frame(0)? != frame(if winner == 0 { 3 } else { winner })? { return Err(mismatch()); }
+    let winner = usize::try_from(state.task_evaluation.winner)
+        .ok()
+        .filter(|&slot| slot < 3)
+        .ok_or_else(mismatch)?;
+    if frame(0)? != frame(if winner == 0 { 3 } else { winner })? {
+        return Err(mismatch());
+    }
     for slot in 0..3 {
         let facts = &candidate_facts[slot];
-        let executed = slot == 0 || matches!(state.task_evaluation.lane_refusal[slot-1], 0 | 2);
+        let executed = slot == 0 || matches!(state.task_evaluation.lane_refusal[slot - 1], 0 | 2);
         if !executed {
             for query in 0..program.queries.len() {
-                if layout.query(ground, slot, query)?.receipt.iter().any(|&value| value != 0) {
+                if layout
+                    .query(ground, slot, query)?
+                    .receipt
+                    .iter()
+                    .any(|&value| value != 0)
+                {
                     return Err(mismatch());
                 }
             }
             if !facts.truth.is_empty()
-                || !facts.attained.is_empty() || facts.g != 0 || facts.p != 0 || facts.eligible != 0
-                || state.work[slot-1].added_supports != 0 || state.work[slot-1].defined_truth_changes != 0
-            { return Err(mismatch()); }
+                || !facts.attained.is_empty()
+                || facts.g != 0
+                || facts.p != 0
+                || facts.eligible != 0
+                || state.work[slot - 1].added_supports != 0
+                || state.work[slot - 1].defined_truth_changes != 0
+            {
+                return Err(mismatch());
+            }
             continue;
         }
         let image = frame(if slot == 0 { 3 } else { slot })?;
@@ -9491,46 +9854,76 @@ fn validate_program_query_receipts(
         let metrics = &first_query.receipt[37..40];
         if metrics[1] > program.fact_capacity().map_err(publication_input_error)? as u64
             || metrics[2] > metrics[1].checked_mul(2).ok_or_else(mismatch)?
-            || facts.truth.len() != program.queries.len() || facts.truth.iter().any(|&truth| truth > 3)
-        { return Err(mismatch()); }
+            || facts.truth.len() != program.queries.len()
+            || facts.truth.iter().any(|&truth| truth > 3)
+        {
+            return Err(mismatch());
+        }
         for query in 0..program.queries.len() {
             let record = layout.query(ground, slot, query)?;
             let receipt = &record.receipt;
             let fact = program.queries[query];
             let mut expected = [0u64; 42];
             expected[1] = 0x584c4f4746515259;
-            expected[2] = facts.truth[query];expected[3] = slot as u64;expected[4] = query as u64;
-            expected[5..9].copy_from_slice(&task_words);expected[9..13].copy_from_slice(&binding_words);
-            expected[13] = if slot == 0 { 0 } else { applied[slot-1] };
+            expected[2] = facts.truth[query];
+            expected[3] = slot as u64;
+            expected[4] = query as u64;
+            expected[5..9].copy_from_slice(&task_words);
+            expected[9..13].copy_from_slice(&binding_words);
+            expected[13] = if slot == 0 { 0 } else { applied[slot - 1] };
             for i in 0..4 {
-                expected[14+i] = word(image, 10+i);expected[18+i] = word(image, 6+i);
-                expected[23+i] = word(snapshot, 18+i);expected[27+i] = word(snapshot, 5+i);
+                expected[14 + i] = word(image, 10 + i);
+                expected[18 + i] = word(image, 6 + i);
+                expected[23 + i] = word(snapshot, 18 + i);
+                expected[27 + i] = word(snapshot, 5 + i);
             }
             expected[22] = word(image, 2);
             for (channel, &reference) in receipt[31..33].iter().enumerate() {
                 if reference != 0 {
-                    if facts.truth[query] & (1 << channel) == 0 { return Err(mismatch()); }
+                    if facts.truth[query] & (1 << channel) == 0 {
+                        return Err(mismatch());
+                    }
                     let encoded = reference - 1;
                     let root = (encoded >> 32) as usize;
                     let node = (encoded & u64::from(u32::MAX)) as usize;
-                    if root >= layout.image.roots || node >= layout.image.nodes
-                        || word(image, layout.image.node_offset/8 + node*8) != 2
-                    { return Err(mismatch()); }
+                    if root >= layout.image.roots
+                        || node >= layout.image.nodes
+                        || word(image, layout.image.node_offset / 8 + node * 8) != 2
+                    {
+                        return Err(mismatch());
+                    }
                 }
-                expected[31+channel] = reference;
+                expected[31 + channel] = reference;
             }
             expected[33] = u64::from(program.query_records[query]);
-            expected[34..37].copy_from_slice(&[u64::from(fact.predicate),u64::from(fact.first),u64::from(fact.second)]);
+            expected[34..37].copy_from_slice(&[
+                u64::from(fact.predicate),
+                u64::from(fact.first),
+                u64::from(fact.second),
+            ]);
             expected[37..40].copy_from_slice(metrics);
             expected[40] = program.initial_rules.len() as u64 + word(image, 4);
-            expected[41] = if slot == 0 { 0 } else { state.work[slot-1].added_supports };
-            if receipt != &expected { return Err(mismatch()); }
+            expected[41] = if slot == 0 {
+                0
+            } else {
+                state.work[slot - 1].added_supports
+            };
+            if receipt != &expected {
+                return Err(mismatch());
+            }
         }
         if slot > 0 {
             let baseline = &candidate_facts[0];
             let supports = first_query.receipt[41];
-            let changes = facts.truth.iter().zip(&baseline.truth).filter(|(a,b)| a != b).count() as u64;
-            if state.work[slot-1].added_supports != supports || state.work[slot-1].defined_truth_changes != changes {
+            let changes = facts
+                .truth
+                .iter()
+                .zip(&baseline.truth)
+                .filter(|(a, b)| a != b)
+                .count() as u64;
+            if state.work[slot - 1].added_supports != supports
+                || state.work[slot - 1].defined_truth_changes != changes
+            {
                 return Err(mismatch());
             }
         }
@@ -25550,7 +25943,14 @@ impl SemanticTransitionSession {
                     if let Some(ground) = &branch.task_ground {
                         writes.push(state_restoration::OriginalDeviceWrite::new(
                             &self.stream,
-                            &ground.layout.initial_bytes(self.task.as_ref().and_then(|(task, _)| task.spec.program.editable_program()), self.task.as_ref().and_then(|(task, _)| task.program_image_owner()))?,
+                            &ground.layout.initial_bytes(
+                                self.task
+                                    .as_ref()
+                                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                                self.task
+                                    .as_ref()
+                                    .and_then(|(task, _)| task.program_image_owner()),
+                            )?,
                             ground.device.view(),
                             false,
                         )?);
@@ -28948,7 +29348,9 @@ impl SemanticTransitionSession {
                 0,
                 &scoring.completed_law_bytes(
                     task_identity,
-                    self.task.as_ref().and_then(|(task, _)| task.spec().program.editable_program()),
+                    self.task
+                        .as_ref()
+                        .and_then(|(task, _)| task.spec().program.editable_program()),
                     ground_layout.queries as u32,
                 )?,
             ),
@@ -32465,7 +32867,14 @@ impl SemanticTransitionSession {
         parent.records.push(SemanticStateRecord {
             role: SemanticStateRole::TaskGround,
             index: 0,
-            bytes: ground_layout.initial_bytes(self.task.as_ref().and_then(|(task, _)| task.spec.program.editable_program()), self.task.as_ref().and_then(|(task, _)| task.program_image_owner()))?,
+            bytes: ground_layout.initial_bytes(
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.program_image_owner()),
+            )?,
             capacity_bytes: ground_layout.bytes,
         });
         let mut layouts = BTreeMap::new();
@@ -40480,15 +40889,31 @@ impl SemanticTransitionSession {
             self.rule_library = Some(Arc::clone(&library));
             spec.rule_library = Some(library);
         }
-        let snapshot_allocation = spec.program.editable_program().map(|program| {
-            let bytes = program.observation_facts.len().checked_mul(
-                size_of::<(u32, crate::SemanticStatementKey, crate::SemanticProgramFact)>())
-                .and_then(|bytes| bytes.checked_add(program.image.nodes.len().checked_mul(
-                    size_of::<u8>() + 5*size_of::<(usize, bool)>())?))
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            self.replay_material_budget.as_ref().ok_or(SemanticTransitionError::NotBound)?
-                .reserve_auxiliary(bytes as u64)
-        }).transpose()?;
+        let snapshot_allocation =
+            spec.program
+                .editable_program()
+                .map(|program| {
+                    let bytes =
+                        program
+                            .observation_facts
+                            .len()
+                            .checked_mul(size_of::<(
+                                u32,
+                                crate::SemanticStatementKey,
+                                crate::SemanticProgramFact,
+                            )>())
+                            .and_then(|bytes| {
+                                bytes.checked_add(program.image.nodes.len().checked_mul(
+                                    size_of::<u8>() + 5 * size_of::<(usize, bool)>(),
+                                )?)
+                            })
+                            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                    self.replay_material_budget
+                        .as_ref()
+                        .ok_or(SemanticTransitionError::NotBound)?
+                        .reserve_auxiliary(bytes as u64)
+                })
+                .transpose()?;
         let mut binding = TaskEvaluationBinding::bind(admission, spec, observation)?;
         binding._requirement_allocation = requirement_allocation;
         binding._snapshot_allocation = snapshot_allocation;
@@ -40513,10 +40938,16 @@ impl SemanticTransitionSession {
                 return Err(SemanticTransitionError::ObservationMismatch);
             }
         }
-        let _task_staging = self.replay_material_budget.as_ref()
+        let _task_staging = self
+            .replay_material_budget
+            .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
-            .reserve_auxiliary(binding.word_count()?.checked_mul(8)
-                .ok_or(SemanticTransitionError::GenerationExhausted)? as u64)?;
+            .reserve_auxiliary(
+                binding
+                    .word_count()?
+                    .checked_mul(8)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)? as u64,
+            )?;
         let words = binding.words(self.graph.transition_arena()[1]);
         let inherited_capacity = self
             .codebooks
@@ -40533,15 +40964,14 @@ impl SemanticTransitionSession {
         let ground_layout = task_ground::TaskGroundLayout::new(
             binding.spec.statement_records.len(),
             binding.spec.task_ground.bindings().len(),
-            binding
-                .spec
-                .program
-                .editable_program(),
+            binding.spec.program.editable_program(),
         )?
         .with_entry_supports(if binding.spec.program.editable_program().is_some() {
             usize::try_from(self.graph.transition_arena()[4])
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?
-        } else { 0 })?
+        } else {
+            0
+        })?
         .with_inherited_observations(inherited_capacity)?
         .with_rule_library(
             binding
@@ -40574,13 +41004,26 @@ impl SemanticTransitionSession {
         let identity = binding.identity();
         self.task = Some((binding, device));
         self.task_ground = Some(ground);
-        let _ground_staging = self.replay_material_budget.as_ref()
+        let _ground_staging = self
+            .replay_material_budget
+            .as_ref()
             .ok_or(SemanticTransitionError::NotBound)?
-            .reserve_auxiliary(ground_layout.bytes.checked_add(ground_layout.image.frame_bytes)
-                .ok_or(SemanticTransitionError::GenerationExhausted)? as u64)?;
+            .reserve_auxiliary(
+                ground_layout
+                    .bytes
+                    .checked_add(ground_layout.image.frame_bytes)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)? as u64,
+            )?;
         upload_publication(
             &self.provider,
-            &ground_layout.initial_bytes(self.task.as_ref().and_then(|(task, _)| task.spec.program.editable_program()), self.task.as_ref().and_then(|(task, _)| task.program_image_owner()))?,
+            &ground_layout.initial_bytes(
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.spec.program.editable_program()),
+                self.task
+                    .as_ref()
+                    .and_then(|(task, _)| task.program_image_owner()),
+            )?,
             &self
                 .task_ground
                 .as_ref()

@@ -247,7 +247,8 @@ impl SemanticAdmissionRecords {
                 max_utf8_bytes: usize::MAX,
             },
             None,
-        )?.requirements)
+        )?
+        .requirements)
     }
 
     /// Compose original cold admissions with an unchanged source prefix and an

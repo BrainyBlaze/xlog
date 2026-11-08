@@ -863,9 +863,8 @@ impl ActorRefreshProgram {
         if operation(&capacity["law"])? != "dlm-new.authored-program-image-capacity/1" {
             return Err(invalid_program());
         }
-        let program_mutation_capacity =
-            u32::try_from(integer(&capacity["mutation_capacity"])?)
-                .map_err(|_| invalid_program())?;
+        let program_mutation_capacity = u32::try_from(integer(&capacity["mutation_capacity"])?)
+            .map_err(|_| invalid_program())?;
         let budgets = object(
             &root["budgets"],
             &[
@@ -1348,7 +1347,10 @@ impl ActorRefreshProgram {
         if schedule["updates"] != Value::Array(expected_updates) {
             return Err(invalid_program());
         }
-        if proposals.checked_mul(4).is_none_or(|count| count > u64::from(program_mutation_capacity)) {
+        if proposals
+            .checked_mul(4)
+            .is_none_or(|count| count > u64::from(program_mutation_capacity))
+        {
             return Err(invalid_program());
         }
         Ok(Self {
@@ -3019,7 +3021,10 @@ impl SemanticTransitionSession {
         }
         let program = ActorRefreshProgram::decode(program_bytes)?;
         let quantities = self.program_quantities(&program)?;
-        let original = self.task.as_ref().and_then(|(task, _)| task.spec.program.editable_program())
+        let original = self
+            .task
+            .as_ref()
+            .and_then(|(task, _)| task.spec.program.editable_program())
             .ok_or_else(invalid_program)?;
         // Evaluation composition retains two disjoint original pools. Its
         // local image still carries exactly the authored whole-program bound.

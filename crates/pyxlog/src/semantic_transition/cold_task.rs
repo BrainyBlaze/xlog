@@ -642,13 +642,20 @@ fn editable_source_segment(
             None,
         ),
     };
-    let (image_declaration, declaration_owner) = super::program_image::ProgramImageDeclaration::from_source(
-        sources.last().expect("complete original source includes image material"), budget,
-    )?;
-    let image_owner = budget.map(|budget| {
-        budget.reserve_auxiliary(image_declaration.allocation_bound(&program)?)
-            .map_err(xlog_err)
-    }).transpose()?;
+    let (image_declaration, declaration_owner) =
+        super::program_image::ProgramImageDeclaration::from_source(
+            sources
+                .last()
+                .expect("complete original source includes image material"),
+            budget,
+        )?;
+    let image_owner = budget
+        .map(|budget| {
+            budget
+                .reserve_auxiliary(image_declaration.allocation_bound(&program)?)
+                .map_err(xlog_err)
+        })
+        .transpose()?;
     program.image = image_declaration.lower(&program)?;
     if let Some(allocations) = allocations.as_mut() {
         let allocations = Arc::get_mut(allocations)
@@ -659,7 +666,11 @@ fn editable_source_segment(
     Ok(Some(EditableTaskSource {
         program: Arc::new(program),
         image_declaration,
-        observer_source: if source_count == 4 { sources.get(2).cloned() } else { None },
+        observer_source: if source_count == 4 {
+            sources.get(2).cloned()
+        } else {
+            None
+        },
         initial_source: xlog_gpu::logic::positive_task_source(
             &sources[0],
             &sources[1],
@@ -1173,11 +1184,11 @@ impl PySemanticTransitionColdTask {
     /// Native admission requirements of the complete original six-field source.
     /// The same encoder is used by metadata composition and fresh construction.
     #[staticmethod]
-    fn admission_requirements(
-        cold_source: &Bound<'_, PyAny>,
-    ) -> PyResult<(u32, u32, u32, usize)> {
+    fn admission_requirements(cold_source: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, usize)> {
         let requirements = ColdTaskSource::from_tuple(cold_source)?
-            .admission()?.requirements().map_err(xlog_err)?;
+            .admission()?
+            .requirements()
+            .map_err(xlog_err)?;
         Ok((
             requirements.max_records,
             requirements.max_terms,

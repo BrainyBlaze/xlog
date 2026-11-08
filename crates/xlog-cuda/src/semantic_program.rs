@@ -136,7 +136,8 @@ impl SemanticProgramAdmission {
                 .ok_or("evaluation statement context exceeds the native domain")?;
         }
         for record in &mut result.image.guard_records {
-            *record = record.checked_add(target_record_offset)
+            *record = record
+                .checked_add(target_record_offset)
                 .ok_or("evaluation guard context exceeds the native domain")?;
         }
         result.validate()?;
@@ -152,8 +153,15 @@ impl SemanticProgramAdmission {
         let overflow = || "evaluation context allocation exceeds the native domain";
         let mut bytes = std::mem::size_of::<Self>();
         for program in [source, target] {
-            bytes = bytes.checked_add(program.image.allocation_bytes()?.checked_mul(2)
-                .ok_or_else(overflow)?).ok_or_else(overflow)?;
+            bytes = bytes
+                .checked_add(
+                    program
+                        .image
+                        .allocation_bytes()?
+                        .checked_mul(2)
+                        .ok_or_else(overflow)?,
+                )
+                .ok_or_else(overflow)?;
             for (count, width) in [
                 (program.predicate_arities.len(), std::mem::size_of::<u32>()),
                 (
@@ -266,8 +274,11 @@ impl SemanticProgramAdmission {
         };
         let mut result = Self {
             image: SemanticProgramImageAdmission::evaluation_context(
-                &source.image, &target.image, source.initial_rules.len(),
-                target_record_offset, &fact,
+                &source.image,
+                &target.image,
+                source.initial_rules.len(),
+                target_record_offset,
+                &fact,
             )?,
             predicate_count,
             predicate_arities: source.predicate_arities.clone(),
@@ -333,7 +344,8 @@ impl SemanticProgramAdmission {
     }
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
-        self.image.validate(&self.predicate_arities, self.initial_rules.len())?;
+        self.image
+            .validate(&self.predicate_arities, self.initial_rules.len())?;
         let valid_fact = |fact: &SemanticProgramFact| {
             (1..=2).contains(&fact.arity)
                 && self.predicate_arities.get(fact.predicate as usize) == Some(&fact.arity)
@@ -382,7 +394,9 @@ impl SemanticProgramAdmission {
             return Err("positive program has an invalid predicate, arity, or fact count");
         }
         self.fact_capacity()?;
-        self.initial_rules.len().checked_add(self.image.mutation_capacity as usize)
+        self.initial_rules
+            .len()
+            .checked_add(self.image.mutation_capacity as usize)
             .filter(|&count| count <= u32::MAX as usize)
             .ok_or("program rule pool exceeds u32")?;
         for rule in &self.initial_rules {
@@ -420,31 +434,55 @@ impl SemanticProgramAdmission {
     /// bound, independent of accepted edits or the answers to any query.
     pub(crate) fn fact_capacity(&self) -> Result<usize, &'static str> {
         let mut constants = std::collections::BTreeSet::new();
-        for fact in self.initial_facts.iter().chain(&self.queries).chain(&self.image.guards).chain(self.observation_facts.iter().map(|(_, fact)| fact)) {
+        for fact in self
+            .initial_facts
+            .iter()
+            .chain(&self.queries)
+            .chain(&self.image.guards)
+            .chain(self.observation_facts.iter().map(|(_, fact)| fact))
+        {
             constants.insert(fact.first);
-            if fact.arity == 2 { constants.insert(fact.second); }
+            if fact.arity == 2 {
+                constants.insert(fact.second);
+            }
         }
         for rule in &self.initial_rules {
-            if !(1..=3).contains(&rule.body_count) { return Err("program rule body exceeds its declared grammar"); }
+            if !(1..=3).contains(&rule.body_count) {
+                return Err("program rule body exceeds its declared grammar");
+            }
             for atom in std::iter::once(&rule.head).chain(&rule.body[..rule.body_count as usize]) {
-                if !(1..=2).contains(&atom.arity) { return Err("program atom exceeds its declared arity"); }
+                if !(1..=2).contains(&atom.arity) {
+                    return Err("program atom exceeds its declared arity");
+                }
                 for term in &atom.terms[..atom.arity as usize] {
-                    if term.kind == 1 { constants.insert(term.value); }
+                    if term.kind == 1 {
+                        constants.insert(term.value);
+                    }
                 }
             }
         }
         let domain = constants.len();
-        self.predicate_arities.iter().try_fold(0usize, |count, &arity| {
-            let cells = match arity {
-                1 => Some(domain),
-                2 => domain.checked_mul(domain),
-                _ => None,
-            }.ok_or("program constant universe exceeds addressable storage")?;
-            count.checked_add(cells).filter(|&n| n <= u32::MAX as usize)
-                .ok_or("program fact pool exceeds u32")
-        }).and_then(|count| {
-            if count == 0 { Err("program constant universe is empty") } else { Ok(count) }
-        })
+        self.predicate_arities
+            .iter()
+            .try_fold(0usize, |count, &arity| {
+                let cells = match arity {
+                    1 => Some(domain),
+                    2 => domain.checked_mul(domain),
+                    _ => None,
+                }
+                .ok_or("program constant universe exceeds addressable storage")?;
+                count
+                    .checked_add(cells)
+                    .filter(|&n| n <= u32::MAX as usize)
+                    .ok_or("program fact pool exceeds u32")
+            })
+            .and_then(|count| {
+                if count == 0 {
+                    Err("program constant universe is empty")
+                } else {
+                    Ok(count)
+                }
+            })
     }
 
     pub(crate) fn word_count(&self) -> Option<usize> {
@@ -471,7 +509,8 @@ impl SemanticProgramAdmission {
             self.initial_facts.len() as u64,
             self.initial_rules.len() as u64,
             self.queries.len() as u64,
-            self.fact_capacity().expect("validated finite constant universe") as u64,
+            self.fact_capacity()
+                .expect("validated finite constant universe") as u64,
             self.observation_facts.len() as u64,
         ] {
             visit(word);

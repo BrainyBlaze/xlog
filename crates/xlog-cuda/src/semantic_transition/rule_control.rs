@@ -164,7 +164,8 @@ impl SemanticEvaluationRuleLibrary {
         field: usize,
         index: usize,
     ) -> Result<u32, SemanticTransitionError> {
-        codebooks.global_category(field as u32, index)
+        codebooks
+            .global_category(field as u32, index)
             .ok_or(SemanticTransitionError::ObservationMismatch)
     }
 

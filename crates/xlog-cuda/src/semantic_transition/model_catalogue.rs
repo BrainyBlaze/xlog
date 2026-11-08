@@ -10,24 +10,40 @@ pub(super) const FRAME_HEADER_WORDS: usize = 9;
 
 /// One immutable address-template bank, sized from every real composed context.
 pub(super) fn template_count(table: usize, extents: &[u64; 5]) -> u64 {
-    match table { 0 => extents[0] + extents[1], 1 => extents[2] + extents[3],
-        2 => 0, 3 => extents[4], _ => unreachable!() }
+    match table {
+        0 => extents[0] + extents[1],
+        1 => extents[2] + extents[3],
+        2 => 0,
+        3 => extents[4],
+        _ => unreachable!(),
+    }
 }
 
 pub(super) fn template_row(table: usize, mut ordinal: u64, extents: &[u64; 5]) -> [u64; 18] {
     let mut row = [0; 18];
     match table {
         0 => {
-            if ordinal < extents[0] { row[1] = u64::MAX - 1; }
-            else { ordinal -= extents[0]; row[1] = u64::MAX - 2; }
+            if ordinal < extents[0] {
+                row[1] = u64::MAX - 1;
+            } else {
+                ordinal -= extents[0];
+                row[1] = u64::MAX - 2;
+            }
             row[0] = ordinal;
         }
         1 => {
-            if ordinal < extents[2] { row[3] = 3; }
-            else { ordinal -= extents[2]; row[3] = 4; }
+            if ordinal < extents[2] {
+                row[3] = 3;
+            } else {
+                ordinal -= extents[2];
+                row[3] = 4;
+            }
             row[4] = ordinal;
         }
-        3 => { row[0] = u64::MAX; row[1] = ordinal; }
+        3 => {
+            row[0] = u64::MAX;
+            row[1] = ordinal;
+        }
         _ => unreachable!(),
     }
     row
@@ -35,8 +51,12 @@ pub(super) fn template_row(table: usize, mut ordinal: u64, extents: &[u64; 5]) -
 
 pub(super) fn template_role(table: usize, row: &[u64]) -> Option<(usize, u64)> {
     match table {
-        0 if row[1] == u64::MAX - 1 && row[2..10].iter().all(|&word| word == 0) => Some((0, row[0])),
-        0 if row[1] == u64::MAX - 2 && row[2..10].iter().all(|&word| word == 0) => Some((1, row[0])),
+        0 if row[1] == u64::MAX - 1 && row[2..10].iter().all(|&word| word == 0) => {
+            Some((0, row[0]))
+        }
+        0 if row[1] == u64::MAX - 2 && row[2..10].iter().all(|&word| word == 0) => {
+            Some((1, row[0]))
+        }
         1 if row[0..3] == [0, 0, 0] && row[3] == 3 && row[5] == 0 => Some((2, row[4])),
         1 if row[0..3] == [0, 0, 0] && row[3] == 4 && row[5] == 0 => Some((3, row[4])),
         3 if row[0] == u64::MAX && row[2..18].iter().all(|&word| word == 0) => Some((4, row[1])),
@@ -45,12 +65,16 @@ pub(super) fn template_role(table: usize, row: &[u64]) -> Option<(usize, u64)> {
 }
 
 fn template_word_bound(extents: &[u64; 5]) -> Result<usize, SemanticTransitionError> {
-    ROW_WIDTHS.into_iter().enumerate().try_fold(0usize, |bound, (table, width)| {
-        usize::try_from(template_count(table, extents)).ok()
-            .and_then(|count| count.checked_mul(width))
-            .and_then(|count| bound.checked_add(count))
-            .ok_or(SemanticTransitionError::GenerationExhausted)
-    })
+    ROW_WIDTHS
+        .into_iter()
+        .enumerate()
+        .try_fold(0usize, |bound, (table, width)| {
+            usize::try_from(template_count(table, extents))
+                .ok()
+                .and_then(|count| count.checked_mul(width))
+                .and_then(|count| bound.checked_add(count))
+                .ok_or(SemanticTransitionError::GenerationExhausted)
+        })
 }
 
 /// Process-local authority derived only from a completed native cold domain.
@@ -197,17 +221,26 @@ impl FrozenModelCatalogue {
         let mut begin = 1;
         let mut end = 1;
         for (ordinal, context) in self.members.iter().enumerate() {
-            if ordinal == member { begin = total; }
+            if ordinal == member {
+                begin = total;
+            }
             let templates = context.words[53 + 2 * table] - context.words[52 + 2 * table];
-            total = context.words[count_word].checked_sub(1 + templates)
+            total = context.words[count_word]
+                .checked_sub(1 + templates)
                 .and_then(|count| total.checked_add(count))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
-            if ordinal == member { end = total; }
+            if ordinal == member {
+                end = total;
+            }
         }
-        total = total.checked_add(template_count(table, &self.template_extents))
+        total = total
+            .checked_add(template_count(table, &self.template_extents))
             .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
-            .ok_or_else(|| publication_input_error(
-                "immutable model field exceeds the categorical proof domain"))?;
+            .ok_or_else(|| {
+                publication_input_error(
+                    "immutable model field exceeds the categorical proof domain",
+                )
+            })?;
         Ok((total, begin, end))
     }
 
@@ -231,7 +264,8 @@ impl FrozenModelCatalogue {
                         header[2 * table + 1] == count
                             && header[29 + 2 * table] == begin
                             && header[30 + 2 * table] == end
-                            && header[44 + 2 * table] == count - template_count(table, &self.template_extents)
+                            && header[44 + 2 * table]
+                                == count - template_count(table, &self.template_extents)
                             && header[45 + 2 * table] == count
                     })
             })
@@ -409,7 +443,9 @@ impl FrozenModelCatalogue {
             self.frame
                 .len()
                 .checked_add(HEADER_WORDS)
-                .and_then(|count| count.checked_add(template_word_bound(&self.template_extents).ok()?))
+                .and_then(|count| {
+                    count.checked_add(template_word_bound(&self.template_extents).ok()?)
+                })
                 .ok_or(SemanticTransitionError::GenerationExhausted)?,
             |bound, member| {
                 bound
@@ -447,7 +483,10 @@ impl FrozenModelCatalogue {
                 let start = context.words[2 * table] as usize;
                 for category in 1..context.words[count_word] as usize {
                     if (context.words[52 + 2 * table]..context.words[53 + 2 * table])
-                        .contains(&(category as u64)) { continue; }
+                        .contains(&(category as u64))
+                    {
+                        continue;
+                    }
                     let row = words.len();
                     words.extend_from_slice(
                         &context.words[start + width * category..start + width * (category + 1)],
@@ -465,7 +504,9 @@ impl FrozenModelCatalogue {
                     .ok_or(SemanticTransitionError::GenerationExhausted)?;
             }
             for ordinal in 0..template_count(table, &self.template_extents) {
-                words.extend_from_slice(&template_row(table, ordinal, &self.template_extents)[..width]);
+                words.extend_from_slice(
+                    &template_row(table, ordinal, &self.template_extents)[..width],
+                );
             }
         }
         words[8] = (words.len() * 8) as u64;
@@ -650,7 +691,10 @@ impl ActionCodebooks {
             add(add(argument_count, additional)?, image_operands)?,
             if program.is_some() { 4 } else { 0 },
         )?;
-        let leaves = add(records.supports.len(), program.map_or(0, |p| p.image.leaves.len()))?;
+        let leaves = add(
+            records.supports.len(),
+            program.map_or(0, |p| p.image.leaves.len()),
+        )?;
         let payload = add(
             operand_bytes,
             add(mul(qualifier_rows, 4)?, mul(qualifier_references, 32)?)?,
@@ -832,7 +876,9 @@ impl ActionCodebooks {
             .frame
             .len()
             .checked_add(HEADER_WORDS)
-            .and_then(|count| count.checked_add(template_word_bound(&catalogue.template_extents).ok()?))
+            .and_then(|count| {
+                count.checked_add(template_word_bound(&catalogue.template_extents).ok()?)
+            })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let word_bound = catalogue
             .members
@@ -1353,15 +1399,21 @@ impl SemanticTransitionSession {
             }
         }
         for table in 0..4 {
-            contexts.iter().try_fold(1 + template_count(table, &template_extents), |total, context| {
-                let words = &context.codebooks.words;
-                words[2 * table + 1]
-                    .checked_sub(1 + words[53 + 2 * table] - words[52 + 2 * table])
-                    .and_then(|count| total.checked_add(count))
-                    .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
-                    .ok_or_else(|| publication_input_error(
-                        "immutable model field exceeds the categorical proof domain"))
-            })?;
+            contexts.iter().try_fold(
+                1 + template_count(table, &template_extents),
+                |total, context| {
+                    let words = &context.codebooks.words;
+                    words[2 * table + 1]
+                        .checked_sub(1 + words[53 + 2 * table] - words[52 + 2 * table])
+                        .and_then(|count| total.checked_add(count))
+                        .filter(|&count| count <= SEMANTIC_CATEGORY_CAPACITY as u64)
+                        .ok_or_else(|| {
+                            publication_input_error(
+                                "immutable model field exceeds the categorical proof domain",
+                            )
+                        })
+                },
+            )?;
         }
         let word_count = contexts
             .iter()
