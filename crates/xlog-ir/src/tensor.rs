@@ -5,6 +5,8 @@ use xlog_core::{Result, XlogError};
 
 mod functions;
 pub use functions::TensorSignature;
+mod dependencies;
+pub use dependencies::TensorOutputDependencies;
 
 // Internally tagged enums buffer their fields through Serde's Content. When the
 // application's serde_json enables arbitrary_precision, a fractional JSON number

@@ -1,15 +1,21 @@
 //! Contextual wire restrictions and shared resource admission before token choice.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use xlog_ir::tensor::{TensorOperation, TensorParameter, TensorProgram, TensorSignature};
+use xlog_ir::tensor::{
+    TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
+};
 use xlog_logic::ast::FuncDef;
 
+mod rows;
 mod typed;
 use xlog_runtime::causal_decoder::acquired::{
     definition_usage, ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
@@ -21,10 +27,27 @@ const OPERAND_LANGUAGE: &str = "xlog-contextual-acquisition-v3";
 const TYPED_LANGUAGE: &str = "xlog-contextual-acquisition-v4";
 const PLANNED_LANGUAGE: &str = "xlog-contextual-acquisition-v5";
 const SINGLE_OPERATION_LANGUAGE: &str = "xlog-contextual-acquisition-v6";
+const NUMERICAL_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v7";
+const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
+const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
+const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
+const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
+const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
+const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
+const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
+pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
+pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
+pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
     json!({"type": "integer", "minimum": minimum, "maximum": maximum})
+}
+
+fn maximum_width(context: &Value) -> usize {
+    (context["signature"]["input_width"].as_u64().unwrap() as usize)
+        .max(context["vocabulary"].as_u64().unwrap() as usize)
+        .max(ACQUIRED_SCALARS)
 }
 
 /// Specialize the sole wire schema with the native model's actual ABI/registry.
@@ -33,7 +56,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
+    if !matches!(version, 1..=14) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -43,7 +66,6 @@ pub(super) fn language(
     schema["description"] = json!(
         "Contextual acquisition wire language. The native prefix mask additionally enforces cumulative new scalar/node/source budgets. Native compilation owns remaining shape, reference, reachability and causal checks."
     );
-    let width = context["signature"]["input_width"].as_u64().unwrap() as usize;
     let vocabulary = context["vocabulary"].as_u64().unwrap() as usize;
     if version >= 2 {
         let tokens = raw_token_ids.ok_or_else(|| {
@@ -57,7 +79,7 @@ pub(super) fn language(
         ));
     }
     let max_context = context["max_context"].as_u64().unwrap() as usize;
-    let maximum_width = width.max(vocabulary).max(ACQUIRED_SCALARS);
+    let maximum_width = maximum_width(&context);
     let function_name = json!({"type": "string", "pattern": format!(
         "^{}[a-zA-Z_][a-zA-Z0-9_]{{0,63}}$", context["function_prefix"].as_str().unwrap())});
     let parameter_name = json!({"type": "string", "pattern": format!(
@@ -230,9 +252,42 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 6 {
+        if version >= 6 {
             schema["description"] = json!(format!(
                 "{} Output zero is available only when canonical prospective inference on the empty body admits a final operation using the declared parameters, known callees and raw-token alphabet. Positive output indices keep the same domain; this does not establish whole-body reachability.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 7 {
+            rows::schema(&mut schema, version >= 8, version >= 10);
+        }
+        if version >= 9 {
+            schema["description"] = json!(format!(
+                "{} Entry formal-type prefixes use FuncDef::numerical_types and its struct serialization, matching the compact codec and helper ABI owner.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 11 {
+            schema["description"] = json!(format!(
+                "{} Entry plans and prospective operations must leave enough rows for every required root helper call and new physical parameter read, reserving a separate result row when none of the remaining obligations can have the required output shape. This necessary lower bound neither supplies operands nor guarantees completion or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 12 {
+            schema["description"] = json!(format!(
+                "{} Output dependencies use the canonical numerical IR and exact retained-callee facts. Every new definition and physical constant must reach the entry result, which must possibly depend on raw tokens or current hidden. Calls substitute only output-used numeric formals; scans always include the initial state and include items only when the cell uses them. Plans and prospective operands reserve rows for missing output obligations. This structural condition does not prove semantic nonconstancy, usefulness or completion.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 13 {
+            schema["description"] = json!(format!(
+                "{} Prefix plans also reserve rows to connect separate required dependency groups in the existing value frontier. Intrinsic callee facts form producer groups; only output-used Call arguments and the canonical Scan initial/item dependencies can join them. Mandatory producers contribute their own connection capacity. This optimistic lower bound preserves final shape and output admission without guaranteeing constructibility or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 14 {
+            schema["description"] = json!(format!(
+                "{} Entry plans and prospective choices must also admit a joint typed structural completion within the remaining rows. Search states retain canonical shape pairs, output dependencies and numeric-argument reads; every searched transition uses the same acquired-body admission as a model-authored operation. The search supplies no source or operands and does not prove token-budget completion, semantic nonconstancy or usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -246,6 +301,14 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                14 => TYPED_COMPLETION_LANGUAGE,
+                13 => FRONTIER_COMPLETION_LANGUAGE,
+                12 => OUTPUT_DEPENDENCY_LANGUAGE,
+                11 => ENTRY_BUDGET_LANGUAGE,
+                10 => INTENT_LANGUAGE,
+                9 => CANONICAL_ENTRY_LANGUAGE,
+                8 => CONTEXT_ENTRY_ROWS_LANGUAGE,
+                7 => NUMERICAL_ROWS_LANGUAGE,
                 6 => SINGLE_OPERATION_LANGUAGE,
                 5 => PLANNED_LANGUAGE,
                 4 => TYPED_LANGUAGE,
@@ -349,6 +412,15 @@ pub(crate) struct PyNativeAcquisitionMask {
     raw_tokens: BTreeSet<u32>,
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
+    numerical_rows: bool,
+    context_entry_rows: bool,
+    canonical_entry_formals: bool,
+    has_intent: bool,
+    entry_budget: bool,
+    output_dependencies: bool,
+    frontier_completion: bool,
+    completion_cache: Option<Arc<typed::CompletionCache>>,
+    parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
 
 #[pymethods]
@@ -357,13 +429,26 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
+        let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE)
+            .then(|| Arc::new(typed::CompletionCache::default()));
+        let frontier_completion =
+            language["id"] == FRONTIER_COMPLETION_LANGUAGE || completion_cache.is_some();
+        let output_dependencies =
+            language["id"] == OUTPUT_DEPENDENCY_LANGUAGE || frontier_completion;
         if (language["id"] != LANGUAGE
             && language["id"] != ORDERED_LANGUAGE
             && language["id"] != OPERAND_LANGUAGE
             && language["id"] != TYPED_LANGUAGE
             && language["id"] != PLANNED_LANGUAGE
-            && language["id"] != SINGLE_OPERATION_LANGUAGE)
-            || context["version"] != 1
+            && language["id"] != SINGLE_OPERATION_LANGUAGE
+            && language["id"] != NUMERICAL_ROWS_LANGUAGE
+            && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE
+            && language["id"] != CANONICAL_ENTRY_LANGUAGE
+            && language["id"] != INTENT_LANGUAGE
+            && language["id"] != ENTRY_BUDGET_LANGUAGE
+            && !output_dependencies)
+            || context["version"] != if output_dependencies { 2 } else { 1 }
+            || (output_dependencies && context["dependency_contract"] != "output-dependencies-v1")
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
                 "nodes": ACQUIRED_NODES, "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
@@ -377,7 +462,13 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE;
+        let entry_budget = language["id"] == ENTRY_BUDGET_LANGUAGE || output_dependencies;
+        let has_intent = language["id"] == INTENT_LANGUAGE || entry_budget;
+        let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE || has_intent;
+        let context_entry_rows =
+            language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
+        let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
+        let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
         let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
         let typed = language["id"] == TYPED_LANGUAGE || planned_output;
         let raw_tokens = if ordered {
@@ -390,28 +481,7 @@ impl PyNativeAcquisitionMask {
         // Required operand fields come from the same wire schema as the
         // compiler-facing packet, never from an authored operation sequence.
         let operation_fields = if language["id"] == OPERAND_LANGUAGE || typed {
-            let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
-            Some(
-                wire["$defs"]["TensorOperation"]["oneOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|operation| {
-                        (
-                            operation["properties"]["operation"]["const"]
-                                .as_str()
-                                .unwrap()
-                                .to_owned(),
-                            operation["required"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .map(|field| field.as_str().unwrap().to_owned())
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            )
+            Some(operation_fields()?)
         } else {
             None
         };
@@ -431,16 +501,51 @@ impl PyNativeAcquisitionMask {
             let callees = context["callees"]
                 .as_object()
                 .ok_or_else(|| value_error("typed acquisition requires known callee signatures"))?;
-            for callee in callees.values() {
+            for (name, callee) in callees {
                 let signature: TensorSignature =
                     serde_json::from_value(callee["signature"].clone()).map_err(value_error)?;
                 signature.arguments(max_context).map_err(value_error)?;
                 signature
                     .output(max_context, token_bytes.len())
                     .map_err(value_error)?;
+                if output_dependencies {
+                    let dependencies: TensorOutputDependencies =
+                        serde_json::from_value(callee["output_dependencies"].clone())
+                            .map_err(value_error)?;
+                    let arguments = signature.arguments(1).map_err(value_error)?.len();
+                    if dependencies
+                        .arguments
+                        .iter()
+                        .any(|&argument| argument >= arguments)
+                        || !dependencies.definitions.contains(name)
+                        || dependencies
+                            .definitions
+                            .iter()
+                            .any(|name| !callees.contains_key(name))
+                        || dependencies
+                            .parameters
+                            .iter()
+                            .any(|name| !parameters.iter().any(|parameter| &parameter.name == name))
+                        || (matches!(signature, TensorSignature::Pure { .. })
+                            && dependencies.tokens)
+                    {
+                        return Err(value_error(
+                            "retained output dependencies differ from the ABI",
+                        ));
+                    }
+                }
             }
         }
         Ok(Self {
+            numerical_rows,
+            context_entry_rows,
+            canonical_entry_formals,
+            has_intent,
+            entry_budget,
+            output_dependencies,
+            frontier_completion,
+            parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
+            completion_cache,
             ordered,
             planned_output,
             check_single_operation,
@@ -461,7 +566,37 @@ impl PyNativeAcquisitionMask {
         if allowed_mask.len() != self.token_bytes.len().div_ceil(32) * 4 {
             return Err(value_error("acquisition mask vocabulary differs"));
         }
+        if let Some(cache) = &self.completion_cache {
+            cache.clear_search();
+        }
         let mask = py.detach(|| {
+            let mut parsed = self
+                .parsed_prefix
+                .as_ref()
+                .map(|state| state.lock().unwrap());
+            let mut checkpoint = parsed.as_mut().and_then(|state| state.take());
+            if parsed.is_some() && allowed_mask.iter().any(|byte| *byte != 0) {
+                match self.canonical_prefix(prefix) {
+                    Ok(canonical) => {
+                        if checkpoint
+                            .as_ref()
+                            .is_some_and(|state| !canonical.starts_with(&state.bytes))
+                        {
+                            checkpoint = None;
+                        }
+                        // Only the actual input may advance the checkpoint.
+                        // Hypothetical spellings below always check their tail.
+                        let next = self
+                            .resources(&canonical, checkpoint.as_ref(), true)
+                            .ok()
+                            .and_then(|resources| resources.parsed_prefix);
+                        if next.is_some() {
+                            checkpoint = next;
+                        }
+                    }
+                    Err(_) => checkpoint = None,
+                }
+            }
             let mut mask = allowed_mask.to_vec();
             let mut bytes = prefix.to_vec();
             for (id, spelling) in self.token_bytes.iter().enumerate() {
@@ -471,20 +606,22 @@ impl PyNativeAcquisitionMask {
                 }
                 bytes.truncate(prefix.len());
                 bytes.extend_from_slice(spelling);
-                if resource_prefix(
-                    &bytes,
-                    &self.retained,
-                    self.ordered,
-                    &self.raw_tokens,
-                    self.operation_fields.as_ref(),
-                    self.typed_context.as_ref(),
-                    self.planned_output,
-                    self.check_single_operation,
-                )
-                .is_err()
+                let canonical = match self.canonical_prefix(&bytes) {
+                    Ok(canonical) => canonical,
+                    Err(_) => {
+                        mask[id / 8] &= !bit;
+                        continue;
+                    }
+                };
+                if self
+                    .resources(&canonical, checkpoint.as_ref(), false)
+                    .is_err()
                 {
                     mask[id / 8] &= !bit;
                 }
+            }
+            if let Some(parsed) = &mut parsed {
+                **parsed = checkpoint;
             }
             mask
         });
@@ -498,8 +635,43 @@ impl PyNativeAcquisitionMask {
                 "completion state requires acquisition language version 4",
             ));
         }
-        let resources = resource_prefix(
-            prefix,
+        let canonical = self.canonical_prefix(prefix).map_err(value_error)?;
+        let resources = self
+            .resources(&canonical, None, false)
+            .map_err(value_error)?;
+        serde_json::to_string(&resources.completion_state().map_err(value_error)?)
+            .map_err(value_error)
+    }
+
+    /// Elaborate complete compact source with the packet's captured native ABI.
+    fn decode_definition(&self, source_bytes: &[u8]) -> PyResult<String> {
+        if !self.numerical_rows {
+            return Err(value_error(
+                "definition decoding requires numerical rows language",
+            ));
+        }
+        let (entrypoint, definitions) = rows::definitions(
+            source_bytes,
+            self.typed_context.as_ref().unwrap(),
+            self.operation_fields.as_ref().unwrap(),
+            self.context_entry_rows,
+            self.has_intent,
+        )
+        .map_err(value_error)?;
+        serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
+            .map_err(value_error)
+    }
+}
+
+impl PyNativeAcquisitionMask {
+    fn resources<'a>(
+        &'a self,
+        bytes: &'a [u8],
+        reusable_prefix: Option<&'a ParsedOperations>,
+        capture_prefix: bool,
+    ) -> Result<Resources<'a>, serde_json::Error> {
+        resource_prefix(
+            bytes,
             &self.retained,
             self.ordered,
             &self.raw_tokens,
@@ -507,11 +679,71 @@ impl PyNativeAcquisitionMask {
             self.typed_context.as_ref(),
             self.planned_output,
             self.check_single_operation,
+            self.canonical_entry_formals,
+            self.entry_budget,
+            self.output_dependencies,
+            self.frontier_completion,
+            self.completion_cache.as_ref(),
+            reusable_prefix,
+            capture_prefix,
         )
-        .map_err(value_error)?;
-        serde_json::to_string(&resources.completion_state().map_err(value_error)?)
-            .map_err(value_error)
     }
+
+    fn canonical_prefix<'a>(&self, source: &'a [u8]) -> Result<Cow<'a, [u8]>, String> {
+        if self.numerical_rows {
+            rows::prefix(
+                source,
+                self.typed_context.as_ref().unwrap(),
+                self.operation_fields.as_ref().unwrap(),
+                self.context_entry_rows,
+                self.has_intent,
+            )
+            .map(|prefix| Cow::Owned(prefix.bytes))
+        } else if source.len() > ACQUIRED_SOURCE_BYTES {
+            Err("acquisition source byte budget exceeded".into())
+        } else {
+            Ok(Cow::Borrowed(source))
+        }
+    }
+}
+
+fn operation_fields() -> PyResult<BTreeMap<String, Vec<String>>> {
+    let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+    Ok(wire["$defs"]["TensorOperation"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|operation| {
+            (
+                operation["properties"]["operation"]["const"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                operation["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|field| field.as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
+pub(super) fn decode_numerical_rows(
+    source: &[u8],
+    context: &Value,
+    context_entry: bool,
+    has_intent: bool,
+) -> PyResult<(String, Vec<FuncDef>)> {
+    rows::definitions(
+        source,
+        context,
+        &operation_fields()?,
+        context_entry,
+        has_intent,
+    )
+    .map_err(value_error)
 }
 
 struct Resources<'a> {
@@ -523,25 +755,41 @@ struct Resources<'a> {
     ordered: bool,
     planned_output: bool,
     check_single_operation: bool,
+    canonical_entry_formals: bool,
+    entry_budget: bool,
+    output_dependencies: bool,
+    frontier_completion: bool,
+    completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
     typed_context: Option<&'a Value>,
     signatures: typed::Signatures,
+    dependencies: BTreeMap<String, TensorOutputDependencies>,
     definition_name: Option<String>,
     definition_index: Option<usize>,
     program_definition_index: Option<usize>,
     definitions: BTreeMap<String, TensorProgram>,
     declarations: BTreeMap<String, TensorParameter>,
+    reusable_prefix: Option<&'a ParsedOperations>,
+    capture_prefix: bool,
+    parsed_prefix: Option<ParsedOperations>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Program {
     arguments: Option<usize>,
     parameters: usize,
     parameters_complete: bool,
     operations: usize,
     typed: Option<typed::Program>,
+}
+
+struct ParsedOperations {
+    bytes: Vec<u8>,
+    definition_index: Option<usize>,
+    program: Program,
+    nodes: usize,
 }
 
 fn resource_prefix<'a>(
@@ -553,12 +801,14 @@ fn resource_prefix<'a>(
     typed_context: Option<&'a Value>,
     planned_output: bool,
     check_single_operation: bool,
+    canonical_entry_formals: bool,
+    entry_budget: bool,
+    output_dependencies: bool,
+    frontier_completion: bool,
+    completion_cache: Option<&'a Arc<typed::CompletionCache>>,
+    reusable_prefix: Option<&'a ParsedOperations>,
+    capture_prefix: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
-    if bytes.len() > ACQUIRED_SOURCE_BYTES {
-        return Err(serde_json::Error::custom(
-            "acquisition source byte budget exceeded",
-        ));
-    }
     let mut resources = Resources {
         bytes,
         retained,
@@ -568,6 +818,11 @@ fn resource_prefix<'a>(
         ordered,
         planned_output,
         check_single_operation,
+        canonical_entry_formals,
+        entry_budget,
+        output_dependencies,
+        frontier_completion,
+        completion_cache,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -587,6 +842,21 @@ fn resource_prefix<'a>(
                     .collect()
             })
             .unwrap_or_default(),
+        dependencies: if output_dependencies {
+            typed_context.unwrap()["callees"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        serde_json::from_value(value["output_dependencies"].clone()).unwrap(),
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        },
         definition_name: None,
         definition_index: None,
         program_definition_index: None,
@@ -600,6 +870,9 @@ fn resource_prefix<'a>(
                     .collect()
             })
             .unwrap_or_default(),
+        reusable_prefix,
+        capture_prefix,
+        parsed_prefix: None,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -616,6 +889,69 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn remember_operations(&mut self, end: usize) {
+        let previous = self.parsed_prefix.as_ref().or(self.reusable_prefix);
+        if previous.is_some_and(|state| state.bytes.len() >= end) {
+            return;
+        }
+        let Some(available) = ACQUIRED_SOURCE_BYTES
+            .checked_sub(end)
+            .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<ParsedOperations>()))
+        else {
+            return;
+        };
+        let Some(program) = &self.program.typed else {
+            return;
+        };
+        if program.fits_prefix_cache(available) {
+            self.parsed_prefix = Some(ParsedOperations {
+                bytes: self.bytes[..end].to_vec(),
+                definition_index: self.definition_index,
+                program: self.program.clone(),
+                nodes: self.nodes,
+            });
+        }
+    }
+
+    fn entry_requirements(&self) -> Result<Option<typed::EntryRequirements>, String> {
+        if !self.entry_budget
+            || self.definition_name.as_deref()
+                != self
+                    .typed_context
+                    .and_then(|context| context["entrypoint"].as_str())
+        {
+            return Ok(None);
+        }
+        let mut calls = self.definitions.keys().cloned().collect::<BTreeSet<_>>();
+        let mut parameters = self
+            .declarations
+            .keys()
+            .filter(|name| !self.retained.contains(*name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if self.output_dependencies {
+            return Ok(Some(typed::EntryRequirements { calls, parameters }));
+        }
+        // Callee-first order makes the new-definition graph acyclic. Roots need
+        // direct entry calls; all other new helpers become reachable through them.
+        // Reads in any helper are therefore covered by those required calls.
+        for body in self.definitions.values() {
+            for operation in &body.operations {
+                if let Some(name) = operation.callee() {
+                    calls.remove(name);
+                }
+                if let Some(weight) = operation.parameter() {
+                    let parameter = body
+                        .parameters
+                        .get(weight)
+                        .ok_or_else(|| "unknown acquired parameter reference".to_owned())?;
+                    parameters.remove(&parameter.name);
+                }
+            }
+        }
+        Ok(Some(typed::EntryRequirements { calls, parameters }))
+    }
+
     fn completion_state(&self) -> Result<Value, String> {
         // A newly opened definition has no shape facts until its own signature
         // completes, even while the parser still retains the preceding body.
@@ -669,6 +1005,23 @@ impl Resources<'_> {
             return Ok(());
         }
         let program = &self.program.typed.as_ref().unwrap().body;
+        if self.output_dependencies {
+            let dependencies = self.program.typed.as_ref().unwrap().output_dependencies()?;
+            if !dependencies.has_input()
+                || self
+                    .definitions
+                    .keys()
+                    .any(|name| !dependencies.definitions.contains(name))
+                || self.declarations.keys().any(|name| {
+                    !self.retained.contains(name) && !dependencies.parameters.contains(name)
+                })
+            {
+                return Err(
+                    "new definitions, constants and an input must reach the entry output".into(),
+                );
+            }
+            return Ok(());
+        }
         let usage = definition_usage(entry, |name| {
             if name == entry {
                 Ok(Some(program))
@@ -785,8 +1138,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         A::Error::custom("numerical body must precede formal types")
                     })?;
                     let context = self.resources.typed_context.unwrap();
-                    let expected = if self.resources.definition_name.as_deref()
-                        == context["entrypoint"].as_str()
+                    let expected = if !self.resources.canonical_entry_formals
+                        && self.resources.definition_name.as_deref()
+                            == context["entrypoint"].as_str()
                     {
                         serde_json::to_vec(
                             &context[if key == "params" {
@@ -797,6 +1151,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         )
                         .map_err(A::Error::custom)?
                     } else {
+                        // Compact codecs serialize these structs directly.
+                        // A context Value sorts object keys and has different
+                        // bytes despite representing the same entry ABI.
                         let (params, result) = FuncDef::numerical_types(
                             &program.body.signature,
                             program.body.vocabulary,
@@ -851,7 +1208,20 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             context["vocabulary"].as_u64().unwrap() as usize,
                             context["max_context"].as_u64().unwrap() as usize,
                             self.resources.raw_tokens.iter().copied().collect(),
+                            maximum_width(context),
                         ));
+                        if self.resources.output_dependencies {
+                            self.resources
+                                .program
+                                .typed
+                                .as_mut()
+                                .unwrap()
+                                .set_output_dependencies(
+                                    self.resources.dependencies.clone(),
+                                    self.resources.frontier_completion,
+                                    self.resources.completion_cache.cloned(),
+                                );
+                        }
                         self.resources.program_definition_index = self.resources.definition_index;
                     }
                 }
@@ -861,6 +1231,13 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         kind: Items::Parameters,
                     })?;
                     self.resources.program.parameters_complete = true;
+                    let required = self
+                        .resources
+                        .entry_requirements()
+                        .map_err(A::Error::custom)?;
+                    if let Some(program) = &mut self.resources.program.typed {
+                        program.entry_requirements = required;
+                    }
                 }
                 (Level::Program, "operations") => {
                     if self.resources.ordered
@@ -912,9 +1289,18 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             true
                         };
                         let choice = map.next_value_seed(NumberChoice {
-                            values: (0..ACQUIRED_NODES - self.resources.nodes)
-                                .filter(|&output| output != 0 || zero_available)
-                                .collect(),
+                            extensions: None,
+                            values: 0..ACQUIRED_NODES - self.resources.nodes,
+                            accepts: |output| {
+                                (output != 0 || zero_available)
+                                    && self
+                                        .resources
+                                        .program
+                                        .typed
+                                        .as_ref()
+                                        .unwrap()
+                                        .permits_plan(output, &self.resources.signatures)
+                            },
                             bytes: self.resources.bytes,
                         })?;
                         // An EOF decimal is still a prefix, not a chosen slot.
@@ -927,8 +1313,11 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             program.planned_output = Some(choice.value);
                         }
                     } else if let Some(program) = &self.resources.program.typed {
+                        let outputs = program.outputs();
                         let choice = map.next_value_seed(NumberChoice {
-                            values: program.outputs(),
+                            extensions: None,
+                            values: 0..program.body.operations.len(),
+                            accepts: |output| outputs.contains(&output),
                             bytes: self.resources.bytes,
                         })?;
                         self.resources.program.typed.as_mut().unwrap().body.output = choice.value;
@@ -948,6 +1337,14 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                 &self.resources.definition_name,
                 &self.resources.program.typed,
             ) {
+                if self.resources.output_dependencies {
+                    let mut dependencies =
+                        program.output_dependencies().map_err(A::Error::custom)?;
+                    dependencies.definitions.insert(name.clone());
+                    self.resources
+                        .dependencies
+                        .insert(name.clone(), dependencies);
+                }
                 self.resources
                     .signatures
                     .insert(name.clone(), program.body.signature.clone());
@@ -983,6 +1380,21 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
         f.write_str("numerical definition array")
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        if matches!(self.kind, Items::Operations) {
+            if let Some(state) = self.resources.reusable_prefix.filter(|state| {
+                state.definition_index == self.resources.definition_index
+                    && self.resources.bytes.starts_with(&state.bytes)
+            }) {
+                // These exact bytes, through a visible following comma, have
+                // already passed this visitor and canonical typed insertion.
+                // Consume their syntax; resume semantic checks at the tail.
+                for _ in 0..state.program.operations {
+                    sequence.next_element::<IgnoredAny>()?;
+                }
+                self.resources.program = state.program.clone();
+                self.resources.nodes = state.nodes;
+            }
+        }
         while sequence
             .next_element_seed(Item {
                 resources: self.resources,
@@ -1071,25 +1483,31 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                 if self.resources.nodes > ACQUIRED_NODES {
                     return Err(D::Error::custom("acquired node budget exceeded"));
                 }
+                let mut prefix_end = None;
                 if self.resources.ordered {
-                    let operation = decoder.deserialize_map(Operation {
+                    let parsed = decoder.deserialize_map(Operation {
                         program: &self.resources.program,
                         raw_tokens: self.resources.raw_tokens,
                         bytes: self.resources.bytes,
                         operation_fields: self.resources.operation_fields,
                         signatures: &self.resources.signatures,
+                        capture_prefix: self.resources.capture_prefix,
                     })?;
                     if let (Some(program), Some(operation)) =
-                        (&mut self.resources.program.typed, operation)
+                        (&mut self.resources.program.typed, parsed.operation)
                     {
                         program
                             .push(operation, &self.resources.signatures)
                             .map_err(D::Error::custom)?;
                     }
+                    prefix_end = parsed.following_comma;
                 } else {
                     IgnoredAny::deserialize(decoder)?;
                 }
                 self.resources.program.operations += 1;
+                if let Some(end) = prefix_end {
+                    self.resources.remember_operations(end);
+                }
                 Ok(())
             }
         }
@@ -1226,6 +1644,12 @@ struct Operation<'a> {
     bytes: &'a [u8],
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     signatures: &'a typed::Signatures,
+    capture_prefix: bool,
+}
+
+struct ParsedOperation {
+    operation: Option<TensorOperation>,
+    following_comma: Option<usize>,
 }
 
 fn reference_extent(program: &Program, field: &str) -> Option<usize> {
@@ -1282,7 +1706,7 @@ fn operation_prefix(bytes: &[u8], name: &str) -> bool {
 }
 
 impl<'de> Visitor<'de> for Operation<'_> {
-    type Value = Option<TensorOperation>;
+    type Value = ParsedOperation;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("operation tag followed by available operands")
     }
@@ -1330,13 +1754,29 @@ impl<'de> Visitor<'de> for Operation<'_> {
             let extent = reference_extent(self.program, &key);
             if let Some(program) = &self.program.typed {
                 let choices = if key == "columns" {
-                    program.output_columns().map(|columns| vec![columns])
+                    if program.searches_completion() {
+                        Some(program.column_range())
+                    } else {
+                        program.output_columns().map(|columns| columns..columns + 1)
+                    }
                 } else {
-                    extent.map(|extent| program.numbers(&material, &key, extent, self.signatures))
+                    extent.map(|extent| 0..extent)
                 };
                 let value = if let Some(values) = choices {
                     let choice = map.next_value_seed(NumberChoice {
                         values,
+                        extensions: (key == "columns" && program.searches_completion()).then(
+                            || {
+                                program
+                                    .completion_widths(self.signatures)
+                                    .into_iter()
+                                    .collect()
+                            },
+                        ),
+                        accepts: |value| {
+                            (key == "columns" && !program.searches_completion())
+                                || program.number_possible(&material, &key, value, self.signatures)
+                        },
                         bytes: self.bytes,
                     })?;
                     if choice.end == self.bytes.len() {
@@ -1359,6 +1799,11 @@ impl<'de> Visitor<'de> for Operation<'_> {
                         alphabet: self.raw_tokens,
                         bytes: self.bytes,
                         required_length: program.output_columns(),
+                        typed_completion: program.searches_completion().then_some((
+                            program,
+                            &material,
+                            self.signatures,
+                        )),
                     })?)
                     .map_err(A::Error::custom)?
                 } else if key == "function" {
@@ -1393,17 +1838,19 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     alphabet: self.raw_tokens,
                     bytes: self.bytes,
                     required_length: None,
+                    typed_completion: None,
                 })?;
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        if self
+        let output_slot = self
             .program
             .typed
             .as_ref()
-            .is_some_and(typed::Program::is_output_slot)
-        {
+            .is_some_and(typed::Program::is_output_slot);
+        let mut following_comma = None;
+        if output_slot || self.capture_prefix {
             // The map is complete. Locate its final value in the original
             // bytes so even a trailing comma without a next operation fails.
             // RawValue only finds the delimiter; operand inference above owns
@@ -1416,22 +1863,28 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     .map_err(A::Error::custom)?;
                 let end =
                     raw.get().as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
-                if self.bytes[end..]
+                following_comma = self.bytes[end..]
                     .trim_ascii_start()
                     .strip_prefix(b"}")
-                    .is_some_and(|rest| rest.trim_ascii_start().starts_with(b","))
-                {
-                    return Err(A::Error::custom("no operation may follow the output slot"));
-                }
+                    .map(<[u8]>::trim_ascii_start)
+                    .filter(|rest| rest.starts_with(b","))
+                    .map(|rest| self.bytes.len() - rest.len() + 1);
             }
         }
-        if self.program.typed.is_some() {
+        if output_slot && following_comma.is_some() {
+            return Err(A::Error::custom("no operation may follow the output slot"));
+        }
+        let operation = if self.program.typed.is_some() {
             serde_json::from_value(Value::Object(material))
                 .map(Some)
-                .map_err(A::Error::custom)
+                .map_err(A::Error::custom)?
         } else {
-            Ok(None)
-        }
+            None
+        };
+        Ok(ParsedOperation {
+            operation,
+            following_comma,
+        })
     }
 }
 
@@ -1439,11 +1892,13 @@ struct ChosenNumber {
     value: usize,
     end: usize,
 }
-struct NumberChoice<'a> {
-    values: Vec<usize>,
+struct NumberChoice<'a, F> {
+    values: Range<usize>,
+    extensions: Option<Vec<usize>>,
+    accepts: F,
     bytes: &'a [u8],
 }
-impl<'de> DeserializeSeed<'de> for NumberChoice<'_> {
+impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
     type Value = ChosenNumber;
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         let raw = <&'de serde_json::value::RawValue>::deserialize(decoder)?;
@@ -1451,11 +1906,26 @@ impl<'de> DeserializeSeed<'de> for NumberChoice<'_> {
         let end = spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
         let viable = if end == self.bytes.len() {
-            self.values
-                .iter()
-                .any(|id| id.to_string().starts_with(spelling))
+            // Only unfinished decimals need a search for compatible extensions.
+            let accepts = |id: usize| {
+                self.values.contains(&id)
+                    && id.to_string().starts_with(spelling)
+                    && (self.accepts)(id)
+            };
+            if let Some(widths) = &self.extensions {
+                // ABI/frontier widths are distinct structural classes. Any
+                // other width can only feed column-preserving operations or
+                // a gather, so the current decimal represents that class.
+                widths
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(value))
+                    .any(accepts)
+            } else {
+                self.values.clone().any(accepts)
+            }
         } else {
-            self.values.contains(&value)
+            self.values.contains(&value) && (self.accepts)(value)
         };
         if !viable {
             return Err(D::Error::custom(
@@ -1487,11 +1957,18 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
         loop {
-            let choices =
-                self.program
-                    .array_numbers(self.material, self.field, &values, self.signatures);
             let Some(value) = sequence.next_element_seed(NumberChoice {
-                values: choices,
+                extensions: None,
+                values: self.program.array_range(self.material, self.field, &values),
+                accepts: |value| {
+                    self.program.array_number_possible(
+                        self.material,
+                        self.field,
+                        &values,
+                        value,
+                        self.signatures,
+                    )
+                },
                 bytes: self.bytes,
             })?
             else {
@@ -1501,10 +1978,18 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
             // Once all slots are filled, a comma cannot be accepted merely
             // because its next element has not arrived in this byte token yet.
             if self.bytes[value.end..].trim_ascii_start().starts_with(b",")
-                && self
+                && !self
                     .program
-                    .array_numbers(self.material, self.field, &values, self.signatures)
-                    .is_empty()
+                    .array_range(self.material, self.field, &values)
+                    .any(|value| {
+                        self.program.array_number_possible(
+                            self.material,
+                            self.field,
+                            &values,
+                            value,
+                            self.signatures,
+                        )
+                    })
             {
                 return Err(A::Error::custom(
                     "operand array has no compatible next slot",
@@ -1531,6 +2016,22 @@ struct TokenIds<'a> {
     alphabet: &'a BTreeSet<u32>,
     bytes: &'a [u8],
     required_length: Option<usize>,
+    typed_completion: Option<(
+        &'a typed::Program,
+        &'a serde_json::Map<String, Value>,
+        &'a typed::Signatures,
+    )>,
+}
+
+impl TokenIds<'_> {
+    fn permits_prefix(&self, values: &[u32]) -> bool {
+        let Some((program, material, signatures)) = self.typed_completion else {
+            return true;
+        };
+        let mut candidate = material.clone();
+        candidate.insert("token_ids".into(), json!(values));
+        program.possible(&candidate, Some("token_ids"), signatures)
+    }
 }
 impl<'de> DeserializeSeed<'de> for TokenIds<'_> {
     type Value = Vec<u32>;
@@ -1546,6 +2047,9 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = BTreeSet::new();
         let mut values = Vec::new();
+        if !self.permits_prefix(&values) {
+            return Err(A::Error::custom("raw-token array has no typed completion"));
+        }
         while let Some(raw) = sequence.next_element::<&'de serde_json::value::RawValue>()? {
             if self
                 .required_length
@@ -1558,11 +2062,17 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
             // a decimal may still extend across BPE tokens (e.g. "1" -> "15").
             // Once a delimiter follows it, membership/uniqueness are final.
             if spelling.as_bytes().as_ptr_range().end == self.bytes.as_ptr_range().end {
-                if !self
-                    .alphabet
-                    .iter()
-                    .any(|id| !seen.contains(id) && id.to_string().starts_with(spelling))
-                {
+                if !self.alphabet.iter().any(|id| {
+                    if seen.contains(id) || !id.to_string().starts_with(spelling) {
+                        return false;
+                    }
+                    if self.typed_completion.is_none() {
+                        return true;
+                    }
+                    let mut next = values.clone();
+                    next.push(*id);
+                    self.permits_prefix(&next)
+                }) {
                     return Err(A::Error::custom(
                         "no unused raw-token ID extends this decimal prefix",
                     ));
@@ -1576,8 +2086,25 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
                     "token indicator must name a distinct raw-alphabet ID",
                 ));
             }
+            if !self.permits_prefix(&values) {
+                return Err(A::Error::custom("raw-token prefix has no typed completion"));
+            }
             let end =
                 spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+            if self.typed_completion.is_some()
+                && self.bytes[end..].trim_ascii_start().starts_with(b",")
+                && !self
+                    .alphabet
+                    .iter()
+                    .filter(|id| !seen.contains(*id))
+                    .any(|id| {
+                        let mut next = values.clone();
+                        next.push(*id);
+                        self.permits_prefix(&next)
+                    })
+            {
+                return Err(A::Error::custom("raw-token array has no typed next slot"));
+            }
             if self.required_length == Some(values.len())
                 && self.bytes[end..].trim_ascii_start().starts_with(b",")
             {

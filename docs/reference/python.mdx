@@ -248,7 +248,8 @@ state. It also reads loss/norm scalars to the host. `checkpoint_identity` contin
 to identify the imported checkpoint, not the subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
 `fork_acquired(definition_json, parameter_values, insertion_layer=17,
-train_down_projection=True)` constructs an independent acquired candidate. The JSON
+train_down_projection=True, source_encoding="funcdef-json-v1",
+require_output_dependencies=False)` constructs an independent acquired candidate. The default JSON
 object has exactly `entrypoint` (a new registry name) and `definitions` (canonical
 `FuncDef` records). Each definition includes its actual `params`, `return_type`,
 `body: {"Numerical": ...}`, and `is_private`. Numerical bodies carry `signature`,
@@ -257,11 +258,17 @@ object has exactly `entrypoint` (a new registry name) and `definitions` (canonic
 proposals. Definitions cannot replace old names; calls resolve the original
 bodies and parameter identities from that registry.
 
-Every new definition must be reachable from the entrypoint, and every new
+By default, every new definition must be reachable from the entrypoint, and every new
 constant must be read by an operation in a reachable body. A refusal lists the
 unreachable definition names and unused constant names in sorted order so a
 subsequent proposal can address the actual omissions. It does not select a graph
 or replace the constructor's remaining shape and causal checks.
+
+With `require_output_dependencies=True`, the same constructor instead requires
+every new definition and physical constant to reach the returned entry value.
+The entry value must also possibly depend on raw tokens or current hidden.
+This explicit opt-in accompanies acquisition language versions12 and13 below; it is
+independent of source encoding. Earlier callers retain the default admission.
 
 The wheel and source distribution include the canonical JSON Schema resource
 `pyxlog/acquired_funcdef_wire_v1.schema.json`. On Python 3.9 or later, read its
@@ -433,7 +440,203 @@ model. This check removes an impossible one-operation plan; it does not establis
 reachability for longer plans, whole-bundle admission or completion within the
 token budget. Versions1–5 retain their exact packets and masks for restoration.
 
-For a version4, version5 or version6 packet,
+New chains may select `language_version=7`, producing
+`xlog-contextual-acquisition-v7` with context version1 and source encoding
+`numerical-rows-v1`. The top-level JSON still has exactly `entrypoint` and
+`definitions`. Every definition has, in order, `name`, `signature`, `parameters`,
+`output` and `operations`. Names, signatures and parameter declarations retain
+their canonical forms. Each operation is an array containing its tag followed by
+the operands in the canonical wire schema's `required` order, excluding the
+`operation` field itself. Arity is exact; the operation set and operand order are
+derived from that schema. Definitions omit the `Numerical` wrapper, context-owned
+`vocabulary`/`max_context`, and formal types supplied by `FuncDef::numerical`.
+
+The native codec elaborates this syntax for the same resource/type prefix owner.
+Unfinished operand strings, decimals and arrays retain their bytes and delimiter
+semantics. Callee-first/entry-last order, output-first plans, version6's zero-slot
+feasibility, both context-length shape checks, causal/usage checks and shared
+node/scalar budgets remain in that owner. The 1 MiB bound counts original compact
+UTF-8 bytes. Versions1–6 keep their packets and source interpretation.
+
+`mask.decode_definition(original_source_bytes)` returns canonical JSON for a
+complete version7 source, using the mask's captured native context. Callers may
+use that definition for deterministic parameter initialization while retaining the
+original compact bytes and generated token IDs. Pass the original compact string
+to `fork_acquired(..., source_encoding="numerical-rows-v1")`: the binding uses the
+same codec with the actual model context and passes canonical definitions to the
+shared registration/allocation/optimizer path. Unknown encodings fail explicitly.
+The codec neither chooses operations nor repairs a graph; it establishes no
+token-fit, training-benefit or performance claim. Restoration must select the
+saved language/context and compare the same elaboration before mask replay.
+
+Version8 (`xlog-contextual-acquisition-v8`, `numerical-rows-v2`) keeps the same
+operation rows and native admission. Its root fields are `helpers`, then `entry`.
+Each helper contains `name`, `signature`, `parameters`, `operation_count`,
+`operations` in that order. Entry contains only `parameters`, `operation_count`,
+`operations`: its name and signature come from the captured native context.
+Helpers may be empty; the codec appends the required entry after them. Every
+helper, constant, operation and operand remains explicitly selected in source.
+
+A positive count `n` requires exactly `n` rows and maps mechanically to canonical
+output index `n-1`; the last row returns the function result. The codec waits for
+the count's delimiter before projecting that index, so an unfinished `1` remains
+a possible prefix of `10` through `19`. The existing planned-output owner still
+enforces remaining node allowance, one-operation feasibility and the final
+result's shape at both context lengths. ABI construction, causality, usage and
+source/scalar budgets are unchanged. Complete decoding also checks the row count.
+Use `decode_definition` with the version8 packet and pass the original source to
+`fork_acquired(..., source_encoding="numerical-rows-v2")`; both use this codec,
+with captured or actual model context respectively. Versions1–7 retain their
+literal packets, source interpretation and prefix behavior. Version8 establishes
+no termination or training-benefit guarantee.
+
+Version9 (`xlog-contextual-acquisition-v9`) retains `numerical-rows-v2` and its
+source syntax. It fixes entry closure in the native prefix mask: formal types
+emitted by the codec are compared with `FuncDef::numerical_types` serialized as
+Rust structs, just like helper types. Versions7–8 instead compare entry types
+with a context JSON value whose object keys are sorted; those bytes differ even
+when the ABI is identical, rejecting the closing entry token. Their historical
+packets/masks remain literal for saved-attempt replay. The repair begins with
+version9. It changes no ABI, operation, source elaboration, actual fork or
+optimizer behavior; successful compilation alone does not prove runtime closure.
+
+Version10 (`xlog-contextual-acquisition-v10`, `numerical-rows-v3`) starts the
+source object with `intent`, followed by the same `helpers` and `entry` as v9.
+The intent is a model-authored JSON string containing 1–256 Unicode scalar values.
+It describes the algorithm before the model commits to helpers and operations.
+The syntax grammar and native reader enforce that string domain. Prefix masking,
+`decode_definition`, and `fork_acquired(..., source_encoding="numerical-rows-v3")`
+use the same codec, which omits only this descriptive field from canonical
+definitions. Original UTF-8 source retains it and counts it against the existing
+source-byte limit; token accounting, feedback and training remain caller-owned.
+Intent does not supply an operation, prove a data dependency or establish
+agreement with the executable graph. All v9 numerical and resource contracts
+remain, and earlier packets/codecs retain their literal behavior.
+
+Version11 (`xlog-contextual-acquisition-v11`) retains `numerical-rows-v3` and
+adds a necessary lower bound on the entry's remaining operations. In the
+callee-first helper DAG, each new root helper needs an entry call. New physical
+constants unread by every helper need direct entry reads; aliases count once.
+Every still-required call or read needs its own row. When none can return the
+entry's required shape, a separate result row must also remain. Parameter,
+linear and scan possibilities use canonical shape inference at both context
+lengths, allowing hypothetical operands for this lower bound.
+
+The same calculation restricts `operation_count` and prospective operation tags
+and operands. It excludes prefixes that have already spent the rows needed for
+their declared obligations, without emitting a graph or choosing a constant,
+call or operand. It does not prove that all needed operands can be constructed,
+that generation will terminate, or that the result depends usefully on history.
+Actual shape, causal and terminal usage admission remain unchanged. Earlier
+packets keep their literal prefix behavior; restoration selects the saved version.
+
+Version12 (`xlog-contextual-acquisition-v12`) retains `numerical-rows-v3` and
+uses one canonical numerical IR analysis for prefix choices and the opt-in
+constructor. It counts only definitions and physical constants reached from
+the returned entry value, including at least one possible raw-token or
+current-hidden dependency. Each value carries its possible input, definition
+and physical parameter dependencies. `Call` substitutes only numeric arguments
+actually used by the callee output. `Scan` always carries its initial state's
+dependencies because it returns that state before or outside the raw span;
+item dependencies propagate only when the pure cell uses numeric argument1.
+Physical aliases count by name, across entry and helper tables.
+
+The native context has `version: 2`,
+`dependency_contract: "output-dependencies-v1"`, and exact
+`output_dependencies` for every retained callee. Those records contain
+`arguments` (numeric `TensorSignature` argument indices), `tokens` (raw-token
+dependence), `definitions` (registry identities) and `parameters` (physical
+identities). Causal hidden is numeric argument0; raw tokens are separate from
+that list. Native registry bodies produce the facts; callers preserve the
+packet without reconstructing or guessing those dependencies.
+
+The prefix owner uses the same analysis in plan, operation, operand and output
+choices. Its necessary row bound counts missing output-reaching root calls,
+direct physical reads and an input producer when no missing call supplies raw
+tokens. Incomplete call arguments use an optimistic union of shape-compatible
+values until the model chooses them; completed operands and output admission
+use their exact facts. These bounds do not guarantee constructibility or token
+termination. Possible structural dependence does not prove semantic
+nonconstancy: cancellation or equal select branches can still return a
+constant. Usefulness, independent selection and scientific acceptance remain
+separate. This version does not remove unrelated dead operations. Packets1–11,
+their usage rules and saved snapshots keep their existing semantics; snapshot
+restoration does not apply a new admission rule.
+
+Version13 (`xlog-contextual-acquisition-v13`) keeps the same context2 facts,
+constructor predicate and `numerical-rows-v3` source. It adds a necessary reserve
+for connecting separate groups of required dependencies in the current value
+frontier. Facts occurring together in an existing value or a callee's intrinsic
+output are grouped by physical identity. Transitive overlap is optimistic;
+numeric callee formals join groups only through their actual output-used
+arguments. The bound accounts for the connection capacity of mandatory calls
+and parameter reads, then reserves additional joining rows. In particular,
+several unrelated reads or constant-returning helper calls cannot exhaust all
+but the final row while still needing multiple operations to join their results.
+No graph, operand or constant is supplied. Shapes and causal rules remain with
+the canonical compiler; this lower bound does not guarantee a constructible
+completion, token termination or useful dependence on history. Packets1–12
+retain their literal mask semantics and saved replay behavior.
+
+Version14 (`xlog-contextual-acquisition-v14`) keeps the context2 dependency
+records, constructor predicate and `numerical-rows-v3` source. Entry plans and
+prospective choices search for a joint typed structural completion within the
+remaining operation rows. Each frontier value retains its canonical shape at
+lengths1 and `max_context`, output-reaching dependencies and numeric-argument
+reads. Every search transition uses the same typed program insertion, acquired
+causal check and dependency propagation as an actual model-authored operation.
+Shape conversions and joins therefore consume rows together; separate values
+do not contribute a free union of their dependencies.
+
+The search keeps only nondominated values with identical shape pairs, preserving
+the distinction between raw-token and numeric-argument reads needed by causal
+scans. Equivalent frontiers are memoized within one mask call. Candidate widths
+come from the actual frontier, parameter dimensions and declared input/output
+ABIs; column selection values do not change structural dependency coverage.
+Empty entry-plan and external typed-prefix answers are retained across tokens
+for one exact environment, including the ABI, parameter declarations, raw-token
+alphabet, callee signatures and dependency facts, required definitions and
+physical parameters, and width bound. Typed-prefix keys are the complete existing
+search-state keys after canonical producer scheduling: remaining rows and sorted
+frontier shape pairs, dependency facts and numeric-read flags. Reparsing a completed
+operation count, operation or operand prefix can reuse its exact proof.
+Changing the environment discards those answers. Empty plans retain at most one
+answer per output slot. Serialized typed-prefix keys share a 1 MiB allowance,
+matching the native source-byte bound; exceeding it evicts prefix answers for
+recomputation and does not evict empty plans or reject a program. Intermediate
+search frontiers are still reset for each mask. The native mask instance owns
+this cache; saved model state and decoder audits do not depend on cache residency.
+The same mask also retains one parsed operation-prefix checkpoint from the actual
+input, never from a hypothetical next spelling. Exact canonical bytes and the
+definition position bind the checkpoint to the mask's captured context. Only
+completed operations with a visible following comma are reused through the same
+resource visitor and typed program; their syntax is consumed without repeating
+operand inference or completion search. The remaining tail still undergoes all
+original checks, including commas after the output slot, unfinished decimals and
+open operand or raw-token arrays. Prefix bytes, serialized program metadata and
+fixed checkpoint storage share a separate 1 MiB allowance; this is not a total RSS
+limit. A mismatch or an oversized checkpoint recomputes through the same visitors
+and never rejects a permitted program. Earlier packets do not use checkpoints.
+Mandatory direct vector reads and calls that ignore all numeric formals can be
+scheduled first inside the search when doing so preserves the causal boundary;
+scan-capable cells remain choices. This removes equivalent scheduling orders
+without changing the model's source order.
+Binary joins share the structural transition of a `Select` with one repeated
+operand. A shape-preserving `Tanh` can fill spare rows after a complete result
+becomes available. These are search representatives, never emitted source or
+operations substituted for model choices. Incomplete calls enumerate actual
+shape-valid operand vectors instead of unioning mutually exclusive choices.
+Raw-token arrays also apply that predicate to unfinished decimal IDs and
+commas, so an open array cannot bypass the remaining typed completion bound.
+Unfinished column widths use the same native width domain and consider decimal
+extensions before committing a dimension, preserving split-token widths.
+
+This establishes structural completion under the typed operation-row bound,
+not completion within source-byte or token budgets, numerical nonconstancy,
+usefulness or scientific acceptance. Earlier packets1–13 retain their literal
+mask and saved restoration behavior; callers explicitly select the new packet.
+
+For a version4 through version14 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -448,9 +651,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–14 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types. |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–14). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
@@ -481,6 +684,12 @@ successful proposals.
 Operations use a snake-case `operation` tag. `argument` reads the indexed numeric
 argument; `parameter` reads a shared parameter; `linear` multiplies by a named
 parameter's indexed matrix; `add`, `subtract`, `multiply`, `divide`, and `tanh` provide FP32 arithmetic.
+Division uses the ordinary quotient and derivative, with no epsilon or clipping.
+Both numeric branches of `select` are computed before selection; it does not guard
+an invalid division. Zero inputs therefore require a numerically defined graph,
+including during differentiation. Existing finiteness failures identify the
+function result, program output, parameter gradient or Adam state that failed.
+An unsuccessful minibatch publishes no parameter or optimizer changes.
 `zeros` creates a fixed single row, including a nontrainable zero scan state.
 `gather_columns` retains its explicit index order and accumulates repeated-index
 gradients. `select` chooses its positive or negative numeric input according to

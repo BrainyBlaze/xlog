@@ -1,27 +1,199 @@
 //! Prospective operand choices use the executable compiler's shape inference.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+use std::sync::Arc;
+
+mod completion;
+pub(super) use completion::CompletionCache;
 
 use serde_json::{Map, Value};
 use xlog_core::XlogError;
-use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorSignature, TensorValueShape};
+use xlog_ir::tensor::{
+    TensorOperation as Op, TensorOutputDependencies, TensorProgram, TensorSignature,
+    TensorValueShape,
+};
 
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
+
+#[derive(Clone)]
+pub(super) struct EntryRequirements {
+    pub(super) calls: BTreeSet<String>,
+    pub(super) parameters: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct OutputDependencies {
+    callees: BTreeMap<String, TensorOutputDependencies>,
+    values: Vec<TensorOutputDependencies>,
+    reserve_frontier: bool,
+    completion_cache: Option<Arc<CompletionCache>>,
+}
+
+impl OutputDependencies {
+    fn operation(
+        &self,
+        body: &TensorProgram,
+        operation: &Op,
+    ) -> Result<TensorOutputDependencies, XlogError> {
+        body.operation_output_dependencies(
+            operation,
+            &|id| {
+                self.values.get(id).cloned().ok_or_else(|| {
+                    XlogError::Compilation("dependency value is not preceding".into())
+                })
+            },
+            &mut |name| {
+                self.callees.get(name).cloned().ok_or_else(|| {
+                    XlogError::Compilation("callee output dependencies are absent".into())
+                })
+            },
+        )
+    }
+}
+
+/// Disjoint required facts that no available value or intrinsic callee output
+/// joins yet. Transitive overlap is deliberately optimistic: this is a row
+/// lower bound, not a synthesized completion or a shape-reachability proof.
+struct DependencyFrontier {
+    definitions: BTreeMap<String, usize>,
+    parameters: BTreeMap<String, usize>,
+    parents: Vec<usize>,
+    groups: usize,
+}
+
+impl DependencyFrontier {
+    fn new(required: &EntryRequirements) -> Self {
+        // Group zero represents either numeric input or raw tokens.
+        let definitions = required
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index + 1))
+            .collect();
+        let parameters = required
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index + 1 + required.calls.len()))
+            .collect();
+        let groups = 1 + required.calls.len() + required.parameters.len();
+        Self {
+            definitions,
+            parameters,
+            parents: (0..groups).collect(),
+            groups,
+        }
+    }
+
+    fn contains(&self, dependencies: &TensorOutputDependencies) -> bool {
+        dependencies.tokens
+            || dependencies
+                .definitions
+                .iter()
+                .any(|name| self.definitions.contains_key(name))
+            || dependencies
+                .parameters
+                .iter()
+                .any(|name| self.parameters.contains_key(name))
+    }
+
+    fn root(&self, mut index: usize) -> usize {
+        while self.parents[index] != index {
+            index = self.parents[index];
+        }
+        index
+    }
+
+    fn connect(&mut self, dependencies: &TensorOutputDependencies, numeric_input: bool) {
+        let indices = dependencies
+            .definitions
+            .iter()
+            .filter_map(|name| self.definitions.get(name).copied())
+            .chain(
+                dependencies
+                    .parameters
+                    .iter()
+                    .filter_map(|name| self.parameters.get(name).copied()),
+            )
+            .chain(
+                (dependencies.tokens || (numeric_input && dependencies.has_input())).then_some(0),
+            )
+            .collect::<Vec<_>>();
+        let Some(&first) = indices.first() else {
+            return;
+        };
+        let first = self.root(first);
+        for index in indices.into_iter().skip(1) {
+            let other = self.root(index);
+            if first != other {
+                self.parents[other] = first;
+                self.groups -= 1;
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
+    pub(super) entry_requirements: Option<EntryRequirements>,
     shapes: [Vec<TensorValueShape>; 2],
     raw_tokens: Vec<u32>,
+    column_limit: usize,
+    dependencies: Option<OutputDependencies>,
 }
 
 impl Program {
+    /// Bound retained prefix state without allocating a serialized copy. The
+    /// shared completion cache is not copied into an operation checkpoint.
+    pub(super) fn fits_prefix_cache(&self, limit: usize) -> bool {
+        struct Extent(usize);
+        impl std::io::Write for Extent {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_sub(bytes.len())
+                    .ok_or(std::io::ErrorKind::WriteZero)?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let shapes = self.shapes.each_ref().map(|shapes| {
+            shapes
+                .iter()
+                .map(|shape| (shape.rows, shape.columns, shape.float32))
+                .collect::<Vec<_>>()
+        });
+        serde_json::to_writer(
+            Extent(limit),
+            &(
+                &self.body,
+                self.planned_output,
+                self.entry_requirements
+                    .as_ref()
+                    .map(|required| (&required.calls, &required.parameters)),
+                shapes,
+                &self.raw_tokens,
+                self.column_limit,
+                self.dependencies
+                    .as_ref()
+                    .map(|facts| (&facts.callees, &facts.values, facts.reserve_frontier)),
+            ),
+        )
+        .is_ok()
+    }
+
     pub(super) fn new(
         signature: TensorSignature,
         vocabulary: usize,
         max_context: usize,
         raw_tokens: Vec<u32>,
+        column_limit: usize,
     ) -> Self {
         Self {
             body: TensorProgram {
@@ -33,9 +205,34 @@ impl Program {
                 max_context,
             },
             planned_output: None,
+            entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],
             raw_tokens,
+            column_limit,
+            dependencies: None,
         }
+    }
+
+    pub(super) fn set_output_dependencies(
+        &mut self,
+        callees: BTreeMap<String, TensorOutputDependencies>,
+        reserve_frontier: bool,
+        completion_cache: Option<Arc<CompletionCache>>,
+    ) {
+        self.dependencies = Some(OutputDependencies {
+            callees,
+            values: Vec::new(),
+            reserve_frontier,
+            completion_cache,
+        });
+    }
+
+    pub(super) fn output_dependencies(&self) -> Result<TensorOutputDependencies, String> {
+        self.dependencies
+            .as_ref()
+            .and_then(|dependencies| dependencies.values.get(self.body.output))
+            .cloned()
+            .ok_or_else(|| "numerical output dependencies are absent".into())
     }
 
     fn infer(
@@ -80,12 +277,26 @@ impl Program {
         {
             return Err("planned output does not match the signature".into());
         }
+        let dependencies = self
+            .dependencies
+            .as_ref()
+            .map(|facts| facts.operation(&self.body, &operation))
+            .transpose()
+            .map_err(|error| error.to_string())?;
         self.body.operations.push(operation);
         self.body
             .validate_acquired_body()
             .map_err(|error| error.to_string())?;
+        if self.planned_output.is_some_and(|output| {
+            !self.completion_possible(&self.body, output, signatures, dependencies.as_ref())
+        }) {
+            return Err("remaining entry operations cannot cover required calls and reads".into());
+        }
         self.shapes[0].push(first);
         self.shapes[1].push(last);
+        if let Some(facts) = &mut self.dependencies {
+            facts.values.push(dependencies.unwrap());
+        }
         Ok(())
     }
 
@@ -111,19 +322,50 @@ impl Program {
             == Some(shape)
     }
 
+    pub(super) fn completion_widths(&self, signatures: &Signatures) -> BTreeSet<usize> {
+        let mut widths = BTreeSet::from([1]);
+        for signature in std::iter::once(&self.body.signature).chain(signatures.values()) {
+            if let Ok(shape) = signature.output(1, self.body.vocabulary) {
+                widths.insert(shape.columns);
+            }
+            if let Ok(arguments) = signature.arguments(1) {
+                widths.extend(arguments.into_iter().map(|shape| shape.columns));
+            }
+        }
+        for parameter in &self.body.parameters {
+            widths.extend(parameter.shape.iter().copied());
+        }
+        widths.extend(self.shapes[0].iter().map(|shape| shape.columns));
+        widths
+    }
+
+    pub(super) fn column_range(&self) -> Range<usize> {
+        self.output_columns()
+            .map_or(1..self.column_limit + 1, |columns| columns..columns + 1)
+    }
+
+    pub(super) fn searches_completion(&self) -> bool {
+        self.dependencies
+            .as_ref()
+            .is_some_and(|facts| facts.completion_cache.is_some())
+    }
+
     pub(super) fn outputs(&self) -> Vec<usize> {
         (0..self.body.operations.len())
             .filter(|&id| {
-                [1, self.body.max_context]
-                    .into_iter()
-                    .enumerate()
-                    .all(|(length, tokens)| {
-                        self.body
-                            .signature
-                            .output(tokens, self.body.vocabulary)
-                            .ok()
-                            == Some(self.shapes[length][id])
-                    })
+                self.dependencies
+                    .as_ref()
+                    .is_none_or(|facts| self.satisfies_output(&facts.values[id]))
+                    && [1, self.body.max_context]
+                        .into_iter()
+                        .enumerate()
+                        .all(|(length, tokens)| {
+                            self.body
+                                .signature
+                                .output(tokens, self.body.vocabulary)
+                                .ok()
+                                == Some(self.shapes[length][id])
+                        })
             })
             .collect()
     }
@@ -146,17 +388,378 @@ impl Program {
     }
 
     fn compatible(&self, operation: Op, signatures: &Signatures) -> bool {
-        // The same causal-dependency check used by the complete compiler applies
-        // to this prospective operation. No prospective graph is ever emitted.
-        let mut body = self.body.clone();
-        body.operations.push(operation.clone());
-        if body.validate_acquired_body().is_err() {
-            return false;
-        }
-        (0..2).all(|length| {
+        self.compatible_with_dependencies(operation, signatures, None)
+    }
+
+    fn compatible_with_dependencies(
+        &self,
+        operation: Op,
+        signatures: &Signatures,
+        dependencies: Option<&TensorOutputDependencies>,
+    ) -> bool {
+        if !(0..2).all(|length| {
             self.infer(&operation, signatures, length)
                 .is_ok_and(|shape| !self.is_output_slot() || self.matches_output(shape, length))
+        }) {
+            return false;
+        }
+        // The same causal-dependency check used by the complete compiler applies
+        // after shape inference. No prospective graph is ever emitted.
+        let mut body = self.body.clone();
+        body.operations.push(operation);
+        body.validate_acquired_body().is_ok()
+            && self.planned_output.is_none_or(|output| {
+                self.completion_possible(&body, output, signatures, dependencies)
+            })
+    }
+
+    pub(super) fn permits_plan(&self, output: usize, signatures: &Signatures) -> bool {
+        self.completion_possible(&self.body, output, signatures, None)
+    }
+
+    fn completion_possible(
+        &self,
+        body: &TensorProgram,
+        output: usize,
+        signatures: &Signatures,
+        dependencies: Option<&TensorOutputDependencies>,
+    ) -> bool {
+        if let Some(facts) = &self.dependencies {
+            return self.dependency_completion_possible(
+                body,
+                output,
+                signatures,
+                facts,
+                dependencies,
+            );
+        }
+        let Some(required) = &self.entry_requirements else {
+            return true;
+        };
+        let Some(remaining) = (output + 1).checked_sub(body.operations.len()) else {
+            return false;
+        };
+        let mut calls = required.calls.clone();
+        let mut parameters = required.parameters.clone();
+        for operation in &body.operations {
+            if let Some(name) = operation.callee() {
+                calls.remove(name);
+            }
+            if let Some(weight) = operation.parameter() {
+                let Some(parameter) = body.parameters.get(weight) else {
+                    return false;
+                };
+                parameters.remove(&parameter.name);
+            }
+        }
+        let needed = calls.len() + parameters.len();
+        if remaining < needed
+            || parameters.iter().any(|name| {
+                !body
+                    .parameters
+                    .iter()
+                    .any(|parameter| &parameter.name == name)
+            })
+        {
+            return false;
+        }
+        if needed == 0 || remaining > needed {
+            return true;
+        }
+        // Each outstanding root call or direct physical read needs a distinct
+        // row. With no spare row, at least one must also yield the entry result.
+        // Allow hypothetical operands here: this is a necessary lower bound,
+        // not a claim that those operands already exist or can still be built.
+        calls
+            .iter()
+            .any(|name| self.call_can_finish(name, signatures))
+            || body
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(weight, parameter)| {
+                    parameters.contains(&parameter.name)
+                        && self.parameter_can_finish(weight, signatures)
+                })
+    }
+
+    fn satisfies_output(&self, dependencies: &TensorOutputDependencies) -> bool {
+        self.entry_requirements.as_ref().is_none_or(|required| {
+            dependencies.has_input()
+                && required.calls.is_subset(&dependencies.definitions)
+                && required.parameters.is_subset(&dependencies.parameters)
         })
+    }
+
+    fn dependency_completion_possible(
+        &self,
+        body: &TensorProgram,
+        output: usize,
+        signatures: &Signatures,
+        facts: &OutputDependencies,
+        prospective: Option<&TensorOutputDependencies>,
+    ) -> bool {
+        let Some(remaining) = (output + 1).checked_sub(body.operations.len()) else {
+            return false;
+        };
+        let computed;
+        let next = if body.operations.len() > facts.values.len() {
+            if body.operations.len() != facts.values.len() + 1 {
+                return false;
+            }
+            match prospective {
+                Some(dependencies) => Some(dependencies),
+                None => {
+                    let Ok(dependencies) = facts.operation(body, body.operations.last().unwrap())
+                    else {
+                        return false;
+                    };
+                    computed = dependencies;
+                    Some(&computed)
+                }
+            }
+        } else {
+            None
+        };
+        let values = || facts.values.iter().chain(next);
+        if remaining == 0 {
+            return values()
+                .nth(output)
+                .is_some_and(|dependencies| self.satisfies_output(dependencies));
+        }
+        let Some(required) = &self.entry_requirements else {
+            return true;
+        };
+        let mut available = TensorOutputDependencies::default();
+        for dependencies in values() {
+            available.merge(dependencies);
+        }
+
+        // Roots are computed from returned values, not from calls serialized
+        // elsewhere in helper bodies. Each missing root needs its own call row.
+        let mut roots = required.calls.clone();
+        let mut parameters = required.parameters.clone();
+        for name in &required.calls {
+            let Some(callee) = facts.callees.get(name) else {
+                return false;
+            };
+            for dependency in &callee.definitions {
+                if dependency != name {
+                    roots.remove(dependency);
+                }
+            }
+            parameters.retain(|name| !callee.parameters.contains(name));
+        }
+        roots.retain(|name| !available.definitions.contains(name));
+        parameters.retain(|name| !available.parameters.contains(name));
+        if parameters.iter().any(|name| {
+            !body
+                .parameters
+                .iter()
+                .any(|parameter| &parameter.name == name)
+        }) {
+            return false;
+        }
+        // An unseen numeric/token input needs a separate producer unless a
+        // required call can itself inspect raw tokens. Existing values are an
+        // optimistic union: joining them may still cost additional rows.
+        let input_row =
+            !available.has_input() && !roots.iter().any(|name| facts.callees[name].tokens);
+        let needed = roots.len() + parameters.len() + usize::from(input_row);
+        if remaining < needed {
+            return false;
+        }
+        if facts.reserve_frontier {
+            let mut frontier = DependencyFrontier::new(required);
+            for dependencies in values() {
+                frontier.connect(dependencies, true);
+            }
+            // A helper's own output-reaching facts are one producer group.
+            // Formal arguments remain separate until an actual call uses them.
+            for dependencies in facts.callees.values() {
+                frontier.connect(dependencies, false);
+            }
+            let call_capacity = |name: &str| {
+                let dependencies = &facts.callees[name];
+                let intrinsic = usize::from(frontier.contains(dependencies));
+                let call = (dependencies.arguments.len() + intrinsic).saturating_sub(1);
+                let scan = match signatures.get(name) {
+                    Some(TensorSignature::Pure { input_widths, .. }) if input_widths.len() == 2 => {
+                        // Scan always carries initial; item is output-used only
+                        // when the canonical cell facts name numeric formal 1.
+                        (1 + usize::from(dependencies.arguments.contains(&1)) + intrinsic)
+                            .saturating_sub(1)
+                    }
+                    _ => 0,
+                };
+                call.max(scan)
+            };
+            // Select joins at most three existing groups. A call or scan may
+            // additionally join its intrinsic group and output-used operands.
+            let capacity = facts
+                .callees
+                .keys()
+                .map(|name| call_capacity(name))
+                .max()
+                .unwrap_or(0)
+                .max(2);
+            let mandatory_capacity =
+                roots.iter().map(|name| call_capacity(name)).sum::<usize>()
+                    + parameters
+                        .iter()
+                        .map(|name| {
+                            // The acquired grammar reads a physical parameter with
+                            // Parameter or Linear; only a matrix can join an input.
+                            usize::from(body.parameters.iter().any(|parameter| {
+                                &parameter.name == name && parameter.shape.len() == 2
+                            }))
+                        })
+                        .sum::<usize>()
+                    + if input_row {
+                        facts
+                            .callees
+                            .iter()
+                            .filter(|(_, dependencies)| dependencies.tokens)
+                            .map(|(name, _)| call_capacity(name))
+                            .max()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+            let joins = frontier
+                .groups
+                .saturating_sub(1)
+                .saturating_sub(mandatory_capacity)
+                .div_ceil(capacity);
+            if remaining < needed + joins {
+                return false;
+            }
+        }
+        if let Some(cache) = &facts.completion_cache {
+            return completion::possible(self, body, output, signatures, cache);
+        }
+        if needed == 0 || remaining > needed {
+            return true;
+        }
+        // With no spare row, the result must be one of the missing producers.
+        // This remains a necessary shape bound; it never invents an operand.
+        roots
+            .iter()
+            .any(|name| self.call_can_finish(name, signatures))
+            || body
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(weight, parameter)| {
+                    parameters.contains(&parameter.name)
+                        && self.parameter_can_finish(weight, signatures)
+                })
+            || (input_row && self.input_can_finish(signatures))
+    }
+
+    fn input_can_finish(&self, signatures: &Signatures) -> bool {
+        (0..self.body.signature.arguments(1).unwrap().len()).any(|argument| {
+            (0..2).all(|length| {
+                self.infer(&Op::Argument { argument }, signatures, length)
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+        }) || {
+            let columns = self
+                .body
+                .signature
+                .output(1, self.body.vocabulary)
+                .unwrap()
+                .columns;
+            let token_ids: Vec<_> = self.raw_tokens.iter().copied().take(columns).collect();
+            (0..2).all(|length| {
+                self.infer(
+                    &Op::TokenIndicators {
+                        token_ids: token_ids.clone(),
+                    },
+                    signatures,
+                    length,
+                )
+                .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+        } || self.dependencies.as_ref().is_some_and(|facts| {
+            facts.callees.iter().any(|(name, dependencies)| {
+                dependencies.tokens && self.call_can_finish(name, signatures)
+            })
+        })
+    }
+
+    fn parameter_can_finish(&self, weight: usize, signatures: &Signatures) -> bool {
+        (0..2).all(|length| {
+            self.infer(&Op::Parameter { weight }, signatures, length)
+                .is_ok_and(|shape| self.matches_output(shape, length))
+        }) || [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                let parameter = &self.body.parameters[weight];
+                let [_, inner] = parameter.shape.as_slice() else {
+                    return false;
+                };
+                let Ok(mut input) = self.body.signature.output(tokens, self.body.vocabulary) else {
+                    return false;
+                };
+                input.columns = *inner;
+                self.body
+                    .operation_shape_with(
+                        &Op::Linear { input: 0, weight },
+                        tokens,
+                        &|_| Ok(input),
+                        &|name| {
+                            signatures.get(name).cloned().ok_or_else(|| {
+                                XlogError::Compilation("callee must precede its caller".into())
+                            })
+                        },
+                    )
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+    }
+
+    fn call_can_finish(&self, name: &str, signatures: &Signatures) -> bool {
+        let Some(signature) = signatures.get(name) else {
+            return false;
+        };
+        if [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                signature
+                    .output(tokens, self.body.vocabulary)
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
+        {
+            return true;
+        }
+        if !matches!(signature, TensorSignature::Pure { input_widths, .. } if input_widths.len() == 2)
+        {
+            return false;
+        }
+        [1, self.body.max_context]
+            .into_iter()
+            .enumerate()
+            .all(|(length, tokens)| {
+                let Ok(mut arguments) = signature.arguments(tokens) else {
+                    return false;
+                };
+                arguments[1].rows = tokens;
+                self.body
+                    .operation_shape_with(
+                        &Op::Scan {
+                            input: 1,
+                            initial: 0,
+                            function: name.into(),
+                            max_steps: self.body.max_context,
+                        },
+                        tokens,
+                        &|id| Ok(arguments[id]),
+                        &|_| Ok(signature.clone()),
+                    )
+                    .is_ok_and(|shape| self.matches_output(shape, length))
+            })
     }
 
     fn references(&self, fields: &Map<String, Value>, name: &str, extent: usize) -> Vec<usize> {
@@ -166,56 +769,150 @@ impl Program {
         }
     }
 
-    pub(super) fn numbers(
+    fn possible_call(
+        &self,
+        function: &str,
+        signature: &TensorSignature,
+        mut arguments: Vec<usize>,
+        signatures: &Signatures,
+    ) -> bool {
+        let [Ok(first), Ok(last)] = [
+            signature.arguments(1),
+            signature.arguments(self.body.max_context),
+        ] else {
+            return false;
+        };
+        let count = self.body.operations.len();
+        if self.searches_completion() {
+            return completion::call_arguments(
+                self,
+                function,
+                signature,
+                &arguments,
+                &(0..count).collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .any(|arguments| {
+                self.compatible(
+                    Op::Call {
+                        function: function.into(),
+                        arguments,
+                    },
+                    signatures,
+                )
+            });
+        }
+        let mut abstract_arguments = arguments.clone();
+        let mut abstract_values = BTreeMap::new();
+        for slot in arguments.len()..first.len() {
+            let choices = (0..count)
+                .filter(|&id| self.shapes[0][id] == first[slot] && self.shapes[1][id] == last[slot])
+                .collect::<Vec<_>>();
+            let Some(&id) = choices.first() else {
+                return false;
+            };
+            arguments.push(id);
+            if let Some(facts) = &self.dependencies {
+                // Unchosen operands are an optimistic union of shape-valid
+                // preceding values, not an authored replacement argument.
+                // Once the array is complete, every argument is exact.
+                let mut dependencies = TensorOutputDependencies::default();
+                for id in choices {
+                    dependencies.merge(&facts.values[id]);
+                }
+                let id = count + slot;
+                abstract_arguments.push(id);
+                abstract_values.insert(id, dependencies);
+            }
+        }
+        let operation = Op::Call {
+            function: function.into(),
+            arguments,
+        };
+        let Some(facts) = self
+            .dependencies
+            .as_ref()
+            .filter(|_| !abstract_values.is_empty())
+        else {
+            return self.compatible(operation, signatures);
+        };
+        let dependencies = self.body.operation_output_dependencies(
+            &Op::Call {
+                function: function.into(),
+                arguments: abstract_arguments,
+            },
+            &|id| {
+                abstract_values
+                    .get(&id)
+                    .or_else(|| facts.values.get(id))
+                    .cloned()
+                    .ok_or_else(|| XlogError::Compilation("dependency value is absent".into()))
+            },
+            &mut |name| {
+                facts.callees.get(name).cloned().ok_or_else(|| {
+                    XlogError::Compilation("callee output dependencies are absent".into())
+                })
+            },
+        );
+        dependencies.is_ok_and(|dependencies| {
+            self.compatible_with_dependencies(operation, signatures, Some(&dependencies))
+        })
+    }
+
+    pub(super) fn number_possible(
         &self,
         fields: &Map<String, Value>,
         name: &str,
-        extent: usize,
+        value: usize,
         signatures: &Signatures,
-    ) -> Vec<usize> {
+    ) -> bool {
         let mut candidate = fields.clone();
-        (0..extent)
-            .filter(|&id| {
-                candidate.insert(name.into(), Value::from(id));
-                self.possible(&candidate, None, signatures)
-            })
-            .collect()
+        candidate.insert(name.into(), Value::from(value));
+        self.possible(&candidate, None, signatures)
     }
 
-    pub(super) fn array_numbers(
+    pub(super) fn array_range(
         &self,
         fields: &Map<String, Value>,
         name: &str,
         prefix: &[usize],
-        signatures: &Signatures,
-    ) -> Vec<usize> {
+    ) -> Range<usize> {
         if name == "indices" {
             if self
                 .output_columns()
                 .is_some_and(|columns| prefix.len() >= columns)
             {
-                return Vec::new();
+                return 0..0;
             }
             let id = fields["input"].as_u64().unwrap() as usize;
-            return (0..self
+            return 0..self
                 .shapes
                 .iter()
                 .map(|shapes| shapes[id].columns)
                 .min()
-                .unwrap())
-                .collect();
+                .unwrap();
         }
-        let extent = self.body.operations.len();
+        0..self.body.operations.len()
+    }
+
+    pub(super) fn array_number_possible(
+        &self,
+        fields: &Map<String, Value>,
+        name: &str,
+        prefix: &[usize],
+        value: usize,
+        signatures: &Signatures,
+    ) -> bool {
+        if name == "indices" && !self.searches_completion() {
+            // The contiguous domain is exact; the complete array still uses
+            // canonical gather inference in array_can_end.
+            return true;
+        }
         let mut candidate = fields.clone();
         let mut values = prefix.to_vec();
-        values.push(0);
-        (0..extent)
-            .filter(|&id| {
-                *values.last_mut().unwrap() = id;
-                candidate.insert(name.into(), serde_json::json!(values));
-                self.possible(&candidate, Some(name), signatures)
-            })
-            .collect()
+        values.push(value);
+        candidate.insert(name.into(), serde_json::json!(values));
+        self.possible(&candidate, Some(name), signatures)
     }
 
     pub(super) fn array_can_end(
@@ -257,9 +954,17 @@ impl Program {
         };
         let check = |operation| self.compatible(operation, signatures);
         match tag {
-            "zeros" => check(Op::Zeros {
-                columns: scalar("columns", self.output_columns().unwrap_or(1)),
-            }),
+            "zeros" => {
+                if self.searches_completion() && !fields.contains_key("columns") {
+                    self.completion_widths(signatures)
+                        .into_iter()
+                        .any(|columns| check(Op::Zeros { columns }))
+                } else {
+                    check(Op::Zeros {
+                        columns: scalar("columns", self.output_columns().unwrap_or(1)),
+                    })
+                }
+            }
             "argument" => self
                 .references(
                     fields,
@@ -274,6 +979,30 @@ impl Program {
                 .any(|weight| check(Op::Parameter { weight })),
             "token_indicators" => {
                 let mut token_ids = array("token_ids").unwrap_or_default();
+                if self.searches_completion()
+                    && (!fields.contains_key("token_ids") || open_array == Some("token_ids"))
+                {
+                    let mut widths = self.completion_widths(signatures);
+                    widths.insert(token_ids.len().max(1));
+                    return widths
+                        .into_iter()
+                        .filter(|&columns| columns >= token_ids.len())
+                        .any(|columns| {
+                            let mut candidate = token_ids.clone();
+                            for &id in &self.raw_tokens {
+                                if candidate.len() >= columns {
+                                    break;
+                                }
+                                if !candidate.contains(&(id as usize)) {
+                                    candidate.push(id as usize);
+                                }
+                            }
+                            candidate.len() == columns
+                                && check(Op::TokenIndicators {
+                                    token_ids: candidate.into_iter().map(|id| id as u32).collect(),
+                                })
+                        });
+                }
                 if !fields.contains_key("token_ids") || open_array == Some("token_ids") {
                     let columns = self.output_columns().unwrap_or(1);
                     // Prospective distinct IDs prove that a continuation exists;
@@ -325,6 +1054,23 @@ impl Program {
             }),
             "gather_columns" => refs("input").into_iter().any(|input| {
                 let mut indices = array("indices").unwrap_or_else(|| vec![0]);
+                if self.searches_completion()
+                    && (!fields.contains_key("indices") || open_array == Some("indices"))
+                {
+                    let mut widths = self.completion_widths(signatures);
+                    widths.insert(indices.len().max(1));
+                    return widths
+                        .into_iter()
+                        .filter(|&columns| columns >= indices.len())
+                        .any(|columns| {
+                            let mut candidate = indices.clone();
+                            candidate.resize(columns, 0);
+                            check(Op::GatherColumns {
+                                input,
+                                indices: candidate,
+                            })
+                        });
+                }
                 if let Some(columns) = self.output_columns() {
                     if !fields.contains_key("indices") || open_array == Some("indices") {
                         if indices.len() > columns {
@@ -343,7 +1089,7 @@ impl Program {
                     .iter()
                     .filter(|(name, _)| selected.is_none_or(|selected| selected == name.as_str()))
                     .any(|(function, signature)| {
-                        let mut arguments = array("arguments").unwrap_or_default();
+                        let arguments = array("arguments").unwrap_or_default();
                         let expected = [
                             signature.arguments(1),
                             signature.arguments(self.body.max_context),
@@ -358,6 +1104,10 @@ impl Program {
                         {
                             return false;
                         }
+                        if self.dependencies.is_some() {
+                            return self.possible_call(function, signature, arguments, signatures);
+                        }
+                        let mut arguments = arguments;
                         for slot in arguments.len()..first.len() {
                             let Some(id) = (0..count).find(|&id| {
                                 self.shapes[0][id] == first[slot]
