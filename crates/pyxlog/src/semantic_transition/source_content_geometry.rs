@@ -1948,47 +1948,36 @@ pub(super) fn source_task_projection(
     if let Some(cached) = cached.as_ref() {
         return Ok(cached.tuple.clone_ref(py));
     }
-    let cold = source
+    source
         .cold
         .as_ref()
         .ok_or_else(|| invalid("original source lost its canonical cold task"))?;
+    let context = source.seed.semantic_context()?;
     let mut extent = add(
         python_metadata_tuple_extent(py, 2)?,
         add(
-            python_metadata_tuple_extent(py, 6)?,
+            python_metadata_tuple_extent(py, 7)?,
             python_metadata_tuple_extent(py, 6)?,
         )?,
     )?;
     extent = add(
         extent,
-        material_bytes::python_instance_extent::<program_image::PySemanticProgramImage>(py)?,
+        material_bytes::python_instance_extent::<world::PySemanticContextSource>(py)?,
     )?;
-    let mut scratch_extent = 0;
-    for text in [&cold.initial_theory, &cold.input_facts] {
-        extent = add(extent, python_metadata_text_extent(py, text)?)?;
-    }
-    if let Some(text) = &cold.observer_source {
-        extent = add(extent, python_metadata_text_extent(py, text)?)?;
-    }
-    extent = add(
-        extent,
-        python_metadata_tuple_extent(py, cold.statements.len())?,
-    )?;
-    for (statement, _) in &cold.statements {
-        extent = add(extent, python_metadata_tuple_extent(py, 2)?)?;
-        extent = add(extent, python_metadata_text_extent(py, statement)?)?;
-        extent = add(extent, integer_extent(py)?)?;
-    }
-    extent = add(
-        extent,
-        python_metadata_tuple_extent(py, cold.query_records.len())?,
-    )?;
-    extent = add(
-        extent,
-        multiply(cold.query_records.len(), integer_extent(py)?)?,
-    )?;
-    for values in [&source.seed.authority, &source.seed.evaluation] {
-        extent = add(extent, python_metadata_tuple_extent(py, values.len())?)?;
+    extent = add(extent, std::mem::size_of::<world::ContextSourceData>())?;
+    extent = add(extent, 2 * std::mem::size_of::<usize>())?;
+    extent = add(extent, context.material.capacity())?;
+    let mut scratch_extent = multiply(7 + 9 + 6 + 2, std::mem::size_of::<Py<PyAny>>())?;
+    // Source fields retain their original Python owners. Only the first eight
+    // evaluation fields are projected; its ninth field is the native context.
+    for (values, tuple_len) in [
+        (
+            source.seed.authority.as_slice(),
+            source.seed.authority.len(),
+        ),
+        (&source.seed.evaluation[..8], 9),
+    ] {
+        extent = add(extent, python_metadata_tuple_extent(py, tuple_len)?)?;
         scratch_extent = add(
             scratch_extent,
             multiply(values.len(), std::mem::size_of::<Py<PyAny>>())?,
@@ -2019,27 +2008,19 @@ pub(super) fn source_task_projection(
             u64::try_from(extent).map_err(|_| invalid("original source projection exceeds u64"))?,
         )
         .map_err(xlog_err)?;
-    let cold = (
-        cold.initial_theory.as_str(),
-        cold.input_facts.as_str(),
-        cold.observer_source.as_deref(),
-        PyTuple::new(py, &cold.statements)?,
-        PyTuple::new(py, &cold.query_records)?,
-        Py::new(
-            py,
-            program_image::PySemanticProgramImage {
-                inner: Arc::clone(&cold.image_declaration),
-            },
-        )?,
-    )
-        .into_pyobject(py)?
-        .unbind()
-        .into_any();
+    let context = world::context_python(py, context)?;
+    let cold = world::source_projection(py, &context)?.into_any();
+    let mut evaluation = source.seed.evaluation[..8]
+        .iter()
+        .map(|value| project_value(py, value))
+        .collect::<PyResult<Vec<_>>>()?;
+    evaluation.push(context.into_any());
+    let evaluation = PyTuple::new(py, evaluation)?.unbind().into_any();
     let fields = PyTuple::new(
         py,
         [
             project_sequence(py, &source.seed.authority)?.into_any(),
-            project_sequence(py, &source.seed.evaluation)?.into_any(),
+            evaluation,
             project_value(py, &source.seed.training_domain)?,
             project_value(py, &source.seed.initial_sources)?,
             project_value(py, &source.seed.source_mapping)?,

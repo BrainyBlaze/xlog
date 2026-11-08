@@ -214,9 +214,41 @@ pub(super) struct MaterialSourceRegistry {
     compiler_diagnostic: Mutex<CompilerDiagnosticCache>,
     compiler_diagnostic_acquiring: AtomicBool,
     owner_metadata: Mutex<Option<xlog_cuda::SemanticReplayMaterialReservation>>,
+    semantic_world: Mutex<Option<Arc<world::WorldOwnerData>>>,
 }
 
 impl MaterialSourceRegistry {
+    pub(super) fn bind_semantic_world(&self, owner: &Arc<world::WorldOwnerData>) -> PyResult<()> {
+        let mut current = self
+            .semantic_world
+            .lock()
+            .map_err(|_| invalid("common semantic world owner is poisoned"))?;
+        if let Some(original) = current.as_ref() {
+            if !Arc::ptr_eq(original, owner) {
+                return Err(invalid(
+                    "material source cannot replace its original common world owner",
+                ));
+            }
+        } else {
+            *current = Some(Arc::clone(owner));
+        }
+        Ok(())
+    }
+
+    pub(super) fn semantic_context(
+        &self,
+        binding: &ColdValue,
+    ) -> PyResult<Arc<world::ContextSourceData>> {
+        let owner = self
+            .semantic_world
+            .lock()
+            .map_err(|_| invalid("common semantic world owner is poisoned"))?
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| invalid("semantic context requires its original common world owner"))?;
+        world::resolve_binding(&owner, binding)
+    }
+
     /// Warm the same original cache before acquiring a consumer's own mutex.
     /// This grants no compiler entry and returns only an unbound family.
     pub(super) fn ensure_compiler_diagnostic(&self, py: Python<'_>) -> PyResult<()> {

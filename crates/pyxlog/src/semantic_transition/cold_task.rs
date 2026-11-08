@@ -849,7 +849,7 @@ impl PySemanticTransitionFreshParent {
     }
 }
 
-pub(super) struct ColdTaskSource {
+pub(super) struct AuthoredTaskSource {
     program_image: Arc<super::program_image::ProgramImageDeclaration>,
     initial_theory: String,
     input_facts: String,
@@ -858,7 +858,7 @@ pub(super) struct ColdTaskSource {
     statement_records: Vec<u32>,
 }
 
-impl ColdTaskSource {
+impl AuthoredTaskSource {
     fn read(
         initial_theory: &Bound<'_, PyAny>,
         input_facts: &Bound<'_, PyAny>,
@@ -959,6 +959,85 @@ impl ColdTaskSource {
     }
 }
 
+/// The external cold entrypoint: authored local material plus its authentic
+/// binding in the complete common world.
+struct ColdTaskSource {
+    source: AuthoredTaskSource,
+    semantic_context: Arc<super::world::ContextSourceData>,
+}
+
+impl ColdTaskSource {
+    fn read(
+        initial_theory: &Bound<'_, PyAny>,
+        input_facts: &Bound<'_, PyAny>,
+        observer_program: &Bound<'_, PyAny>,
+        statements: &Bound<'_, PyAny>,
+        query_records: &Bound<'_, PyAny>,
+        program_image: &Bound<'_, PyAny>,
+        semantic_context: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let source = AuthoredTaskSource::read(
+            initial_theory,
+            input_facts,
+            observer_program,
+            statements,
+            query_records,
+            program_image,
+        )?;
+        let context = super::world::context_source(semantic_context)?;
+        let original = super::world::original_source(semantic_context.py(), &context);
+        let expected =
+            AuthoredTaskSource::from_tuple(original.bind(semantic_context.py()).as_any())?;
+        let digest = |source: &AuthoredTaskSource| {
+            let mut hash = Sha256::new();
+            source.update_digest(&mut hash);
+            <[u8; 32]>::from(hash.finalize())
+        };
+        if !Arc::ptr_eq(&source.program_image, &expected.program_image)
+            || digest(&source) != digest(&expected)
+        {
+            return Err(invalid(
+                "cold source differs from its original common-world material or image owner",
+            ));
+        }
+        Ok(Self {
+            source,
+            semantic_context: context,
+        })
+    }
+
+    fn from_tuple(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if !value.is_exact_instance_of::<PyTuple>() {
+            return Err(invalid("cold source requires an exact builtin seven-tuple"));
+        }
+        let fields = value.cast::<PyTuple>()?;
+        if fields.len() != 7 {
+            return Err(invalid(
+                "cold source requires its original local material and native semantic context",
+            ));
+        }
+        Self::read(
+            &fields.get_item(0)?,
+            &fields.get_item(1)?,
+            &fields.get_item(2)?,
+            &fields.get_item(3)?,
+            &fields.get_item(4)?,
+            &fields.get_item(5)?,
+            &fields.get_item(6)?,
+        )
+    }
+
+    fn admission(&self) -> PyResult<SemanticAdmissionRecords> {
+        self.source.admission()
+    }
+
+    fn update_digest(&self, hash: &mut Sha256) {
+        // Admission geometry retains its original content law. Full world
+        // identities stay in the separate native binding and checkpoint metadata.
+        self.source.update_digest(hash);
+    }
+}
+
 struct ColdTaskContent {
     observation: (
         xlog_cuda::SemanticTaskContentIdentity,
@@ -977,6 +1056,13 @@ impl PySemanticTransitionSession {
         ground: &super::ColdValue,
         parent: &PySemanticTransitionFreshParent,
     ) -> PyResult<ColdTaskContent> {
+        let context = self.require_semantic_context()?;
+        let donor_context = donor.require_semantic_context()?;
+        if !Arc::ptr_eq(&context.owner, &donor_context.owner) {
+            return Err(invalid(
+                "evaluation composition requires its original common world owner",
+            ));
+        }
         let donor_program = donor.editable_source()?.program.as_ref().cloned();
         let target_program = self
             .editable_source()?
@@ -1136,6 +1222,7 @@ pub(crate) struct PySemanticTransitionColdTask {
     content: Mutex<ColdTaskContent>,
     task_ground: super::ColdValue,
     pending_model_contexts: Mutex<Option<Py<PyTuple>>>,
+    pub(super) semantic_context: Arc<super::world::ContextSourceData>,
 }
 
 impl PySemanticTransitionColdTask {
@@ -1181,7 +1268,7 @@ impl PySemanticTransitionColdTask {
 
 #[pymethods]
 impl PySemanticTransitionColdTask {
-    /// Native admission requirements of the complete original six-field source.
+    /// Native admission requirements of the complete original seven-field source.
     /// The same encoder is used by metadata composition and fresh construction.
     #[staticmethod]
     fn admission_requirements(cold_source: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, usize)> {
@@ -1198,7 +1285,7 @@ impl PySemanticTransitionColdTask {
     }
 
     /// Return the target query record ordinals from the canonical cold composition.
-    /// Both sources use the same six fields as fresh cold construction.
+    /// Both sources retain the same local material and common owner as fresh construction.
     /// This metadata preparation does not construct a Session or load a model.
     #[staticmethod]
     #[pyo3(signature = (source_cold_source, target_cold_source, *, admission_limits))]
@@ -1210,6 +1297,14 @@ impl PySemanticTransitionColdTask {
     ) -> PyResult<Py<PyTuple>> {
         let source = ColdTaskSource::from_tuple(source_cold_source)?;
         let target = ColdTaskSource::from_tuple(target_cold_source)?;
+        if !Arc::ptr_eq(
+            &source.semantic_context.owner,
+            &target.semantic_context.owner,
+        ) {
+            return Err(invalid(
+                "evaluation sources require one original common world owner",
+            ));
+        }
         let mut digest = Sha256::new();
         digest.update(b"xlog.semantic.evaluation-admission-metadata.v1\0");
         for source in [&source, &target] {
@@ -1238,7 +1333,7 @@ impl PySemanticTransitionColdTask {
     }
 
     #[new]
-    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, program_image, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None, nonterminal_intent=None))]
+    #[pyo3(signature = (*, initial_theory, input_facts, observer_program, statements, query_records, program_image, semantic_context, task_ground, training_canary_source, capacities, admission_limits, device_ordinal, memory_bytes, provenance_capacity_records, prefix_capacity, feedback_capacity, pad_token, terminal_tokens, final_intent_payload_bytes, intent_effect, intent_entry_capacity, intent_payload_capacity_bytes, acknowledgement_payload_capacity_bytes, authority_decisions_capacity_bytes, generations, training_cursor, training_rng, fuel, rng, material_source=None, private_replay_child=None, prepared_actor_refresh=None, actor_refresh_bank=None, rule_library=None, nonterminal_intent=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the cold producer receives independent native resource budgets"
@@ -1251,6 +1346,7 @@ impl PySemanticTransitionColdTask {
         statements: &Bound<'_, PyAny>,
         query_records: &Bound<'_, PyAny>,
         program_image: &Bound<'_, PyAny>,
+        semantic_context: &Bound<'_, PyAny>,
         task_ground: &Bound<'_, PyAny>,
         training_canary_source: &Bound<'_, PyAny>,
         capacities: (u32, u32, u32, u32),
@@ -1362,8 +1458,11 @@ impl PySemanticTransitionColdTask {
             }
             None
         };
-        let (canary_source, canary_owner, _) =
-            super::read_training_canary_source(py, Some(training_canary_source))?;
+        let (canary_source, canary_owner, _) = super::read_training_canary_source(
+            py,
+            Some(training_canary_source),
+            &super::world::context_source(semantic_context)?,
+        )?;
         let source_allocation = canary_owner
             .as_ref()
             .map(|source| source.borrow(py).canary_allocation_domain(py))
@@ -1382,21 +1481,25 @@ impl PySemanticTransitionColdTask {
         };
         let task_ground = super::read_task_ground(task_ground, &mut (16 * 1024 * 1024))?;
         let native_ground = super::task_ground_value(&task_ground)?;
-        let ColdTaskSource {
-            initial_theory,
-            input_facts,
-            observer_program,
-            statements,
-            statement_records,
-            program_image: image_declaration,
-        } = ColdTaskSource::read(
+        let bound_source = ColdTaskSource::read(
             initial_theory,
             input_facts,
             observer_program,
             statements,
             query_records,
             program_image,
+            semantic_context,
         )?;
+        let semantic_context = bound_source.semantic_context;
+        material_sources.bind_semantic_world(&semantic_context.owner)?;
+        let AuthoredTaskSource {
+            initial_theory,
+            input_facts,
+            observer_program,
+            statements,
+            statement_records,
+            program_image: image_declaration,
+        } = bound_source.source;
         match (&native_ground, &observer_program) {
             (xlog_cuda::SemanticTaskGround::Logical, None) => {
                 return Err(invalid(
@@ -1578,6 +1681,9 @@ impl PySemanticTransitionColdTask {
                 (Py::new(py, native_session)?, parent)
             }
         };
+        session
+            .borrow(py)
+            .bind_semantic_context(Arc::clone(&semantic_context))?;
         #[cfg(feature = "semantic-policy")]
         if let Some(child) = &replay_custody {
             child.retain_session(py, &session)?;
@@ -1683,6 +1789,7 @@ impl PySemanticTransitionColdTask {
             }),
             task_ground,
             pending_model_contexts: Mutex::new(None),
+            semantic_context,
         })
     }
 
@@ -1760,6 +1867,14 @@ impl PySemanticTransitionColdTask {
             cold_tasks.push(context.extract::<PyRef<'_, Self>>()?);
         }
         for (member, cold) in cold_tasks.iter().enumerate() {
+            if !Arc::ptr_eq(
+                &cold_tasks[0].semantic_context.owner,
+                &cold.semantic_context.owner,
+            ) {
+                return Err(invalid(
+                    "model contexts require one original common world owner",
+                ));
+            }
             let session = cold.session.borrow(py);
             session.require_creator()?;
             if sessions

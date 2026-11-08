@@ -23,13 +23,14 @@ pub(super) struct WorldDeclarationData {
 
 pub(super) struct WorldOwnerData {
     pub(super) declaration: Arc<WorldDeclarationData>,
+    declaration_object: Py<PySemanticWorldDeclaration>,
 }
 
 pub(super) struct ContextSourceData {
     pub(super) owner: Arc<WorldOwnerData>,
     pub(super) index: u32,
     pub(super) identity: [u8; 32],
-    material: Vec<u8>,
+    pub(super) material: Vec<u8>,
 }
 
 impl ContextSourceData {
@@ -113,7 +114,7 @@ fn cold_immutable(value: &Bound<'_, PyAny>) -> PyResult<ColdValue> {
 }
 
 fn source_material(source: &Bound<'_, PyAny>) -> PyResult<ColdValue> {
-    super::cold_task::ColdTaskSource::from_tuple(source)?;
+    super::cold_task::AuthoredTaskSource::from_tuple(source)?;
     let source = source.cast::<PyTuple>()?;
     let mut fields = Vec::with_capacity(6);
     for ordinal in 0..5 {
@@ -141,7 +142,7 @@ fn source_python(py: Python<'_>, source: &ColdValue) -> PyResult<Py<PyTuple>> {
         .into_any(),
     );
     let original = PyTuple::new(py, original)?;
-    super::cold_task::ColdTaskSource::from_tuple(original.as_any())?;
+    super::cold_task::AuthoredTaskSource::from_tuple(original.as_any())?;
     Ok(original.unbind())
 }
 
@@ -383,7 +384,7 @@ fn compiled_programs(
     }
     let mut programs = Vec::with_capacity(sources.len());
     for (source, context) in sources.iter().zip(contexts) {
-        let source = super::cold_task::ColdTaskSource::from_tuple(source.bind(py).as_any())?;
+        let source = super::cold_task::AuthoredTaskSource::from_tuple(source.bind(py).as_any())?;
         let compiled = super::cold_task::editable_source_from_admission(&source.admission()?)?
             .ok_or_else(|| {
                 invalid("semantic world lost its original canonical program lowering")
@@ -694,7 +695,7 @@ pub(crate) struct PySemanticWorldOwner {
 impl PySemanticWorldOwner {
     #[new]
     #[pyo3(signature = (*, declaration))]
-    fn new(declaration: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn new(py: Python<'_>, declaration: &Bound<'_, PyAny>) -> PyResult<Self> {
         if !declaration.is_exact_instance_of::<PySemanticWorldDeclaration>() {
             return Err(invalid(
                 "semantic world owner requires its native immutable declaration",
@@ -706,7 +707,12 @@ impl PySemanticWorldOwner {
                 .inner,
         );
         Ok(Self {
-            inner: Arc::new(WorldOwnerData { declaration: inner }),
+            inner: Arc::new(WorldOwnerData {
+                declaration: inner,
+                declaration_object: declaration
+                    .extract::<Py<PySemanticWorldDeclaration>>()?
+                    .clone_ref(py),
+            }),
             declaration: declaration.extract()?,
         })
     }
@@ -716,31 +722,8 @@ impl PySemanticWorldOwner {
         py: Python<'_>,
         context_index: u32,
     ) -> PyResult<PySemanticContextSource> {
-        let declaration = &self.inner.declaration;
-        let local = declaration
-            .local_identities
-            .get(context_index as usize)
-            .ok_or_else(|| invalid("semantic context index is outside the original declaration"))?;
-        let mut digest = Sha256::new();
-        digest.update(b"xlog.semantic-bound-context.v1\0");
-        digest.update(declaration.identity);
-        digest.update(local);
-        digest.update(context_index.to_le_bytes());
-        let identity: [u8; 32] = digest.finalize().into();
-        let material = checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
-            ColdValue::Text(CONTEXT_TAG.into()),
-            ColdValue::Bytes(Arc::from(declaration.identity)),
-            ColdValue::Bytes(Arc::from(*local)),
-            ColdValue::Bytes(Arc::from(identity)),
-            ColdValue::Integer(context_index.to_string()),
-        ]));
         Ok(PySemanticContextSource {
-            inner: Arc::new(ContextSourceData {
-                owner: Arc::clone(&self.inner),
-                index: context_index,
-                identity,
-                material,
-            }),
+            inner: context_data(&self.inner, context_index)?,
             declaration: self.declaration.clone_ref(py),
         })
     }
@@ -890,4 +873,101 @@ pub(super) fn value_schema_object(py: Python<'_>, statement_bytes: usize) -> PyR
     ])
     .python_value(py)?;
     Ok(result.bind(py).cast::<PyTuple>()?.clone().unbind())
+}
+
+pub(super) fn context_data(
+    owner: &Arc<WorldOwnerData>,
+    context_index: u32,
+) -> PyResult<Arc<ContextSourceData>> {
+    let declaration = &owner.declaration;
+    let local = declaration
+        .local_identities
+        .get(context_index as usize)
+        .ok_or_else(|| invalid("semantic context index is outside the original declaration"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"xlog.semantic-bound-context.v1\0");
+    digest.update(declaration.identity);
+    digest.update(local);
+    digest.update(context_index.to_le_bytes());
+    let identity: [u8; 32] = digest.finalize().into();
+    let material = checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
+        ColdValue::Text(CONTEXT_TAG.into()),
+        ColdValue::Bytes(Arc::from(declaration.identity)),
+        ColdValue::Bytes(Arc::from(*local)),
+        ColdValue::Bytes(Arc::from(identity)),
+        ColdValue::Integer(context_index.to_string()),
+    ]));
+    Ok(Arc::new(ContextSourceData {
+        owner: Arc::clone(owner),
+        index: context_index,
+        identity,
+        material,
+    }))
+}
+
+pub(super) fn context_python(
+    py: Python<'_>,
+    context: Arc<ContextSourceData>,
+) -> PyResult<Py<PySemanticContextSource>> {
+    let declaration = context.owner.declaration_object.clone_ref(py);
+    Py::new(
+        py,
+        PySemanticContextSource {
+            inner: context,
+            declaration,
+        },
+    )
+}
+
+pub(super) fn original_source(py: Python<'_>, context: &ContextSourceData) -> Py<PyTuple> {
+    context.owner.declaration.original_sources[context.index as usize].clone_ref(py)
+}
+
+pub(super) fn source_projection(
+    py: Python<'_>,
+    context: &Py<PySemanticContextSource>,
+) -> PyResult<Py<PyTuple>> {
+    let source = original_source(py, &context.borrow(py).inner);
+    let mut fields = source
+        .bind(py)
+        .iter()
+        .map(|field| field.unbind())
+        .collect::<Vec<_>>();
+    fields.push(context.clone_ref(py).into_any());
+    Ok(PyTuple::new(py, fields)?.unbind())
+}
+
+pub(super) fn binding_value(context: &ContextSourceData) -> ColdValue {
+    ColdValue::Bytes(Arc::from(context.material.as_slice()))
+}
+
+pub(super) fn resolve_binding(
+    owner: &Arc<WorldOwnerData>,
+    binding: &ColdValue,
+) -> PyResult<Arc<ContextSourceData>> {
+    let ColdValue::Bytes(bytes) = binding else {
+        return Err(invalid(
+            "semantic context requires its original native binding material",
+        ));
+    };
+    let value = checkpoint_cold_value(bytes, bytes.len())?;
+    let fields = value.fields(5)?;
+    if text_value(&fields[0])? != CONTEXT_TAG {
+        return Err(invalid(
+            "semantic context binding has another material kind",
+        ));
+    }
+    let context = context_data(owner, index(&fields[4])?)?;
+    if context.material.as_slice() != bytes.as_ref() {
+        return Err(invalid(
+            "semantic context binding differs from the original common world",
+        ));
+    }
+    Ok(context)
+}
+
+pub(super) fn same_context(left: &ContextSourceData, right: &ContextSourceData) -> bool {
+    Arc::ptr_eq(&left.owner, &right.owner)
+        && left.index == right.index
+        && left.identity == right.identity
 }
