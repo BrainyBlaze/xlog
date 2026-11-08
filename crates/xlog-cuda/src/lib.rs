@@ -135,8 +135,9 @@ pub use semantic_transition::{
     SemanticTokenProvenance, SemanticTransitionError, SemanticTransitionHostIoStats,
     SemanticTransitionKind, SemanticTransitionLane, SemanticTransitionObservation,
     SemanticTransitionOutcome, SemanticTransitionReceipt, SemanticTransitionRefusal,
-    SemanticTransitionSession, SemanticTransitionWork, SEMANTIC_FEEDBACK_SUPPORT_FIELDS,
-    SEMANTIC_TRANSITION_COMPONENT_COUNT, SEMANTIC_TRANSITION_GENERATION,
+    SemanticTransitionSession, SemanticTransitionWork, SemanticWorldContext, SemanticWorldSource,
+    SEMANTIC_FEEDBACK_SUPPORT_FIELDS, SEMANTIC_TRANSITION_COMPONENT_COUNT,
+    SEMANTIC_TRANSITION_GENERATION,
 };
 #[cfg(feature = "semantic-policy")]
 pub use semantic_transition::{

@@ -888,9 +888,9 @@ impl SemanticTransitionSession {
             );
             let mut read_bytes = (size_of::<ReplayAuthenticationReads>()
                 + 2 * size_of::<usize>()
-                + 8 * size_of::<ReplayAuthenticationRange>()
+                + 10 * size_of::<ReplayAuthenticationRange>()
                 + 2 * size_of::<PublicationControl>()) as u64;
-            for role in [1, 2, 30, 31, 32, 56, 57, 58] {
+            for role in [1, 2, 30, 31, 32, 56, 57, 58, 59, 60] {
                 let extent = lease
                     .directory
                     .iter()
@@ -910,8 +910,8 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .map(|budget| budget.reserve_auxiliary(read_bytes).map(Arc::new))
                 .transpose()?;
-            let mut ranges = Vec::with_capacity(8);
-            for role in [1, 2, 30, 31, 32, 56, 57, 58] {
+            let mut ranges = Vec::with_capacity(10);
+            for role in [1, 2, 30, 31, 32, 56, 57, 58, 59, 60] {
                 let range = *lease
                     .directory
                     .iter()
@@ -1745,6 +1745,22 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        let world_source =
+            self.read_replay_authentication_range(SemanticStateRole::SemanticWorldSource as u64)?;
+        let world_state =
+            self.read_replay_authentication_range(SemanticStateRole::SemanticWorldState as u64)?;
+        self.task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0
+            .spec
+            .semantic_context
+            .validate_material(
+                &[plane, world_source, world_state],
+                self.replay_material_budget
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            )?;
         let reads = Arc::clone(
             self.replay_authentication
                 .as_ref()

@@ -1018,6 +1018,18 @@ impl SemanticTransitionSession {
             invalidated.model_generation = 0;
             coverage.bytes = publication_abi_bytes(&[invalidated]).into();
         }
+        self.task
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .0
+            .spec
+            .semantic_context
+            .validate_material(
+                &material.ranges,
+                self.replay_material_budget
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            )?;
         let ground = self
             .task_ground
             .as_ref()

@@ -481,6 +481,9 @@ struct PublicationControl {
     uint64_t reader_counts[2],reader_gate,refusal;
 };
 struct PublicationRoleCount { uint64_t role,count; };
+static constexpr uint64_t PUBLICATION_ROLE_COUNT=60;
+static constexpr uint64_t SEMANTIC_WORLD_SOURCE_ROLE=59;
+static constexpr uint64_t SEMANTIC_WORLD_STATE_ROLE=60;
 struct ModelContractLayout {
     uint64_t schema_begin,schema_bytes,schema_digest_offset,generation_offset,identity_offset;
 };
@@ -1956,10 +1959,10 @@ __device__ uint64_t publication_validate_selected_model(const PublicationControl
 __device__ uint64_t publication_validate_directory(const PublicationControl& control,
         const PublicationContract& contract,PublicationRange* ranges,uint64_t count,
         semantic_graph::NativeWorkTally* work=nullptr) {
-    if(!ranges || count>contract.range_capacity || contract.role_count!=semantic_task_ground::kPublicationRole || !contract.role_counts)return 1;
+    if(!ranges || count>contract.range_capacity || contract.role_count!=PUBLICATION_ROLE_COUNT || !contract.role_counts)return 1;
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     uint64_t expected=0,tensor_count=0;
-    for(uint64_t i=0;i<semantic_task_ground::kPublicationRole;++i) {
+    for(uint64_t i=0;i<PUBLICATION_ROLE_COUNT;++i) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         if(roles[i].role!=i+1 || !semantic_graph::checked_add(expected,roles[i].count,&expected))return 1;
         if(publication_tensor_role(i+1))tensor_count+=roles[i].count;
@@ -1982,7 +1985,7 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
         }
     }
     uint64_t cursor=0;
-    for(uint64_t role=1;role<=semantic_task_ground::kPublicationRole;++role)for(uint64_t index=0;index<roles[role-1].count;++index) {
+    for(uint64_t role=1;role<=PUBLICATION_ROLE_COUNT;++role)for(uint64_t index=0;index<roles[role-1].count;++index) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         PublicationRange& range=ranges[cursor++];
         if(range.role!=role || range.index!=index)return 1;
@@ -2010,7 +2013,7 @@ __device__ uint64_t publication_validate_directory(const PublicationControl& con
 }
 __device__ bool publication_mutable_role(uint64_t role) {
     return role==1 || role==2 || role==3 || (role>=4 && role<=15) || (role>=18 && role<=25) || role==30 || role==31 || role==32 || role==33 || role==39 || role==44 ||
-        (role>=51 && role<=semantic_task_ground::kPublicationRole);
+        (role>=51 && role<=semantic_task_ground::kPublicationRole) || role==SEMANTIC_WORLD_STATE_ROLE;
 }
 __device__ uint64_t publication_validate_storage(const PublicationControl& control,
         semantic_graph::NativeWorkTally* work=nullptr) {
@@ -2978,7 +2981,7 @@ __device__ uint64_t publication_apply_continuation(const PublicationControl& con
                 reinterpret_cast<const uint8_t*>(source.pointer),source.bytes,work);
         }
         if(old[i].role==32 || old[i].role==44 || old[i].role==56 || old[i].role==57 ||
-           old[i].role==semantic_task_ground::kPublicationRole)
+           old[i].role==semantic_task_ground::kPublicationRole || old[i].role==SEMANTIC_WORLD_STATE_ROLE)
             if(publication_preserve_range(control,old,base.header.range_count,old[i],to[i],work))return 1;
         if(old[i].role>=18 && old[i].role<=25) {
             if(!publication_pending_model(pending.transition_kind)) {
@@ -3353,7 +3356,7 @@ __device__ bool publication_step_output_span(const PublicationControl& control,u
        publication_spans_overlap(pointer,bytes,lease,sizeof(PublicationLease)) ||
        publication_spans_overlap(pointer,bytes,bindings,binding_bytes) ||
        publication_spans_overlap(pointer,bytes,control.contract,sizeof(contract)) ||
-       publication_spans_overlap(pointer,bytes,contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount)) ||
+       publication_spans_overlap(pointer,bytes,contract.role_counts,PUBLICATION_ROLE_COUNT*sizeof(PublicationRoleCount)) ||
        publication_spans_overlap(pointer,bytes,control.storage,control.storage_count*sizeof(PublicationStorageEntry)))return false;
     for(uint64_t bank=0;bank<2;++bank) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
@@ -3546,8 +3549,8 @@ extern "C" __global__ void semantic_publication_step_result(uint64_t control_ptr
         semantic_content_integrity_trap();return;
     }
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
-    if(contract.abi!=1 || contract.role_count!=semantic_task_ground::kPublicationRole ||
-       !publication_pointer_span(contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
+    if(contract.abi!=1 || contract.role_count!=PUBLICATION_ROLE_COUNT ||
+       !publication_pointer_span(contract.role_counts,PUBLICATION_ROLE_COUNT*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
@@ -3690,8 +3693,8 @@ extern "C" __global__ void semantic_publication_step_inputs(uint64_t control_ptr
     }
     const auto& contract=*reinterpret_cast<const PublicationContract*>(control.contract);
     uint64_t directory_bytes=0;
-    if(contract.abi!=1 || contract.role_count!=semantic_task_ground::kPublicationRole ||
-       !publication_pointer_span(contract.role_counts,semantic_task_ground::kPublicationRole*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
+    if(contract.abi!=1 || contract.role_count!=PUBLICATION_ROLE_COUNT ||
+       !publication_pointer_span(contract.role_counts,PUBLICATION_ROLE_COUNT*sizeof(PublicationRoleCount),alignof(PublicationRoleCount)) ||
        !semantic_graph::checked_mul(contract.range_capacity,sizeof(PublicationRange),&directory_bytes)) {
         semantic_content_integrity_trap();return;
     }
@@ -7608,6 +7611,114 @@ __device__ uint64_t publication_discard_control(const Descriptor& descriptor,Pub
     return 0;
 }
 
+struct SemanticRuleCellPublication {
+    uint64_t created,count,capacity,contexts,context,next_rule,birth_low,birth_high,generation;
+};
+__device__ uint64_t semantic_world_word(const uint64_t* words,uint64_t index,
+        semantic_graph::NativeWorkTally* work) {
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+    return words[index];
+}
+// Only the genuinely selected, successfully applied rule-creation receipts
+// allocate cells. Candidate evaluation and stale publication never consume a
+// birth from the immutable common owner.
+__device__ bool publication_plan_rule_cells(const PublicationControl& control,const PublicationBank& base,uint64_t winner,
+        const State& state,SemanticRuleCellPublication* plan,semantic_graph::NativeWorkTally* work) {
+    *plan={};
+    if(!winner)return true;
+    uint64_t selected_rules=0;
+    for(uint32_t slot=0;slot<2;++slot) {
+        const auto& receipt=state.semantic_receipts[1+(winner-1)*3+slot];
+        const uint64_t status=semantic_world_word(receipt.words,0,work);
+        const uint64_t tag=semantic_world_word(receipt.words,1,work);
+        const uint64_t opcode=semantic_world_word(receipt.words,12,work);
+        const uint64_t rule_control=semantic_world_word(receipt.words,41,work);
+        const uint64_t outcome=semantic_world_word(receipt.words,40,work);
+        const uint64_t rules=semantic_world_word(receipt.words,27,work);
+        if(status==semantic_graph::kOk && tag==PROGRAM_IMAGE_EDIT_TAG &&
+           outcome==uint64_t(semantic_program::Status::Ok)) {
+            selected_rules=rules;
+            plan->created+=uint64_t(opcode==2 && rule_control!=semantic_task_ground::kFixedRuleActivation);
+        }
+    }
+    if(!plan->created)return true;
+    const auto* ranges=reinterpret_cast<const PublicationRange*>(
+        control.directories[base.header.publication_word&1]);
+    const auto* source=publication_find_range(ranges,base.header.range_count,SEMANTIC_WORLD_SOURCE_ROLE,0,work);
+    const auto* cells=publication_find_range(ranges,base.header.range_count,SEMANTIC_WORLD_STATE_ROLE,0,work);
+    if(!source || !cells || source->offset_bytes%8 || cells->offset_bytes%8 ||
+       source->length_bytes!=13*8 || cells->length_bytes<16*8)return false;
+    const auto* original=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*source));
+    const auto* current=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*cells));
+    if(!original || !current || semantic_world_word(original,0,work)!=1 ||
+       semantic_world_word(current,0,work)!=1)return false;
+    for(uint32_t word=1;word<9;++word)
+        if(semantic_world_word(original,word,work)!=semantic_world_word(current,word,work))return false;
+    plan->contexts=semantic_world_word(original,9,work);
+    plan->capacity=semantic_world_word(original,11,work);
+    const uint64_t original_cells=semantic_world_word(original,12,work);
+    const uint64_t state_contexts=semantic_world_word(current,9,work);
+    plan->generation=semantic_world_word(current,10,work);
+    plan->count=semantic_world_word(current,11,work);
+    const uint64_t state_capacity=semantic_world_word(current,12,work);
+    plan->birth_low=semantic_world_word(current,13,work);
+    plan->birth_high=semantic_world_word(current,14,work);
+    plan->context=semantic_world_word(current,15,work);
+    uint64_t state_words=0,cell_words=0,state_bytes=0,successor_count=0;
+    if(!plan->contexts || plan->contexts!=state_contexts ||
+       plan->context>=plan->contexts || !plan->generation || plan->generation==UINT64_MAX ||
+       plan->capacity!=state_capacity || plan->count<original_cells ||
+       !semantic_graph::checked_add(plan->count,plan->created,&successor_count) ||
+       successor_count>plan->capacity || selected_rules!=successor_count-original_cells ||
+       !semantic_graph::checked_add(16,plan->contexts,&state_words) ||
+       !semantic_graph::checked_mul(6,plan->count,&cell_words) ||
+       !semantic_graph::checked_add(state_words,cell_words,&state_words) ||
+       !semantic_graph::checked_mul(state_words,8,&state_bytes) ||
+       state_bytes!=cells->length_bytes)return false;
+    plan->next_rule=semantic_world_word(current,16+plan->context,work);
+    if(plan->next_rule>plan->count || !(plan->birth_low|plan->birth_high) ||
+       (plan->birth_high==UINT64_MAX && plan->birth_low>UINT64_MAX-plan->created))return false;
+    return true;
+}
+__device__ bool publication_apply_rule_cells(const PublicationControl& control,
+        PublicationBank& next,const SemanticRuleCellPublication& plan,
+        semantic_graph::NativeWorkTally* work) {
+    if(!plan.created)return true;
+    auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
+    auto* cells=const_cast<PublicationRange*>(publication_find_range(
+        ranges,next.header.range_count,SEMANTIC_WORLD_STATE_ROLE,0,work));
+    if(!cells || cells->storage_slot>=control.storage_count)return false;
+    auto* destination=reinterpret_cast<uint64_t*>(publication_range_bytes(control,*cells));
+    const auto* storage=reinterpret_cast<const PublicationStorageEntry*>(control.storage);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
+    const auto& backing=storage[cells->storage_slot];
+    uint64_t count=0,cell_words=0,words=0,bytes=0;
+    if(!destination || !semantic_graph::checked_add(plan.count,plan.created,&count) ||
+       !semantic_graph::checked_mul(6,count,&cell_words) ||
+       !semantic_graph::checked_add(16,plan.contexts,&words) ||
+       !semantic_graph::checked_add(words,cell_words,&words) ||
+       !semantic_graph::checked_mul(words,8,&bytes) ||
+       cells->offset_bytes>backing.bytes || bytes>backing.bytes-cells->offset_bytes)return false;
+    uint64_t low=plan.birth_low,high=plan.birth_high;
+    for(uint64_t created=0;created<plan.created;++created) {
+        auto* cell=destination+16+plan.contexts+6*(plan.count+created);
+        cell[0]=semantic_graph::written_word(plan.context,work);
+        cell[1]=semantic_graph::written_word(plan.next_rule+created,work);
+        cell[2]=semantic_graph::written_word(low,work);
+        cell[3]=semantic_graph::written_word(high,work);
+        cell[4]=semantic_graph::written_word(1,work);
+        cell[5]=semantic_graph::written_word(32769,work); // Unit coefficient for a new logical rule.
+        if(++low==0)++high;
+    }
+    destination[10]=semantic_graph::written_word(plan.generation+1,work);
+    destination[11]=semantic_graph::written_word(count,work);
+    destination[13]=semantic_graph::written_word(low,work);
+    destination[14]=semantic_graph::written_word(high,work);
+    destination[16+plan.context]=semantic_graph::written_word(plan.next_rule+plan.created,work);
+    cells->length_bytes=semantic_graph::written_word(bytes,work);
+    return true;
+}
+
 __device__ uint64_t publication_publish(const Descriptor& descriptor,PublicationBank& base,uint64_t word,uint64_t end,
         const semantic_graph::ResidentHandle& base_root,State* state,const Receipt* receipts,bool no_draw=false,bool drain=false) {
     PublicationAttemptWork attempt(state->execution_work);
@@ -7629,6 +7740,8 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
         if(seal->words[0]!=semantic_graph::kOk || seal->words[33]!=semantic_graph::kRootKind)return 6;
         root={seal->words[39],semantic_graph::kRootKind,seal->words[34],seal->words[35]};
     }
+    SemanticRuleCellPublication rule_cells{};
+    if(!publication_plan_rule_cells(control,base,winner,*state,&rule_cells,work))return 1;
     if(!retire_pending_roots(descriptor,base_root,state,winner,&root))return 6;
     next.header.abi=1;next.header.sealed_epoch=(word>>1)+1;next.header.base_word=word;
     next.header.publication_word=(next.header.sealed_epoch<<1)|((word&1)^1);
@@ -7656,6 +7769,7 @@ __device__ uint64_t publication_publish(const Descriptor& descriptor,Publication
     const uint64_t preservation_status=publication_apply_continuation(control,base,next,pending,&preserved_work);
     execution_work_merge_native(state->execution_work,preserved_work);
     if(preservation_status ||
+       !publication_apply_rule_cells(control,next,rule_cells,work) ||
        publication_append_provenance(control,base,next,receipts,winner,descriptor.text,work))return 1;
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
     const auto* previous=reinterpret_cast<const PublicationRange*>(control.directories[word&1]);
@@ -7839,7 +7953,7 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
     inputs->bank=bank;
     inputs->records=reinterpret_cast<const RawFeedbackRecord*>(bytes);
     inputs->control=&control;inputs->ranges=ranges;
-    if(contract.role_count!=semantic_task_ground::kPublicationRole || !contract.role_counts)return 1;
+    if(contract.role_count!=PUBLICATION_ROLE_COUNT || !contract.role_counts)return 1;
     const auto* roles=reinterpret_cast<const PublicationRoleCount*>(contract.role_counts);
     if(roles[15].role!=16 || !roles[15].count || roles[15].count>UINT32_MAX || roles[15].count>slots)return 1;
     inputs->statement_count=roles[15].count;
