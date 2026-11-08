@@ -77,12 +77,13 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v10 adds model-authored intent before the compact graph."""
+        """Exact native context/schema; v12 adds output dependency facts and admission."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
         insertion_layer: int = 17, train_down_projection: bool = True,
         source_encoding: str = "funcdef-json-v1",
+        require_output_dependencies: bool = False,
     ) -> NativeCausalModel: ...
     @property
     def adaptation_manifest(self) -> str: ...

@@ -9,7 +9,9 @@ use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visito
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use xlog_ir::tensor::{TensorOperation, TensorParameter, TensorProgram, TensorSignature};
+use xlog_ir::tensor::{
+    TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
+};
 use xlog_logic::ast::FuncDef;
 
 mod rows;
@@ -29,6 +31,7 @@ const CONTEXT_ENTRY_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v8";
 const CANONICAL_ENTRY_LANGUAGE: &str = "xlog-contextual-acquisition-v9";
 const INTENT_LANGUAGE: &str = "xlog-contextual-acquisition-v10";
 const ENTRY_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v11";
+const OUTPUT_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v12";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -44,7 +47,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=11) {
+    if !matches!(version, 1..=12) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -256,9 +259,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 11 {
+        if version == 11 {
             schema["description"] = json!(format!(
                 "{} Entry plans and prospective operations must leave enough rows for every required root helper call and new physical parameter read, reserving a separate result row when none of the remaining obligations can have the required output shape. This necessary lower bound neither supplies operands nor guarantees completion or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 12 {
+            schema["description"] = json!(format!(
+                "{} Output dependencies use the canonical numerical IR and exact retained-callee facts. Every new definition and physical constant must reach the entry result, which must possibly depend on raw tokens or current hidden. Calls substitute only output-used numeric formals; scans always include the initial state and include items only when the cell uses them. Plans and prospective operands reserve rows for missing output obligations. This structural condition does not prove semantic nonconstancy, usefulness or completion.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -272,6 +281,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                12 => OUTPUT_DEPENDENCY_LANGUAGE,
                 11 => ENTRY_BUDGET_LANGUAGE,
                 10 => INTENT_LANGUAGE,
                 9 => CANONICAL_ENTRY_LANGUAGE,
@@ -385,6 +395,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     canonical_entry_formals: bool,
     has_intent: bool,
     entry_budget: bool,
+    output_dependencies: bool,
 }
 
 #[pymethods]
@@ -393,6 +404,7 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
+        let output_dependencies = language["id"] == OUTPUT_DEPENDENCY_LANGUAGE;
         if (language["id"] != LANGUAGE
             && language["id"] != ORDERED_LANGUAGE
             && language["id"] != OPERAND_LANGUAGE
@@ -403,8 +415,10 @@ impl PyNativeAcquisitionMask {
             && language["id"] != CONTEXT_ENTRY_ROWS_LANGUAGE
             && language["id"] != CANONICAL_ENTRY_LANGUAGE
             && language["id"] != INTENT_LANGUAGE
-            && language["id"] != ENTRY_BUDGET_LANGUAGE)
-            || context["version"] != 1
+            && language["id"] != ENTRY_BUDGET_LANGUAGE
+            && !output_dependencies)
+            || context["version"] != if output_dependencies { 2 } else { 1 }
+            || (output_dependencies && context["dependency_contract"] != "output-dependencies-v1")
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
                 "nodes": ACQUIRED_NODES, "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
@@ -418,7 +432,7 @@ impl PyNativeAcquisitionMask {
             return Err(value_error("retained acquisition parameters must be FP32"));
         }
         let ordered = language["id"] != LANGUAGE;
-        let entry_budget = language["id"] == ENTRY_BUDGET_LANGUAGE;
+        let entry_budget = language["id"] == ENTRY_BUDGET_LANGUAGE || output_dependencies;
         let has_intent = language["id"] == INTENT_LANGUAGE || entry_budget;
         let canonical_entry_formals = language["id"] == CANONICAL_ENTRY_LANGUAGE || has_intent;
         let context_entry_rows =
@@ -457,13 +471,39 @@ impl PyNativeAcquisitionMask {
             let callees = context["callees"]
                 .as_object()
                 .ok_or_else(|| value_error("typed acquisition requires known callee signatures"))?;
-            for callee in callees.values() {
+            for (name, callee) in callees {
                 let signature: TensorSignature =
                     serde_json::from_value(callee["signature"].clone()).map_err(value_error)?;
                 signature.arguments(max_context).map_err(value_error)?;
                 signature
                     .output(max_context, token_bytes.len())
                     .map_err(value_error)?;
+                if output_dependencies {
+                    let dependencies: TensorOutputDependencies =
+                        serde_json::from_value(callee["output_dependencies"].clone())
+                            .map_err(value_error)?;
+                    let arguments = signature.arguments(1).map_err(value_error)?.len();
+                    if dependencies
+                        .arguments
+                        .iter()
+                        .any(|&argument| argument >= arguments)
+                        || !dependencies.definitions.contains(name)
+                        || dependencies
+                            .definitions
+                            .iter()
+                            .any(|name| !callees.contains_key(name))
+                        || dependencies
+                            .parameters
+                            .iter()
+                            .any(|name| !parameters.iter().any(|parameter| &parameter.name == name))
+                        || (matches!(signature, TensorSignature::Pure { .. })
+                            && dependencies.tokens)
+                    {
+                        return Err(value_error(
+                            "retained output dependencies differ from the ABI",
+                        ));
+                    }
+                }
             }
         }
         Ok(Self {
@@ -472,6 +512,7 @@ impl PyNativeAcquisitionMask {
             canonical_entry_formals,
             has_intent,
             entry_budget,
+            output_dependencies,
             ordered,
             planned_output,
             check_single_operation,
@@ -520,6 +561,7 @@ impl PyNativeAcquisitionMask {
                     self.check_single_operation,
                     self.canonical_entry_formals,
                     self.entry_budget,
+                    self.output_dependencies,
                 )
                 .is_err()
                 {
@@ -550,6 +592,7 @@ impl PyNativeAcquisitionMask {
             self.check_single_operation,
             self.canonical_entry_formals,
             self.entry_budget,
+            self.output_dependencies,
         )
         .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
@@ -645,11 +688,13 @@ struct Resources<'a> {
     check_single_operation: bool,
     canonical_entry_formals: bool,
     entry_budget: bool,
+    output_dependencies: bool,
     raw_tokens: &'a BTreeSet<u32>,
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     program: Program,
     typed_context: Option<&'a Value>,
     signatures: typed::Signatures,
+    dependencies: BTreeMap<String, TensorOutputDependencies>,
     definition_name: Option<String>,
     definition_index: Option<usize>,
     program_definition_index: Option<usize>,
@@ -677,6 +722,7 @@ fn resource_prefix<'a>(
     check_single_operation: bool,
     canonical_entry_formals: bool,
     entry_budget: bool,
+    output_dependencies: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -689,6 +735,7 @@ fn resource_prefix<'a>(
         check_single_operation,
         canonical_entry_formals,
         entry_budget,
+        output_dependencies,
         raw_tokens,
         operation_fields,
         program: Program::default(),
@@ -708,6 +755,21 @@ fn resource_prefix<'a>(
                     .collect()
             })
             .unwrap_or_default(),
+        dependencies: if output_dependencies {
+            typed_context.unwrap()["callees"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        serde_json::from_value(value["output_dependencies"].clone()).unwrap(),
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        },
         definition_name: None,
         definition_index: None,
         program_definition_index: None,
@@ -753,6 +815,9 @@ impl Resources<'_> {
             .filter(|name| !self.retained.contains(*name))
             .cloned()
             .collect::<BTreeSet<_>>();
+        if self.output_dependencies {
+            return Ok(Some(typed::EntryRequirements { calls, parameters }));
+        }
         // Callee-first order makes the new-definition graph acyclic. Roots need
         // direct entry calls; all other new helpers become reachable through them.
         // Reads in any helper are therefore covered by those required calls.
@@ -826,6 +891,23 @@ impl Resources<'_> {
             return Ok(());
         }
         let program = &self.program.typed.as_ref().unwrap().body;
+        if self.output_dependencies {
+            let dependencies = self.program.typed.as_ref().unwrap().output_dependencies()?;
+            if !dependencies.has_input()
+                || self
+                    .definitions
+                    .keys()
+                    .any(|name| !dependencies.definitions.contains(name))
+                || self.declarations.keys().any(|name| {
+                    !self.retained.contains(name) && !dependencies.parameters.contains(name)
+                })
+            {
+                return Err(
+                    "new definitions, constants and an input must reach the entry output".into(),
+                );
+            }
+            return Ok(());
+        }
         let usage = definition_usage(entry, |name| {
             if name == entry {
                 Ok(Some(program))
@@ -1013,6 +1095,14 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             context["max_context"].as_u64().unwrap() as usize,
                             self.resources.raw_tokens.iter().copied().collect(),
                         ));
+                        if self.resources.output_dependencies {
+                            self.resources
+                                .program
+                                .typed
+                                .as_mut()
+                                .unwrap()
+                                .set_output_dependencies(self.resources.dependencies.clone());
+                        }
                         self.resources.program_definition_index = self.resources.definition_index;
                     }
                 }
@@ -1126,6 +1216,14 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                 &self.resources.definition_name,
                 &self.resources.program.typed,
             ) {
+                if self.resources.output_dependencies {
+                    let mut dependencies =
+                        program.output_dependencies().map_err(A::Error::custom)?;
+                    dependencies.definitions.insert(name.clone());
+                    self.resources
+                        .dependencies
+                        .insert(name.clone(), dependencies);
+                }
                 self.resources
                     .signatures
                     .insert(name.clone(), program.body.signature.clone());

@@ -2,7 +2,9 @@
 
 use super::*;
 use std::collections::BTreeSet;
-use xlog_ir::tensor::{TensorOperation as Op, TensorParameter, TensorSignature};
+use xlog_ir::tensor::{
+    TensorOperation as Op, TensorOutputDependencies, TensorParameter, TensorSignature,
+};
 use xlog_logic::ast::{FuncBody, FuncDef};
 use xlog_neural::causal_snapshot::AcquiredInsertion;
 
@@ -56,6 +58,38 @@ pub fn definition_usage<'a>(
         }
     }
     Ok(usage)
+}
+
+/// Resolve output dependencies against actual immutable numerical definitions.
+pub fn definition_output_dependencies<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
+) -> Result<TensorOutputDependencies> {
+    fn visit<'a>(
+        name: &str,
+        resolve: &impl Fn(&str) -> Result<&'a TensorProgram>,
+        saved: &mut BTreeMap<String, TensorOutputDependencies>,
+        active: &mut BTreeSet<String>,
+    ) -> Result<TensorOutputDependencies> {
+        if let Some(dependencies) = saved.get(name) {
+            return Ok(dependencies.clone());
+        }
+        if !active.insert(name.to_owned()) {
+            return Err(invalid("numerical output dependency graph is cyclic"));
+        }
+        let mut dependencies = resolve(name)?
+            .output_dependencies(&mut |callee| visit(callee, resolve, saved, active))?;
+        dependencies.definitions.insert(name.to_owned());
+        active.remove(name);
+        saved.insert(name.to_owned(), dependencies.clone());
+        Ok(dependencies)
+    }
+    visit(
+        entrypoint,
+        &resolve,
+        &mut BTreeMap::new(),
+        &mut BTreeSet::new(),
+    )
 }
 
 fn invalid(message: impl Into<String>) -> XlogError {
@@ -132,6 +166,24 @@ impl NativeCausalModel {
         }))
     }
 
+    /// Extend the new acquisition contract with exact output facts, not bodies.
+    /// The original context remains byte-for-byte unchanged for older policies.
+    pub fn acquisition_context_with_output_dependencies(
+        &self,
+        insertion_layer: usize,
+    ) -> Result<serde_json::Value> {
+        let mut context = self.acquisition_context(insertion_layer)?;
+        context["version"] = serde_json::json!(2);
+        context["dependency_contract"] = serde_json::json!("output-dependencies-v1");
+        for (name, callee) in context["callees"].as_object_mut().unwrap() {
+            let dependencies =
+                definition_output_dependencies(name, |name| self.functions.numerical(name))?;
+            callee["output_dependencies"] =
+                serde_json::to_value(dependencies).map_err(|error| invalid(error.to_string()))?;
+        }
+        Ok(context)
+    }
+
     /// Register actual typed definitions, insert their causal feature call, and
     /// allocate new FP32 constants/P with independent zero-step Adam states.
     /// Original definitions, weights, aliases and optimizer versions remain intact.
@@ -141,6 +193,24 @@ impl NativeCausalModel {
         parameter_values: BTreeMap<String, Vec<f32>>,
         insertion_layer: usize,
         train_down_projection: bool,
+    ) -> Result<Self> {
+        self.fork_acquired_with_dependencies(
+            definition_json,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            false,
+        )
+    }
+
+    /// Opt into output-reaching admission while retaining the original constructor.
+    pub fn fork_acquired_with_dependencies(
+        &self,
+        definition_json: &str,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+        require_output_dependencies: bool,
     ) -> Result<Self> {
         if definition_json.len() > ACQUIRED_SOURCE_BYTES {
             return Err(invalid(
@@ -163,12 +233,13 @@ impl NativeCausalModel {
         if !document.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
-        self.fork_acquired_definitions(
+        self.fork_acquired_definitions_with_dependencies(
             entrypoint,
             definitions,
             parameter_values,
             insertion_layer,
             train_down_projection,
+            require_output_dependencies,
         )
     }
 
@@ -182,6 +253,26 @@ impl NativeCausalModel {
         parameter_values: BTreeMap<String, Vec<f32>>,
         insertion_layer: usize,
         train_down_projection: bool,
+    ) -> Result<Self> {
+        self.fork_acquired_definitions_with_dependencies(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            false,
+        )
+    }
+
+    /// One registry/allocation path for the explicit old and output contracts.
+    pub fn fork_acquired_definitions_with_dependencies(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+        require_output_dependencies: bool,
     ) -> Result<Self> {
         if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
@@ -256,13 +347,32 @@ impl NativeCausalModel {
                 "new entrypoint must map this layer's hidden rows to 16 FP32 features",
             ));
         }
-        let usage = definition_usage(&entrypoint, |name| functions.numerical(name).map(Some))?;
+        let usage = if require_output_dependencies {
+            let dependencies =
+                definition_output_dependencies(&entrypoint, |name| functions.numerical(name))?;
+            if !dependencies.has_input() {
+                return Err(invalid(
+                    "acquired output must have a possible dependency on tokens or current hidden",
+                ));
+            }
+            DefinitionUsage {
+                definitions: dependencies.definitions,
+                parameters: dependencies.parameters,
+            }
+        } else {
+            definition_usage(&entrypoint, |name| functions.numerical(name).map(Some))?
+        };
         let unused_definitions = new_names.difference(&usage.definitions).collect::<Vec<_>>();
         let unused_constants = new_parameters
             .keys()
             .filter(|name| !usage.parameters.contains(*name))
             .collect::<Vec<_>>();
         if !unused_definitions.is_empty() || !unused_constants.is_empty() {
+            if require_output_dependencies {
+                return Err(invalid(format!(
+                    "new definitions and constants must reach the returned output; unreachable definitions: {unused_definitions:?}; unused constants: {unused_constants:?}"
+                )));
+            }
             return Err(invalid(format!(
                 "new definitions and constants must have actual callers; unreachable definitions: {unused_definitions:?}; unused constants: {unused_constants:?}"
             )));
