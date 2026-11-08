@@ -1543,6 +1543,7 @@ impl SemanticPreparedSourceContentGeometry {
             task.program.editable_program(),
             u32::try_from(task.statement_records.len())
                 .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            task.training_domain.as_ref(),
         )
     }
 
