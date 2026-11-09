@@ -38,9 +38,11 @@ const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
 const ENTRY_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v15";
 const REQUIRED_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v16";
 const COUNT_PREFIX_LANGUAGE: &str = "xlog-contextual-acquisition-v17";
+const COMPACT_INDICES_LANGUAGE: &str = "xlog-contextual-acquisition-v18";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
+pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -59,7 +61,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=17) {
+    if !matches!(version, 1..=18) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -262,7 +264,7 @@ pub(super) fn language(
             ));
         }
         if version >= 7 {
-            rows::schema(&mut schema, version >= 8, version >= 10);
+            rows::schema(&mut schema, version >= 8, version >= 10, version >= 18);
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -322,6 +324,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                18 => COMPACT_INDICES_LANGUAGE,
                 17 => COUNT_PREFIX_LANGUAGE,
                 16 => REQUIRED_PARAMETER_LANGUAGE,
                 15 => ENTRY_PARAMETER_LANGUAGE,
@@ -446,6 +449,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
     operation_count_prefix: bool,
+    compact_indices: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -453,6 +457,8 @@ pub(crate) struct PyNativeAcquisitionMask {
 struct CanonicalPrefix<'a> {
     bytes: Cow<'a, [u8]>,
     operation_count: Option<&'a [u8]>,
+    indices: Vec<rows::indices::Record>,
+    pending_indices: Option<rows::indices::Pending<'a>>,
 }
 
 #[pymethods]
@@ -461,7 +467,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE;
+        let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE;
+        let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
         let required_parameter_names =
             language["id"] == REQUIRED_PARAMETER_LANGUAGE || operation_count_prefix;
         let entry_parameter_coverage =
@@ -585,6 +592,7 @@ impl PyNativeAcquisitionMask {
             entry_parameter_coverage,
             required_parameter_names,
             operation_count_prefix,
+            compact_indices,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -697,6 +705,7 @@ impl PyNativeAcquisitionMask {
             self.operation_fields.as_ref().unwrap(),
             self.context_entry_rows,
             self.has_intent,
+            self.compact_indices,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -735,6 +744,28 @@ impl PyNativeAcquisitionMask {
             // decimal. Its current definition owns the typed plan and budget.
             resources.permits_operation_count_prefix(count)?;
         }
+        // The canonical cache may legitimately reuse an equivalent Gather.
+        // Source-only descriptor bounds must still be checked for every input.
+        for record in &prefix.indices {
+            resources.validate_structured_indices(record)?;
+        }
+        if let Some(pending) = &prefix.pending_indices {
+            if resources.definition_index != Some(pending.target.definition_index)
+                || resources.definition_name.as_deref() != Some(pending.target.definition.as_str())
+                || resources.program.operations != pending.target.operation
+            {
+                return Err(serde_json::Error::custom(
+                    "structured indices prefix owner differs",
+                ));
+            }
+            rows::indices::admit_prefix(
+                pending,
+                resources.program.typed.as_ref().unwrap(),
+                &resources.signatures,
+                resources.bytes.len(),
+                self.typed_context.as_ref().unwrap(),
+            )?;
+        }
         Ok(resources)
     }
 
@@ -746,6 +777,7 @@ impl PyNativeAcquisitionMask {
                 self.operation_fields.as_ref().unwrap(),
                 self.context_entry_rows,
                 self.has_intent,
+                self.compact_indices,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -754,6 +786,8 @@ impl PyNativeAcquisitionMask {
                 } else {
                     None
                 },
+                indices: prefix.indices,
+                pending_indices: prefix.pending_indices,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
             Err("acquisition source byte budget exceeded".into())
@@ -761,6 +795,8 @@ impl PyNativeAcquisitionMask {
             Ok(CanonicalPrefix {
                 bytes: Cow::Borrowed(source),
                 operation_count: None,
+                indices: Vec::new(),
+                pending_indices: None,
             })
         }
     }
@@ -794,6 +830,7 @@ pub(super) fn decode_numerical_rows(
     context: &Value,
     context_entry: bool,
     has_intent: bool,
+    compact_indices: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -801,6 +838,7 @@ pub(super) fn decode_numerical_rows(
         &operation_fields()?,
         context_entry,
         has_intent,
+        compact_indices,
     )
     .map_err(value_error)
 }
@@ -954,6 +992,43 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn validate_structured_indices(
+        &self,
+        record: &rows::indices::Record,
+    ) -> Result<(), serde_json::Error> {
+        let maximum = maximum_width(self.typed_context.unwrap());
+        if self.definition_name.as_deref() == Some(record.target.definition.as_str()) {
+            if self.definition_index != Some(record.target.definition_index)
+                || record.target.input >= record.target.operation
+            {
+                return Err(serde_json::Error::custom(
+                    "structured indices definition or operation differs",
+                ));
+            }
+            let columns = self
+                .program
+                .typed
+                .as_ref()
+                .unwrap()
+                .input_columns(record.target.input)
+                .ok_or_else(|| serde_json::Error::custom("structured indices input is absent"))?;
+            record
+                .pattern
+                .validate_input(columns, maximum)
+                .map_err(serde_json::Error::custom)
+        } else {
+            let body = self
+                .definitions
+                .get(&record.target.definition)
+                .ok_or_else(|| {
+                    serde_json::Error::custom("structured indices definition is absent")
+                })?;
+            record
+                .validate_body(body, &self.signatures, maximum)
+                .map_err(serde_json::Error::custom)
+        }
+    }
+
     fn permits_output_plan(&self, output: usize) -> bool {
         let program = self.program.typed.as_ref().unwrap();
         if output == 0 && self.check_single_operation {
