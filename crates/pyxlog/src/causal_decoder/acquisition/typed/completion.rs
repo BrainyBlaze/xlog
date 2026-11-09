@@ -33,16 +33,55 @@ impl ValueKey {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(serde::Serialize)]
 struct StateKey {
     remaining: usize,
     values: Vec<ValueKey>,
 }
 
+/// For one environment/frontier and a legal row allowance, a completed result
+/// can fill further slots with the same canonical Tanh used by Search::visit.
+/// Thus a positive proof covers larger allowances, and a negative proof covers
+/// smaller ones. These bounds retain answers, never a prospective source graph.
+#[derive(Default)]
+struct CompletionBounds {
+    possible_from: Option<usize>,
+    impossible_through: Option<usize>,
+}
+
+impl CompletionBounds {
+    fn get(&self, remaining: usize) -> Option<bool> {
+        if self.possible_from.is_some_and(|rows| remaining >= rows) {
+            Some(true)
+        } else if self
+            .impossible_through
+            .is_some_and(|rows| remaining <= rows)
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn remember(&mut self, remaining: usize, possible: bool) {
+        if possible {
+            self.possible_from = Some(
+                self.possible_from
+                    .map_or(remaining, |rows| rows.min(remaining)),
+            );
+        } else {
+            self.impossible_through = Some(
+                self.impossible_through
+                    .map_or(remaining, |rows| rows.max(remaining)),
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct CompletionProofs {
     environment: Vec<u8>,
-    empty_plans: BTreeMap<usize, bool>,
+    empty_plans: CompletionBounds,
     prefixes: BTreeMap<Vec<u8>, bool>,
     prefix_bytes: usize,
 }
@@ -59,12 +98,12 @@ impl CompletionProofs {
 }
 
 /// Structural answers only; no model state or authored source. One exact
-/// environment retains at most one empty-plan answer per output slot and a
-/// source-byte allowance of serialized external-query keys. Intermediate search
-/// states are reset for each mask; prefix eviction changes only recomputation.
+/// environment retains empty-plan bounds and a source-byte allowance of
+/// serialized external-query keys. Intermediate frontier bounds are reset for
+/// each mask; prefix eviction changes only recomputation.
 #[derive(Default)]
 pub(crate) struct CompletionCache {
-    entries: Mutex<BTreeMap<Vec<u8>, BTreeMap<StateKey, bool>>>,
+    entries: Mutex<BTreeMap<Vec<u8>, BTreeMap<Vec<ValueKey>, CompletionBounds>>>,
     proofs: Mutex<CompletionProofs>,
 }
 
@@ -78,13 +117,13 @@ impl CompletionCache {
         if proofs.environment != environment {
             return None;
         }
-        proofs.empty_plans.get(&output).copied()
+        proofs.empty_plans.get(output + 1)
     }
 
     fn remember_empty_plan(&self, environment: &[u8], output: usize, result: bool) {
         let mut proofs = self.proofs.lock().unwrap();
         proofs.bind(environment);
-        proofs.empty_plans.insert(output, result);
+        proofs.empty_plans.remember(output + 1, result);
     }
 
     fn prefix(&self, environment: &[u8], key: &[u8]) -> Option<bool> {
@@ -391,8 +430,8 @@ impl Search<'_> {
             .lock()
             .unwrap()
             .get(&self.environment)
-            .and_then(|entries| entries.get(&key))
-            .copied();
+            .and_then(|entries| entries.get(&key.values))
+            .and_then(|bounds| bounds.get(key.remaining));
         if let Some(result) = cached {
             if let Some(key) = prefix_key {
                 self.cache.remember_prefix(&self.environment, key, result);
@@ -452,7 +491,9 @@ impl Search<'_> {
             .unwrap()
             .entry(self.environment.clone())
             .or_default()
-            .insert(key, result);
+            .entry(key.values)
+            .or_default()
+            .remember(key.remaining, result);
         if let Some(key) = prefix_key {
             self.cache.remember_prefix(&self.environment, key, result);
         }
