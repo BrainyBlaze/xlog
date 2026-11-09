@@ -77,7 +77,7 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v16 masks required entry aliases before new names."""
+        """Exact native context/schema; v17 checks source count prefixes against typed plans."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,

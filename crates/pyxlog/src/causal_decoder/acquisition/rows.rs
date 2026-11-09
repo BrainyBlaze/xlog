@@ -95,9 +95,10 @@ pub(super) fn schema(schema: &mut Value, context_entry: bool, has_intent: bool) 
     }
 }
 
-pub(super) struct Prefix {
+pub(super) struct Prefix<'a> {
     pub bytes: Vec<u8>,
     pub complete: bool,
+    pub operation_count: Option<&'a [u8]>,
 }
 
 enum Stop {
@@ -119,17 +120,18 @@ struct Reader<'a> {
     fields: &'a BTreeMap<String, Vec<String>>,
     context_entry: bool,
     has_intent: bool,
+    pending_operation_count: Option<usize>,
 }
 
 /// Only syntax is expanded. An unfinished operand remains the same byte prefix
 /// for the existing resource/type owner, including strings, decimals and arrays.
-pub(super) fn prefix(
-    source: &[u8],
+pub(super) fn prefix<'a>(
+    source: &'a [u8],
     context: &Value,
     fields: &BTreeMap<String, Vec<String>>,
     context_entry: bool,
     has_intent: bool,
-) -> Result<Prefix, String> {
+) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
     }
@@ -141,6 +143,7 @@ pub(super) fn prefix(
         fields,
         context_entry,
         has_intent,
+        pending_operation_count: None,
     };
     let complete = match reader.document() {
         Ok(()) => true,
@@ -150,6 +153,7 @@ pub(super) fn prefix(
     Ok(Prefix {
         bytes: reader.output,
         complete,
+        operation_count: reader.pending_operation_count.map(|start| &source[start..]),
     })
 }
 
@@ -367,12 +371,16 @@ impl Reader<'_> {
         let operation_count = if self.context_entry {
             self.key("operation_count")?;
             self.output.extend_from_slice(b"\"output\":");
+            // Retain the original decimal until its canonical output index can
+            // be projected. Subtraction does not preserve decimal prefixes.
+            self.pending_operation_count = Some(self.offset);
             let count: usize = serde_json::from_str(self.raw(false)?.get())?;
             // A prefix such as `1` may still become `10`. Do not project its
             // canonical output index until the number is visibly delimited.
             if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
                 return Err(Stop::Invalid("invalid numerical operation count".into()));
             }
+            self.pending_operation_count = None;
             self.output
                 .extend_from_slice((count - 1).to_string().as_bytes());
             Some(count)

@@ -673,7 +673,28 @@ shape-valid completion, termination within a token budget or useful behavior.
 Callers explicitly select `language_version=16` for a new policy; packets1–15
 retain their literal masks and saved replay behavior.
 
-For a version4 through version16 packet,
+Version17 (`xlog-contextual-acquisition-v17`) checks unfinished source
+`operation_count` decimals before their delimiter is visible. The rows codec
+retains the original count bytes separately from the canonical output prefix.
+For helpers and entry alike, the native owner considers positive counts within
+the remaining shared node allowance and applies the same planned-output
+predicate to `count - 1`, including the existing single-operation check for
+count1. A decimal prefix is available only if at least one admitted count starts
+with that spelling. Thus an unfinished `1` can still select10 even when count1
+is impossible; projecting the prefix to0 would lose that continuation.
+
+At a number delimiter, the exact count must be admitted. Canonical output
+projection still waits for the comma, and the codec never selects or inserts a
+count, operation or operand. Reused parsed operations do not bypass this check:
+each actual or hypothetical source prefix retains its own count bytes and is
+checked against its definition's current typed state and shared node budget.
+Physical aliases, output dependencies, shape inference at both context lengths
+and final constructor admission keep their existing owners. This establishes a
+structural count domain, not completion within a source-byte or token budget,
+numerical nonconstancy or useful behavior. Callers explicitly select
+`language_version=17`; packets1–16 retain their literal masks and replay behavior.
+
+For a version4 through version17 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -688,9 +709,9 @@ The record has exactly these fields:
 | `definition_index` | Zero-based index of the current or last definition; `null` before the first definition object begins. |
 | `required_output` | FP32 `[[rows, columns], [rows, columns]]` at lengths1 and `max_context`, from the current definition's completed signature; otherwise `null`. |
 | `last_value` | The same shape pair for its last fully completed operation; `null` before such an operation. Partial operations do not contribute. |
-| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–16 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
+| `compatible_outputs` | Number of completed values matching the declared output at both lengths; versions12–17 entry values must also satisfy their output dependencies. Zero before the signature. This does not predict future completion. |
 | `unread_constants` | Unique new physical parameter names fully declared but not read by any completed operation in the current or fully serialized bodies. Retained parameters are excluded; aliases count once. |
-| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–16). |
+| `entry_completed` | Whether the complete entry definition has been serialized, including its formal types (derived by the codec for versions7–17). |
 
 When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
