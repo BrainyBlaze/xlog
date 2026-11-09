@@ -818,6 +818,14 @@ impl PyNativeAcquisitionMask {
             capture_prefix,
             token_budget,
         )?;
+        // These common source obligations cannot be reduced by choosing a
+        // count or retained reference. Reject them before exploring either
+        // domain; both searches below only check the same parsed facts.
+        if !resources.permits_token_budget(None) {
+            return Err(serde_json::Error::custom(
+                "remaining original IDs cannot cover mandatory source and paid EOS",
+            ));
+        }
         if let Some(count) = prefix.operation_count {
             // Reused operation facts cannot replace admission of this source
             // decimal. Its current definition owns the typed plan and budget.
@@ -885,11 +893,6 @@ impl PyNativeAcquisitionMask {
                     "retained symbol has no compatible native source continuation",
                 ));
             }
-        }
-        if !resources.permits_token_budget(None) {
-            return Err(serde_json::Error::custom(
-                "remaining original IDs cannot cover mandatory source and paid EOS",
-            ));
         }
         Ok(resources)
     }
