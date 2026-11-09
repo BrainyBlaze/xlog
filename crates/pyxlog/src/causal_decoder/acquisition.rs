@@ -41,6 +41,7 @@ const COUNT_PREFIX_LANGUAGE: &str = "xlog-contextual-acquisition-v17";
 const COMPACT_INDICES_LANGUAGE: &str = "xlog-contextual-acquisition-v18";
 const COMPACT_METADATA_LANGUAGE: &str = "xlog-contextual-acquisition-v19";
 const RETAINED_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v20";
+const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -64,7 +65,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=20) {
+    if !matches!(version, 1..=21) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -326,6 +327,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 21 {
+            schema["description"] = json!(format!(
+                "{} The caller supplies the positive remaining original-ID allowance including the next choice and a separate paid EOS. After each hypothetical spelling the shared rows reader bounds its mandatory suffix by ordered structural subsequence coverage using the supplied byte-token alphabet. Pending rows/counts, future entry syntax and outstanding direct physical declarations use the existing typed owners. Variable contents and operands are relaxed; this necessary lower bound supplies no graph and does not guarantee completed acquisition or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -333,9 +340,12 @@ pub(super) fn language(
             id: &'a str,
             context: &'a Value,
             schema: OrderedSchema<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            token_cost_contract: Option<&'static str>,
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                21 => TOKEN_BUDGET_LANGUAGE,
                 20 => RETAINED_REFERENCE_LANGUAGE,
                 19 => COMPACT_METADATA_LANGUAGE,
                 18 => COMPACT_INDICES_LANGUAGE,
@@ -358,6 +368,7 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
+            token_cost_contract: (version >= 21).then_some(rows::budget::CONTRACT),
         })
         .map_err(value_error);
     }
@@ -466,6 +477,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     compact_indices: bool,
     compact_metadata: bool,
     retained_reference_prefix: bool,
+    token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -476,6 +488,7 @@ struct CanonicalPrefix<'a> {
     indices: Vec<rows::indices::Record>,
     pending_indices: Option<rows::indices::Pending<'a>>,
     pending_retained: Option<rows::metadata::PendingReference>,
+    budget: rows::budget::State,
 }
 
 #[pymethods]
@@ -484,7 +497,12 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let retained_reference_prefix = language["id"] == RETAINED_REFERENCE_LANGUAGE;
+        let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE;
+        if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
+            return Err(value_error("native original-token cost contract differs"));
+        }
+        let retained_reference_prefix =
+            language["id"] == RETAINED_REFERENCE_LANGUAGE || token_budget;
         let compact_metadata =
             language["id"] == COMPACT_METADATA_LANGUAGE || retained_reference_prefix;
         let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE || compact_metadata;
@@ -619,6 +637,7 @@ impl PyNativeAcquisitionMask {
             compact_indices,
             compact_metadata,
             retained_reference_prefix,
+            token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -637,9 +656,22 @@ impl PyNativeAcquisitionMask {
 
     /// Intersect the grammar's mask with cumulative native resource admission.
     /// Empty spellings represent EOS; the grammar decides when EOS is legal.
-    fn filter(&self, py: Python<'_>, prefix: &[u8], allowed_mask: &[u8]) -> PyResult<Py<PyBytes>> {
+    #[pyo3(signature = (prefix, allowed_mask, *, remaining_tokens=None))]
+    fn filter(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        allowed_mask: &[u8],
+        remaining_tokens: Option<usize>,
+    ) -> PyResult<Py<PyBytes>> {
         if allowed_mask.len() != self.token_bytes.len().div_ceil(32) * 4 {
             return Err(value_error("acquisition mask vocabulary differs"));
+        }
+        if self.token_budget.is_some() != remaining_tokens.is_some() || remaining_tokens == Some(0)
+        {
+            return Err(value_error(
+                "positive remaining original IDs must be supplied exactly for acquisition language 21",
+            ));
         }
         if let Some(cache) = &self.completion_cache {
             cache.clear_search();
@@ -661,8 +693,17 @@ impl PyNativeAcquisitionMask {
                         }
                         // Only the actual input may advance the checkpoint.
                         // Hypothetical spellings below always check their tail.
+                        let budget =
+                            self.token_budget
+                                .as_ref()
+                                .map(|alphabet| rows::budget::Bound {
+                                    alphabet,
+                                    state: &canonical.budget,
+                                    remaining: remaining_tokens.unwrap(),
+                                    eos: false,
+                                });
                         let next = self
-                            .resources(&canonical, checkpoint.as_ref(), true)
+                            .resources(&canonical, checkpoint.as_ref(), true, budget)
                             .ok()
                             .and_then(|resources| resources.parsed_prefix);
                         if next.is_some() {
@@ -688,8 +729,17 @@ impl PyNativeAcquisitionMask {
                         continue;
                     }
                 };
+                let budget = self
+                    .token_budget
+                    .as_ref()
+                    .map(|alphabet| rows::budget::Bound {
+                        alphabet,
+                        state: &canonical.budget,
+                        remaining: remaining_tokens.unwrap() - 1,
+                        eos: spelling.is_empty(),
+                    });
                 if self
-                    .resources(&canonical, checkpoint.as_ref(), false)
+                    .resources(&canonical, checkpoint.as_ref(), false, budget)
                     .is_err()
                 {
                     mask[id / 8] &= !bit;
@@ -712,7 +762,7 @@ impl PyNativeAcquisitionMask {
         }
         let canonical = self.canonical_prefix(prefix).map_err(value_error)?;
         let resources = self
-            .resources(&canonical, None, false)
+            .resources(&canonical, None, false, None)
             .map_err(value_error)?;
         serde_json::to_string(&resources.completion_state().map_err(value_error)?)
             .map_err(value_error)
@@ -746,6 +796,7 @@ impl PyNativeAcquisitionMask {
         prefix: &'a CanonicalPrefix<'_>,
         reusable_prefix: Option<&'a ParsedOperations>,
         capture_prefix: bool,
+        token_budget: Option<rows::budget::Bound<'a>>,
     ) -> Result<Resources<'a>, serde_json::Error> {
         let resources = resource_prefix(
             &prefix.bytes,
@@ -765,6 +816,7 @@ impl PyNativeAcquisitionMask {
             self.completion_cache.as_ref(),
             reusable_prefix,
             capture_prefix,
+            token_budget,
         )?;
         if let Some(count) = prefix.operation_count {
             // Reused operation facts cannot replace admission of this source
@@ -823,14 +875,21 @@ impl PyNativeAcquisitionMask {
                     indices: Vec::new(),
                     pending_indices: None,
                     pending_retained: None,
+                    budget: rows::budget::State::default(),
                 };
-                self.resources(&candidate, reusable_prefix, false).is_ok()
+                self.resources(&candidate, reusable_prefix, false, None)
+                    .is_ok()
             });
             if !permitted {
                 return Err(serde_json::Error::custom(
                     "retained symbol has no compatible native source continuation",
                 ));
             }
+        }
+        if !resources.permits_token_budget(None) {
+            return Err(serde_json::Error::custom(
+                "remaining original IDs cannot cover mandatory source and paid EOS",
+            ));
         }
         Ok(resources)
     }
@@ -845,6 +904,7 @@ impl PyNativeAcquisitionMask {
                 self.has_intent,
                 self.compact_indices,
                 self.compact_metadata,
+                self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -860,6 +920,7 @@ impl PyNativeAcquisitionMask {
                 } else {
                     None
                 },
+                budget: prefix.budget,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
             Err("acquisition source byte budget exceeded".into())
@@ -870,6 +931,7 @@ impl PyNativeAcquisitionMask {
                 indices: Vec::new(),
                 pending_indices: None,
                 pending_retained: None,
+                budget: rows::budget::State::default(),
             })
         }
     }
@@ -948,6 +1010,7 @@ struct Resources<'a> {
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
     parsed_prefix: Option<ParsedOperations>,
+    token_budget: Option<rows::budget::Bound<'a>>,
 }
 
 #[derive(Clone, Default)]
@@ -984,6 +1047,7 @@ fn resource_prefix<'a>(
     completion_cache: Option<&'a Arc<typed::CompletionCache>>,
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
+    token_budget: Option<rows::budget::Bound<'a>>,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1051,6 +1115,7 @@ fn resource_prefix<'a>(
         reusable_prefix,
         capture_prefix,
         parsed_prefix: None,
+        token_budget,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -1106,7 +1171,80 @@ impl Resources<'_> {
         }
     }
 
+    fn permits_token_budget(&self, count: Option<usize>) -> bool {
+        let Some(bound) = self.token_budget else {
+            return true;
+        };
+        if count.is_some() && self.definition_index != Some(bound.state.definition) {
+            return true;
+        }
+        let mut parameters = rows::budget::Obligations::default();
+        if bound.state.entry || bound.state.entry_pending {
+            if let Some(producers) = self
+                .required_entry()
+                .ok()
+                .flatten()
+                .and_then(|required| required.producers(&self.dependencies))
+            {
+                parameters.minimum_rows = producers.calls.len()
+                    + producers.parameters.len()
+                    + usize::from(
+                        !producers
+                            .calls
+                            .iter()
+                            .any(|name| self.dependencies[name].tokens),
+                    );
+                let mut missing = producers.parameters;
+                if bound.state.entry
+                    && self.program_definition_index == Some(bound.state.definition)
+                {
+                    if let Some(program) = &self.program.typed {
+                        missing.retain(|name| {
+                            !program
+                                .body
+                                .parameters
+                                .iter()
+                                .any(|parameter| &parameter.name == name)
+                        });
+                    }
+                }
+                parameters.missing = missing.len();
+                let namespace = self.typed_context.unwrap()["parameter_prefix"]
+                    .as_str()
+                    .unwrap();
+                parameters.symbols = missing
+                    .iter()
+                    .map(|name| {
+                        name.strip_prefix(namespace)
+                            .filter(|local| rows::metadata::is_local(local))
+                            .map(str::len)
+                            .unwrap_or_else(|| {
+                                "retained".len()
+                                    + name
+                                        .bytes()
+                                        .filter(|byte| {
+                                            byte.is_ascii_alphanumeric() || *byte == b'_'
+                                        })
+                                        .count()
+                            })
+                    })
+                    .min()
+                    .unwrap_or(0);
+                parameters.rank = missing
+                    .iter()
+                    .filter_map(|name| self.declarations.get(name))
+                    .map(|parameter| parameter.shape.len())
+                    .min()
+                    .unwrap_or(0);
+            }
+        }
+        bound.permits(count, parameters)
+    }
+
     fn permits_output_plan(&self, output: usize) -> bool {
+        if !self.permits_token_budget(Some(output + 1)) {
+            return false;
+        }
         let program = self.program.typed.as_ref().unwrap();
         if output == 0 && self.check_single_operation {
             // The same final-slot predicate applies to both canonical output
@@ -1177,6 +1315,10 @@ impl Resources<'_> {
         {
             return Ok(None);
         }
+        self.required_entry()
+    }
+
+    fn required_entry(&self) -> Result<Option<typed::EntryRequirements>, String> {
         let mut calls = self.definitions.keys().cloned().collect::<BTreeSet<_>>();
         let mut parameters = self
             .declarations

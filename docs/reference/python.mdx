@@ -770,7 +770,36 @@ explicitly select version19 for the original metadata admission or version20
 for the retained-reference prefix rule. Packets1–19 and rows encodings1–4 retain
 their literal interpretation and replay behavior.
 
-For a version4 through version20 packet,
+Version21 (`xlog-contextual-acquisition-v21`) inherits version20 and adds the
+top-level packet discriminator
+`token_cost_contract="ordered-structural-subsequence-v1"`. Its call is
+`mask.filter(prefix, grammar_mask, remaining_tokens=remaining)`, where the caller
+provides the positive number of actual original token IDs left, including the
+next selection and a separately paid EOS. Earlier versions omit this argument;
+their packets and mask routes are unchanged. The native owner subtracts one for
+each hypothetical spelling. An empty spelling requires complete source; a
+nonempty completion must still leave an ID for EOS. Source bytes never determine
+how many IDs have already been charged.
+
+The same rows reader retains ordered unfinished syntax, pending rows and count
+choices, later entry metadata and closing delimiters. Once helpers close, the
+canonical dependency owner supplies required direct physical declarations and
+producer-row lower bounds. An active declaration may satisfy one outstanding
+alias; future aliases use conservative minima over all outstanding names and
+shapes, preserving source-selected order. Before helpers close, additional helpers
+can cover those dependencies, so direct entry declarations are not assumed.
+Unfinished count decimals intersect the same typed domain with this cost bound.
+
+The lexical relaxation projects each supplied spelling onto JSON punctuation,
+ASCII letters/underscores and digits. It computes the minimum original-ID cover
+of the ordered structural subsequence, allowing a token to cross any number of
+syntax units. Variable contents, operands, optional whitespace and exact escaping
+remain relaxed. No bytes-per-token estimate, task-specific graph or chosen
+operation is supplied. This is a necessary lower bound, not a guarantee of valid
+construction, completion within512 IDs or usefulness. Actual complete acquisition,
+paid EOS, native admission and subsequent qualification remain required.
+
+For a version4 through version21 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
