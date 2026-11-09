@@ -929,8 +929,15 @@ impl PyNativeAcquisitionMask {
                     pending_retained: None,
                     budget: rows::budget::State::default(),
                 };
-                self.resources(&candidate, reusable_prefix, false, None)
-                    .is_ok()
+                // Completing a reference domain spends no original IDs. Keep
+                // the actual source state and remainder for linked row capacity.
+                self.resources(
+                    &candidate,
+                    reusable_prefix,
+                    false,
+                    token_budget.filter(|_| self.token_row_capacity),
+                )
+                .is_ok()
             });
             if !permitted {
                 return Err(serde_json::Error::custom(
