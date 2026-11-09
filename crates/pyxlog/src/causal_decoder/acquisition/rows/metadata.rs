@@ -4,6 +4,16 @@ use super::*;
 
 const RETAINED: &str = "retained";
 
+pub(crate) fn is_local(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
 pub(crate) struct PendingReference {
     pub function: bool,
     /// Position immediately after the canonical name/function field's colon.
@@ -123,14 +133,7 @@ impl Reader<'_> {
             }
             Err(error) => return Err(error),
         };
-        let bytes = local.as_bytes();
-        if bytes.is_empty()
-            || bytes.len() > 64
-            || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-            || !bytes
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        {
+        if !is_local(&local) {
             return Err(Stop::Invalid("invalid local acquisition symbol".into()));
         }
         self.output
@@ -143,16 +146,21 @@ impl Reader<'_> {
         if self.peek()? == b'"' {
             return self.local_symbol(function);
         }
+        let frame = self.budget.enter();
+        self.budget.set(frame, || vec![budget::text("\"\",\"\"]")]);
         self.pending_retained = Some(PendingReference {
             function,
             value_offset,
         });
         self.take(b'[')?;
+        self.budget.set(frame, || vec![budget::text(",\"\"]")]);
         let tag: String = serde_json::from_str(self.raw(false)?.get())?;
         if tag != RETAINED {
             return Err(Stop::Invalid("unknown acquisition symbol reference".into()));
         }
+        self.budget.set(frame, || vec![budget::text("\"\"]")]);
         self.take(b',')?;
+        self.budget.set(frame, || vec![budget::text("]")]);
         let name = self.value::<String>()?;
         let retained = retained_names(self.context, function).contains(&name.as_str());
         if !retained {
@@ -160,62 +168,120 @@ impl Reader<'_> {
                 "symbol is absent from the retained native context".into(),
             ));
         }
+        self.budget.set(frame, || vec![]);
         self.take(b']')?;
         self.pending_retained = None;
+        self.budget.leave(frame);
         Ok(name)
     }
 
     pub(super) fn compact_signature(&mut self) -> Result<TensorSignature, Stop> {
+        let frame = self.budget.enter();
+        self.budget.set(frame, || vec![budget::text("\"\",,1]")]);
         self.punctuation(b'[', b'{')?;
         self.output.extend_from_slice(b"\"kind\":")?;
+        self.budget.set(frame, || vec![budget::text(",,1]")]);
         let kind = self.value::<String>()?;
         let input = match kind.as_str() {
             "pure" => "input_widths",
             "causal" => "input_width",
             _ => return Err(Stop::Invalid("unknown numerical signature kind".into())),
         };
+        self.budget.set(frame, || {
+            vec![budget::text(if input == "input_widths" {
+                "[],1]"
+            } else {
+                "1,1]"
+            })]
+        });
         self.punctuation(b',', b',')?;
         self.output.json(&input)?;
         self.output.push(b':')?;
+        self.budget.set(frame, || vec![budget::text(",1]")]);
         let signature = if input == "input_widths" {
             let input_widths = self.value::<Vec<usize>>()?;
+            self.budget.set(frame, || vec![budget::text("1]")]);
             self.punctuation(b',', b',')?;
             self.output.extend_from_slice(b"\"output_width\":")?;
+            self.budget.set(frame, || vec![budget::text("]")]);
             TensorSignature::Pure {
                 input_widths,
                 output_width: self.value()?,
             }
         } else {
             let input_width = self.value::<usize>()?;
+            self.budget.set(frame, || vec![budget::text("1]")]);
             self.punctuation(b',', b',')?;
             self.output.extend_from_slice(b"\"output_width\":")?;
+            self.budget.set(frame, || vec![budget::text("]")]);
             TensorSignature::Causal {
                 input_width,
                 output_width: self.value()?,
             }
         };
+        self.budget.set(frame, || vec![]);
         self.punctuation(b']', b'}')?;
+        self.budget.leave(frame);
         Ok(signature)
     }
 
     pub(super) fn compact_parameters(&mut self) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        self.budget.set(frame, || {
+            vec![
+                budget::Unit::Parameters {
+                    active: false,
+                    leading_comma: false,
+                },
+                budget::text("]"),
+            ]
+        });
         self.punctuation(b'[', b'[')?;
         if self.peek()? != b']' {
             loop {
+                self.budget.set(frame, || {
+                    vec![
+                        budget::Unit::Parameters {
+                            active: true,
+                            leading_comma: true,
+                        },
+                        budget::text("]"),
+                    ]
+                });
+                let parameter = self.budget.enter();
+                self.budget
+                    .set(parameter, || vec![budget::text("\"\",[]]")]);
                 self.take(b'[')?;
                 self.output.extend_from_slice(b"{\"name\":")?;
+                self.budget.set(parameter, || vec![budget::text(",[]]")]);
                 self.symbol(false)?;
+                self.budget.set(parameter, || vec![budget::text("[]]")]);
                 self.punctuation(b',', b',')?;
                 self.output.extend_from_slice(b"\"shape\":")?;
+                self.budget.set(parameter, || vec![budget::text("]")]);
                 self.value::<Vec<usize>>()?;
+                self.budget.set(parameter, || vec![]);
                 self.take(b']')?;
                 self.output.extend_from_slice(b",\"float32\":true}")?;
+                self.budget.leave(parameter);
+                self.budget.set(frame, || {
+                    vec![
+                        budget::Unit::Parameters {
+                            active: false,
+                            leading_comma: true,
+                        },
+                        budget::text("]"),
+                    ]
+                });
                 if self.peek()? != b',' {
                     break;
                 }
                 self.punctuation(b',', b',')?;
             }
         }
-        self.punctuation(b']', b']')
+        self.budget.set(frame, || vec![]);
+        self.punctuation(b']', b']')?;
+        self.budget.leave(frame);
+        Ok(())
     }
 }

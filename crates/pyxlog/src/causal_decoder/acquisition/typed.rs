@@ -30,11 +30,14 @@ struct OutputDependencies {
     completion_cache: Option<Arc<CompletionCache>>,
 }
 
-impl OutputDependencies {
-    fn required_producers(&self, required: &EntryRequirements) -> Option<EntryRequirements> {
-        let mut producers = required.clone();
-        for name in &required.calls {
-            let callee = self.callees.get(name)?;
+impl EntryRequirements {
+    pub(super) fn producers(
+        &self,
+        callees: &BTreeMap<String, TensorOutputDependencies>,
+    ) -> Option<Self> {
+        let mut producers = self.clone();
+        for name in &self.calls {
+            let callee = callees.get(name)?;
             for dependency in &callee.definitions {
                 if dependency != name {
                     producers.calls.remove(dependency);
@@ -46,7 +49,9 @@ impl OutputDependencies {
         }
         Some(producers)
     }
+}
 
+impl OutputDependencies {
     fn operation(
         &self,
         body: &TensorProgram,
@@ -454,7 +459,7 @@ impl Program {
         let mut missing = self
             .dependencies
             .as_ref()
-            .and_then(|facts| facts.required_producers(required))?
+            .and_then(|facts| required.producers(&facts.callees))?
             .parameters;
         missing.retain(|name| {
             !self
@@ -589,7 +594,7 @@ impl Program {
         let Some(EntryRequirements {
             calls: mut roots,
             mut parameters,
-        }) = facts.required_producers(required)
+        }) = required.producers(&facts.callees)
         else {
             return false;
         };

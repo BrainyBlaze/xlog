@@ -80,6 +80,7 @@ class NativeCausalModel:
         """Exact native context/schema.
 
         V20 adds retained-reference prefix admission to v19's compact metadata.
+        V21 adds the explicit original-ID suffix cost contract, preserving rows-v5.
         """
         ...
     def fork_acquired(
@@ -115,7 +116,15 @@ class NativeAcquisitionMask:
     """Intersect byte-token masks with the selected native acquisition contract."""
 
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
-    def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
+    def filter(
+        self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
+    ) -> bytes:
+        """V21 requires positive remaining original IDs including this choice and paid EOS.
+
+        Earlier languages omit the argument. The ordered structural lower bound
+        is necessary; completed acquisition and native admission remain required.
+        """
+        ...
     def completion_state(self, prefix: bytes) -> str:
         """Version4–19 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:

@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use xlog_logic::ast::FuncBody;
 
+pub(super) mod budget;
 pub(super) mod indices;
 pub(super) mod metadata;
 
@@ -140,6 +141,7 @@ pub(super) struct Prefix<'a> {
     pub indices: Vec<indices::Record>,
     pub pending_indices: Option<indices::Pending<'a>>,
     pub pending_retained: Option<metadata::PendingReference>,
+    pub budget: budget::State,
 }
 
 enum Stop {
@@ -222,6 +224,7 @@ struct Reader<'a> {
     indices: Vec<indices::Record>,
     pending_indices: Option<(usize, indices::Target)>,
     pending_retained: Option<metadata::PendingReference>,
+    budget: budget::State,
 }
 
 /// Only syntax is expanded. An unfinished operand remains the same byte prefix
@@ -234,6 +237,7 @@ pub(super) fn prefix<'a>(
     has_intent: bool,
     compact_indices: bool,
     compact_metadata: bool,
+    track_token_budget: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -257,12 +261,21 @@ pub(super) fn prefix<'a>(
         indices: Vec::new(),
         pending_indices: None,
         pending_retained: None,
+        budget: budget::State::new(track_token_budget, fields),
     };
     let complete = match reader.document() {
-        Ok(()) => true,
+        Ok(()) => {
+            reader.budget.complete = true;
+            true
+        }
         Err(Stop::Incomplete) => false,
         Err(Stop::Invalid(error)) => return Err(error),
     };
+    if track_token_budget {
+        reader.budget.count_prefix = reader
+            .pending_operation_count
+            .map(|start| source[start..].trim_ascii().to_vec());
+    }
     Ok(Prefix {
         bytes: reader.output.bytes,
         complete,
@@ -275,6 +288,7 @@ pub(super) fn prefix<'a>(
                 target,
             }),
         pending_retained: reader.pending_retained,
+        budget: reader.budget,
     })
 }
 
@@ -297,6 +311,7 @@ pub(super) fn definitions(
         has_intent,
         compact_indices,
         compact_metadata,
+        false,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -360,7 +375,14 @@ impl Reader<'_> {
     }
 
     fn take(&mut self, expected: u8) -> Result<(), Stop> {
-        if self.peek()? != expected {
+        let byte = match self.peek() {
+            Err(Stop::Incomplete) => {
+                self.budget.expect(expected);
+                return Err(Stop::Incomplete);
+            }
+            result => result?,
+        };
+        if byte != expected {
             return Err(Stop::Invalid(
                 "numerical rows field order or arity differs".into(),
             ));
@@ -383,6 +405,7 @@ impl Reader<'_> {
             Some(Ok(value)) => value,
             None => return Err(Stop::Incomplete),
             Some(Err(error)) if error.is_eof() => {
+                self.budget.raw(tail);
                 if copy {
                     self.output.extend_from_slice(tail)?;
                 }
@@ -402,11 +425,16 @@ impl Reader<'_> {
     }
 
     fn key(&mut self, expected: &str) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        self.budget.set(frame, || vec![budget::text(":")]);
         let key: String = serde_json::from_str(self.raw(false)?.get())?;
         if key != expected {
             return Err(Stop::Invalid("numerical rows fields differ".into()));
         }
-        self.take(b':')
+        self.budget.set(frame, || vec![]);
+        self.take(b':')?;
+        self.budget.leave(frame);
+        Ok(())
     }
 
     fn field(&mut self, name: &str) -> Result<(), Stop> {
@@ -450,21 +478,49 @@ impl Reader<'_> {
     }
 
     fn context_entry_document(&mut self) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        let helpers = || {
+            let mut units = vec![budget::text("\"helpers\":[]")];
+            units.extend(budget::entry());
+            units
+        };
+        self.budget.set(frame, || helpers());
         self.punctuation(b'{', b'{')?;
         if self.has_intent {
+            self.budget.set(frame, || {
+                let mut following = vec![budget::text("\"\",")];
+                following.extend(helpers());
+                following
+            });
             self.key("intent")?;
+            self.budget.set(frame, || {
+                let mut following = vec![budget::text(",")];
+                following.extend(helpers());
+                following
+            });
             let intent: String = serde_json::from_str(self.raw(false)?.get())?;
             if !(1..=INTENT_CHARACTERS).contains(&intent.chars().count()) {
                 return Err(Stop::Invalid(
                     "numerical intent must contain one through 256 Unicode scalar values".into(),
                 ));
             }
+            self.budget.set(frame, || helpers());
             self.take(b',')?;
         }
+        self.budget.set(frame, || {
+            let mut following = vec![budget::text("[]")];
+            following.extend(budget::entry());
+            following
+        });
         self.key("helpers")?;
         self.output.extend_from_slice(b"\"entrypoint\":")?;
         self.output.json(&self.context["entrypoint"])?;
         self.output.extend_from_slice(b",\"definitions\":[")?;
+        self.budget.set(frame, || {
+            let mut following = vec![budget::text("]")];
+            following.extend(budget::entry());
+            following
+        });
         self.take(b'[')?;
         let mut has_helpers = false;
         if self.peek()? != b']' {
@@ -477,23 +533,61 @@ impl Reader<'_> {
                 self.punctuation(b',', b',')?;
             }
         }
+        self.budget.set(frame, || budget::entry());
         self.take(b']')?;
+        self.budget.entry_pending = true;
+        self.budget.set(frame, || {
+            let mut following = vec![budget::text("\"entry\":")];
+            following.extend(budget::entry_body());
+            following.push(budget::text("}"));
+            following
+        });
         self.take(b',')?;
+        self.budget.set(frame, || {
+            let mut following = budget::entry_body();
+            following.push(budget::text("}"));
+            following
+        });
         self.key("entry")?;
         if has_helpers {
             self.output.push(b',')?;
         }
+        self.budget.set(frame, || vec![budget::text("}")]);
         self.definition(true)?;
         self.output.push(b']')?;
+        self.budget.set(frame, || vec![]);
         self.punctuation(b'}', b'}')?;
         self.whitespace()?;
         if self.offset != self.source.len() {
             return Err(Stop::Invalid("trailing numerical rows source".into()));
         }
+        self.budget.leave(frame);
         Ok(())
     }
 
     fn definition(&mut self, entry: bool) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        self.budget.definition = self.definition_index;
+        self.budget.entry = entry;
+        self.budget.set(frame, || {
+            let mut following = if entry {
+                vec![
+                    budget::text("["),
+                    budget::Unit::Parameters {
+                        active: false,
+                        leading_comma: false,
+                    },
+                    budget::text("],1,["),
+                ]
+            } else {
+                vec![budget::text("\"\",[\"\",,1],[],1,[")]
+            };
+            following.extend([
+                budget::rows(self.definition_index, None, 0, false),
+                budget::text("]]"),
+            ]);
+            following
+        });
         self.punctuation(if self.compact_metadata { b'[' } else { b'{' }, b'{')?;
         let signature: TensorSignature = if entry {
             self.definition_name = self.context["entrypoint"].as_str().unwrap().to_owned();
@@ -506,38 +600,87 @@ impl Reader<'_> {
             serde_json::from_value(self.context["signature"].clone())?
         } else {
             if self.compact_metadata {
+                self.budget.set(frame, || {
+                    vec![
+                        budget::text(",[\"\",,1],[],1,["),
+                        budget::rows(self.definition_index, None, 0, false),
+                        budget::text("]]"),
+                    ]
+                });
                 self.output.extend_from_slice(b"\"name\":")?;
                 self.definition_name = self.local_symbol(true)?;
             } else {
                 self.field("name")?;
                 self.definition_name = self.value::<String>()?;
             }
+            self.budget.set(frame, || {
+                vec![
+                    budget::text("[\"\",,1],[],1,["),
+                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text("]]"),
+                ]
+            });
             self.take(b',')?;
             self.output
                 .extend_from_slice(b",\"body\":{\"Numerical\":{")?;
             let signature = if self.compact_metadata {
+                self.budget.set(frame, || {
+                    vec![
+                        budget::text(",[],1,["),
+                        budget::rows(self.definition_index, None, 0, false),
+                        budget::text("]]"),
+                    ]
+                });
                 self.output.extend_from_slice(b"\"signature\":")?;
                 self.compact_signature()?
             } else {
                 self.field("signature")?;
                 self.value()?
             };
+            self.budget.set(frame, || {
+                vec![
+                    budget::text("[],1,["),
+                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text("]]"),
+                ]
+            });
             self.punctuation(b',', b',')?;
             signature
         };
         if self.compact_metadata {
+            self.budget.set(frame, || {
+                vec![
+                    budget::text(",1,["),
+                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text("]]"),
+                ]
+            });
             self.output.extend_from_slice(b"\"parameters\":")?;
             self.compact_parameters()?;
         } else {
             self.field("parameters")?;
             self.value::<Vec<TensorParameter>>()?;
         }
+        self.budget.set(frame, || {
+            vec![
+                budget::text("1,["),
+                budget::rows(self.definition_index, None, 0, false),
+                budget::text("]]"),
+            ]
+        });
         self.punctuation(b',', b',')?;
         let operation_count = if self.context_entry {
             if !self.compact_metadata {
                 self.key("operation_count")?;
             }
             self.output.extend_from_slice(b"\"output\":")?;
+            self.budget.set(frame, || {
+                vec![
+                    budget::text(",["),
+                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text("]]"),
+                ]
+            });
             // Retain the original decimal until its canonical output index can
             // be projected. Subtraction does not preserve decimal prefixes.
             self.pending_operation_count = Some(self.offset);
@@ -556,30 +699,63 @@ impl Reader<'_> {
             self.value::<usize>()?;
             None
         };
+        self.budget.set(frame, || {
+            vec![
+                budget::text("["),
+                budget::rows(self.definition_index, operation_count, 0, false),
+                budget::text("]]"),
+            ]
+        });
         self.punctuation(b',', b',')?;
         if self.compact_metadata {
             self.output.extend_from_slice(b"\"operations\":")?;
         } else {
             self.field("operations")?;
         }
+        self.budget.set(frame, || {
+            vec![
+                budget::rows(self.definition_index, operation_count, 0, false),
+                budget::text("]]"),
+            ]
+        });
         self.punctuation(b'[', b'[')?;
         let mut operations = 0;
         if self.peek()? != b']' {
             loop {
+                self.budget.set(frame, || {
+                    vec![
+                        budget::rows(self.definition_index, operation_count, operations + 1, true),
+                        budget::text("]]"),
+                    ]
+                });
                 self.operation(operations)?;
                 operations += 1;
+                self.budget.set(frame, || {
+                    vec![
+                        budget::rows(self.definition_index, operation_count, operations, true),
+                        budget::text("]]"),
+                    ]
+                });
                 if self.peek()? != b',' {
                     break;
                 }
+                self.budget.set(frame, || {
+                    vec![
+                        budget::rows(self.definition_index, operation_count, operations, false),
+                        budget::text("]]"),
+                    ]
+                });
                 self.punctuation(b',', b',')?;
             }
         }
+        self.budget.set(frame, || vec![budget::text("]")]);
         self.punctuation(b']', b']')?;
         if operation_count.is_some_and(|count| count != operations) {
             return Err(Stop::Invalid(
                 "numerical operation count differs from rows".into(),
             ));
         }
+        self.budget.set(frame, || vec![]);
         self.take(if self.compact_metadata { b']' } else { b'}' })?;
         let vocabulary = self.context["vocabulary"].as_u64().unwrap() as usize;
         let max_context = self.context["max_context"].as_u64().unwrap() as usize;
@@ -594,23 +770,42 @@ impl Reader<'_> {
         self.output.json(&result)?;
         self.output.extend_from_slice(b",\"is_private\":false}")?;
         self.definition_index += 1;
+        self.budget.leave(frame);
         Ok(())
     }
 
     fn operation(&mut self, index: usize) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        self.budget.set(frame, || vec![budget::text("\"\"]")]);
         self.take(b'[')?;
         self.output.extend_from_slice(b"{\"operation\":")?;
+        self.budget.set(frame, || vec![budget::text("]")]);
         let tag: String = self.value()?;
         let fields = self
             .fields
             .get(&tag)
             .ok_or_else(|| Stop::Invalid("unknown numerical operation tag".into()))?;
         let mut input = None;
-        for field in fields.iter().skip(1) {
+        for (position, field) in fields.iter().enumerate().skip(1) {
+            let following = || {
+                let mut units = Vec::new();
+                for field in fields.iter().skip(position + 1) {
+                    units.push(budget::text(","));
+                    units.push(budget::field(field));
+                }
+                units.push(budget::text("]"));
+                units
+            };
+            self.budget.set(frame, || {
+                let mut units = vec![budget::field(field)];
+                units.extend(following());
+                units
+            });
             self.take(b',')?;
             self.output.push(b',')?;
             self.output.json(field)?;
             self.output.push(b':')?;
+            self.budget.set(frame, following);
             if self.compact_metadata && field == "function" {
                 self.symbol(true)?;
             } else if self.compact_indices && tag == "gather_columns" && field == "input" {
@@ -625,10 +820,26 @@ impl Reader<'_> {
                 self.raw(true)?;
             }
         }
-        self.punctuation(b']', b'}')
+        self.budget.set(frame, || vec![]);
+        self.punctuation(b']', b'}')?;
+        self.budget.leave(frame);
+        Ok(())
     }
 
     fn structured_indices(&mut self, operation: usize, input: usize) -> Result<(), Stop> {
+        let frame = self.budget.enter();
+        let following = |position: usize| {
+            let mut units = Vec::new();
+            for (index, name) in indices::FIELDS.into_iter().enumerate().skip(position) {
+                units.push(budget::text(&format!(
+                    "{}\"{name}\":1",
+                    if index == 0 { "" } else { "," }
+                )));
+            }
+            units.push(budget::text("}"));
+            units
+        };
+        self.budget.set(frame, || following(0));
         let target = indices::Target {
             definition: self.definition_name.clone(),
             definition_index: self.definition_index,
@@ -640,11 +851,23 @@ impl Reader<'_> {
         let mut numbers = [0usize; 4];
         for (field, name) in indices::FIELDS.into_iter().enumerate() {
             if field != 0 {
+                self.budget.set(frame, || {
+                    let mut units = vec![budget::text(&format!("\"{name}\":1"))];
+                    units.extend(following(field + 1));
+                    units
+                });
                 self.take(b',')?;
             }
+            self.budget.set(frame, || {
+                let mut units = vec![budget::text("1")];
+                units.extend(following(field + 1));
+                units
+            });
             self.key(name)?;
+            self.budget.set(frame, || following(field + 1));
             numbers[field] = serde_json::from_str(self.raw(false)?.get())?;
         }
+        self.budget.set(frame, || vec![]);
         self.take(b'}')?;
         let pattern = indices::Pattern::from(numbers);
         pattern
@@ -653,6 +876,7 @@ impl Reader<'_> {
         pattern.write(&mut self.output)?;
         self.indices.push(indices::Record { target, pattern });
         self.pending_indices = None;
+        self.budget.leave(frame);
         Ok(())
     }
 }
