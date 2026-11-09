@@ -397,6 +397,40 @@ pub(crate) struct Bound<'a> {
 }
 
 impl Bound<'_> {
+    /// Invert the same necessary suffix bound for the active body's total rows.
+    /// The reader's completed count includes a partly emitted row whose remaining
+    /// bytes are already in the unfinished units. No row is paid twice.
+    pub(crate) fn row_capacity(&self, maximum: usize, parameters: Obligations) -> Option<usize> {
+        let completed = self.state.frames.iter().flatten().find_map(|unit| {
+            if let Unit::Rows {
+                definition,
+                completed,
+                ..
+            } = unit
+            {
+                (*definition == self.state.definition).then_some(*completed)
+            } else {
+                None
+            }
+        })?;
+        let mut minimum = completed.max(1);
+        if minimum > maximum || !self.permits(Some(minimum), parameters) {
+            return Some(0);
+        }
+        let mut maximum = maximum;
+        // Increasing count only appends mandatory row atoms in the same unit;
+        // suffix coverage is monotone even when a spelling crosses units.
+        while minimum < maximum {
+            let middle = minimum + (maximum - minimum).div_ceil(2);
+            if self.permits(Some(middle), parameters) {
+                minimum = middle;
+            } else {
+                maximum = middle - 1;
+            }
+        }
+        Some(minimum)
+    }
+
     /// These operations may occur in any later definition. Their ordered
     /// projection is a separate necessary bound, not an assigned entry body.
     pub(crate) fn permits_unplaced_rows(&self, rows: usize) -> bool {
