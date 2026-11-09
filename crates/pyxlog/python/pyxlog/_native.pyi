@@ -82,6 +82,7 @@ class NativeCausalModel:
         V20 adds retained-reference prefix admission to v19's compact metadata.
         V21 adds the explicit original-ID suffix cost contract, preserving rows-v5.
         V22 selects rows-v6: self-delimited bodies and existing-physical-alias references.
+        V23 also bounds prospective rows by remaining original-ID suffix capacity.
         """
         ...
     def fork_acquired(
@@ -120,16 +121,16 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–22 require positive remaining original IDs including this choice and paid EOS.
+        """V21–23 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–22 prefix facts as JSON; no token selection or final admission."""
+        """Version4–23 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–22 source into canonical JSON using the captured context."""
+        """Elaborate complete v7–23 source into canonical JSON using the captured context."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int

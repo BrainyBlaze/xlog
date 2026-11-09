@@ -385,6 +385,7 @@ pub(super) fn definitions(
             false,
             None,
             true,
+            false,
         )
         .map_err(|error| error.to_string())?;
     }

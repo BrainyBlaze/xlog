@@ -43,6 +43,7 @@ const COMPACT_METADATA_LANGUAGE: &str = "xlog-contextual-acquisition-v19";
 const RETAINED_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v20";
 const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
 const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
+const TOKEN_ROW_CAPACITY_LANGUAGE: &str = "xlog-contextual-acquisition-v23";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -67,7 +68,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=22) {
+    if !matches!(version, 1..=23) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -341,6 +342,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 23 {
+            schema["description"] = json!(format!(
+                "{} The open body's prospective row allowance also intersects the maximum current-body count whose shared ordered suffix projection fits the remaining original IDs and paid EOS. The same typed owner applies this capacity before partial tags and operands, including after parsed-prefix restoration. This inverse structural bound selects no count or graph and remains a necessary relaxation rather than a token-fit witness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -353,6 +360,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                23 => TOKEN_ROW_CAPACITY_LANGUAGE,
                 22 => SELF_DELIMITED_LANGUAGE,
                 21 => TOKEN_BUDGET_LANGUAGE,
                 20 => RETAINED_REFERENCE_LANGUAGE,
@@ -487,6 +495,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     compact_metadata: bool,
     retained_reference_prefix: bool,
     self_delimited: bool,
+    token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
@@ -507,7 +516,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE;
+        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE;
+        let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
         if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
             return Err(value_error("native original-token cost contract differs"));
@@ -651,6 +661,7 @@ impl PyNativeAcquisitionMask {
             compact_metadata,
             retained_reference_prefix,
             self_delimited,
+            token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
@@ -835,6 +846,7 @@ impl PyNativeAcquisitionMask {
             capture_prefix,
             token_budget,
             self.self_delimited,
+            self.token_row_capacity,
         )?;
         // These common source obligations cannot be reduced by choosing a
         // count or retained reference. Reject them before exploring either
@@ -1050,6 +1062,7 @@ struct Resources<'a> {
     capture_prefix: bool,
     parsed_prefix: Option<ParsedOperations>,
     token_budget: Option<rows::budget::Bound<'a>>,
+    token_row_capacity: bool,
 }
 
 #[derive(Clone, Default)]
@@ -1088,6 +1101,7 @@ fn resource_prefix<'a>(
     capture_prefix: bool,
     token_budget: Option<rows::budget::Bound<'a>>,
     self_delimited: bool,
+    token_row_capacity: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1149,6 +1163,7 @@ fn resource_prefix<'a>(
         capture_prefix,
         parsed_prefix: None,
         token_budget,
+        token_row_capacity,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -1271,8 +1286,12 @@ impl Resources<'_> {
         if self.self_delimited && !bound.permits_unplaced_rows(self.unplaced_producer_rows()) {
             return false;
         }
+        bound.permits(count, self.token_obligations(bound.state))
+    }
+
+    fn token_obligations(&self, state: &rows::budget::State) -> rows::budget::Obligations {
         let mut parameters = rows::budget::Obligations::default();
-        if bound.state.entry || bound.state.entry_pending {
+        if state.entry || state.entry_pending {
             if let Some(producers) = self
                 .required_entry()
                 .ok()
@@ -1288,9 +1307,7 @@ impl Resources<'_> {
                             .any(|name| self.dependencies[name].tokens),
                     );
                 let mut missing = producers.parameters;
-                if bound.state.entry
-                    && self.program_definition_index == Some(bound.state.definition)
-                {
+                if state.entry && self.program_definition_index == Some(state.definition) {
                     if let Some(program) = &self.program.typed {
                         missing.retain(|name| {
                             !program
@@ -1331,7 +1348,7 @@ impl Resources<'_> {
                     .unwrap_or(0);
             }
         }
-        bound.permits(count, parameters)
+        parameters
     }
 
     fn permits_output_plan(&self, output: usize) -> bool {
@@ -1756,6 +1773,27 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             ));
                         }
                     }
+                    if let Some(bound) = self.resources.token_budget.filter(|bound| {
+                        self.resources.token_row_capacity
+                            && self.resources.definition_index == Some(bound.state.definition)
+                    }) {
+                        // Declarations are now known, while every operation's
+                        // partial tag and operand still uses this same Program.
+                        let capacity = self
+                            .resources
+                            .program
+                            .typed
+                            .as_ref()
+                            .unwrap()
+                            .row_allowance
+                            .unwrap();
+                        if let Some(rows) = bound
+                            .row_capacity(capacity, self.resources.token_obligations(bound.state))
+                        {
+                            self.resources.program.typed.as_mut().unwrap().row_allowance =
+                                Some(rows);
+                        }
+                    }
                 }
                 (Level::Program, "operations") => {
                     if self.resources.ordered
@@ -1901,7 +1939,30 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
                 for _ in 0..state.program.operations {
                     sequence.next_element::<IgnoredAny>()?;
                 }
+                let row_allowance = self
+                    .resources
+                    .program
+                    .typed
+                    .as_ref()
+                    .and_then(|program| program.row_allowance);
                 self.resources.program = state.program.clone();
+                if self.resources.token_row_capacity {
+                    // The current hypothetical remainder owns capacity; cached
+                    // operation facts cannot restore an earlier, larger limit.
+                    let program = self.resources.program.typed.as_mut().unwrap();
+                    program.row_allowance = row_allowance;
+                    if row_allowance.is_some_and(|rows| {
+                        program.body.operations.len() > rows
+                            || (program.body.operations.len() == rows
+                                && rows
+                                    .checked_sub(1)
+                                    .is_none_or(|output| !program.outputs().contains(&output)))
+                    }) {
+                        return Err(A::Error::custom(
+                            "cached operations exceed the original-ID output capacity",
+                        ));
+                    }
+                }
                 self.resources.nodes = state.nodes;
             }
         }
