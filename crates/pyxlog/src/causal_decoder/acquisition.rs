@@ -997,8 +997,10 @@ impl Resources<'_> {
         record: &rows::indices::Record,
     ) -> Result<(), serde_json::Error> {
         let maximum = maximum_width(self.typed_context.unwrap());
-        if self.definition_name.as_deref() == Some(record.target.definition.as_str()) {
-            if self.definition_index != Some(record.target.definition_index)
+        // Opening the next definition advances its index before its new name
+        // is complete. Previous descriptors belong to the saved body then.
+        if self.definition_index == Some(record.target.definition_index) {
+            if self.definition_name.as_deref() != Some(record.target.definition.as_str())
                 || record.target.input >= record.target.operation
             {
                 return Err(serde_json::Error::custom(
