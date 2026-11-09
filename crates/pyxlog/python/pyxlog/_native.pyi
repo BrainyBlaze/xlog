@@ -77,7 +77,10 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v19 adds positional metadata and local symbols."""
+        """Exact native context/schema.
+
+        V20 adds retained-reference prefix admission to v19's compact metadata.
+        """
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,

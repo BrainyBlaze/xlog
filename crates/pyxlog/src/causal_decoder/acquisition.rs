@@ -40,6 +40,7 @@ const REQUIRED_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v16";
 const COUNT_PREFIX_LANGUAGE: &str = "xlog-contextual-acquisition-v17";
 const COMPACT_INDICES_LANGUAGE: &str = "xlog-contextual-acquisition-v18";
 const COMPACT_METADATA_LANGUAGE: &str = "xlog-contextual-acquisition-v19";
+const RETAINED_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v20";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -63,7 +64,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=19) {
+    if !matches!(version, 1..=20) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -319,6 +320,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 20 {
+            schema["description"] = json!(format!(
+                "{} From the opening of a retained symbol wrapper, its captured-name domain must intersect canonical typed callee or physical alias admission. This check includes unfinished tags and names, reuses the same canonical visitors and selects no name or operation.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -329,6 +336,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                20 => RETAINED_REFERENCE_LANGUAGE,
                 19 => COMPACT_METADATA_LANGUAGE,
                 18 => COMPACT_INDICES_LANGUAGE,
                 17 => COUNT_PREFIX_LANGUAGE,
@@ -457,6 +465,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     operation_count_prefix: bool,
     compact_indices: bool,
     compact_metadata: bool,
+    retained_reference_prefix: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -466,6 +475,7 @@ struct CanonicalPrefix<'a> {
     operation_count: Option<&'a [u8]>,
     indices: Vec<rows::indices::Record>,
     pending_indices: Option<rows::indices::Pending<'a>>,
+    pending_retained: Option<rows::metadata::PendingReference>,
 }
 
 #[pymethods]
@@ -474,7 +484,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let compact_metadata = language["id"] == COMPACT_METADATA_LANGUAGE;
+        let retained_reference_prefix = language["id"] == RETAINED_REFERENCE_LANGUAGE;
+        let compact_metadata =
+            language["id"] == COMPACT_METADATA_LANGUAGE || retained_reference_prefix;
         let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE || compact_metadata;
         let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
         let required_parameter_names =
@@ -606,6 +618,7 @@ impl PyNativeAcquisitionMask {
             operation_count_prefix,
             compact_indices,
             compact_metadata,
+            retained_reference_prefix,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -780,6 +793,45 @@ impl PyNativeAcquisitionMask {
                 self.typed_context.as_ref().unwrap(),
             )?;
         }
+        if let Some(pending) = &prefix.pending_retained {
+            let context = self.typed_context.as_ref().unwrap();
+            let names = rows::metadata::retained_names(context, pending.function);
+            let permitted = names.into_iter().any(|name| {
+                let expected = serde_json::to_vec(name).unwrap();
+                let tail = &prefix.bytes[pending.value_offset - 1..];
+                let matches = if pending.function {
+                    operation_prefix(tail, name)
+                } else {
+                    value_prefix(tail, &expected)
+                };
+                if !matches
+                    || pending
+                        .value_offset
+                        .checked_add(expected.len())
+                        .is_none_or(|size| size > ACQUIRED_SOURCE_BYTES)
+                {
+                    return false;
+                }
+                let mut bytes = prefix.bytes[..pending.value_offset].to_vec();
+                bytes.extend_from_slice(&expected);
+                // Check only this source-selected reference domain through
+                // the same canonical visitors. No name is emitted or retained
+                // as a choice, and no prospective operation advances a cache.
+                let candidate = CanonicalPrefix {
+                    bytes: Cow::Owned(bytes),
+                    operation_count: None,
+                    indices: Vec::new(),
+                    pending_indices: None,
+                    pending_retained: None,
+                };
+                self.resources(&candidate, reusable_prefix, false).is_ok()
+            });
+            if !permitted {
+                return Err(serde_json::Error::custom(
+                    "retained symbol has no compatible native source continuation",
+                ));
+            }
+        }
         Ok(resources)
     }
 
@@ -803,6 +855,11 @@ impl PyNativeAcquisitionMask {
                 },
                 indices: prefix.indices,
                 pending_indices: prefix.pending_indices,
+                pending_retained: if self.retained_reference_prefix {
+                    prefix.pending_retained
+                } else {
+                    None
+                },
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
             Err("acquisition source byte budget exceeded".into())
@@ -812,6 +869,7 @@ impl PyNativeAcquisitionMask {
                 operation_count: None,
                 indices: Vec::new(),
                 pending_indices: None,
+                pending_retained: None,
             })
         }
     }

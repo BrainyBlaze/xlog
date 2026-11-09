@@ -755,13 +755,22 @@ no tuple or hypothetical token advances its parsed-operation checkpoint.
 Original and projected canonical source each remain bounded by 1048576 bytes,
 including metadata and namespace expansion. Prefix masking, `decode_definition`
 and `fork_acquired(..., source_encoding="numerical-rows-v5")` use this same codec.
+
+Version20 (`xlog-contextual-acquisition-v20`) retains the `numerical-rows-v5`
+source format and adds a distinct prefix rule: as soon as a retained wrapper
+starts, its remaining captured-name domain must intersect canonical alias/callee
+admission, including before its tag is complete. Hypothetical reference checks
+reuse those visitors without selecting a name or publishing a prospective
+operation. The version19 packet and masks remain literal for saved token-audit
+replay; the new restriction requires an explicit version20 packet.
 Operations, operands, declarations, shapes and counts remain source-selected;
 the constructor, typed/dependency checks, execution and VJP paths are unchanged.
 No remaining-token API or token-budget completion guarantee is added. Callers
-explicitly select version19; packets1–18 and rows encodings1–4 retain their
-literal interpretation and replay behavior.
+explicitly select version19 for the original metadata admission or version20
+for the retained-reference prefix rule. Packets1–19 and rows encodings1–4 retain
+their literal interpretation and replay behavior.
 
-For a version4 through version19 packet,
+For a version4 through version20 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
