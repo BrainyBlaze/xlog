@@ -159,6 +159,8 @@ impl DependencyFrontier {
 pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
+    /// Maximum rows available to an open body, without selecting its output.
+    pub(super) row_allowance: Option<usize>,
     pub(super) entry_requirements: Option<EntryRequirements>,
     shapes: [Vec<TensorValueShape>; 2],
     raw_tokens: Vec<u32>,
@@ -195,6 +197,7 @@ impl Program {
             &(
                 &self.body,
                 self.planned_output,
+                self.row_allowance,
                 self.entry_requirements
                     .as_ref()
                     .map(|required| (&required.calls, &required.parameters)),
@@ -226,6 +229,7 @@ impl Program {
                 max_context,
             },
             planned_output: None,
+            row_allowance: None,
             entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],
             raw_tokens,
@@ -282,7 +286,13 @@ impl Program {
 
     pub(super) fn push(&mut self, operation: Op, signatures: &Signatures) -> Result<(), String> {
         if self
-            .planned_output
+            .row_allowance
+            .is_some_and(|rows| self.body.operations.len() >= rows)
+        {
+            return Err("operations exceed the available row allowance".into());
+        }
+        if self
+            .continuation_output()
             .is_some_and(|output| self.body.operations.len() > output)
         {
             return Err("operations exceed the planned output slot".into());
@@ -308,7 +318,7 @@ impl Program {
         self.body
             .validate_acquired_body()
             .map_err(|error| error.to_string())?;
-        if self.planned_output.is_some_and(|output| {
+        if self.continuation_output().is_some_and(|output| {
             !self.completion_possible(&self.body, output, signatures, dependencies.as_ref())
         }) {
             return Err("remaining entry operations cannot cover required calls and reads".into());
@@ -322,7 +332,12 @@ impl Program {
     }
 
     pub(super) fn is_output_slot(&self) -> bool {
-        self.planned_output == Some(self.body.operations.len())
+        self.continuation_output() == Some(self.body.operations.len())
+    }
+
+    fn continuation_output(&self) -> Option<usize> {
+        self.planned_output
+            .or_else(|| self.row_allowance.and_then(|rows| rows.checked_sub(1)))
     }
 
     pub(super) fn output_columns(&self) -> Option<usize> {
@@ -427,6 +442,12 @@ impl Program {
         signatures: &Signatures,
         dependencies: Option<&TensorOutputDependencies>,
     ) -> bool {
+        if self
+            .row_allowance
+            .is_some_and(|rows| self.body.operations.len() >= rows)
+        {
+            return false;
+        }
         if !(0..2).all(|length| {
             self.infer(&operation, signatures, length)
                 .is_ok_and(|shape| !self.is_output_slot() || self.matches_output(shape, length))
@@ -438,7 +459,7 @@ impl Program {
         let mut body = self.body.clone();
         body.operations.push(operation);
         body.validate_acquired_body().is_ok()
-            && self.planned_output.is_none_or(|output| {
+            && self.continuation_output().is_none_or(|output| {
                 self.completion_possible(&body, output, signatures, dependencies)
             })
     }

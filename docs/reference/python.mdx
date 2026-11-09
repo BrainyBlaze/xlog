@@ -804,7 +804,49 @@ operation is supplied. This is a necessary lower bound, not a guarantee of valid
 construction, completion within512 IDs or usefulness. Actual complete acquisition,
 paid EOS, native admission and subsequent qualification remain required.
 
-For a version4 through version21 packet,
+Version22 (`xlog-contextual-acquisition-v22`) selects `numerical-rows-v6`.
+Helpers use `[local_name, signature, parameters, operations]` and entry uses
+`[parameters, operations]`. Each operation list is nonempty. Its last actual row
+is the output; the model chooses closure without an earlier operation count.
+The same typed owner checks unfinished tags and operands against a prospective
+cumulative row allowance, including the last available row. That allowance is
+not written into the canonical output or treated as a selected source count.
+Closing the list checks the actual last row at both context lengths, causal
+reads and required output dependencies. All operator, operand, signature, local
+and retained symbol, and Gather index domains remain source-selected.
+
+`[symbol, shape]` still declares or checks named FP32 storage. `[symbol]` reuses an
+already existing physical declaration, including its shape. The shared declaration
+resolver owns both elaboration and resource admission. A tuple's closing delimiter
+selects shorthand: an undeclared name followed by an unfinished tuple may still
+continue with `, shape`; an undeclared completed `[symbol]` is rejected. Local
+parameter tables retain their order, uniqueness checks and numeric reference
+indices. No alias, allocation, shape or operation is inserted as a default.
+`decode_definition` and `fork_acquired(..., source_encoding="numerical-rows-v6")`
+use the same reader and closed-body admission.
+
+The packet still has exactly `id`, `context`, `schema` and `token_cost_contract`,
+with the unchanged `ordered-structural-subsequence-v1` cost contract and the same
+positive `remaining_tokens` API. The collector retains known work before helpers
+close: each new physical constant not yet read anywhere needs a later Parameter
+or Linear, and each new definition not yet called needs a later Call or Scan.
+An input producer is also reserved when none has appeared. These operation
+obligations are checked over the whole remaining source, independently of the
+ordered syntax bound, so they may be placed in the current body, a future helper
+or entry. At most one partly emitted row is credited; projected tokens may cross
+units, and EOS still costs a separate original ID. The bounds are combined as
+necessary conditions, without adding overlapping token costs.
+
+This global floor deliberately credits reads and calls even when their values
+may not reach a later output. Unknown future helper placement, additional joins,
+declaration spellings and operands remain optimistic. Once helpers close, the
+existing dependency owner supplies the actual entry obligations. Typed structural
+completion and this lexical lower bound are not a whole-grammar source witness or
+a guarantee of completion within512 IDs. Actual paid EOS, native admission and
+subsequent qualification remain required. Packets1–21 and their source encodings
+retain their prior interpretation.
+
+For a version4 through version22 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

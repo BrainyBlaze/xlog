@@ -4,6 +4,40 @@ use super::*;
 
 const RETAINED: &str = "retained";
 
+/// Physical declarations shared by source elaboration and prefix admission.
+pub(crate) struct Declarations(BTreeMap<String, TensorParameter>);
+
+impl Declarations {
+    pub(crate) fn new(context: Option<&Value>) -> Self {
+        Self(context.map_or_else(BTreeMap::new, |context| {
+            serde_json::from_value::<Vec<TensorParameter>>(context["parameters"].clone())
+                .unwrap()
+                .into_iter()
+                .map(|parameter| (parameter.name.clone(), parameter))
+                .collect()
+        }))
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&TensorParameter> {
+        self.0.get(name)
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
+    pub(crate) fn record(&mut self, parameter: TensorParameter) -> Result<(), String> {
+        if self
+            .get(&parameter.name)
+            .is_some_and(|old| old != &parameter)
+        {
+            return Err("parameter alias shape differs from its declaration".into());
+        }
+        self.0.insert(parameter.name.clone(), parameter);
+        Ok(())
+    }
+}
+
 pub(crate) fn is_local(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -51,7 +85,7 @@ fn reference(names: Vec<Value>) -> Value {
     }
 }
 
-pub(crate) fn schema(schema: &mut Value, context: &Value) {
+pub(crate) fn schema(schema: &mut Value, context: &Value, self_delimited: bool) {
     let defs = &mut schema["$defs"];
     defs["Callee"] = reference(
         retained_names(context, true)
@@ -80,23 +114,40 @@ pub(crate) fn schema(schema: &mut Value, context: &Value) {
         ]));
     }
     defs["TensorSignature"] = json!({"anyOf": signatures});
-    defs["TensorParameter"] = tuple(vec![
-        parameter,
+    let declaration = tuple(vec![
+        parameter.clone(),
         defs["TensorParameter"]["anyOf"][0]["properties"]["shape"].clone(),
     ]);
+    defs["TensorParameter"] = if self_delimited {
+        json!({"anyOf": [declaration, tuple(vec![parameter])]})
+    } else {
+        declaration
+    };
     let helper = &defs["FuncDef"]["properties"];
     let parameters = helper["parameters"].clone();
     let count = helper["operation_count"].clone();
     let operations = helper["operations"].clone();
     let entry_operations = defs["EntryFuncDef"]["properties"]["operations"].clone();
-    defs["FuncDef"] = tuple(vec![
+    let mut helper = vec![
         local(),
         json!({"$ref": "#/$defs/TensorSignature"}),
         parameters.clone(),
-        count.clone(),
-        operations,
-    ]);
-    defs["EntryFuncDef"] = tuple(vec![parameters, count, entry_operations]);
+    ];
+    let mut entry = vec![parameters];
+    if !self_delimited {
+        helper.push(count.clone());
+        entry.push(count);
+    }
+    helper.push(operations);
+    entry.push(entry_operations);
+    defs["FuncDef"] = tuple(helper);
+    defs["EntryFuncDef"] = tuple(entry);
+    if self_delimited {
+        schema["description"] = json!(
+            "Compact numerical-rows-v6 acquisition. Root fields are intent,helpers,entry. Helpers use [local_name,signature,parameters,operations]; entry uses [parameters,operations]. Operations are nonempty and the last actual row is the output. Signatures use [kind,input_width_or_widths,output_width]. Parameters use [symbol,shape] to declare or check named FP32 storage, or [symbol] to reference an already existing physical declaration without changing its shape. Local names expand with the captured namespace; retained symbols use [\"retained\",full_name]. The native typed owner checks prospective rows within the cumulative row allowance without selecting an output. Closure checks the actual last row and output-reaching dependencies. Original-ID suffix coverage remains a necessary relaxation, not a completion or usefulness guarantee."
+        );
+        return;
+    }
     schema["description"] = json!(format!(
         "{} Helpers use [local_name,signature,parameters,operation_count,operations]; entry uses [parameters,operation_count,operations]. Signatures are [\"pure\",input_widths,output_width] or [\"causal\",input_width,output_width]. Parameters use [reference,shape] with canonical float32=true. Local ASCII identifier strings expand with the captured function or parameter namespace. Call/Scan callees and parameter declarations may instead use [\"retained\",full_name] naming an actual captured callee or physical parameter. The same reader projects partial symbols before canonical prefix checks and bounds original and projected source. All operations, references and shapes remain selected in source; no token-budget completion or usefulness is guaranteed.",
         schema["description"].as_str().unwrap().replace("numerical-rows-v4", "numerical-rows-v5")
@@ -249,19 +300,52 @@ impl Reader<'_> {
                     ]
                 });
                 let parameter = self.budget.enter();
-                self.budget
-                    .set(parameter, || vec![budget::text("\"\",[]]")]);
+                self.budget.set(parameter, || {
+                    vec![budget::text(if self.self_delimited {
+                        "\"\"]"
+                    } else {
+                        "\"\",[]]"
+                    })]
+                });
                 self.take(b'[')?;
                 self.output.extend_from_slice(b"{\"name\":")?;
-                self.budget.set(parameter, || vec![budget::text(",[]]")]);
-                self.symbol(false)?;
-                self.budget.set(parameter, || vec![budget::text("[]]")]);
-                self.punctuation(b',', b',')?;
-                self.output.extend_from_slice(b"\"shape\":")?;
-                self.budget.set(parameter, || vec![budget::text("]")]);
-                self.value::<Vec<usize>>()?;
+                self.budget.set(parameter, || {
+                    vec![budget::text(if self.self_delimited { "]" } else { ",[]]" })]
+                });
+                let name = self.symbol(false)?;
+                let reference = self.self_delimited && self.peek()? == b']';
+                let shape = if reference {
+                    // The closing tuple delimiter selects a reference. Before
+                    // it, an unknown name can still introduce an explicit shape.
+                    let shape = self
+                        .declarations
+                        .as_ref()
+                        .unwrap()
+                        .get(&name)
+                        .ok_or_else(|| Stop::Invalid("parameter reference is not declared".into()))?
+                        .shape
+                        .clone();
+                    self.output.extend_from_slice(b",\"shape\":")?;
+                    self.output.json(&shape)?;
+                    shape
+                } else {
+                    self.budget.set(parameter, || vec![budget::text("[]]")]);
+                    self.punctuation(b',', b',')?;
+                    self.output.extend_from_slice(b"\"shape\":")?;
+                    self.budget.set(parameter, || vec![budget::text("]")]);
+                    self.value::<Vec<usize>>()?
+                };
                 self.budget.set(parameter, || vec![]);
                 self.take(b']')?;
+                if let Some(declarations) = &mut self.declarations {
+                    declarations
+                        .record(TensorParameter {
+                            name,
+                            shape,
+                            float32: true,
+                        })
+                        .map_err(Stop::Invalid)?;
+                }
                 self.output.extend_from_slice(b",\"float32\":true}")?;
                 self.budget.leave(parameter);
                 self.budget.set(frame, || {
