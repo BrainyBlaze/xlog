@@ -6,12 +6,19 @@ use serde_json::value::RawValue;
 use xlog_logic::ast::FuncBody;
 
 pub(super) mod indices;
+pub(super) mod metadata;
 
 pub(super) const ENCODING: &str = "numerical-rows-v1";
 pub(super) const CONTEXT_ENTRY_ENCODING: &str = "numerical-rows-v2";
 pub(super) const INTENT_ENCODING: &str = "numerical-rows-v3";
 pub(super) const COMPACT_INDICES_ENCODING: &str = "numerical-rows-v4";
+pub(super) const COMPACT_METADATA_ENCODING: &str = "numerical-rows-v5";
 const INTENT_CHARACTERS: usize = 256;
+
+fn tuple(items: Vec<Value>) -> Value {
+    json!({"type": "array", "minItems": items.len(),
+        "maxItems": items.len(), "prefixItems": items, "items": false})
+}
 
 /// Derive positional rows from the existing specialized canonical operation
 /// schema. Its required-field lists own both the operand order and exact arity.
@@ -30,8 +37,7 @@ pub(super) fn schema(
                 .iter()
                 .map(|field| operation["properties"][field.as_str().unwrap()].clone())
                 .collect::<Vec<_>>();
-            rows.push(json!({"type": "array", "minItems": items.len(),
-                "maxItems": items.len(), "prefixItems": items, "items": false}));
+            rows.push(tuple(items));
         }
         // Distinct constant tags make this an exact disjoint union. The pinned
         // strict grammar need not prove oneOf disjointness for tuple schemas.
@@ -209,6 +215,7 @@ struct Reader<'a> {
     has_intent: bool,
     pending_operation_count: Option<usize>,
     compact_indices: bool,
+    compact_metadata: bool,
     definition_name: String,
     definition_index: usize,
     indices: Vec<indices::Record>,
@@ -224,6 +231,7 @@ pub(super) fn prefix<'a>(
     context_entry: bool,
     has_intent: bool,
     compact_indices: bool,
+    compact_metadata: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -241,6 +249,7 @@ pub(super) fn prefix<'a>(
         has_intent,
         pending_operation_count: None,
         compact_indices,
+        compact_metadata,
         definition_name: String::new(),
         definition_index: 0,
         indices: Vec::new(),
@@ -274,6 +283,7 @@ pub(super) fn definitions(
     context_entry: bool,
     has_intent: bool,
     compact_indices: bool,
+    compact_metadata: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -282,6 +292,7 @@ pub(super) fn definitions(
         context_entry,
         has_intent,
         compact_indices,
+        compact_metadata,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -479,7 +490,7 @@ impl Reader<'_> {
     }
 
     fn definition(&mut self, entry: bool) -> Result<(), Stop> {
-        self.punctuation(b'{', b'{')?;
+        self.punctuation(if self.compact_metadata { b'[' } else { b'{' }, b'{')?;
         let signature: TensorSignature = if entry {
             self.definition_name = self.context["entrypoint"].as_str().unwrap().to_owned();
             self.output.extend_from_slice(b"\"name\":")?;
@@ -490,21 +501,38 @@ impl Reader<'_> {
             self.output.push(b',')?;
             serde_json::from_value(self.context["signature"].clone())?
         } else {
-            self.field("name")?;
-            self.definition_name = self.value::<String>()?;
+            if self.compact_metadata {
+                self.output.extend_from_slice(b"\"name\":")?;
+                self.definition_name = self.local_symbol(true)?;
+            } else {
+                self.field("name")?;
+                self.definition_name = self.value::<String>()?;
+            }
             self.take(b',')?;
             self.output
                 .extend_from_slice(b",\"body\":{\"Numerical\":{")?;
-            self.field("signature")?;
-            let signature = self.value()?;
+            let signature = if self.compact_metadata {
+                self.output.extend_from_slice(b"\"signature\":")?;
+                self.compact_signature()?
+            } else {
+                self.field("signature")?;
+                self.value()?
+            };
             self.punctuation(b',', b',')?;
             signature
         };
-        self.field("parameters")?;
-        self.value::<Vec<TensorParameter>>()?;
+        if self.compact_metadata {
+            self.output.extend_from_slice(b"\"parameters\":")?;
+            self.compact_parameters()?;
+        } else {
+            self.field("parameters")?;
+            self.value::<Vec<TensorParameter>>()?;
+        }
         self.punctuation(b',', b',')?;
         let operation_count = if self.context_entry {
-            self.key("operation_count")?;
+            if !self.compact_metadata {
+                self.key("operation_count")?;
+            }
             self.output.extend_from_slice(b"\"output\":")?;
             // Retain the original decimal until its canonical output index can
             // be projected. Subtraction does not preserve decimal prefixes.
@@ -525,7 +553,11 @@ impl Reader<'_> {
             None
         };
         self.punctuation(b',', b',')?;
-        self.field("operations")?;
+        if self.compact_metadata {
+            self.output.extend_from_slice(b"\"operations\":")?;
+        } else {
+            self.field("operations")?;
+        }
         self.punctuation(b'[', b'[')?;
         let mut operations = 0;
         if self.peek()? != b']' {
@@ -544,7 +576,7 @@ impl Reader<'_> {
                 "numerical operation count differs from rows".into(),
             ));
         }
-        self.take(b'}')?;
+        self.take(if self.compact_metadata { b']' } else { b'}' })?;
         let vocabulary = self.context["vocabulary"].as_u64().unwrap() as usize;
         let max_context = self.context["max_context"].as_u64().unwrap() as usize;
         let (params, result) = FuncDef::numerical_types(&signature, vocabulary, max_context)
@@ -575,7 +607,9 @@ impl Reader<'_> {
             self.output.push(b',')?;
             self.output.json(field)?;
             self.output.push(b':')?;
-            if self.compact_indices && tag == "gather_columns" && field == "input" {
+            if self.compact_metadata && field == "callee" {
+                self.symbol(true)?;
+            } else if self.compact_indices && tag == "gather_columns" && field == "input" {
                 input = Some(self.value::<usize>()?);
             } else if self.compact_indices
                 && tag == "gather_columns"

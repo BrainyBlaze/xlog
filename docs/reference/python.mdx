@@ -723,7 +723,45 @@ not guarantee completion within a token budget or useful generated behavior.
 Callers explicitly select `language_version=18`; packets 1–17 and rows encodings 1–3
 retain their literal masks and replay behavior.
 
-For a version4 through version18 packet,
+Version19 (`xlog-contextual-acquisition-v19`, `numerical-rows-v5`) keeps the
+ordered root fields `intent`, `helpers`, `entry` and the version18 Gather
+operands, with positional metadata:
+
+- A helper is `[local_name, signature, parameters, operation_count, operations]`.
+- The entry is `[parameters, operation_count, operations]`; its name, signature
+  and formal types still come from the actual native context.
+- A signature is `["pure", [input_widths...], output_width]` or
+  `["causal", input_width, output_width]`, with the existing numeric domains.
+- Each parameter is `[reference, [shape...]]`. Its fixed FP32 storage metadata
+  is derived as `float32=true`; its name and complete shape are source-selected.
+
+A local symbol is an ASCII identifier matching
+`[a-zA-Z_][a-zA-Z0-9_]{0,63}`. Helper declarations and local Call/Scan references
+use `context.function_prefix + symbol`; parameter declarations use
+`context.parameter_prefix + symbol`. Repeating a local parameter symbol in
+different bodies names one physical parameter, with the existing alias-shape,
+uniqueness and scalar accounting. Helper declarations accept local names only.
+Call/Scan callees and parameter declarations may instead use
+`["retained", full_canonical_name]`, restricted to the captured `callees` or
+`parameters` respectively. This discriminator does not declare a new symbol or
+rename a retained physical allocation. Parameter operations still reference a
+declaration index.
+
+The shared reader projects a local string's namespace and original unfinished
+string tail before canonical prefix admission. Retained wrappers project their
+original full-name string, and their actual closing delimiters remain required.
+The existing canonical owner checks partial aliases/callees and completed rows;
+no tuple or hypothetical token advances its parsed-operation checkpoint.
+Original and projected canonical source each remain bounded by 1048576 bytes,
+including metadata and namespace expansion. Prefix masking, `decode_definition`
+and `fork_acquired(..., source_encoding="numerical-rows-v5")` use this same codec.
+Operations, operands, declarations, shapes and counts remain source-selected;
+the constructor, typed/dependency checks, execution and VJP paths are unchanged.
+No remaining-token API or token-budget completion guarantee is added. Callers
+explicitly select version19; packets1–18 and rows encodings1–4 retain their
+literal interpretation and replay behavior.
+
+For a version4 through version19 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
