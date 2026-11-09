@@ -59,21 +59,21 @@ pub(crate) fn field(name: &str) -> Unit {
     })
 }
 
-pub(crate) fn entry() -> Vec<Unit> {
+pub(crate) fn entry(self_delimited: bool) -> Vec<Unit> {
     let mut units = vec![text(",\"entry\":")];
-    units.extend(entry_body());
+    units.extend(entry_body(self_delimited));
     units.push(text("}"));
     units
 }
 
-pub(crate) fn entry_body() -> Vec<Unit> {
+pub(crate) fn entry_body(self_delimited: bool) -> Vec<Unit> {
     vec![
         text("[["),
         Unit::Parameters {
             active: false,
             leading_comma: false,
         },
-        text("],1,["),
+        text(if self_delimited { "],[" } else { "],1,[" }),
         rows(usize::MAX, None, 0, false),
         text("]]"),
     ]
@@ -103,13 +103,41 @@ pub(crate) struct State {
     pub entry_pending: bool,
     pub complete: bool,
     pub count_prefix: Option<Vec<u8>>,
+    pub operation_open: bool,
     row_commas: usize,
+    parameter_references: bool,
 }
 
 impl State {
-    pub(crate) fn new(enabled: bool, fields: &BTreeMap<String, Vec<String>>) -> Self {
+    fn append_row(&self, pattern: &mut Vec<Atom>) {
+        // Canonical operation tags are nonempty ASCII words. Operands remain
+        // relaxed; neither a tag nor a graph is selected by this projection.
+        pattern.extend([
+            Atom::Byte(b'['),
+            Atom::Byte(b'"'),
+            Atom::Letter,
+            Atom::Byte(b'"'),
+        ]);
+        pattern.extend(std::iter::repeat_n(Atom::Byte(b','), self.row_commas));
+        pattern.push(Atom::Byte(b']'));
+    }
+
+    fn operations_pattern(&self, rows: usize) -> Vec<Atom> {
+        let mut pattern = Vec::new();
+        for _ in 0..rows {
+            self.append_row(&mut pattern);
+        }
+        pattern
+    }
+
+    pub(crate) fn new(
+        enabled: bool,
+        fields: &BTreeMap<String, Vec<String>>,
+        parameter_references: bool,
+    ) -> Self {
         Self {
             enabled,
+            parameter_references,
             row_commas: if enabled {
                 fields
                     .values()
@@ -224,16 +252,7 @@ impl State {
                             if *leading_comma || index > *completed {
                                 result.push(Atom::Byte(b','));
                             }
-                            // All canonical operation tags are nonempty ASCII
-                            // words. Operands are relaxed; their tag is not chosen.
-                            result.extend([
-                                Atom::Byte(b'['),
-                                Atom::Byte(b'"'),
-                                Atom::Letter,
-                                Atom::Byte(b'"'),
-                            ]);
-                            result.extend(std::iter::repeat_n(Atom::Byte(b','), self.row_commas));
-                            result.push(Atom::Byte(b']'));
+                            self.append_row(&mut result);
                         }
                     }
                     Unit::Parameters {
@@ -247,6 +266,10 @@ impl State {
                             }
                             result.extend([Atom::Byte(b'['), Atom::Byte(b'"')]);
                             result.extend(std::iter::repeat_n(Atom::Symbol, parameters.symbols));
+                            if self.parameter_references {
+                                result.extend([Atom::Byte(b'"'), Atom::Byte(b']')]);
+                                continue;
+                            }
                             result.extend([Atom::Byte(b'"'), Atom::Byte(b','), Atom::Byte(b'[')]);
                             for dimension in 0..parameters.rank {
                                 if dimension != 0 {
@@ -374,6 +397,19 @@ pub(crate) struct Bound<'a> {
 }
 
 impl Bound<'_> {
+    /// These operations may occur in any later definition. Their ordered
+    /// projection is a separate necessary bound, not an assigned entry body.
+    pub(crate) fn permits_unplaced_rows(&self, rows: usize) -> bool {
+        let rows = rows.saturating_sub(usize::from(self.state.operation_open));
+        if self.eos {
+            return self.state.complete && rows == 0;
+        }
+        self.remaining.checked_sub(1).is_some_and(|allowance| {
+            self.alphabet
+                .covers(self.state.operations_pattern(rows), allowance)
+        })
+    }
+
     pub(crate) fn permits(&self, count: Option<usize>, parameters: Obligations) -> bool {
         if self.eos {
             return self.state.complete;

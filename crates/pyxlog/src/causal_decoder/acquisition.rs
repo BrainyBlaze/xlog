@@ -42,11 +42,13 @@ const COMPACT_INDICES_LANGUAGE: &str = "xlog-contextual-acquisition-v18";
 const COMPACT_METADATA_LANGUAGE: &str = "xlog-contextual-acquisition-v19";
 const RETAINED_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v20";
 const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
+const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
 pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENCODING;
 pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
+pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -65,7 +67,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=21) {
+    if !matches!(version, 1..=22) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -270,7 +272,7 @@ pub(super) fn language(
         if version >= 7 {
             rows::schema(&mut schema, version >= 8, version >= 10, version >= 18);
             if version >= 19 {
-                rows::metadata::schema(&mut schema, &context);
+                rows::metadata::schema(&mut schema, &context, version >= 22);
             }
         }
         if version >= 9 {
@@ -315,7 +317,7 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 17 {
+        if (17..22).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Unfinished source operation_count decimals for helpers and entry must extend to a count admitted by the same planned-output and single-operation predicates within the remaining shared node allowance. The native owner checks source decimal prefixes before projecting count n to output n-1 at its delimiter. No count, operation or operand is inserted, and this structural domain does not prove token-budget completion or usefulness.",
                 schema["description"].as_str().unwrap()
@@ -327,9 +329,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 21 {
+        if version == 21 {
             schema["description"] = json!(format!(
                 "{} The caller supplies the positive remaining original-ID allowance including the next choice and a separate paid EOS. After each hypothetical spelling the shared rows reader bounds its mandatory suffix by ordered structural subsequence coverage using the supplied byte-token alphabet. Pending rows/counts, future entry syntax and outstanding direct physical declarations use the existing typed owners. Variable contents and operands are relaxed; this necessary lower bound supplies no graph and does not guarantee completed acquisition or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version >= 22 {
+            schema["description"] = json!(format!(
+                "{} Open-body tag and operand prefixes retain a typed structural continuation within the cumulative row allowance. That allowance is not a chosen output. Closing the nonempty body chooses its actual last row, which must satisfy both context lengths, causality and output dependencies. The caller supplies remaining original IDs including the next choice and a paid EOS. Ordered structural suffix coverage uses the supplied spellings and reserves known producer obligations without fixing future helper placement. It is a necessary relaxation, not a whole-grammar witness, a completion guarantee or evidence of usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -345,6 +353,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                22 => SELF_DELIMITED_LANGUAGE,
                 21 => TOKEN_BUDGET_LANGUAGE,
                 20 => RETAINED_REFERENCE_LANGUAGE,
                 19 => COMPACT_METADATA_LANGUAGE,
@@ -477,6 +486,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     compact_indices: bool,
     compact_metadata: bool,
     retained_reference_prefix: bool,
+    self_delimited: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
@@ -497,7 +507,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE;
+        let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE;
+        let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
         if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
             return Err(value_error("native original-token cost contract differs"));
         }
@@ -506,9 +517,10 @@ impl PyNativeAcquisitionMask {
         let compact_metadata =
             language["id"] == COMPACT_METADATA_LANGUAGE || retained_reference_prefix;
         let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE || compact_metadata;
-        let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
+        let count_features = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
+        let operation_count_prefix = count_features && !self_delimited;
         let required_parameter_names =
-            language["id"] == REQUIRED_PARAMETER_LANGUAGE || operation_count_prefix;
+            language["id"] == REQUIRED_PARAMETER_LANGUAGE || count_features;
         let entry_parameter_coverage =
             language["id"] == ENTRY_PARAMETER_LANGUAGE || required_parameter_names;
         let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE
@@ -552,8 +564,9 @@ impl PyNativeAcquisitionMask {
             language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
         let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
         let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
-        let planned_output = language["id"] == PLANNED_LANGUAGE || check_single_operation;
-        let typed = language["id"] == TYPED_LANGUAGE || planned_output;
+        let planned_output =
+            !self_delimited && (language["id"] == PLANNED_LANGUAGE || check_single_operation);
+        let typed = language["id"] == TYPED_LANGUAGE || planned_output || self_delimited;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
                 .map_err(value_error)?;
@@ -637,6 +650,7 @@ impl PyNativeAcquisitionMask {
             compact_indices,
             compact_metadata,
             retained_reference_prefix,
+            self_delimited,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
@@ -669,9 +683,11 @@ impl PyNativeAcquisitionMask {
         }
         if self.token_budget.is_some() != remaining_tokens.is_some() || remaining_tokens == Some(0)
         {
-            return Err(value_error(
-                "positive remaining original IDs must be supplied exactly for acquisition language 21",
-            ));
+            return Err(value_error(if self.self_delimited {
+                "positive remaining original IDs are required for this token-budgeted language"
+            } else {
+                "positive remaining original IDs must be supplied exactly for acquisition language 21"
+            }));
         }
         if let Some(cache) = &self.completion_cache {
             cache.clear_search();
@@ -783,6 +799,7 @@ impl PyNativeAcquisitionMask {
             self.has_intent,
             self.compact_indices,
             self.compact_metadata,
+            self.self_delimited,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -817,6 +834,7 @@ impl PyNativeAcquisitionMask {
             reusable_prefix,
             capture_prefix,
             token_budget,
+            self.self_delimited,
         )?;
         // These common source obligations cannot be reduced by choosing a
         // count or retained reference. Reject them before exploring either
@@ -824,6 +842,20 @@ impl PyNativeAcquisitionMask {
         if !resources.permits_token_budget(None) {
             return Err(serde_json::Error::custom(
                 "remaining original IDs cannot cover mandatory source and paid EOS",
+            ));
+        }
+        if resources.self_delimited
+            && resources.program.parameters_complete
+            && resources.program_definition_index == resources.definition_index
+            && resources.program.typed.as_ref().is_some_and(|program| {
+                program.row_allowance.is_some_and(|rows| {
+                    rows.checked_sub(1)
+                        .is_none_or(|output| !program.permits_plan(output, &resources.signatures))
+                })
+            })
+        {
+            return Err(serde_json::Error::custom(
+                "open body has no typed continuation within the remaining rows",
             ));
         }
         if let Some(count) = prefix.operation_count {
@@ -907,6 +939,7 @@ impl PyNativeAcquisitionMask {
                 self.has_intent,
                 self.compact_indices,
                 self.compact_metadata,
+                self.self_delimited,
                 self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
@@ -970,6 +1003,7 @@ pub(super) fn decode_numerical_rows(
     has_intent: bool,
     compact_indices: bool,
     compact_metadata: bool,
+    self_delimited: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -979,6 +1013,7 @@ pub(super) fn decode_numerical_rows(
         has_intent,
         compact_indices,
         compact_metadata,
+        self_delimited,
     )
     .map_err(value_error)
 }
@@ -991,6 +1026,7 @@ struct Resources<'a> {
     nodes: usize,
     ordered: bool,
     planned_output: bool,
+    self_delimited: bool,
     check_single_operation: bool,
     canonical_entry_formals: bool,
     entry_budget: bool,
@@ -1009,7 +1045,7 @@ struct Resources<'a> {
     definition_index: Option<usize>,
     program_definition_index: Option<usize>,
     definitions: BTreeMap<String, TensorProgram>,
-    declarations: BTreeMap<String, TensorParameter>,
+    declarations: rows::metadata::Declarations,
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
     parsed_prefix: Option<ParsedOperations>,
@@ -1051,6 +1087,7 @@ fn resource_prefix<'a>(
     reusable_prefix: Option<&'a ParsedOperations>,
     capture_prefix: bool,
     token_budget: Option<rows::budget::Bound<'a>>,
+    self_delimited: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1060,6 +1097,7 @@ fn resource_prefix<'a>(
         nodes: 0,
         ordered,
         planned_output,
+        self_delimited,
         check_single_operation,
         canonical_entry_formals,
         entry_budget,
@@ -1106,15 +1144,7 @@ fn resource_prefix<'a>(
         definition_index: None,
         program_definition_index: None,
         definitions: BTreeMap::new(),
-        declarations: typed_context
-            .map(|context| {
-                serde_json::from_value::<Vec<TensorParameter>>(context["parameters"].clone())
-                    .unwrap()
-                    .into_iter()
-                    .map(|parameter| (parameter.name.clone(), parameter))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        declarations: rows::metadata::Declarations::new(typed_context),
         reusable_prefix,
         capture_prefix,
         parsed_prefix: None,
@@ -1135,6 +1165,63 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn unplaced_producer_rows(&self) -> usize {
+        let mut read = BTreeSet::new();
+        let mut called = BTreeSet::new();
+        let mut input = false;
+        let current = self
+            .program
+            .typed
+            .as_ref()
+            .filter(|_| self.program_definition_index == self.definition_index);
+        for body in self
+            .definitions
+            .values()
+            .chain(current.map(|program| &program.body))
+        {
+            for operation in &body.operations {
+                if let Some(weight) = operation.parameter() {
+                    if let Some(parameter) = body.parameters.get(weight) {
+                        read.insert(parameter.name.as_str());
+                    }
+                }
+                if let Some(name) = operation.callee() {
+                    called.insert(name);
+                    input |= self
+                        .dependencies
+                        .get(name)
+                        .is_some_and(|facts| facts.has_input());
+                }
+                input |= matches!(
+                    operation,
+                    TensorOperation::Argument { .. } | TensorOperation::TokenIndicators { .. }
+                );
+            }
+        }
+        // Reading a new physical name needs a Parameter or Linear somewhere;
+        // every not-yet-called new definition needs its own Call or Scan.
+        // These are global obligations: no declaration or placement is chosen.
+        let constants = self
+            .declarations
+            .keys()
+            .filter(|name| !self.retained.contains(*name) && !read.contains(name.as_str()))
+            .count();
+        let calls = self
+            .definitions
+            .keys()
+            .filter(|name| {
+                Some(name.as_str()) != self.typed_context.unwrap()["entrypoint"].as_str()
+                    && !called.contains(name.as_str())
+            })
+            .count();
+        let pending_helper = self.definition_name.as_deref().is_some_and(|name| {
+            Some(name) != self.typed_context.unwrap()["entrypoint"].as_str()
+                && !self.definitions.contains_key(name)
+                && !called.contains(name)
+        });
+        constants + calls + usize::from(pending_helper) + usize::from(!input)
+    }
+
     fn validate_structured_indices(
         &self,
         record: &rows::indices::Record,
@@ -1180,6 +1267,9 @@ impl Resources<'_> {
         };
         if count.is_some() && self.definition_index != Some(bound.state.definition) {
             return true;
+        }
+        if self.self_delimited && !bound.permits_unplaced_rows(self.unplaced_producer_rows()) {
+            return false;
         }
         let mut parameters = rows::budget::Obligations::default();
         if bound.state.entry || bound.state.entry_pending {
@@ -1610,6 +1700,18 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             self.resources.raw_tokens.iter().copied().collect(),
                             maximum_width(context),
                         ));
+                        if self.resources.self_delimited {
+                            // Every helper still leaves one real row for the
+                            // required later entry. This is a capacity limit,
+                            // not a source-selected or canonical output.
+                            let entry = context["entrypoint"].as_str().unwrap();
+                            let reserve = usize::from(
+                                self.resources.definition_name.as_deref() != Some(entry),
+                            );
+                            self.resources.program.typed.as_mut().unwrap().row_allowance = Some(
+                                (ACQUIRED_NODES - self.resources.nodes).saturating_sub(reserve),
+                            );
+                        }
                         if self.resources.output_dependencies {
                             self.resources
                                 .program
@@ -1680,7 +1782,23 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     })?;
                 }
                 (Level::Program, "output") if self.resources.ordered => {
-                    if self.resources.planned_output {
+                    if self.resources.self_delimited {
+                        let output = self
+                            .resources
+                            .program
+                            .operations
+                            .checked_sub(1)
+                            .ok_or_else(|| {
+                                A::Error::custom("numerical operations must be nonempty")
+                            })?;
+                        let choice = map.next_value_seed(NumberChoice {
+                            extensions: None,
+                            values: output..output + 1,
+                            accepts: |value| value == output,
+                            bytes: self.resources.bytes,
+                        })?;
+                        self.resources.program.typed.as_mut().unwrap().body.output = choice.value;
+                    } else if self.resources.planned_output {
                         if self.resources.program.arguments.is_none()
                             || !self.resources.program.parameters_complete
                             || self.resources.program.operations != 0
@@ -1807,7 +1925,21 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
             ));
         }
         if matches!(self.kind, Items::Operations) {
-            if self.resources.planned_output {
+            if self.resources.self_delimited {
+                let output = self
+                    .resources
+                    .program
+                    .operations
+                    .checked_sub(1)
+                    .ok_or_else(|| A::Error::custom("numerical operations must be nonempty"))?;
+                let program = self.resources.program.typed.as_mut().unwrap();
+                if !program.outputs().contains(&output) {
+                    return Err(A::Error::custom(
+                        "last operation does not satisfy the output contract",
+                    ));
+                }
+                program.body.output = output;
+            } else if self.resources.planned_output {
                 let program = self.resources.program.typed.as_ref().unwrap();
                 if program.planned_output != self.resources.program.operations.checked_sub(1)
                     || !program.outputs().contains(&program.body.output)
@@ -2035,7 +2167,8 @@ impl<'de> Visitor<'de> for Parameter<'_, '_> {
             }
             self.resources
                 .declarations
-                .insert(parameter.name.clone(), parameter.clone());
+                .record(parameter.clone())
+                .map_err(A::Error::custom)?;
             program.body.parameters.push(parameter);
         }
         self.resources.program.parameters += 1;
