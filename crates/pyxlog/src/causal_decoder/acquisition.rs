@@ -37,6 +37,7 @@ const FRONTIER_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v13";
 const TYPED_COMPLETION_LANGUAGE: &str = "xlog-contextual-acquisition-v14";
 const ENTRY_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v15";
 const REQUIRED_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v16";
+const COUNT_PREFIX_LANGUAGE: &str = "xlog-contextual-acquisition-v17";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -58,7 +59,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=16) {
+    if !matches!(version, 1..=17) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -305,6 +306,12 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version >= 17 {
+            schema["description"] = json!(format!(
+                "{} Unfinished source operation_count decimals for helpers and entry must extend to a count admitted by the same planned-output and single-operation predicates within the remaining shared node allowance. The native owner checks source decimal prefixes before projecting count n to output n-1 at its delimiter. No count, operation or operand is inserted, and this structural domain does not prove token-budget completion or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -315,6 +322,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                17 => COUNT_PREFIX_LANGUAGE,
                 16 => REQUIRED_PARAMETER_LANGUAGE,
                 15 => ENTRY_PARAMETER_LANGUAGE,
                 14 => TYPED_COMPLETION_LANGUAGE,
@@ -437,8 +445,14 @@ pub(crate) struct PyNativeAcquisitionMask {
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
+    operation_count_prefix: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
+}
+
+struct CanonicalPrefix<'a> {
+    bytes: Cow<'a, [u8]>,
+    operation_count: Option<&'a [u8]>,
 }
 
 #[pymethods]
@@ -447,7 +461,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let required_parameter_names = language["id"] == REQUIRED_PARAMETER_LANGUAGE;
+        let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE;
+        let required_parameter_names =
+            language["id"] == REQUIRED_PARAMETER_LANGUAGE || operation_count_prefix;
         let entry_parameter_coverage =
             language["id"] == ENTRY_PARAMETER_LANGUAGE || required_parameter_names;
         let completion_cache = (language["id"] == TYPED_COMPLETION_LANGUAGE
@@ -568,6 +584,7 @@ impl PyNativeAcquisitionMask {
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
+            operation_count_prefix,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -604,7 +621,7 @@ impl PyNativeAcquisitionMask {
                     Ok(canonical) => {
                         if checkpoint
                             .as_ref()
-                            .is_some_and(|state| !canonical.starts_with(&state.bytes))
+                            .is_some_and(|state| !canonical.bytes.starts_with(&state.bytes))
                         {
                             checkpoint = None;
                         }
@@ -690,12 +707,12 @@ impl PyNativeAcquisitionMask {
 impl PyNativeAcquisitionMask {
     fn resources<'a>(
         &'a self,
-        bytes: &'a [u8],
+        prefix: &'a CanonicalPrefix<'_>,
         reusable_prefix: Option<&'a ParsedOperations>,
         capture_prefix: bool,
     ) -> Result<Resources<'a>, serde_json::Error> {
-        resource_prefix(
-            bytes,
+        let resources = resource_prefix(
+            &prefix.bytes,
             &self.retained,
             self.ordered,
             &self.raw_tokens,
@@ -712,10 +729,16 @@ impl PyNativeAcquisitionMask {
             self.completion_cache.as_ref(),
             reusable_prefix,
             capture_prefix,
-        )
+        )?;
+        if let Some(count) = prefix.operation_count {
+            // Reused operation facts cannot replace admission of this source
+            // decimal. Its current definition owns the typed plan and budget.
+            resources.permits_operation_count_prefix(count)?;
+        }
+        Ok(resources)
     }
 
-    fn canonical_prefix<'a>(&self, source: &'a [u8]) -> Result<Cow<'a, [u8]>, String> {
+    fn canonical_prefix<'a>(&self, source: &'a [u8]) -> Result<CanonicalPrefix<'a>, String> {
         if self.numerical_rows {
             rows::prefix(
                 source,
@@ -724,11 +747,21 @@ impl PyNativeAcquisitionMask {
                 self.context_entry_rows,
                 self.has_intent,
             )
-            .map(|prefix| Cow::Owned(prefix.bytes))
+            .map(|prefix| CanonicalPrefix {
+                bytes: Cow::Owned(prefix.bytes),
+                operation_count: if self.operation_count_prefix {
+                    prefix.operation_count
+                } else {
+                    None
+                },
+            })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
             Err("acquisition source byte budget exceeded".into())
         } else {
-            Ok(Cow::Borrowed(source))
+            Ok(CanonicalPrefix {
+                bytes: Cow::Borrowed(source),
+                operation_count: None,
+            })
         }
     }
 }
@@ -921,6 +954,44 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn permits_output_plan(&self, output: usize) -> bool {
+        let program = self.program.typed.as_ref().unwrap();
+        if output == 0 && self.check_single_operation {
+            // The same final-slot predicate applies to both canonical output
+            // zero and source operation_count one, without changing the body.
+            let mut candidate = program.clone();
+            candidate.planned_output = Some(0);
+            if !self.operation_fields.unwrap().keys().any(|tag| {
+                let mut fields = serde_json::Map::new();
+                fields.insert("operation".into(), json!(tag));
+                candidate.possible(&fields, None, &self.signatures)
+            }) {
+                return false;
+            }
+        }
+        program.permits_plan(output, &self.signatures)
+    }
+
+    fn permits_operation_count_prefix(&self, bytes: &[u8]) -> Result<(), serde_json::Error> {
+        let choice = NumberChoice {
+            values: 1..ACQUIRED_NODES - self.nodes + 1,
+            extensions: None,
+            accepts: |count| self.permits_output_plan(count - 1),
+            bytes,
+        };
+        if bytes.trim_ascii().is_empty() {
+            if choice.permits_prefix("") {
+                return Ok(());
+            }
+            return Err(serde_json::Error::custom(
+                "operation count has no compatible decimal continuation",
+            ));
+        }
+        let mut decoder = serde_json::Deserializer::from_slice(bytes);
+        choice.deserialize(&mut decoder)?;
+        decoder.end()
+    }
+
     fn remember_operations(&mut self, end: usize) {
         let previous = self.parsed_prefix.as_ref().or(self.reusable_prefix);
         if previous.is_some_and(|state| state.bytes.len() >= end) {
@@ -1321,34 +1392,10 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                 "output must follow signature and parameters, before operations",
                             ));
                         }
-                        let zero_available = if self.resources.check_single_operation {
-                            // Ask the same final-slot predicate before choosing
-                            // p=0. This body has no operations yet; the clone's
-                            // prospective target never changes the parsed body.
-                            let mut candidate =
-                                self.resources.program.typed.as_ref().unwrap().clone();
-                            candidate.planned_output = Some(0);
-                            self.resources.operation_fields.unwrap().keys().any(|tag| {
-                                let mut fields = serde_json::Map::new();
-                                fields.insert("operation".into(), json!(tag));
-                                candidate.possible(&fields, None, &self.resources.signatures)
-                            })
-                        } else {
-                            true
-                        };
                         let choice = map.next_value_seed(NumberChoice {
                             extensions: None,
                             values: 0..ACQUIRED_NODES - self.resources.nodes,
-                            accepts: |output| {
-                                (output != 0 || zero_available)
-                                    && self
-                                        .resources
-                                        .program
-                                        .typed
-                                        .as_ref()
-                                        .unwrap()
-                                        .permits_plan(output, &self.resources.signatures)
-                            },
+                            accepts: |output| self.resources.permits_output_plan(output),
                             bytes: self.resources.bytes,
                         })?;
                         // An EOF decimal is still a prefix, not a chosen slot.
@@ -1977,6 +2024,25 @@ struct NumberChoice<'a, F> {
     accepts: F,
     bytes: &'a [u8],
 }
+impl<F: Fn(usize) -> bool> NumberChoice<'_, F> {
+    fn permits_prefix(&self, spelling: &str) -> bool {
+        let accepts = |id: usize| {
+            self.values.contains(&id) && id.to_string().starts_with(spelling) && (self.accepts)(id)
+        };
+        if let Some(widths) = &self.extensions {
+            // ABI/frontier widths are distinct structural classes. Any other
+            // width can only feed column-preserving operations or a gather,
+            // so the current decimal represents that class.
+            widths
+                .iter()
+                .copied()
+                .chain(spelling.parse::<usize>())
+                .any(accepts)
+        } else {
+            self.values.clone().any(accepts)
+        }
+    }
+}
 impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
     type Value = ChosenNumber;
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
@@ -1986,23 +2052,7 @@ impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
         let viable = if end == self.bytes.len() {
             // Only unfinished decimals need a search for compatible extensions.
-            let accepts = |id: usize| {
-                self.values.contains(&id)
-                    && id.to_string().starts_with(spelling)
-                    && (self.accepts)(id)
-            };
-            if let Some(widths) = &self.extensions {
-                // ABI/frontier widths are distinct structural classes. Any
-                // other width can only feed column-preserving operations or
-                // a gather, so the current decimal represents that class.
-                widths
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(value))
-                    .any(accepts)
-            } else {
-                self.values.clone().any(accepts)
-            }
+            self.permits_prefix(spelling)
         } else {
             self.values.contains(&value) && (self.accepts)(value)
         };
