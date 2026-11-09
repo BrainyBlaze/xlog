@@ -607,7 +607,7 @@ impl Reader<'_> {
             self.output.push(b',')?;
             self.output.json(field)?;
             self.output.push(b':')?;
-            if self.compact_metadata && field == "callee" {
+            if self.compact_metadata && field == "function" {
                 self.symbol(true)?;
             } else if self.compact_indices && tag == "gather_columns" && field == "input" {
                 input = Some(self.value::<usize>()?);
