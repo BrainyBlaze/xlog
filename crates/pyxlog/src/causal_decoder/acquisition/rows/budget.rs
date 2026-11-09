@@ -274,8 +274,14 @@ pub(crate) struct Obligations {
 
 #[derive(Default)]
 struct Costs {
-    values: BTreeMap<Vec<Atom>, usize>,
+    values: BTreeMap<Vec<Atom>, Coverage>,
     bytes: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Coverage {
+    position: usize,
+    tokens: usize,
 }
 
 pub(crate) struct Alphabet {
@@ -321,40 +327,40 @@ impl Alphabet {
         }
     }
 
-    fn minimum(&self, pattern: Vec<Atom>) -> usize {
+    fn covers(&self, pattern: Vec<Atom>, allowance: usize) -> bool {
         let mut costs = self.costs.lock().unwrap();
-        if let Some(&cost) = costs.values.get(&pattern) {
-            return cost;
-        }
-        let mut position = 0;
-        let mut cost = 0usize;
-        while position < pattern.len() {
+        let mut coverage = costs.values.get(&pattern).copied().unwrap_or_default();
+        while coverage.position < pattern.len() && coverage.tokens < allowance {
             let next = self
                 .spellings
                 .iter()
-                .map(|spelling| extends(&pattern, spelling, position))
+                .map(|spelling| extends(&pattern, spelling, coverage.position))
                 .max()
-                .unwrap_or(position);
-            if next == position {
-                cost = usize::MAX;
+                .unwrap_or(coverage.position);
+            if next == coverage.position {
+                coverage.tokens = usize::MAX;
                 break;
             }
             // Any longer prefix coverage leaves a suffix of every shorter
-            // coverage's obligation. Thus the farthest transition dominates;
-            // repeated greedy transitions give the exact relaxed minimum.
-            position = next;
-            cost += 1;
+            // coverage's obligation. Thus the farthest transition dominates.
+            // If it cannot finish within the allowance, no shorter transition
+            // can. A later larger allowance resumes this same greedy frontier.
+            coverage.position = next;
+            coverage.tokens += 1;
         }
-        let bytes =
-            pattern.len() * std::mem::size_of::<Atom>() + std::mem::size_of::<(Vec<Atom>, usize)>();
+        let covered = coverage.position == pattern.len() && coverage.tokens <= allowance;
+        let bytes = pattern.len() * std::mem::size_of::<Atom>()
+            + std::mem::size_of::<(Vec<Atom>, Coverage)>();
         if bytes <= ACQUIRED_SOURCE_BYTES {
-            if costs.bytes + bytes > ACQUIRED_SOURCE_BYTES {
-                *costs = Costs::default();
+            if !costs.values.contains_key(&pattern) {
+                if costs.bytes + bytes > ACQUIRED_SOURCE_BYTES {
+                    *costs = Costs::default();
+                }
+                costs.bytes += bytes;
             }
-            costs.bytes += bytes;
-            costs.values.insert(pattern, cost);
+            costs.values.insert(pattern, coverage);
         }
-        cost
+        covered
     }
 }
 
@@ -372,9 +378,9 @@ impl Bound<'_> {
         if self.eos {
             return self.state.complete;
         }
-        self.alphabet
-            .minimum(self.state.pattern(count, parameters))
-            .checked_add(1)
-            .is_some_and(|cost| cost <= self.remaining)
+        self.remaining.checked_sub(1).is_some_and(|allowance| {
+            self.alphabet
+                .covers(self.state.pattern(count, parameters), allowance)
+        })
     }
 }
