@@ -360,6 +360,15 @@ impl Program {
             .map_or(1..self.column_limit + 1, |columns| columns..columns + 1)
     }
 
+    pub(super) fn input_columns(&self, input: usize) -> Option<usize> {
+        Some(
+            self.shapes[0]
+                .get(input)?
+                .columns
+                .min(self.shapes[1].get(input)?.columns),
+        )
+    }
+
     pub(super) fn searches_completion(&self) -> bool {
         self.dependencies
             .as_ref()

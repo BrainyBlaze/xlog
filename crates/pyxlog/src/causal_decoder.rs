@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 12..=17) {
+        let context = if matches!(language_version, 12..=18) {
             self.inner
                 .acquisition_context_with_output_dependencies(insertion_layer)
         } else {
@@ -166,16 +166,22 @@ impl PyNativeCausalModel {
                 .map_err(xlog_err),
             acquisition::NUMERICAL_ROWS_ENCODING
             | acquisition::CONTEXT_ENTRY_ROWS_ENCODING
-            | acquisition::INTENT_ROWS_ENCODING => {
-                let context = self
-                    .inner
-                    .acquisition_context(insertion_layer)
-                    .map_err(xlog_err)?;
+            | acquisition::INTENT_ROWS_ENCODING
+            | acquisition::COMPACT_INDICES_ROWS_ENCODING => {
+                let compact_indices = source_encoding == acquisition::COMPACT_INDICES_ROWS_ENCODING;
+                let context = if compact_indices {
+                    self.inner
+                        .acquisition_context_with_output_dependencies(insertion_layer)
+                } else {
+                    self.inner.acquisition_context(insertion_layer)
+                }
+                .map_err(xlog_err)?;
                 let (entrypoint, definitions) = acquisition::decode_numerical_rows(
                     definition_json.as_bytes(),
                     &context,
                     source_encoding != acquisition::NUMERICAL_ROWS_ENCODING,
-                    source_encoding == acquisition::INTENT_ROWS_ENCODING,
+                    source_encoding == acquisition::INTENT_ROWS_ENCODING || compact_indices,
+                    compact_indices,
                 )?;
                 self.inner
                     .fork_acquired_definitions_with_dependencies(
