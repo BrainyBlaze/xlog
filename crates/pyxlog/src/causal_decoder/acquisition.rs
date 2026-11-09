@@ -39,10 +39,12 @@ const ENTRY_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v15";
 const REQUIRED_PARAMETER_LANGUAGE: &str = "xlog-contextual-acquisition-v16";
 const COUNT_PREFIX_LANGUAGE: &str = "xlog-contextual-acquisition-v17";
 const COMPACT_INDICES_LANGUAGE: &str = "xlog-contextual-acquisition-v18";
+const COMPACT_METADATA_LANGUAGE: &str = "xlog-contextual-acquisition-v19";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
 pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENCODING;
+pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -61,7 +63,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=18) {
+    if !matches!(version, 1..=19) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -265,6 +267,9 @@ pub(super) fn language(
         }
         if version >= 7 {
             rows::schema(&mut schema, version >= 8, version >= 10, version >= 18);
+            if version >= 19 {
+                rows::metadata::schema(&mut schema, &context);
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -324,6 +329,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                19 => COMPACT_METADATA_LANGUAGE,
                 18 => COMPACT_INDICES_LANGUAGE,
                 17 => COUNT_PREFIX_LANGUAGE,
                 16 => REQUIRED_PARAMETER_LANGUAGE,
@@ -450,6 +456,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     required_parameter_names: bool,
     operation_count_prefix: bool,
     compact_indices: bool,
+    compact_metadata: bool,
     completion_cache: Option<Arc<typed::CompletionCache>>,
     parsed_prefix: Option<Mutex<Option<ParsedOperations>>>,
 }
@@ -467,7 +474,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE;
+        let compact_metadata = language["id"] == COMPACT_METADATA_LANGUAGE;
+        let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE || compact_metadata;
         let operation_count_prefix = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
         let required_parameter_names =
             language["id"] == REQUIRED_PARAMETER_LANGUAGE || operation_count_prefix;
@@ -538,6 +546,10 @@ impl PyNativeAcquisitionMask {
                 as usize;
             if token_bytes.is_empty()
                 || context["entrypoint"].as_str().is_none_or(str::is_empty)
+                || (compact_metadata
+                    && ["function_prefix", "parameter_prefix"]
+                        .iter()
+                        .any(|key| context[*key].as_str().is_none_or(str::is_empty)))
                 || !context["params"].is_array()
                 || !context["return_type"].is_object()
             {
@@ -593,6 +605,7 @@ impl PyNativeAcquisitionMask {
             required_parameter_names,
             operation_count_prefix,
             compact_indices,
+            compact_metadata,
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
             completion_cache,
             ordered,
@@ -706,6 +719,7 @@ impl PyNativeAcquisitionMask {
             self.context_entry_rows,
             self.has_intent,
             self.compact_indices,
+            self.compact_metadata,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -778,6 +792,7 @@ impl PyNativeAcquisitionMask {
                 self.context_entry_rows,
                 self.has_intent,
                 self.compact_indices,
+                self.compact_metadata,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -831,6 +846,7 @@ pub(super) fn decode_numerical_rows(
     context_entry: bool,
     has_intent: bool,
     compact_indices: bool,
+    compact_metadata: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -839,6 +855,7 @@ pub(super) fn decode_numerical_rows(
         context_entry,
         has_intent,
         compact_indices,
+        compact_metadata,
     )
     .map_err(value_error)
 }
