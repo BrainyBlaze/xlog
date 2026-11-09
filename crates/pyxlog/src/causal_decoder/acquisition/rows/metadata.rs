@@ -4,6 +4,30 @@ use super::*;
 
 const RETAINED: &str = "retained";
 
+pub(crate) struct PendingReference {
+    pub function: bool,
+    /// Position immediately after the canonical name/function field's colon.
+    pub value_offset: usize,
+}
+
+pub(crate) fn retained_names(context: &Value, function: bool) -> Vec<&str> {
+    if function {
+        context["callees"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    } else {
+        context["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|parameter| parameter["name"].as_str().unwrap())
+            .collect()
+    }
+}
+
 fn local() -> Value {
     json!({"type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$"})
 }
@@ -20,19 +44,15 @@ fn reference(names: Vec<Value>) -> Value {
 pub(crate) fn schema(schema: &mut Value, context: &Value) {
     let defs = &mut schema["$defs"];
     defs["Callee"] = reference(
-        context["callees"]
-            .as_object()
-            .unwrap()
-            .keys()
+        retained_names(context, true)
+            .into_iter()
             .map(|name| json!(name))
             .collect(),
     );
     let parameter = reference(
-        context["parameters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|parameter| parameter["name"].clone())
+        retained_names(context, false)
+            .into_iter()
+            .map(|name| json!(name))
             .collect(),
     );
     let mut signatures = Vec::new();
@@ -119,9 +139,14 @@ impl Reader<'_> {
     }
 
     pub(super) fn symbol(&mut self, function: bool) -> Result<String, Stop> {
+        let value_offset = self.output.bytes.len();
         if self.peek()? == b'"' {
             return self.local_symbol(function);
         }
+        self.pending_retained = Some(PendingReference {
+            function,
+            value_offset,
+        });
         self.take(b'[')?;
         let tag: String = serde_json::from_str(self.raw(false)?.get())?;
         if tag != RETAINED {
@@ -129,24 +154,14 @@ impl Reader<'_> {
         }
         self.take(b',')?;
         let name = self.value::<String>()?;
-        let retained = if function {
-            self.context["callees"]
-                .as_object()
-                .unwrap()
-                .contains_key(&name)
-        } else {
-            self.context["parameters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|parameter| parameter["name"].as_str() == Some(name.as_str()))
-        };
+        let retained = retained_names(self.context, function).contains(&name.as_str());
         if !retained {
             return Err(Stop::Invalid(
                 "symbol is absent from the retained native context".into(),
             ));
         }
         self.take(b']')?;
+        self.pending_retained = None;
         Ok(name)
     }
 

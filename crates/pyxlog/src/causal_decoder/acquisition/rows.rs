@@ -139,6 +139,7 @@ pub(super) struct Prefix<'a> {
     pub operation_count: Option<&'a [u8]>,
     pub indices: Vec<indices::Record>,
     pub pending_indices: Option<indices::Pending<'a>>,
+    pub pending_retained: Option<metadata::PendingReference>,
 }
 
 enum Stop {
@@ -220,6 +221,7 @@ struct Reader<'a> {
     definition_index: usize,
     indices: Vec<indices::Record>,
     pending_indices: Option<(usize, indices::Target)>,
+    pending_retained: Option<metadata::PendingReference>,
 }
 
 /// Only syntax is expanded. An unfinished operand remains the same byte prefix
@@ -254,6 +256,7 @@ pub(super) fn prefix<'a>(
         definition_index: 0,
         indices: Vec::new(),
         pending_indices: None,
+        pending_retained: None,
     };
     let complete = match reader.document() {
         Ok(()) => true,
@@ -271,6 +274,7 @@ pub(super) fn prefix<'a>(
                 bytes: &source[start..],
                 target,
             }),
+        pending_retained: reader.pending_retained,
     })
 }
 

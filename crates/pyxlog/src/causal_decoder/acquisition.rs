@@ -466,6 +466,7 @@ struct CanonicalPrefix<'a> {
     operation_count: Option<&'a [u8]>,
     indices: Vec<rows::indices::Record>,
     pending_indices: Option<rows::indices::Pending<'a>>,
+    pending_retained: Option<rows::metadata::PendingReference>,
 }
 
 #[pymethods]
@@ -780,6 +781,45 @@ impl PyNativeAcquisitionMask {
                 self.typed_context.as_ref().unwrap(),
             )?;
         }
+        if let Some(pending) = &prefix.pending_retained {
+            let context = self.typed_context.as_ref().unwrap();
+            let names = rows::metadata::retained_names(context, pending.function);
+            let permitted = names.into_iter().any(|name| {
+                let expected = serde_json::to_vec(name).unwrap();
+                let tail = &prefix.bytes[pending.value_offset - 1..];
+                let matches = if pending.function {
+                    operation_prefix(tail, name)
+                } else {
+                    value_prefix(tail, &expected)
+                };
+                if !matches
+                    || pending
+                        .value_offset
+                        .checked_add(expected.len())
+                        .is_none_or(|size| size > ACQUIRED_SOURCE_BYTES)
+                {
+                    return false;
+                }
+                let mut bytes = prefix.bytes[..pending.value_offset].to_vec();
+                bytes.extend_from_slice(&expected);
+                // Check only this source-selected reference domain through
+                // the same canonical visitors. No name is emitted or retained
+                // as a choice, and no prospective operation advances a cache.
+                let candidate = CanonicalPrefix {
+                    bytes: Cow::Owned(bytes),
+                    operation_count: None,
+                    indices: Vec::new(),
+                    pending_indices: None,
+                    pending_retained: None,
+                };
+                self.resources(&candidate, reusable_prefix, false).is_ok()
+            });
+            if !permitted {
+                return Err(serde_json::Error::custom(
+                    "retained symbol has no compatible native source continuation",
+                ));
+            }
+        }
         Ok(resources)
     }
 
@@ -803,6 +843,7 @@ impl PyNativeAcquisitionMask {
                 },
                 indices: prefix.indices,
                 pending_indices: prefix.pending_indices,
+                pending_retained: prefix.pending_retained,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
             Err("acquisition source byte budget exceeded".into())
@@ -812,6 +853,7 @@ impl PyNativeAcquisitionMask {
                 operation_count: None,
                 indices: Vec::new(),
                 pending_indices: None,
+                pending_retained: None,
             })
         }
     }
