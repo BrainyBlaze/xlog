@@ -791,10 +791,13 @@ can cover those dependencies, so direct entry declarations are not assumed.
 Unfinished count decimals intersect the same typed domain with this cost bound.
 
 The lexical relaxation projects each supplied spelling onto JSON punctuation,
-ASCII letters/underscores and digits. It computes the minimum original-ID cover
-of the ordered structural subsequence, allowing a token to cross any number of
-syntax units. Variable contents, operands, optional whitespace and exact escaping
-remain relaxed. No bytes-per-token estimate, task-specific graph or chosen
+ASCII letters/underscores and digits. It checks whether the minimum original-ID
+cover of the ordered structural subsequence fits after reserving EOS, allowing a
+token to cross any number of syntax units. Coverage stops at that allowance rather
+than computing an unusable larger cost. The bounded cache retains coverage so a
+larger remaining allowance can resume the same calculation. Variable contents,
+operands, optional whitespace and exact escaping remain relaxed. No bytes-per-token
+estimate, task-specific graph or chosen
 operation is supplied. This is a necessary lower bound, not a guarantee of valid
 construction, completion within512 IDs or usefulness. Actual complete acquisition,
 paid EOS, native admission and subsequent qualification remain required.
