@@ -65,7 +65,7 @@ pub fn definition_output_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
-    definition_dependencies(entrypoint, resolve, false)
+    definition_dependencies(entrypoint, resolve, false, false)
 }
 
 /// Resolve explicit value-aware facts through the same immutable call graph.
@@ -73,13 +73,22 @@ pub fn definition_output_value_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
-    definition_dependencies(entrypoint, resolve, true)
+    definition_dependencies(entrypoint, resolve, true, false)
+}
+
+/// Resolve the explicit predicate-aware contract without exporting private proofs.
+pub fn definition_output_predicate_dependencies<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
+) -> Result<TensorOutputDependencies> {
+    definition_dependencies(entrypoint, resolve, true, true)
 }
 
 fn definition_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
     value_identities: bool,
+    predicate_values: bool,
 ) -> Result<TensorOutputDependencies> {
     fn visit<'a>(
         name: &str,
@@ -87,6 +96,7 @@ fn definition_dependencies<'a>(
         saved: &mut BTreeMap<String, TensorOutputDependencies>,
         active: &mut BTreeSet<String>,
         value_identities: bool,
+        predicate_values: bool,
     ) -> Result<TensorOutputDependencies> {
         if let Some(dependencies) = saved.get(name) {
             return Ok(dependencies.clone());
@@ -95,8 +105,19 @@ fn definition_dependencies<'a>(
             return Err(invalid("numerical output dependency graph is cyclic"));
         }
         let body = resolve(name)?;
-        let mut callee = |callee: &str| visit(callee, resolve, saved, active, value_identities);
-        let mut dependencies = if value_identities {
+        let mut callee = |callee: &str| {
+            visit(
+                callee,
+                resolve,
+                saved,
+                active,
+                value_identities,
+                predicate_values,
+            )
+        };
+        let mut dependencies = if predicate_values {
+            body.output_predicate_dependencies(&mut callee)?
+        } else if value_identities {
             body.output_value_dependencies(&mut callee)?
         } else {
             body.output_dependencies(&mut callee)?
@@ -112,6 +133,7 @@ fn definition_dependencies<'a>(
         &mut BTreeMap::new(),
         &mut BTreeSet::new(),
         value_identities,
+        predicate_values,
     )
 }
 
@@ -195,7 +217,7 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
-        self.acquisition_context_with_dependencies(insertion_layer, false)
+        self.acquisition_context_with_dependencies(insertion_layer, false, false)
     }
 
     /// The explicit new context carries semantic identities in the same records.
@@ -203,17 +225,28 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
-        self.acquisition_context_with_dependencies(insertion_layer, true)
+        self.acquisition_context_with_dependencies(insertion_layer, true, false)
+    }
+
+    /// New explicit semantics, retaining context3 and the five-field callee ABI.
+    pub fn acquisition_context_with_predicate_dependencies(
+        &self,
+        insertion_layer: usize,
+    ) -> Result<serde_json::Value> {
+        self.acquisition_context_with_dependencies(insertion_layer, true, true)
     }
 
     fn acquisition_context_with_dependencies(
         &self,
         insertion_layer: usize,
         value_identities: bool,
+        predicate_values: bool,
     ) -> Result<serde_json::Value> {
         let mut context = self.acquisition_context(insertion_layer)?;
         context["version"] = serde_json::json!(if value_identities { 3 } else { 2 });
-        context["dependency_contract"] = serde_json::json!(if value_identities {
+        context["dependency_contract"] = serde_json::json!(if predicate_values {
+            "output-dependencies-v3"
+        } else if value_identities {
             "output-dependencies-v2"
         } else {
             "output-dependencies-v1"
@@ -223,6 +256,7 @@ impl NativeCausalModel {
                 name,
                 |name| self.functions.numerical(name),
                 value_identities,
+                predicate_values,
             )?;
             callee["output_dependencies"] =
                 serde_json::to_value(dependencies).map_err(|error| invalid(error.to_string()))?;
@@ -328,6 +362,7 @@ impl NativeCausalModel {
             train_down_projection,
             require_output_dependencies,
             false,
+            false,
         )
     }
 
@@ -348,6 +383,28 @@ impl NativeCausalModel {
             train_down_projection,
             true,
             true,
+            false,
+        )
+    }
+
+    /// Admit original predicate-aware source through the same physical owner.
+    pub fn fork_acquired_definitions_with_predicate_dependencies(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> Result<Self> {
+        self.fork_acquired_definitions_with_contract(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            true,
+            true,
+            true,
         )
     }
 
@@ -360,6 +417,7 @@ impl NativeCausalModel {
         train_down_projection: bool,
         require_output_dependencies: bool,
         value_identities: bool,
+        predicate_values: bool,
     ) -> Result<Self> {
         if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
@@ -435,7 +493,11 @@ impl NativeCausalModel {
             ));
         }
         let usage = if require_output_dependencies {
-            let dependencies = if value_identities {
+            let dependencies = if predicate_values {
+                definition_output_predicate_dependencies(&entrypoint, |name| {
+                    functions.numerical(name)
+                })?
+            } else if value_identities {
                 definition_output_value_dependencies(&entrypoint, |name| functions.numerical(name))?
             } else {
                 definition_output_dependencies(&entrypoint, |name| functions.numerical(name))?
