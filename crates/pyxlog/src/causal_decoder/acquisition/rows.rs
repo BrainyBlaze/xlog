@@ -147,6 +147,7 @@ pub(super) struct Prefix<'a> {
     pub expression_parents: Vec<expressions::Parent>,
     pub expression_operation: usize,
     pub expression_nodes: expressions::Nodes,
+    pub expression_reference: Option<expressions::Reference<'a>>,
     pub budget: budget::State,
 }
 
@@ -228,6 +229,7 @@ struct Reader<'a> {
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    value_references: bool,
     parent_prerequisites: bool,
     ancestor_typing: bool,
     expression_parents: Vec<expressions::Parent>,
@@ -236,6 +238,7 @@ struct Reader<'a> {
     expression_root_pending: bool,
     expression_operations: usize,
     expression_pending_bytes: usize,
+    expression_reference: Option<(usize, usize, usize)>,
     declarations: Option<metadata::Declarations>,
     definition_name: String,
     definition_index: usize,
@@ -258,6 +261,7 @@ pub(super) fn prefix<'a>(
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    value_references: bool,
     parent_prerequisites: bool,
     ancestor_typing: bool,
     track_token_budget: bool,
@@ -282,6 +286,7 @@ pub(super) fn prefix<'a>(
         self_delimited,
         named_body,
         expressions,
+        value_references,
         parent_prerequisites,
         ancestor_typing,
         expression_parents: Vec::new(),
@@ -290,6 +295,7 @@ pub(super) fn prefix<'a>(
         expression_root_pending: false,
         expression_operations: 0,
         expression_pending_bytes: 0,
+        expression_reference: None,
         declarations: self_delimited.then(|| metadata::Declarations::new(Some(context))),
         definition_name: String::new(),
         definition_index: 0,
@@ -335,7 +341,15 @@ pub(super) fn prefix<'a>(
             spent: reader.expression_nodes,
             pending_roots: reader.expression_roots,
             current_root_pending: reader.expression_root_pending,
+            reference_pending: reader.expression_reference.is_some(),
         },
+        expression_reference: reader.expression_reference.map(
+            |(start, definition_index, operations)| expressions::Reference {
+                bytes: &source[start..],
+                definition_index,
+                operations,
+            },
+        ),
         budget: reader.budget,
     })
 }
@@ -353,6 +367,7 @@ pub(super) fn definitions(
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    value_references: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -365,6 +380,7 @@ pub(super) fn definitions(
         self_delimited,
         named_body,
         expressions,
+        value_references,
         false,
         false,
         false,
@@ -437,6 +453,7 @@ pub(super) fn definitions(
             None,
             false,
             None,
+            value_references,
         )
         .map_err(|error| error.to_string())?;
     }
