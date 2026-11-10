@@ -2,9 +2,9 @@
 
 use super::*;
 
-pub(super) const ENCODING: &str = "numerical-expressions-v1";
+pub(crate) const ENCODING: &str = "numerical-expressions-v1";
 
-pub(super) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>) {
+pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
         for operation in defs[name]["anyOf"].as_array_mut().unwrap() {
