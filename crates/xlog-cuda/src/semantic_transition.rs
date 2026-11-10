@@ -343,8 +343,8 @@ pub fn semantic_structural_cost_descriptor(
 }
 
 /// One normalized truth-match objective within an ordered task priority level.
-/// The native query result contributes one when it equals `target_truth`, zero
-/// otherwise; candidate progress subtracts the acquired base's contribution.
+/// Assignment contributes its observed truth match; Measure contributes the
+/// conditional mass of that outcome. Progress subtracts the acquired base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticTaskPriorityGoal {
     pub query: u32,
@@ -395,7 +395,21 @@ impl SemanticTaskScoring {
         let return_bound = value_span * u128::from(self.improvement_weight)
             + 2 * u128::from(self.refusal_weight)
             + max_spent * u128::from(self.spent_weight);
-        i64::try_from(return_bound)
+        // Monotonicity of each ordered binary64 operation bounds the executed
+        // law at the same fixed domain endpoints. This also encloses rounding
+        // for fractional values without widening from an observed result.
+        let high = f64::from(self.correct_weight) * f64::from(query_count)
+            + f64::from(self.all_correct_weight);
+        let low = -(f64::from(self.work_weight) * max_cost as f64);
+        let rounded = (f64::from(self.improvement_weight) * (high - low)
+            + 2.0 * f64::from(self.refusal_weight))
+            + max_spent as f64 * f64::from(self.spent_weight);
+        if !rounded.is_finite() || rounded < 0.0 {
+            return Err(publication_input_error(
+                "task return has no finite numeric enclosure",
+            ));
+        }
+        i64::try_from(return_bound.max(rounded.ceil() as u128))
             .map_err(|_| publication_input_error("task scoring can overflow the signed return"))
     }
 
@@ -448,7 +462,7 @@ impl SemanticTaskScoring {
         query_count: u32,
     ) -> Result<Vec<u8>, SemanticTransitionError> {
         let mut bytes = b"XLOG-TASK-SCORING-LAW\0".to_vec();
-        material_u64(&mut bytes, 2);
+        material_u64(&mut bytes, 3);
         bytes.extend_from_slice(task_identity.as_bytes());
         let structural_cost = semantic_structural_cost_descriptor(program, query_count)?;
         bytes.extend_from_slice(structural_cost.unit.as_bytes());
@@ -468,7 +482,7 @@ fn checkpoint_scoring_law_identity(
     training_domain: Option<&SemanticTrainingDomain>,
 ) -> Identity256 {
     let mut hash = Sha256::new();
-    hash.update(b"xlog.semantic.checkpoint.scoring-law.v4\0");
+    hash.update(b"xlog.semantic.checkpoint.scoring-law.v5\0");
     // Arena transfer advances authority, not the task's content or evaluator.
     // The checkpoint binds that authority separately from this immutable law.
     for identity in [
@@ -511,7 +525,7 @@ fn validate_completed_task_scoring(
     lane_refusal: [u64; 2],
     query_count: u64,
     winner: u64,
-    return_value: i64,
+    return_bits: u64,
 ) -> bool {
     let editable_program = program.is_some();
     if scoring.validate(program, queries).is_err()
@@ -522,23 +536,127 @@ fn validate_completed_task_scoring(
         || work
             .iter()
             .any(|work| !work.is_valid(editable_program, queries))
-        || facts
-            .iter()
-            .any(|facts| facts.g > u64::from(queries) || facts.p > 1 || facts.eligible > 1)
     {
         return false;
     }
     for (slot, facts) in facts.iter().enumerate() {
+        let g = f64::from_bits(facts.expected_g_bits);
+        let p = f64::from_bits(facts.expected_p_bits);
+        let v = f64::from_bits(facts.value_bits);
+        let executed = slot == 0 || matches!(lane_refusal[slot - 1], 0 | 2);
+        if !g.is_finite()
+            || !(0.0..=f64::from(queries)).contains(&g)
+            || !p.is_finite()
+            || !(0.0..=1.0).contains(&p)
+            || !v.is_finite()
+            || facts.eligible > 1
+            || facts.complete > 1
+        {
+            return false;
+        }
+        if executed {
+            let count = queries as usize;
+            if facts.truth.len() != count
+                || facts.attained.len() != count
+                || facts.query_kinds.len() != count
+                || facts.query_masses_bits.len() != count
+                || facts.attainment_mass_bits.len() != count
+                || facts
+                    .correct
+                    .as_ref()
+                    .is_some_and(|values| values.len() != count)
+            {
+                return false;
+            }
+            let mut correct = 0.0;
+            for query in 0..count {
+                let masses = facts.query_masses_bits[query].map(f64::from_bits);
+                let attained = f64::from_bits(facts.attainment_mass_bits[query]);
+                if masses
+                    .iter()
+                    .chain([&attained])
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                {
+                    return false;
+                }
+                correct += attained;
+                match facts.query_kinds[query] {
+                    "assignment" => {
+                        let Some(truth) = facts.truth[query].filter(|value| *value < 4) else {
+                            return false;
+                        };
+                        let Some(point) = facts.attained[query].filter(|value| *value <= 1) else {
+                            return false;
+                        };
+                        if attained != point as f64
+                            || masses.iter().enumerate().any(|(outcome, value)| {
+                                *value != u64::from(outcome as u64 == truth) as f64
+                            })
+                            || facts
+                                .correct
+                                .as_ref()
+                                .is_some_and(|values| values[query].is_none_or(|value| value > 1))
+                        {
+                            return false;
+                        }
+                    }
+                    "measure" => {
+                        if facts.truth[query].is_some()
+                            || facts.attained[query].is_some()
+                            || facts
+                                .correct
+                                .as_ref()
+                                .is_some_and(|values| values[query].is_some())
+                        {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            if correct.to_bits() != facts.expected_g_bits {
+                return false;
+            }
+            if facts.query_kinds.iter().all(|kind| *kind == "assignment") {
+                let goals = priority_levels
+                    .iter()
+                    .map(|level| level.goals.len())
+                    .sum::<usize>();
+                let complete = if facts.correct.is_some() {
+                    g == f64::from(queries)
+                } else {
+                    goals != 0 && g == goals as f64
+                };
+                if facts.complete != u64::from(complete) || p != u64::from(complete) as f64 {
+                    return false;
+                }
+            } else if facts.complete == 1 && p != 1.0 {
+                return false;
+            }
+        } else if !facts.truth.is_empty()
+            || !facts.attained.is_empty()
+            || !facts.query_kinds.is_empty()
+            || !facts.query_masses_bits.is_empty()
+            || !facts.attainment_mass_bits.is_empty()
+            || facts
+                .correct
+                .as_ref()
+                .is_some_and(|values| !values.is_empty())
+            || g != 0.0
+            || p != 0.0
+            || facts.eligible != 0
+            || facts.complete != 0
+        {
+            return false;
+        }
         let measured = if slot == 0 {
             0
         } else {
-            let work = work[slot - 1];
-            work.raw_structural_cost()
+            work[slot - 1].raw_structural_cost()
         };
-        let value = i128::from(scoring.correct_weight) * i128::from(facts.g)
-            + i128::from(scoring.all_correct_weight) * i128::from(facts.p)
-            - i128::from(scoring.work_weight) * i128::from(measured);
-        if facts.c != measured || i128::from(facts.v) != value {
+        let value = (scoring.correct_weight as f64 * g + scoring.all_correct_weight as f64 * p)
+            - scoring.work_weight as f64 * measured as f64;
+        if facts.c != measured || value.to_bits() != facts.value_bits {
             return false;
         }
     }
@@ -554,19 +672,19 @@ fn validate_completed_task_scoring(
     if winner as usize != selected || facts[selected].eligible != 1 {
         return false;
     }
-    let refusals = lane_refusal.iter().filter(|&&refusal| refusal != 0).count() as i128;
-    let spent = i128::from(query_count)
+    let refusals = lane_refusal.iter().filter(|&&refusal| refusal != 0).count() as u64;
+    let spent = query_count
         + work
             .iter()
             .enumerate()
             .filter(|(lane, _)| lane + 1 != selected)
-            .map(|(_, work)| i128::from(work.edit_commands + work.defined_truth_changes))
-            .sum::<i128>();
-    let expected_return = i128::from(scoring.improvement_weight)
-        * (i128::from(facts[selected].v) - i128::from(facts[0].v))
-        - i128::from(scoring.refusal_weight) * refusals
-        - i128::from(scoring.spent_weight) * spent;
-    i128::from(return_value) == expected_return
+            .map(|(_, work)| work.edit_commands + work.defined_truth_changes)
+            .sum::<u64>();
+    let expected_return = (scoring.improvement_weight as f64
+        * (f64::from_bits(facts[selected].value_bits) - f64::from_bits(facts[0].value_bits))
+        - scoring.refusal_weight as f64 * refusals as f64)
+        - scoring.spent_weight as f64 * spent as f64;
+    expected_return.is_finite() && expected_return.to_bits() == return_bits
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -577,26 +695,20 @@ fn task_candidate_better(
     incumbent: usize,
 ) -> bool {
     for level in priority_levels {
-        let score = |slot: usize| -> i64 {
-            level
-                .goals
-                .iter()
-                .map(|goal| {
-                    let query = goal.query as usize;
-                    let target = u64::from(goal.target_truth);
-                    let achieved = if facts[slot].correct.is_none() {
-                        facts[slot].attained.get(query).copied().unwrap_or(0) as i64
+        let score = |slot: usize| -> f64 {
+            level.goals.iter().fold(0.0, |sum, goal| {
+                let query = goal.query as usize;
+                let value = |slot: usize| {
+                    if facts[slot].correct.is_none() {
+                        f64::from_bits(facts[slot].attainment_mass_bits[query])
                     } else {
-                        i64::from(facts[slot].truth[query] == target)
-                    };
-                    let base = if facts[0].correct.is_none() {
-                        facts[0].attained.get(query).copied().unwrap_or(0) as i64
-                    } else {
-                        i64::from(facts[0].truth[query] == target)
-                    };
-                    i64::from(goal.weight) * (achieved - base)
-                })
-                .sum()
+                        f64::from_bits(
+                            facts[slot].query_masses_bits[query][goal.target_truth as usize],
+                        )
+                    }
+                };
+                sum + f64::from(goal.weight) * (value(slot) - value(0))
+            })
         };
         let candidate_score = score(candidate);
         let incumbent_score = score(incumbent);
@@ -604,8 +716,10 @@ fn task_candidate_better(
             return candidate_score > incumbent_score;
         }
     }
-    facts[candidate].g > facts[incumbent].g
-        || (facts[candidate].g == facts[incumbent].g && facts[candidate].c < facts[incumbent].c)
+    let candidate_g = f64::from_bits(facts[candidate].expected_g_bits);
+    let incumbent_g = f64::from_bits(facts[incumbent].expected_g_bits);
+    candidate_g > incumbent_g
+        || (candidate_g == incumbent_g && facts[candidate].c < facts[incumbent].c)
 }
 
 /// The complete nonempty ordered query selection for a retained task. Predicate,
@@ -2947,34 +3061,46 @@ fn canonical_text_null(receipt: &SemanticTransitionReceipt) -> bool {
 /// Device-computed facts for the complete original task query roster.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SemanticTaskFacts {
-    /// Ordered actual Truth4 codes for the complete task query roster. A refused
-    /// lane has no executed truth outcome; its terminal refusal is authoritative.
-    pub truth: Vec<u64>,
+    /// Point answers in query order. A Measure query has no point answer;
+    /// an unqueried lane has no entries at all.
+    pub truth: Vec<Option<u64>>,
     /// Equality of each actual Truth4 answer to the protected observer result.
-    pub correct: Option<Vec<u64>>,
+    pub correct: Option<Vec<Option<u64>>>,
     /// Authenticated attainment of original listed goals, independent of
     /// reference correctness. Unlisted Coding queries contribute no attainment.
-    pub attained: Vec<u64>,
-    /// Number of correct logical queries or attained original coding goals.
-    pub g: u64,
-    /// Whether all original logical queries or listed coding goals are attained.
-    pub p: u64,
+    pub attained: Vec<Option<u64>>,
+    pub query_kinds: Vec<&'static str>,
+    /// Conditional masses in NEITHER, TRUE, FALSE, BOTH order.
+    pub query_masses_bits: Vec<[u64; 4]>,
+    pub attainment_mass_bits: Vec<u64>,
+    pub expected_g_bits: u64,
+    pub expected_p_bits: u64,
     /// Actual edit commands plus added supports plus defined truth changes.
     pub c: u64,
     /// Query agreement minus measured work, using the bound task coefficients.
-    pub v: i64,
+    pub value_bits: u64,
     /// Whether the candidate satisfies the task scope and hard constraints.
     pub eligible: u64,
+    /// Event identity proves completion independently of rounded mass values.
+    pub complete: u64,
+}
+
+impl SemanticTaskFacts {
+    const QUERY_METADATA_BYTES: usize = 3 * size_of::<Option<u64>>()
+        + size_of::<&'static str>()
+        + size_of::<[u64; 4]>()
+        + size_of::<u64>();
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeviceTaskFacts {
-    g: u64,
-    p: u64,
+    expected_g_bits: u64,
+    expected_p_bits: u64,
     c: u64,
-    v: i64,
+    value_bits: u64,
     eligible: u64,
+    complete: u64,
 }
 
 #[repr(C)]
@@ -2983,7 +3109,7 @@ struct DeviceTaskEvaluation {
     lane_refusal: [u64; 2],
     query_count: u64,
     winner: u64,
-    return_value: i64,
+    return_bits: u64,
     facts: [DeviceTaskFacts; 3],
 }
 
@@ -7064,7 +7190,7 @@ const _: () = assert!(size_of::<PublicationStorageEntry>() == 24);
 const _: () = assert!(size_of::<PublicationRange>() == 64);
 const _: () = assert!(size_of::<PublicationHeader>() == 424);
 const _: () = assert!(size_of::<PublicationControl>() == 144);
-const _: () = assert!(size_of::<PublicationBank>() == 47128);
+const _: () = assert!(size_of::<PublicationBank>() == 47152);
 const _: () = assert!(size_of::<PublicationRoleCount>() == 16);
 const _: () = assert!(size_of::<SemanticModelContractLayout>() == 40);
 const _: () = assert!(size_of::<PublicationContract>() == 416);
@@ -8639,7 +8765,7 @@ pub struct SemanticCompletedTheoryDeltaMaterial {
 #[cfg(feature = "semantic-policy")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticCompletedLaneOutcomeMaterial {
-    Executed(Vec<crate::SemanticTruth>),
+    Executed(Vec<Option<crate::SemanticTruth>>),
     Refused(SemanticTaskRefusal),
 }
 
@@ -8663,7 +8789,7 @@ pub struct SemanticCompletedTaskGroundMaterial {
     pub expected_truth: Option<Vec<crate::SemanticTruth>>,
     pub ground: SemanticTaskGround,
     pub facts: [SemanticTaskFacts; 3],
-    pub base_truth: Vec<crate::SemanticTruth>,
+    pub base_truth: Vec<Option<crate::SemanticTruth>>,
     pub lane_outcomes: [SemanticCompletedLaneOutcomeMaterial; 2],
 }
 
@@ -10013,8 +10139,8 @@ fn validate_program_query_receipts(
             }
             if !facts.truth.is_empty()
                 || !facts.attained.is_empty()
-                || facts.g != 0
-                || facts.p != 0
+                || f64::from_bits(facts.expected_g_bits) != 0.0
+                || f64::from_bits(facts.expected_p_bits) != 0.0
                 || facts.eligible != 0
                 || state.work[slot - 1].added_supports != 0
                 || state.work[slot - 1].defined_truth_changes != 0
@@ -10029,7 +10155,10 @@ fn validate_program_query_receipts(
         if metrics[1] > program.fact_capacity().map_err(publication_input_error)? as u64
             || metrics[2] > metrics[1].checked_mul(2).ok_or_else(mismatch)?
             || facts.truth.len() != program.queries.len()
-            || facts.truth.iter().any(|&truth| truth > 3)
+            || facts
+                .truth
+                .iter()
+                .any(|truth| truth.is_some_and(|truth| truth > 3))
         {
             return Err(mismatch());
         }
@@ -10039,7 +10168,7 @@ fn validate_program_query_receipts(
             let fact = program.queries[query];
             let mut expected = [0u64; 42];
             expected[1] = 0x584c4f4746515259;
-            expected[2] = facts.truth[query];
+            expected[2] = facts.truth[query].unwrap_or(u64::MAX);
             expected[3] = slot as u64;
             expected[4] = query as u64;
             expected[5..9].copy_from_slice(&task_words);
@@ -10054,7 +10183,7 @@ fn validate_program_query_receipts(
             expected[22] = word(image, 2);
             for (channel, &reference) in receipt[31..33].iter().enumerate() {
                 if reference != 0 {
-                    if facts.truth[query] & (1 << channel) == 0 {
+                    if facts.truth[query].is_some_and(|truth| truth & (1 << channel) == 0) {
                         return Err(mismatch());
                     }
                     let encoded = reference - 1;
@@ -10108,12 +10237,15 @@ fn validate_program_query_receipts(
 #[cfg(feature = "semantic-policy")]
 fn completed_task_truths(
     facts: &SemanticTaskFacts,
-) -> Result<Vec<crate::SemanticTruth>, SemanticTransitionError> {
+) -> Result<Vec<Option<crate::SemanticTruth>>, SemanticTransitionError> {
     facts
         .truth
         .iter()
         .map(|truth| {
-            crate::SemanticTruth::from_bits(*truth).map_err(SemanticTransitionError::Semantic)
+            truth
+                .map(crate::SemanticTruth::from_bits)
+                .transpose()
+                .map_err(SemanticTransitionError::Semantic)
         })
         .collect()
 }
@@ -10122,18 +10254,32 @@ fn completed_task_truths(
 fn encode_completed_task_facts(bytes: &mut Vec<u8>, facts: &SemanticTaskFacts) {
     material_u64(bytes, facts.truth.len() as u64);
     for &value in &facts.truth {
-        material_u64(bytes, value);
+        material_u64(bytes, value.unwrap_or(u64::MAX));
     }
     material_u64(bytes, u64::from(facts.correct.is_some()));
     if let Some(correct) = &facts.correct {
         for &value in correct {
-            material_u64(bytes, value);
+            material_u64(bytes, value.unwrap_or(u64::MAX));
         }
     }
     for &value in &facts.attained {
-        material_u64(bytes, value);
+        material_u64(bytes, value.unwrap_or(u64::MAX));
     }
-    for value in [facts.g, facts.p, facts.c, facts.v as u64, facts.eligible] {
+    for query in 0..facts.query_kinds.len() {
+        material_u64(bytes, u64::from(facts.query_kinds[query] == "measure"));
+        for value in facts.query_masses_bits[query] {
+            material_u64(bytes, value);
+        }
+        material_u64(bytes, facts.attainment_mass_bits[query]);
+    }
+    for value in [
+        facts.expected_g_bits,
+        facts.expected_p_bits,
+        facts.c,
+        facts.value_bits,
+        facts.eligible,
+        facts.complete,
+    ] {
         material_u64(bytes, value);
     }
 }
@@ -10516,7 +10662,7 @@ impl PublicationReplayEvidence {
         let action_batch_valid = if kind == SemanticTransitionKind::Proposal {
             let batch = &bank.state.action_batch;
             let root = publication_action_batch_root(batch);
-            batch.abi == 1
+            batch.abi == ACTION_BATCH_ABI as u64
                 && batch.proposal == bank.state.proposal
                 && batch.stream_serial == bank.state.stream_serial
                 && batch.family_id == u64::from(bank.state.family_id)
@@ -10527,7 +10673,7 @@ impl PublicationReplayEvidence {
                 && batch.component_count == COMPONENT_COUNT as u64
                 && batch.candidate_count == 3
                 && batch.winner == bank.state.task_evaluation.winner
-                && batch.total_return_bits == bank.state.task_evaluation.return_value as u64
+                && batch.total_return_bits == bank.state.task_evaluation.return_bits as u64
                 && batch.base_word == base.publication_word
                 && batch.next_word == header.publication_word
                 && batch.rng_base == bank.state.proposal * COMPONENT_COUNT as u64
@@ -20193,9 +20339,9 @@ const _: () = assert!(std::mem::offset_of!(ContinuationInputs, capacity_allocati
 const _: () = assert!(std::mem::offset_of!(ContinuationInputs, capacity_bytes) == 240);
 const _: () = assert!(size_of::<SemanticCapacityRefusalRecord>() == 48);
 const _: () = assert!(size_of::<SemanticTransitionReceipt>() == 296);
-const _: () = assert!(size_of::<DeviceTaskFacts>() == 40);
-const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 160);
-const _: () = assert!(size_of::<DeviceState>() == 4400);
+const _: () = assert!(size_of::<DeviceTaskFacts>() == 48);
+const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 184);
+const _: () = assert!(size_of::<DeviceState>() == 4424);
 const _: () = assert!(size_of::<PolicyField>() == 32);
 const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 176);
@@ -20663,7 +20809,7 @@ pub struct SemanticTaskEvaluation {
     pub binding: Identity256,
     pub query_count: u64,
     pub winner: u64,
-    pub return_value: i64,
+    pub return_bits: u64,
     pub facts: [SemanticTaskFacts; 3],
 }
 
@@ -28642,8 +28788,8 @@ impl SemanticTransitionSession {
             repeated_material_extent(
                 3,
                 completed_material_extent(&[
-                    7 * 8,
-                    repeated_material_extent(task.spec().statement_records.len(), 3 * 8)?,
+                    8 * 8,
+                    repeated_material_extent(task.spec().statement_records.len(), 9 * 8)?,
                 ])?,
             )?,
             5 * 8,
@@ -29003,44 +29149,6 @@ impl SemanticTransitionSession {
             &state.task_evaluation,
             expected_truth.as_deref(),
         )?;
-        let goal_count = priority_levels
-            .iter()
-            .map(|level| level.goals.len())
-            .sum::<usize>();
-        let invalid_task_facts = task_facts
-            .iter()
-            .zip(executed_slots)
-            .any(|(facts, executed)| {
-                facts
-                    .correct
-                    .as_ref()
-                    .is_some_and(|correct| correct.iter().any(|&value| value > 1))
-                    || facts.g > ground_layout.queries as u64
-                    || facts.p > 1
-                    || facts.eligible > 1
-                    || if executed {
-                        facts.truth.iter().any(|&value| value > 3)
-                            || facts.truth.len() != ground_layout.queries
-                            || facts.attained.len() != ground_layout.queries
-                            || facts.g != facts.attained.iter().sum::<u64>()
-                            || facts.p
-                                != u64::from(if expected_truth.is_some() {
-                                    facts.g == ground_layout.queries as u64
-                                } else {
-                                    goal_count != 0 && facts.g == goal_count as u64
-                                })
-                    } else {
-                        !facts.truth.is_empty()
-                            || facts
-                                .correct
-                                .as_ref()
-                                .is_some_and(|correct| !correct.is_empty())
-                            || !facts.attained.is_empty()
-                            || facts.g != 0
-                            || facts.p != 0
-                            || facts.eligible != 0
-                    }
-            });
         let invalid_task_scoring = !validate_completed_task_scoring(
             scoring,
             program_owner.editable_program(),
@@ -29051,7 +29159,7 @@ impl SemanticTransitionSession {
             state.task_evaluation.lane_refusal,
             state.task_evaluation.query_count,
             state.task_evaluation.winner,
-            state.task_evaluation.return_value,
+            state.task_evaluation.return_bits,
         );
         if result.refusal != 0
             || result.advanced != 1
@@ -29078,7 +29186,6 @@ impl SemanticTransitionSession {
                 != identity_words(*schema_generation.identity.as_bytes())
             || state.task_evaluation.winner > 2
             || state.task_evaluation.query_count != expected_query_count
-            || invalid_task_facts
             || invalid_task_scoring
             || state.task_evaluation.facts[state.task_evaluation.winner as usize].eligible != 1
             || state
@@ -29099,7 +29206,7 @@ impl SemanticTransitionSession {
                 .chain(&active_sets)
                 .any(|&value| value > 1)
             || state.actor_eligible > 1
-            || state.action_batch.abi != 1
+            || state.action_batch.abi != ACTION_BATCH_ABI as u64
             || publication_action_batch_root(&state.action_batch) != batch_root
             || result.attempt.action_receipts_digest != batch_root
             || state.action_batch.proposal != state.proposal
@@ -29111,7 +29218,7 @@ impl SemanticTransitionSession {
             || state.action_batch.component_count != COMPONENT_COUNT as u64
             || state.action_batch.candidate_count != 3
             || state.action_batch.winner != state.task_evaluation.winner
-            || state.action_batch.total_return_bits != state.task_evaluation.return_value as u64
+            || state.action_batch.total_return_bits != state.task_evaluation.return_bits as u64
             || state.action_batch.base_word != binding.0.word
             || state.action_batch.next_word != successor.word
             || state.action_batch.rng_base != state.proposal * COMPONENT_COUNT as u64
@@ -29459,7 +29566,7 @@ impl SemanticTransitionSession {
             });
         let mut ground_bytes = Vec::new();
         ground_bytes.extend_from_slice(b"XLOG-COMPLETED-TASK-GROUND\0");
-        material_u64(&mut ground_bytes, 6);
+        material_u64(&mut ground_bytes, 7);
         let structural_cost = objective_law.structural_cost;
         ground_bytes.extend_from_slice(structural_cost.unit.as_bytes());
         material_u64(&mut ground_bytes, structural_cost.cap);
@@ -29564,7 +29671,7 @@ impl SemanticTransitionSession {
             lane_outcomes,
         };
 
-        let base_solves = task_facts[0].eligible == 1 && task_facts[0].p == 1;
+        let base_solves = task_facts[0].eligible == 1 && task_facts[0].complete == 1;
         let decisive_lane = (0..2).find(|&lane| {
             let facts = &task_facts[lane + 1];
             state.task_evaluation.lane_refusal[lane] == 0
@@ -29572,7 +29679,7 @@ impl SemanticTransitionSession {
                 && state.work[lane].added_supports > 0
                 && !base_solves
                 && facts.eligible == 1
-                && facts.p == 1
+                && facts.complete == 1
         });
         let edit_solution = decisive_lane.map(|lane| {
             let component_begin = lane * 68 + 32;
@@ -29685,7 +29792,7 @@ impl SemanticTransitionSession {
             model_generation: state.model_generation as u64,
             winner: state.task_evaluation.winner,
             actor_eligible: state.actor_eligible == 1,
-            total_return_bits: state.task_evaluation.return_value as u64,
+            total_return_bits: state.task_evaluation.return_bits as u64,
             batch_root,
             batch_receipt,
             result: task_result,
@@ -46255,7 +46362,7 @@ impl SemanticTransitionSession {
                 binding: binding.identity(),
                 query_count: task.query_count,
                 winner: task.winner,
-                return_value: task.return_value,
+                return_bits: task.return_bits,
                 facts,
             })
         } else {
@@ -51549,7 +51656,7 @@ mod text_parent_tests {
             component_count: COMPONENT_COUNT as u64,
             candidate_count: 3,
             winner: bank.state.task_evaluation.winner,
-            total_return_bits: bank.state.task_evaluation.return_value as u64,
+            total_return_bits: bank.state.task_evaluation.return_bits as u64,
             base_word: bank.header.base_word,
             next_word: bank.header.publication_word,
             rng_base: bank.state.proposal * COMPONENT_COUNT as u64,

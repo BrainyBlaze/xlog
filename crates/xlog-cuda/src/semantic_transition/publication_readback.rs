@@ -77,7 +77,8 @@ impl SemanticTransitionSession {
             .checked_mul(3)
             .and_then(|bytes| {
                 bytes.checked_add(layout.queries.checked_mul(
-                    3 * (size_of::<task_ground::TaskQueryRecord>() + 3 * size_of::<u64>()),
+                    3 * (size_of::<task_ground::TaskQueryRecord>()
+                        + SemanticTaskFacts::QUERY_METADATA_BYTES),
                 )?)
             })
             .and_then(|bytes| {
@@ -186,9 +187,14 @@ impl SemanticTransitionSession {
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
         if facts.truth.len() != original.layout.queries
             || facts.attained.len() != original.layout.queries
-            || facts.g > original.layout.queries as u64
-            || facts.p > 1
+            || !f64::from_bits(facts.expected_g_bits).is_finite()
+            || !(0.0..=original.layout.queries as f64)
+                .contains(&f64::from_bits(facts.expected_g_bits))
+            || !f64::from_bits(facts.expected_p_bits).is_finite()
+            || !(0.0..=1.0).contains(&f64::from_bits(facts.expected_p_bits))
+            || !f64::from_bits(facts.value_bits).is_finite()
             || facts.eligible > 1
+            || facts.complete > 1
         {
             return Err(publication_input_error(
                 "selected task facts omit the actual native query receipts",

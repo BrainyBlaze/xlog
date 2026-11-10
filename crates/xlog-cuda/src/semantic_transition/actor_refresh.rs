@@ -154,7 +154,8 @@ impl OriginalEditDemonstration {
             || state.action_batch_root != batch_identity
             || state.action_batch.actor_eligible != state.actor_eligible
             || state.action_batch.winner != state.task_evaluation.winner
-            || state.action_batch.total_return_bits != state.task_evaluation.return_value as u64
+            || state.action_batch.abi != ACTION_BATCH_ABI as u64
+            || state.action_batch.total_return_bits != state.task_evaluation.return_bits
             || publication_semantic_receipts_digest(&state.semantic_receipts)
                 != state.action_batch.semantic_receipts_digest
             || publication_action_receipts_digest_bytes(&codebook.bytes, &receipts)?
@@ -170,8 +171,8 @@ impl OriginalEditDemonstration {
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let base_solves =
-            state.task_evaluation.facts[0].eligible == 1 && state.task_evaluation.facts[0].p == 1;
+        let base_solves = state.task_evaluation.facts[0].eligible == 1
+            && state.task_evaluation.facts[0].complete == 1;
         let lane = (0..2)
             .find(|&lane| {
                 let facts = &state.task_evaluation.facts[lane + 1];
@@ -180,7 +181,7 @@ impl OriginalEditDemonstration {
                     && state.semantic_receipts[3 + lane * 3][0] == 0
                     && state.work[lane].added_supports > 0
                     && facts.eligible == 1
-                    && facts.p == 1
+                    && facts.complete == 1
             })
             .ok_or_else(|| {
                 publication_input_error(
@@ -262,7 +263,7 @@ impl OriginalEditDemonstration {
             .take(magic.len())
             .map_err(SemanticTransitionError::Semantic)?
             != magic
-            || reader.u64().map_err(SemanticTransitionError::Semantic)? != 6
+            || reader.u64().map_err(SemanticTransitionError::Semantic)? != 7
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -1021,7 +1022,7 @@ pub(super) fn initial_episode_actor(
         .checked_add(1)
         .filter(|next| *next <= u64::from(u32::MAX))
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
-    if batch.abi != 1
+    if batch.abi != ACTION_BATCH_ABI as u64
         || batch.actor_eligible > 1
         || batch_identity != attempt.action_receipts_digest
         || batch.proposal != u64::from(rng.proposal)

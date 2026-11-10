@@ -383,7 +383,8 @@ impl SemanticTaskVerificationBinding {
 }
 
 pub(super) const TASK_GROUND_MAGIC: u64 = 0x584c4f4754475244;
-pub(super) const TASK_GROUND_VERSION: u64 = 6;
+pub(super) const TASK_GROUND_VERSION: u64 = 7;
+pub(super) const TASK_QUERY_WORDS: usize = 50;
 pub(super) const INHERITED_OBSERVATIONS_MAGIC: u64 = 0x584c4f47494e484f;
 pub(super) const INHERITED_OBSERVATION_BYTES: usize = 176;
 
@@ -394,6 +395,9 @@ pub(super) struct TaskQueryRecord {
     pub receipt: [u64; 42],
     pub truth: u64,
     pub attained: u64,
+    pub kind: u64,
+    pub masses_bits: [u64; 4],
+    pub attainment_bits: u64,
 }
 
 impl Default for TaskQueryRecord {
@@ -402,6 +406,9 @@ impl Default for TaskQueryRecord {
             receipt: [0; 42],
             truth: 0,
             attained: 0,
+            kind: 0,
+            masses_bits: [0; 4],
+            attainment_bits: 0,
         }
     }
 }
@@ -674,7 +681,7 @@ impl TaskGroundLayout {
             TASK_GROUND_VERSION,
             self.queries as u64,
             self.bindings as u64,
-            44,
+            TASK_QUERY_WORDS as u64,
             18,
             0,
             self.rule_capacity as u64,
@@ -712,7 +719,7 @@ impl TaskGroundLayout {
             TASK_GROUND_VERSION,
             self.queries as u64,
             self.bindings as u64,
-            44,
+            TASK_QUERY_WORDS as u64,
             18,
         ]) {
             if actual != expected.to_le_bytes() {
@@ -901,8 +908,9 @@ impl TaskGroundLayout {
                 "task query is outside its original ground",
             ));
         }
-        let offset = self.query_offset + (candidate * self.queries + query) * 352;
-        let record = &bytes[offset..offset + 352];
+        let record_bytes = TASK_QUERY_WORDS * 8;
+        let offset = self.query_offset + (candidate * self.queries + query) * record_bytes;
+        let record = &bytes[offset..offset + record_bytes];
         let word = |index: usize| {
             u64::from_le_bytes(
                 record[index * 8..index * 8 + 8]
@@ -915,12 +923,15 @@ impl TaskGroundLayout {
             receipt,
             truth: word(42),
             attained: word(43),
+            kind: word(44),
+            masses_bits: std::array::from_fn(|index| word(45 + index)),
+            attainment_bits: word(49),
         })
     }
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<TaskQueryRecord>() == 352);
+    assert!(std::mem::size_of::<TaskQueryRecord>() == TASK_QUERY_WORDS * 8);
     assert!(std::mem::size_of::<TaskObservationRecord>() == 144);
 };
 
@@ -1094,26 +1105,47 @@ pub(super) fn decoded_task_facts(
             .any(|record| record.receipt.iter().any(|word| *word != 0));
         let mut truth = Vec::new();
         let mut attained = Vec::new();
+        let mut query_kinds = Vec::new();
+        let mut query_masses_bits = Vec::new();
+        let mut attainment_mass_bits = Vec::new();
         if executed {
             for record in &records {
-                if record.truth > 3
-                    || record.attained > 1
-                    || record.receipt.iter().all(|word| *word == 0)
+                if record.receipt.iter().all(|word| *word == 0)
+                    || record.kind > 1
+                    || (record.kind == 0 && (record.truth > 3 || record.attained > 1))
+                    || (record.kind == 1
+                        && (record.truth != u64::MAX || record.attained != u64::MAX))
+                    || record
+                        .masses_bits
+                        .iter()
+                        .chain([&record.attainment_bits])
+                        .any(|bits| {
+                            let value = f64::from_bits(*bits);
+                            !value.is_finite() || !(0.0..=1.0).contains(&value)
+                        })
                 {
                     return Err(SemanticTransitionError::ObservationMismatch);
                 }
-                truth.push(record.truth);
-                attained.push(record.attained);
+                truth.push((record.kind == 0).then_some(record.truth));
+                attained.push((record.kind == 0).then_some(record.attained));
+                query_kinds.push(if record.kind == 0 {
+                    "assignment"
+                } else {
+                    "measure"
+                });
+                query_masses_bits.push(record.masses_bits);
+                attainment_mass_bits.push(record.attainment_bits);
             }
             query_count = query_count
                 .checked_add(layout.queries as u64)
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         } else if records
             .iter()
-            .any(|record| record.truth != 0 || record.attained != 0)
-            || state.facts[candidate].g != 0
-            || state.facts[candidate].p != 0
+            .any(|record| *record != TaskQueryRecord::default())
+            || f64::from_bits(state.facts[candidate].expected_g_bits) != 0.0
+            || f64::from_bits(state.facts[candidate].expected_p_bits) != 0.0
             || state.facts[candidate].eligible != 0
+            || state.facts[candidate].complete != 0
         {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
@@ -1121,7 +1153,9 @@ pub(super) fn decoded_task_facts(
             truth
                 .iter()
                 .zip(values)
-                .map(|(actual, expected)| u64::from(*actual == *expected as u64))
+                .map(|(actual, expected)| {
+                    actual.map(|actual| u64::from(actual == *expected as u64))
+                })
                 .collect()
         });
         let scalar = state.facts[candidate];
@@ -1129,11 +1163,15 @@ pub(super) fn decoded_task_facts(
             truth,
             correct,
             attained,
-            g: scalar.g,
-            p: scalar.p,
+            query_kinds,
+            query_masses_bits,
+            attainment_mass_bits,
+            expected_g_bits: scalar.expected_g_bits,
+            expected_p_bits: scalar.expected_p_bits,
             c: scalar.c,
-            v: scalar.v,
+            value_bits: scalar.value_bits,
             eligible: scalar.eligible,
+            complete: scalar.complete,
         });
     }
     if query_count != state.query_count {

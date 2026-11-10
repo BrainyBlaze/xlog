@@ -364,6 +364,7 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
         "COMPONENT_KIND_TEXT",
         "COMPONENT_KIND_EDIT",
         "SEMANTIC_OPCODE_CARDINALITY",
+        "ACTION_BATCH_ABI",
         "NULL_CATEGORY",
         "NO_EDIT_ACTIVE_MASK",
         "NO_EDIT_NULL_MASK",

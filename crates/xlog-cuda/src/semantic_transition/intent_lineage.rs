@@ -51,7 +51,7 @@ fn proposal_receipts(
         || state.actor_eligible != 0
         || state.proposal != replay.predecessor.bank.header.proposal
         || state.proposal.checked_add(1) != Some(state.next_proposal)
-        || batch.abi != 1
+        || batch.abi != ACTION_BATCH_ABI as u64
         || batch.actor_eligible != 0
         || batch.proposal != state.proposal
         || batch.component_count != COMPONENT_COUNT as u64

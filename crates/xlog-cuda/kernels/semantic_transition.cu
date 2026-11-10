@@ -398,14 +398,15 @@ extern "C" __global__ void semantic_model_cancellation_work_result(
     output[3]=work.model_bound;output[4]=calls;
 }
 struct TaskFacts {
-    uint64_t g,p,c;
-    int64_t v;
-    uint64_t eligible;
+    double g,p;
+    uint64_t c;
+    double v;
+    uint64_t eligible,complete;
 };
 struct TaskEvaluation {
     uint64_t lane_refusal[2]; // 0 accepted, 1 scope, 2 hard constraint, 3 fact cap, 4 fuel.
     uint64_t query_count,winner;
-    int64_t return_value;
+    double return_value;
     TaskFacts facts[3]; // Base, first learned lane, second learned lane.
 };
 struct PolicyPwlCell {
@@ -782,11 +783,6 @@ __device__ PolicyBoundedScalar policy_u192_bound(U192 value) {
 __device__ PolicyBoundedScalar policy_uint64_bound(uint64_t value) {
     return policy_u192_bound(U192{{value,0,0}});
 }
-__device__ PolicyBoundedScalar policy_int64_bound(int64_t value) {
-    const uint64_t magnitude=value<0 ? uint64_t(-(value+1))+1 : uint64_t(value);
-    const auto bound=policy_uint64_bound(magnitude);
-    return value<0 ? policy_scalar_negate(bound) : bound;
-}
 __device__ model_policy::BoundedValue policy_uint64_float_bound(uint64_t value) {
     const float rounded=__ull2float_rn(value);
     const double ideal=__ull2double_ru(value);
@@ -797,10 +793,10 @@ __device__ model_policy::BoundedValue policy_uint64_float_bound(uint64_t value) 
     const bool inexact=(value&((uint64_t(1)<<discarded)-1))!=0;
     return {rounded,{inexact ? ldexp(1.0,int(top)-24) : 0.0,0.0},ideal};
 }
-__device__ model_policy::BoundedValue policy_int64_float_bound(int64_t value) {
-    const uint64_t magnitude=value<0 ? uint64_t(-(value+1))+1 : uint64_t(value);
-    const auto bound=policy_uint64_float_bound(magnitude);
-    return value<0 ? model_policy::bounded_negate(bound) : bound;
+__device__ model_policy::BoundedValue policy_double_float_bound(double value) {
+    const auto error=policy_round_error(double(__double2float_rd(value)),
+        double(__double2float_ru(value)),0x1p-24,0x1p-126,0x1p-150);
+    return {__double2float_rn(value),error,fabs(value)};
 }
 __device__ model_policy::BoundedValue policy_float_divide(
         model_policy::BoundedValue a,model_policy::BoundedValue b,double ideal_denominator_minimum) {
@@ -1207,12 +1203,12 @@ __device__ void retain_policy_cell(const PolicyDescriptor& policy,const Componen
 static_assert(sizeof(U192)==24,"integer ABI");
 static_assert(sizeof(Receipt)==296,"receipt ABI");
 static_assert(sizeof(Work)==24,"semantic work ABI");
-static_assert(sizeof(TaskFacts)==40,"task facts ABI");
-static_assert(sizeof(TaskEvaluation)==160,"task evaluation ABI");
+static_assert(sizeof(TaskFacts)==48,"task facts ABI");
+static_assert(sizeof(TaskEvaluation)==184,"task evaluation ABI");
 static_assert(sizeof(PolicyPwlCell)==160,"policy PWL cell ABI");
 static_assert(sizeof(PolicySelectedScoreVjp)==96,"selected-score VJP ABI");
 static_assert(sizeof(ActionBatchReceipt)==504,"action batch receipt ABI");
-static_assert(sizeof(State)==4400,"state ABI");
+static_assert(sizeof(State)==4424,"state ABI");
 static_assert(sizeof(PolicyField)==32,"policy field ABI");
 static_assert(sizeof(PolicyNumericalDescriptor)==96 && sizeof(PolicyDescriptor)==776,"policy ABI");
 static_assert(sizeof(SemanticTrainingViewOriginRecord)==256,"training view origin ABI");
@@ -1291,7 +1287,7 @@ static_assert(sizeof(PublicationStorageEntry)==24,"owned storage ABI");
 static_assert(sizeof(PublicationRange)==64,"publication range ABI");
 static_assert(sizeof(PublicationHeader)==424,"publication header ABI");
 static_assert(sizeof(PublicationControl)==144,"publication control ABI");
-static_assert(sizeof(PublicationBank)==47128,"publication bank ABI");
+static_assert(sizeof(PublicationBank)==47152,"publication bank ABI");
 static_assert(sizeof(ModelContractLayout)==40,"model contract byte layout ABI");
 static_assert(sizeof(PublicationContract)==416,"publication contract ABI");
 static_assert(sizeof(PendingContinuation)==360 && alignof(PendingContinuation)==8 &&
@@ -3206,7 +3202,7 @@ struct PublicationSemanticReceiptBytes {
 __device__ uint64_t publication_seal_action_batch(const PublicationControl& control,
         const PublicationBank& base,const PublicationBank& bank,State& state,
         semantic_graph::NativeWorkTally* work=nullptr,const ExecutionWork* completed_work=nullptr) {
-    ActionBatchReceipt receipt{};receipt.abi=1;receipt.proposal=state.proposal;
+    ActionBatchReceipt receipt{};receipt.abi=ACTION_BATCH_ABI;receipt.proposal=state.proposal;
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
         sizeof(receipt)+16*sizeof(uint64_t)+32);
     receipt.stream_serial=state.stream_serial;receipt.family_id=state.family_id;
@@ -3214,7 +3210,7 @@ __device__ uint64_t publication_seal_action_batch(const PublicationControl& cont
     receipt.model_generation=state.model_generation;receipt.actor_eligible=state.actor_eligible;
     receipt.component_count=COMPONENT_COUNT;receipt.candidate_count=3;
     receipt.winner=state.task_evaluation.winner;
-    receipt.total_return_bits=uint64_t(state.task_evaluation.return_value);
+    receipt.total_return_bits=__double_as_longlong(state.task_evaluation.return_value);
     receipt.base_word=base.header.publication_word;receipt.next_word=bank.header.publication_word;
     receipt.rng_base=state.proposal*COMPONENT_COUNT;receipt.rng_span=COMPONENT_COUNT;
     receipt.rng_successor=bank.header.proposal*COMPONENT_COUNT;
@@ -4223,7 +4219,9 @@ __device__ void task_cost(State* state,uint32_t slot,const semantic_task_ground:
         const auto& work=state->work[slot-1];
         facts.c=work.edit_commands+work.added_supports+work.defined_truth_changes;
     }
-    facts.v=int64_t(task.scoring[0]*facts.g+task.scoring[1]*facts.p)-int64_t(task.scoring[2]*facts.c);
+    facts.v=__dsub_rn(__dadd_rn(__dmul_rn(__ull2double_rn(task.scoring[0]),facts.g),
+        __dmul_rn(__ull2double_rn(task.scoring[1]),facts.p)),
+        __dmul_rn(__ull2double_rn(task.scoring[2]),__ull2double_rn(facts.c)));
 }
 
 __device__ bool selected_task_cost_matches(const State* state,uint64_t cap,
@@ -4265,9 +4263,17 @@ __device__ bool task_queries(const Descriptor& d,const uint64_t* task,uint32_t s
         hard &= output->words[2]<=3 && (row[6] & (uint64_t(1)<<output->words[2]))!=0;
         record.truth=output->words[2];
         record.attained=output->words[0]==semantic_graph::kOk && record.truth==row[5];
+        record.kind=0;
+        for(uint32_t truth=0;truth<4;++truth)
+            record.masses_bits[truth]=__double_as_longlong(double(record.truth==truth));
+        record.attainment_bits=__double_as_longlong(double(record.attained));
+        semantic_graph::NativeWorkTally observation_work{};
+        semantic_graph::charge_native(&observation_work,semantic_graph::NativeWorkEvent::CanonicalByte,8*8);
+        execution_work_merge_native(state->execution_work,observation_work);
         facts.g+=record.attained;
     }
     facts.p=facts.g==view.queries;
+    facts.complete=facts.p==1.0;
     facts.eligible=valid && hard;
     task_cost(state,slot,view);
     return valid;
@@ -4644,6 +4650,7 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
     auto& facts=state->task_evaluation.facts[slot];
     facts.g=0;facts.p=0;
     bool hard=true;
+    uint32_t forbidden=0;
     for(uint32_t query=0;query<view.queries;++query) {
         const auto query_fact=semantic_program::bank_fact(bank.program,query);
         const uint32_t fact_index=semantic_program::find_fact(output,closure.fact_count,query_fact,&inspected_supports,UINT64_MAX);
@@ -4651,12 +4658,15 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         const uint32_t contra=fact_index==closure.fact_count ? 0 : uint32_t(world.read(support.events,uint64_t(fact_index)*2+1));
         // Materialization retains every possible support for joint evaluation.
         // Assignment consumers observe only the original authored assignment.
-        const uint64_t truth=world.query_kind(query)==0 ?
+        const uint32_t query_kind=world.query_kind(query);
+        const uint64_t truth=query_kind==0 ?
             uint64_t(world.assignment(pro))|(uint64_t(world.assignment(contra))<<1) :
-            fact_index==closure.fact_count ? 0 : support.truth[fact_index];
+            UINT64_MAX;
         for(uint32_t outcome=0;outcome<4;++outcome) {
             const uint32_t event=world.query_event(query,pro,contra,outcome);
             if(!world.charge())return measure_failure();world.query_roots[uint64_t(query)*4+outcome]=event;
+            if(query_kind==1 && !(view.query(query)[6] & (uint64_t(1)<<outcome)))
+                forbidden=world.unite(forbidden,event);
         }
         if(!world.charge())return measure_failure();
         world.attainment_roots[query]=view.coding ? 0 : world.support_outcome(pro,contra,uint32_t(view.query(query)[5]));
@@ -4683,8 +4693,10 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         receipt->words[22]=image.header[2];
         semantic_graph::copy_identity(receipt->words+23,plane.snapshot+18,&work);
         semantic_graph::copy_identity(receipt->words+27,plane.snapshot+5,&work);
-        receipt->words[31]=fact_index==closure.fact_count || !support.leaf_refs ? 0 : support.leaf_refs[uint64_t(fact_index)*2];
-        receipt->words[32]=fact_index==closure.fact_count || !support.leaf_refs ? 0 : support.leaf_refs[uint64_t(fact_index)*2+1];
+        receipt->words[31]=fact_index==closure.fact_count || !support.leaf_refs || (query_kind==0 && !(truth&1)) ?
+            0 : support.leaf_refs[uint64_t(fact_index)*2];
+        receipt->words[32]=fact_index==closure.fact_count || !support.leaf_refs || (query_kind==0 && !(truth&2)) ?
+            0 : support.leaf_refs[uint64_t(fact_index)*2+1];
         receipt->words[33]=view.query(query)[4];
         receipt->words[34]=query_fact.predicate;
         receipt->words[35]=query_fact.first;
@@ -4695,12 +4707,12 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         receipt->words[40]=bank.program.rule_count+plane.images[slot].header[4];
         receipt->words[41]=added_supports;
         semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::CanonicalByte,
-            sizeof(semantic_graph::Receipt));
+            sizeof(semantic_graph::Receipt)+3*8);
         ++state->task_evaluation.query_count;
-        hard&=(view.query(query)[6] & (uint64_t(1)<<truth))!=0;
+        if(query_kind==0)hard&=(view.query(query)[6] & (uint64_t(1)<<truth))!=0;
+        record.kind=query_kind;
         record.truth=truth;
-        record.attained=view.coding ? 0 : truth==view.query(query)[5];
-        if(!view.coding)facts.g+=record.attained;
+        record.attained=query_kind==1 ? UINT64_MAX : view.coding ? 0 : truth==view.query(query)[5];
     }
     if(view.coding)for(uint32_t rank=0;rank<view.queries;++rank) {
         const uint32_t query=uint32_t(view.attainment_order[rank]);
@@ -4714,9 +4726,8 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
                output[fact_index].first==query_fact.first &&
                (query_fact.arity==1 || output[fact_index].second==query_fact.second))break;
         }
-        uint64_t inspected=0;
-        record.attained=semantic_task_ground::attained(view,plane,slot,query,record.truth,
-            fact_index,closure.fact_count,support,&inspected);
+        // The shared event below owns attainment for both query kinds. A
+        // Measure observation has no point completion witness.
         uint64_t target=0;
         const uint32_t pro=fact_index==closure.fact_count ? 0 : uint32_t(world.read(support.events,uint64_t(fact_index)*2));
         const uint32_t contra=fact_index==closure.fact_count ? 0 : uint32_t(world.read(support.events,uint64_t(fact_index)*2+1));
@@ -4741,18 +4752,15 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
             record.attained=uint64_t(world.assignment(event));
             if(world.status!=semantic_world::MeasureStatus::Ok)return measure_failure();
         }
-        semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,inspected);
-        facts.g+=record.attained;
     }
     semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,inspected_supports);
     if(slot) {
         auto& lane_work=state->work[slot-1];
         lane_work.added_supports=added_supports;
         for(uint32_t query=0;query<view.queries;++query)
-            lane_work.defined_truth_changes+=plane.query(slot,query).truth!=plane.query(0,query).truth;
+            lane_work.defined_truth_changes+=plane.query(slot,query).kind==0 &&
+                plane.query(slot,query).truth!=plane.query(0,query).truth;
     }
-    facts.p=view.coding ? view.goal_count && facts.g==view.goal_count : facts.g==view.queries;
-    facts.eligible=hard;
     task_cost(state,slot,view);
     uint32_t joint=view.coding && !view.goal_count ? 0 : world.has_measure ? world.condition : world.view_condition;
     for(uint32_t query=0;query<view.queries;++query) {
@@ -4764,8 +4772,23 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         if(view.coding && !view.target(query,&target))continue;
         joint=world.intersection(joint,kind==1 ? event : uint32_t(world.assignment(event)));
     }
-    if(!world.finish_results(slot,joint,double(view.scoring[0]),double(view.scoring[1]),double(view.scoring[2])*double(facts.c)))
+    if(!world.finish_results(slot,joint,forbidden,__ull2double_rn(view.scoring[0]),
+            __ull2double_rn(view.scoring[1]),
+            __dmul_rn(__ull2double_rn(view.scoring[2]),__ull2double_rn(facts.c)),
+            [&](uint32_t query,const double* masses,double attained) {
+                auto& record=plane.query(slot,query);
+                for(uint32_t outcome=0;outcome<4;++outcome)
+                    record.masses_bits[outcome]=__double_as_longlong(masses[outcome]);
+                record.attainment_bits=__double_as_longlong(attained);
+                semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::CanonicalByte,5*8);
+            }))
         return measure_failure();
+    if(!world.charge(3))return measure_failure();
+    facts.g=__longlong_as_double(world.header[14+slot]);
+    facts.p=__longlong_as_double(world.header[17+slot]);
+    facts.v=__longlong_as_double(world.header[20+slot]);
+    facts.complete=world.complete;
+    facts.eligible=hard && world.hard;
     measure_work.finish();
     if(state->execution_work.overflow)return TaskProgramQueryOutcome::Failure;
     return TaskProgramQueryOutcome::Ok;
@@ -4940,7 +4963,7 @@ __device__ bool task_candidate_better(const semantic_task_ground::Task& task,
         const TaskFacts& candidate,const TaskFacts& incumbent) {
     uint64_t goal_offset=0;
     for(uint64_t level=0;level<task.level_count;++level) {
-        int64_t candidate_score=0,incumbent_score=0;
+        double candidate_score=0.0,incumbent_score=0.0;
         for(uint64_t i=0;i<task.levels[level];++i) {
             const uint64_t* goal=task.goals+(goal_offset+i)*3;
             const uint32_t query=uint32_t(goal[0]);
@@ -4948,9 +4971,12 @@ __device__ bool task_candidate_better(const semantic_task_ground::Task& task,
             const auto& base=plane.query(0,query);
             const auto& current=plane.query(candidate_index,query);
             const auto& previous=plane.query(incumbent_index,query);
-            const int64_t base_value=task.coding ? base.attained : base.truth==target;
-            candidate_score+=int64_t(goal[2])*(int64_t(task.coding ? current.attained : current.truth==target)-base_value);
-            incumbent_score+=int64_t(goal[2])*(int64_t(task.coding ? previous.attained : previous.truth==target)-base_value);
+            const double base_value=__longlong_as_double(task.coding ? base.attainment_bits : base.masses_bits[target]);
+            const double current_value=__longlong_as_double(task.coding ? current.attainment_bits : current.masses_bits[target]);
+            const double previous_value=__longlong_as_double(task.coding ? previous.attainment_bits : previous.masses_bits[target]);
+            const double weight=__ull2double_rn(goal[2]);
+            candidate_score=__dadd_rn(candidate_score,__dmul_rn(weight,__dsub_rn(current_value,base_value)));
+            incumbent_score=__dadd_rn(incumbent_score,__dmul_rn(weight,__dsub_rn(previous_value,base_value)));
         }
         if(candidate_score!=incumbent_score)return candidate_score>incumbent_score;
         goal_offset+=task.levels[level];
@@ -4975,9 +5001,11 @@ __device__ bool select_task(const Descriptor& descriptor,State* state,const sema
         if(lane+1!=winner)spent+=state->work[lane].edit_commands+state->work[lane].defined_truth_changes;
     }
     evaluation.winner=winner;
-    evaluation.return_value=int64_t(task.scoring[3])*(evaluation.facts[winner].v-evaluation.facts[0].v)
-        -int64_t(task.scoring[4])*int64_t(refusals)-int64_t(task.scoring[5])*int64_t(spent);
-    return true;
+    evaluation.return_value=__dsub_rn(__dsub_rn(__dmul_rn(__ull2double_rn(task.scoring[3]),
+        __dsub_rn(evaluation.facts[winner].v,evaluation.facts[0].v)),
+        __dmul_rn(__ull2double_rn(task.scoring[4]),__ull2double_rn(refusals))),
+        __dmul_rn(__ull2double_rn(task.scoring[5]),__ull2double_rn(spent)));
+    return isfinite(evaluation.return_value);
 }
 // Zero means both original operations published, one is an authenticated
 // reached refusal, and two is inconsistent original operation custody.
@@ -5376,7 +5404,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                             if(actual[word]!=original[word])*status=1;
                         }
                         const auto& batch=state->action_batch;
-                        if(b.mode==4 && (batch.abi!=1 || batch.actor_eligible!=1 || batch.model_generation!=proof->acquired_generation ||
+                        if(b.mode==4 && (batch.abi!=ACTION_BATCH_ABI || batch.actor_eligible!=1 || batch.model_generation!=proof->acquired_generation ||
                            batch.stream_serial!=proof->stream_serial || batch.family_id!=proof->family_id ||
                            batch.proposal!=proof->proposal || batch.base_word!=3 || batch.next_word!=4 ||
                            batch.rng_base!=COMPONENT_COUNT*proof->proposal || batch.rng_span!=COMPONENT_COUNT ||
@@ -5415,8 +5443,8 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
                        !selected_task_cost_matches(state,objective.cost_cap,backward_program_bank)) {
                         *status=1;
                     } else {
-                        bounded_reward=policy_int64_bound((int64_t)state->task_evaluation.return_value);
-                        bounded_reward_f32=policy_int64_float_bound((int64_t)state->task_evaluation.return_value);
+                        bounded_reward=policy_exact_scalar(state->task_evaluation.return_value);
+                        bounded_reward_f32=policy_double_float_bound(state->task_evaluation.return_value);
                         reward=bounded_reward.value;
                         reward_f32=bounded_reward_f32.value;
                         if(reward<evaluator_min || reward>evaluator_max || !isfinite(reward))*status=1;
@@ -5920,7 +5948,7 @@ __device__ uint64_t publication_write_attempt(const PublicationControl& control,
         uint64_t root[4];
         semantic_graph::sha256(reinterpret_cast<const uint8_t*>(&bank.state.action_batch),
             sizeof(bank.state.action_batch),root,work);
-        if(bank.state.action_batch.abi!=1 || bank.state.action_batch.component_count!=COMPONENT_COUNT ||
+        if(bank.state.action_batch.abi!=ACTION_BATCH_ABI || bank.state.action_batch.component_count!=COMPONENT_COUNT ||
            !publication_identity_equal(root,bank.state.action_batch_root,work))return 1;
         semantic_graph::copy_identity(attempt->action_receipts_digest,root,work);
     }
@@ -7539,13 +7567,15 @@ __device__ bool task_ground_accept_image(const Descriptor& descriptor,const Task
     const uint64_t first=plane.images[3].header[3];
     if(first>selected.header[3])return false;
     const auto& facts=state->task_evaluation.facts[winner];
-    const uint64_t fitness[5]={facts.g,facts.p,facts.c,facts.v,facts.eligible};
+    const uint64_t fitness[5]={uint64_t(__double_as_longlong(facts.g)),
+        uint64_t(__double_as_longlong(facts.p)),facts.c,
+        uint64_t(__double_as_longlong(facts.v)),facts.eligible};
     for(uint64_t index=first;index<selected.header[3];++index) {
         auto* row=selected.history(uint32_t(index));
         semantic_graph::sha256(reinterpret_cast<const uint8_t*>(fitness),sizeof(fitness),row+38,&work);
         row[42]=semantic_graph::written_word(state->proposal+1,&work);
     }
-    selected.header[32]=semantic_graph::written_word(facts.g,&work);
+    selected.header[32]=semantic_graph::written_word(__double_as_longlong(facts.g),&work);
     selected.header[33]=semantic_graph::written_word(state->proposal+1,&work);
     publication_copy_bytes(reinterpret_cast<uint8_t*>(plane.images[0].header),
         reinterpret_cast<const uint8_t*>(selected.header),plane.image_geometry.frame_bytes,&work);
