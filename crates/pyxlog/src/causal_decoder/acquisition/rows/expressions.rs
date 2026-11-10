@@ -10,6 +10,9 @@ pub(crate) struct Parent {
     pub definition_index: usize,
     pub tag_prefix: Vec<u8>,
     pub function_prefix: Option<Vec<u8>>,
+    pub selected: serde_json::Map<String, Value>,
+    pub operand: Option<typed::Operand>,
+    pub projected: bool,
 }
 
 pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>) {
@@ -89,6 +92,8 @@ impl Reader<'_> {
         self.output.extend_from_slice(&operation.bytes)?;
         if complete {
             self.expression_operations += 1;
+        } else if self.ancestor_typing {
+            self.expression_parents.last_mut().unwrap().projected = true;
         }
         Ok(start)
     }
@@ -159,6 +164,9 @@ impl Reader<'_> {
                 definition_index: self.definition_index,
                 tag_prefix: Vec::new(),
                 function_prefix: None,
+                selected: serde_json::Map::new(),
+                operand: None,
+                projected: false,
             });
         }
         self.budget.set(frame, || vec![budget::text(",]")]);
@@ -171,6 +179,11 @@ impl Reader<'_> {
             self.expression_parents[parent].tag_prefix = operation.bytes[tag_start..].to_vec();
         }
         let tag = tag?;
+        if self.ancestor_typing {
+            self.expression_parents[parent]
+                .selected
+                .insert("operation".into(), json!(tag));
+        }
         let fields = self
             .fields
             .get(&tag)
@@ -197,13 +210,23 @@ impl Reader<'_> {
             self.expression_bytes(&mut operation, b":")?;
             self.budget.set(frame, following);
             if is_value_reference(field) {
+                if self.ancestor_typing {
+                    self.expression_parents[parent].operand =
+                        Some(typed::Operand::Value(field.clone()));
+                }
                 let id = self.expression()?;
+                if self.ancestor_typing {
+                    self.expression_parents[parent].operand = None;
+                    self.expression_parents[parent]
+                        .selected
+                        .insert(field.clone(), json!(id));
+                }
                 if field == "input" {
                     input = Some(id);
                 }
                 self.expression_json(&mut operation, &id)?;
             } else if field == "arguments" {
-                let arguments = self.expression_arguments()?;
+                let arguments = self.expression_arguments(parent)?;
                 self.expression_json(&mut operation, &arguments)?;
             } else {
                 let project_partial = !fields
@@ -222,21 +245,38 @@ impl Reader<'_> {
                         self.expression_parents[parent].function_prefix =
                             Some(operation.bytes[start..].to_vec());
                     }
-                    function?;
+                    let function = function?;
+                    if self.ancestor_typing {
+                        self.expression_parents[parent]
+                            .selected
+                            .insert(field.clone(), json!(function));
+                    }
                 } else {
                     let index = self.expression_operations;
-                    self.expression_scalar(
+                    let value = self.expression_scalar(
                         &mut operation,
                         project_partial,
                         budget::expression_field(field),
                         |reader| {
                             if field == "indices" && reader.peek()? == b'{' {
-                                reader.structured_indices(index, input.unwrap())
+                                reader
+                                    .structured_indices(index, input.unwrap())
+                                    .map(|_| None)
                             } else {
-                                reader.value::<Value>().map(|_| ())
+                                reader.value::<Value>().map(Some)
                             }
                         },
                     )?;
+                    // A number at EOF may still extend. NumberChoice, rather
+                    // than this snapshot, owns its prospective decimal domain.
+                    if let Some(value) = value.filter(|value| {
+                        self.ancestor_typing
+                            && (!value.is_number() || self.offset < self.source.len())
+                    }) {
+                        self.expression_parents[parent]
+                            .selected
+                            .insert(field.clone(), value);
+                    }
                 }
             }
         }
@@ -259,14 +299,29 @@ impl Reader<'_> {
         Ok(id)
     }
 
-    fn expression_arguments(&mut self) -> Result<Vec<usize>, Stop> {
+    fn expression_arguments(&mut self, parent: usize) -> Result<Vec<usize>, Stop> {
         let frame = self.budget.enter();
         self.budget.set(frame, || vec![budget::text("]")]);
         self.take(b'[')?;
         let mut arguments = Vec::new();
+        if self.ancestor_typing {
+            self.expression_parents[parent]
+                .selected
+                .insert("arguments".into(), json!([]));
+        }
         if self.peek()? != b']' {
             loop {
+                if self.ancestor_typing {
+                    self.expression_parents[parent].operand =
+                        Some(typed::Operand::Argument(arguments.len()));
+                }
                 arguments.push(self.expression()?);
+                if self.ancestor_typing {
+                    self.expression_parents[parent].operand = None;
+                    self.expression_parents[parent]
+                        .selected
+                        .insert("arguments".into(), json!(arguments));
+                }
                 if self.peek()? != b',' {
                     break;
                 }

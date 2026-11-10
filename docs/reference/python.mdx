@@ -1002,7 +1002,7 @@ checkpoints, so prefix reuse still checks those facts in the current definition
 scope together with the fresh actual-ID suffix bound. All tree/node/byte/scalar
 limits, postorder lowering, initialization and execution remain unchanged.
 
-This early prerequisite mode belongs only to version26. Packets through version25
+Version26 adds this early prerequisite mode; version27 inherits it. Packets through version25
 retain their literal schema, masks, prefix completion, costs and restoration,
 including failed-attempt prefixes. Complete source decoding and
 `fork_acquired(..., source_encoding="numerical-expressions-v1")` retain the same
@@ -1010,7 +1010,28 @@ canonical admission and semantics for legal complete definitions. Nonempty known
 domains do not prove a complete tree, original-ID fit, semantic nonconstancy or
 usefulness; actual production qualification remains required.
 
-For a version4 through version26 packet,
+Version27 (`xlog-contextual-acquisition-v27`) additionally checks prospective child
+operations against source-selected ancestors before committing partial or escaped
+tags and scalar/index decimal prefixes. The same bounded reader carries each
+selected tag, scalar, closed child operand and exact active child slot. Canonical
+prospective operation admission and push/rollback infer shapes at one and maximum
+context length. The chain proceeds only while every other child of an ancestor
+and its required scalar/array fields are known. At an unknown field it stops
+optimistically; no preceding value,
+default operand or invented shape fills that hole. If the known chain reaches the
+root, the current helper or entry definition's existing output shape, usage and
+dependency contract applies.
+
+Ancestor checks run freshly before generic completion-cache answers, including
+after parsed-prefix reuse and within retained-symbol and structured-index domains.
+They neither emit operations nor charge already-open parents as additional source
+nodes. Version27 keeps the exact four-field packet, context2, expression encoding
+and V2 actual-ID suffix bound. Packets through version26 retain their literal
+schemas, masks, prefix completion, costs and restore behavior. Complete decoding,
+initialization, execution and gradients are unchanged. These local constraints do
+not prove whole-tree completion, original-ID fit, nonconstancy or usefulness.
+
+For a version4 through version27 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1033,7 +1054,7 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
-For versions25–26, `last_value` can describe a completed child while its parent
+For versions25–27, `last_value` can describe a completed child while its parent
 expression remains unfinished; it becomes the root only after that node closes.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the

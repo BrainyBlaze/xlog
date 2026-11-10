@@ -458,33 +458,20 @@ impl Search<'_> {
             }
             return result;
         }
-        let count = program.body.operations.len();
         let mut next = BTreeMap::new();
         for operation in self.operations(&program, &values) {
-            if program.push(operation, self.signatures).is_ok() {
+            program.with_trial(operation, self.signatures, |program| {
                 let id = program.body.operations.len() - 1;
                 let reads = program.body.value_argument_dependencies();
-                let value = value_key(&program, id, reads[id]);
+                let value = value_key(program, id, reads[id]);
                 if value.has_single_row_at_one_token()
                     && !values.iter().any(|(_, available)| available.covers(&value))
                 {
                     next.entry(value)
                         .or_insert_with(|| program.body.operations[id].clone());
                 }
-            }
-            // Push can fail after appending the operation but before appending
-            // its facts. Restore every stack before the next trial, then keep
-            // only the representative operation rather than a cloned prefix.
-            program.body.operations.truncate(count);
-            for shapes in &mut program.shapes {
-                shapes.truncate(count);
-            }
-            program
-                .dependencies
-                .as_mut()
-                .unwrap()
-                .values
-                .truncate(count);
+                true
+            });
         }
         let required = program.entry_requirements.as_ref().unwrap();
         let mut next = next.into_iter().collect::<Vec<_>>();
