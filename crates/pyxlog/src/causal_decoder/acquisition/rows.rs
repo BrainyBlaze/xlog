@@ -265,6 +265,7 @@ pub(super) fn prefix<'a>(
     parent_prerequisites: bool,
     ancestor_typing: bool,
     track_token_budget: bool,
+    collection_choices: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -302,7 +303,13 @@ pub(super) fn prefix<'a>(
         indices: Vec::new(),
         pending_indices: None,
         pending_retained: None,
-        budget: budget::State::new(track_token_budget, fields, self_delimited, expressions),
+        budget: budget::State::new(
+            track_token_budget,
+            fields,
+            self_delimited,
+            expressions,
+            collection_choices,
+        ),
     };
     let complete = match reader.document() {
         Ok(()) => {
@@ -381,6 +388,7 @@ pub(super) fn definitions(
         named_body,
         expressions,
         value_references,
+        false,
         false,
         false,
         false,

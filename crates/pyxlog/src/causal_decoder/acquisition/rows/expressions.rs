@@ -196,7 +196,15 @@ impl Reader<'_> {
                 projected: false,
             });
         }
-        self.budget.set(frame, || vec![budget::text(",]")]);
+        let collection_choices = self.budget.collection_choices;
+        self.budget.set(frame, || {
+            let fallback = vec![budget::text(",]")];
+            if collection_choices {
+                vec![budget::tail(parent, 1, true, fallback)]
+            } else {
+                fallback
+            }
+        });
         let tag = self.expression_scalar(&mut operation, false, budget::text("\"\""), |reader| {
             reader.value::<String>()
         });
@@ -217,18 +225,27 @@ impl Reader<'_> {
             .ok_or_else(|| Stop::Invalid("unknown numerical operation tag".into()))?;
         let mut input = None;
         let value_references = self.value_references;
+        let collection_parent = collection_choices.then_some(parent);
         for (position, field) in fields.iter().enumerate().skip(1) {
             let following = || {
                 let mut units = Vec::new();
                 for field in fields.iter().skip(position + 1) {
                     units.push(budget::text(","));
-                    units.push(budget::expression_field(field, value_references));
+                    units.push(budget::expression_field(field, value_references, None));
                 }
                 units.push(budget::text("]"));
-                units
+                if collection_choices {
+                    vec![budget::tail(parent, position + 1, true, units)]
+                } else {
+                    units
+                }
             };
             self.budget.set(frame, || {
-                let mut units = vec![budget::expression_field(field, value_references)];
+                let mut units = vec![budget::expression_field(
+                    field,
+                    value_references,
+                    collection_parent,
+                )];
                 units.extend(following());
                 units
             });
@@ -266,7 +283,7 @@ impl Reader<'_> {
                     let function = self.expression_scalar(
                         &mut operation,
                         project_partial,
-                        budget::expression_field(field, self.value_references),
+                        budget::expression_field(field, self.value_references, collection_parent),
                         |reader| reader.symbol(true),
                     );
                     if self.parent_prerequisites {
@@ -284,7 +301,7 @@ impl Reader<'_> {
                     let value = self.expression_scalar(
                         &mut operation,
                         project_partial,
-                        budget::expression_field(field, self.value_references),
+                        budget::expression_field(field, self.value_references, collection_parent),
                         |reader| {
                             if field == "indices" && reader.peek()? == b'{' {
                                 reader
