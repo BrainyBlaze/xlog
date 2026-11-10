@@ -56,6 +56,7 @@ const EXPRESSION_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v29";
 const EXPRESSION_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v30";
 const VALUE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v31";
 const TYPED_COLLECTION_LANGUAGE: &str = "xlog-contextual-acquisition-v32";
+const COLLECTION_CHOICE_LANGUAGE: &str = "xlog-contextual-acquisition-v33";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -84,7 +85,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=32) {
+    if !matches!(version, 1..=33) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -336,6 +337,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 33 {
+                schema["description"] = json!(format!(
+                    "{} Future numeric collection fields also reserve their literal-or-descriptor alternatives through the same complete ordered suffix. The shared tag-prefix/domain matcher applies these obligations once a tag is uniquely known, even before its closing quote, separator or child commitment. Each parent uses its own selected fields and the canonical partial shape continuation at both lengths; ambiguous domains and unknown relations retain optimistic bounds. Branch frontiers preserve token spellings crossing field and ancestor boundaries, with a single paid EOS. Selected forms keep their existing cursor and descriptor owners without double charging. This finite structural relaxation selects no source or graph and does not prove grammar-coupled fit or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -421,6 +428,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                33 => COLLECTION_CHOICE_LANGUAGE,
                 32 => TYPED_COLLECTION_LANGUAGE,
                 31 => VALUE_DEPENDENCY_LANGUAGE,
                 30 => EXPRESSION_REFERENCE_LANGUAGE,
@@ -455,7 +463,9 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: if version >= 32 {
+            token_cost_contract: if version >= 33 {
+                Some(rows::budget::COLLECTION_CHOICE_CONTRACT)
+            } else if version >= 32 {
                 Some(rows::budget::COLLECTION_CONTRACT)
             } else if version >= 30 {
                 Some(rows::budget::REFERENCE_CONTRACT)
@@ -581,6 +591,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     expression_node_obligations: bool,
     value_references: bool,
     typed_collections: bool,
+    collection_choices: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -606,7 +617,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE;
+        let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE;
+        let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
         let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE || typed_collections;
         let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities;
         let expression_node_obligations =
@@ -635,7 +647,9 @@ impl PyNativeAcquisitionMask {
         let self_delimited =
             language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        let cost_contract = if typed_collections {
+        let cost_contract = if collection_choices {
+            rows::budget::COLLECTION_CHOICE_CONTRACT
+        } else if typed_collections {
             rows::budget::COLLECTION_CONTRACT
         } else if value_references {
             rows::budget::REFERENCE_CONTRACT
@@ -835,6 +849,7 @@ impl PyNativeAcquisitionMask {
             expression_node_obligations,
             value_references,
             typed_collections,
+            collection_choices,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -1176,6 +1191,7 @@ impl PyNativeAcquisitionMask {
                 self.parent_prerequisites,
                 self.ancestor_typing,
                 self.token_budget.is_some(),
+                self.collection_choices,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -1808,11 +1824,92 @@ impl Resources<'_> {
         if self.self_delimited && !bound.permits_unplaced_rows(self.unplaced_producer_rows()) {
             return false;
         }
-        bound.permits_collection(
+        bound.permits_fields(
             count,
             self.token_obligations(bound.state),
             self.pending_collection.get(),
+            |unit| {
+                bound
+                    .state
+                    .collection_choices
+                    .then(|| self.token_field_sections(unit))
+                    .flatten()
+            },
         )
+    }
+
+    fn token_field_sections(
+        &self,
+        unit: &rows::budget::Unit,
+    ) -> Option<Vec<rows::budget::Section>> {
+        use rows::budget::{Section, Unit};
+        let index = match unit {
+            Unit::Field { parent, .. } | Unit::Tail { parent, .. } => *parent,
+            _ => return None,
+        };
+        let (parents, _) = self.source_expression?;
+        let parent = parents.get(index)?;
+        let mut candidates = self
+            .operation_fields
+            .unwrap()
+            .iter()
+            .filter(|(name, fields)| {
+                operation_prefix(&parent.tag_prefix, name)
+                    && self.expression_parent_domains(parent, fields)
+            });
+        let (name, required) = candidates.next()?;
+        // Unselected catalogue alternatives keep the previous optimistic
+        // suffix. A unique domain applies before the tag's closing quote too.
+        if candidates.next().is_some() {
+            return None;
+        }
+        let mut material = parent.selected.clone();
+        material.insert("operation".into(), json!(name));
+        let continuation = self.expression_ancestors_continuation(&parents[..index]);
+        let continuation = continuation.borrow(self.operation_fields.unwrap());
+        let field = |name: &str| {
+            if matches!(name, "indices" | "token_ids") {
+                return match self.program.typed.as_ref().unwrap().array_minimum(
+                    &material,
+                    name,
+                    Some(continuation),
+                ) {
+                    Ok(minimum) => Section::collection(
+                        minimum,
+                        name == "indices",
+                        self.token_budget.unwrap().atom_capacity(),
+                    ),
+                    Err(_) => Section {
+                        alternatives: Vec::new(),
+                    },
+                };
+            }
+            let Unit::Bytes(atoms) =
+                rows::budget::expression_field(name, self.value_references, None)
+            else {
+                unreachable!()
+            };
+            Section::one(atoms)
+        };
+        match unit {
+            Unit::Field { name, .. } => Some(vec![field(name)]),
+            Unit::Tail {
+                first,
+                leading_comma,
+                ..
+            } => {
+                let mut sections = Vec::new();
+                for (position, name) in required.iter().enumerate().skip(*first) {
+                    if *leading_comma || position != *first {
+                        sections.push(Section::text(","));
+                    }
+                    sections.push(field(name));
+                }
+                sections.push(Section::text("]"));
+                Some(sections)
+            }
+            _ => None,
+        }
     }
 
     fn token_obligations(&self, state: &rows::budget::State) -> rows::budget::Obligations {
