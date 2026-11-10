@@ -59,23 +59,29 @@ pub(crate) fn field(name: &str) -> Unit {
     })
 }
 
-pub(crate) fn entry(self_delimited: bool) -> Vec<Unit> {
+pub(crate) fn entry(self_delimited: bool, named_body: bool) -> Vec<Unit> {
     let mut units = vec![text(",\"entry\":")];
-    units.extend(entry_body(self_delimited));
+    units.extend(entry_body(self_delimited, named_body));
     units.push(text("}"));
     units
 }
 
-pub(crate) fn entry_body(self_delimited: bool) -> Vec<Unit> {
+pub(crate) fn entry_body(self_delimited: bool, named_body: bool) -> Vec<Unit> {
     vec![
-        text("[["),
+        text(if named_body { "{\"weights\":[" } else { "[[" }),
         Unit::Parameters {
             active: false,
             leading_comma: false,
         },
-        text(if self_delimited { "],[" } else { "],1,[" }),
+        text(if named_body {
+            "],\"ops\":["
+        } else if self_delimited {
+            "],["
+        } else {
+            "],1,["
+        }),
         rows(usize::MAX, None, 0, false),
-        text("]]"),
+        text(if named_body { "]}" } else { "]]" }),
     ]
 }
 

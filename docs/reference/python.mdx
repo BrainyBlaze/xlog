@@ -889,7 +889,45 @@ four fields, the same `ordered-structural-subsequence-v1` cost contract and the
 same positive `remaining_tokens` API. Packets1–22 keep their literal masks and
 source interpretation.
 
-For a version4 through version23 packet,
+Version24 (`xlog-contextual-acquisition-v24`) selects `numerical-rows-v7` to
+distinguish physical storage from computation by named body fields. Root order
+remains `intent`, `helpers`, `entry`. Entry is an object with exactly the ordered
+keys `weights`, `ops`. Each helper is `[local_name, signature, body]`, where
+`body` has those same two keys. `weights` is the previous physical FP32 storage
+table and may be empty; `ops` is the previous nonempty operation-row table. Its
+last actual row is the result, with no selected count or output field.
+
+Operations are built in and need no registration. Storage names are opaque:
+an alias equal to an operation tag remains legal and does not acquire that
+operation's behavior. Weight declarations do not supply input values; numeric
+inputs still come from the signature through `argument`. Signature tuples,
+local and retained references, physical shapes and shared aliases, operation
+tags and operands, and Gather index descriptors retain their existing domains.
+No graph, alias, operand or initializer is selected by this representation.
+
+The same rows reader elaborates original bytes for prefix admission,
+`decode_definition`, and
+`fork_acquired(..., source_encoding="numerical-rows-v7")`. There is no graph
+reconstruction in Python. Canonical definitions, physical initialization,
+execution and VJP retain their owners. Closing a body still checks its actual
+last row at both context lengths and preserves causal and output-dependency
+admission. The packet retains exactly `id`, `context`, `schema` and
+`token_cost_contract`, with the same context ABI and
+`ordered-structural-subsequence-v1` contract.
+
+Named keys, brackets and braces participate in the same ordered suffix bound,
+including the future entry and helper wrapper. An unfinished literal key reserves
+only its unconsumed suffix; escaped partial strings retain the conservative
+delimiter projection. The actual remaining original-ID allowance, paid EOS,
+prospective row capacity, parsed-prefix restoration and typed completion use the
+same owners as version23. This necessary relaxation does not establish whole
+grammar completion, fit within512 IDs, semantic nonconstancy or usefulness.
+Version24 requires named bodies; packets1–23 and rows encodings1–6 retain their
+literal schema, interpretation, costs and saved replay behavior. A named body is
+not accepted as a positional body by those earlier versions. The representation
+and its effect on generated quality still require real production execution.
+
+For a version4 through version24 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
