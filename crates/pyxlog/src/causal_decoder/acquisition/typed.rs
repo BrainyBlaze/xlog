@@ -1006,7 +1006,13 @@ impl Program {
             return false;
         };
         let count = self.body.operations.len();
-        let refs = |name| self.references(fields, name, count);
+        let refs = |name| {
+            if self.searches_completion() && fields.get(name).and_then(Value::as_u64).is_none() {
+                completion::operand_representatives(self)
+            } else {
+                self.references(fields, name, count)
+            }
+        };
         let scalar = |name: &str, first: usize| {
             fields
                 .get(name)

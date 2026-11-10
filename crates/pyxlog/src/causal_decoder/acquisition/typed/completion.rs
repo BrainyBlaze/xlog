@@ -164,6 +164,19 @@ fn value_key(program: &Program, id: usize, numeric_arguments: bool) -> ValueKey 
     }
 }
 
+/// Unselected operands need one representative per equal complete value key.
+/// Explicit indices and decimal-prefix choices retain their original identities.
+pub(super) fn operand_representatives(program: &Program) -> Vec<usize> {
+    let mut seen = BTreeSet::new();
+    program
+        .body
+        .value_argument_dependencies()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(id, arguments)| seen.insert(value_key(program, id, arguments)).then_some(id))
+        .collect()
+}
+
 fn frontier(program: &Program) -> Vec<(usize, ValueKey)> {
     let arguments = program.body.value_argument_dependencies();
     let mut values: Vec<(usize, ValueKey)> = Vec::new();

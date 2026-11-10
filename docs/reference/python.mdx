@@ -593,6 +593,10 @@ the distinction between raw-token and numeric-argument reads needed by causal
 scans. Equivalent frontiers are memoized within one mask call. Candidate widths
 come from the actual frontier, parameter dimensions and declared input/output
 ABIs; column selection values do not change structural dependency coverage.
+Partial operations enumerate one representative for each equal value key while
+an operand is unselected. Equality retains shapes at both lengths, element type,
+all output dependencies and the numeric-argument-read flag. Explicit operand
+indices and unfinished decimal choices retain their original identities.
 Empty entry-plan and external typed-prefix answers are retained across tokens
 for one exact environment, including the ABI, parameter declarations, raw-token
 alphabet, callee signatures and dependency facts, required definitions and
