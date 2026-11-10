@@ -22,6 +22,7 @@ mod rows;
 mod typed;
 use xlog_runtime::causal_decoder::acquired::{
     definition_usage, ACQUIRED_NODES, ACQUIRED_SCALARS, ACQUIRED_SOURCE_BYTES, ACQUIRED_WIDTH,
+    FEATURE_OUTPUT_CONTRACT,
 };
 
 const LANGUAGE: &str = "xlog-contextual-acquisition-v1";
@@ -58,6 +59,7 @@ const VALUE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v31";
 const TYPED_COLLECTION_LANGUAGE: &str = "xlog-contextual-acquisition-v32";
 const COLLECTION_CHOICE_LANGUAGE: &str = "xlog-contextual-acquisition-v33";
 const PREDICATE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v34";
+const FINITE_FEATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v35";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -69,6 +71,7 @@ pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCOD
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
 pub(super) const PREDICATE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v4";
+pub(super) const FINITE_FEATURE_ENCODING: &str = "numerical-expressions-v5";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -87,7 +90,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=34) {
+    if !matches!(version, 1..=35) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -351,6 +354,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 35 {
+                schema["description"] = json!(format!(
+                    "{} Numerical-expressions-v5 explicitly selects entry_output_contract=possible-finite-nonzero-v1. In addition to the existing entry requirements, the returned entry must not be proven entirely signed zero or NaN: finite output and a freshly zero-initialized projection cannot learn a nonzero feature contribution from that class. Unknown proofs and zero-valued children or helpers remain admissible. The same canonical proof-only transfer follows every selected parent through unknown sibling, scalar and index fields, then serves typed trials, references, completion shortcuts, complete decoding and original-source fork. The private entry rule is scoped in completion memoization and is not exported in callee records. Historical modes, source budgets, kernels, gradients, initialization and charged work are unchanged. This necessary condition does not prove usefulness or bitwise model equivalence.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -436,6 +445,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                35 => FINITE_FEATURE_LANGUAGE,
                 34 => PREDICATE_DEPENDENCY_LANGUAGE,
                 33 => COLLECTION_CHOICE_LANGUAGE,
                 32 => TYPED_COLLECTION_LANGUAGE,
@@ -584,6 +594,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     has_intent: bool,
     entry_budget: bool,
     output_dependencies: bool,
+    feature_output: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -626,7 +637,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE;
+        let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE;
+        let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE || feature_output;
         let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
         let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
         let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE || typed_collections;
@@ -724,6 +736,9 @@ impl PyNativeAcquisitionMask {
             || context["vocabulary"].as_u64() != Some(token_bytes.len() as u64)
         {
             return Err(value_error("native acquisition language contract differs"));
+        }
+        if feature_output && context["entry_output_contract"] != FEATURE_OUTPUT_CONTRACT {
+            return Err(value_error("native entry feature contract differs"));
         }
         let parameters: Vec<TensorParameter> =
             serde_json::from_value(context["parameters"].clone()).map_err(value_error)?;
@@ -845,6 +860,7 @@ impl PyNativeAcquisitionMask {
             has_intent,
             entry_budget,
             output_dependencies,
+            feature_output,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -1017,6 +1033,7 @@ impl PyNativeAcquisitionMask {
             self.named_body,
             self.expressions,
             self.value_references,
+            self.feature_output,
         )
         .map_err(value_error)?;
         if self.typed_context.as_ref().unwrap()["version"] == 3 {
@@ -1069,6 +1086,7 @@ impl PyNativeAcquisitionMask {
             self.expression_node_obligations
                 .then_some(prefix.expression_nodes),
             self.value_references,
+            self.feature_output,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1278,6 +1296,7 @@ pub(super) fn decode_numerical_rows(
     named_body: bool,
     expressions: bool,
     value_references: bool,
+    feature_output: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1291,6 +1310,7 @@ pub(super) fn decode_numerical_rows(
         named_body,
         expressions,
         value_references,
+        feature_output,
     )
     .map_err(value_error)
 }
@@ -1308,6 +1328,7 @@ struct Resources<'a> {
     canonical_entry_formals: bool,
     entry_budget: bool,
     output_dependencies: bool,
+    feature_output: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1396,6 +1417,7 @@ fn resource_prefix<'a>(
     partial_expressions: bool,
     expression_nodes: Option<rows::expressions::Nodes>,
     value_references: bool,
+    feature_output: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1410,6 +1432,7 @@ fn resource_prefix<'a>(
         canonical_entry_formals,
         entry_budget,
         output_dependencies,
+        feature_output,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -2147,6 +2170,16 @@ impl Resources<'_> {
             return Ok(());
         }
         let program = &self.program.typed.as_ref().unwrap().body;
+        if self.feature_output
+            && !self
+                .program
+                .typed
+                .as_ref()
+                .unwrap()
+                .entry_feature_possible(program.output)
+        {
+            return Err("new entry feature has no possible finite nonzero output".into());
+        }
         if self.output_dependencies {
             let dependencies = self.program.typed.as_ref().unwrap().output_dependencies()?;
             if !dependencies.has_input()
@@ -2365,6 +2398,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             );
                         }
                         if self.resources.output_dependencies {
+                            let feature_output = self.resources.feature_output
+                                && self.resources.definition_name.as_deref()
+                                    == context["entrypoint"].as_str();
                             self.resources
                                 .program
                                 .typed
@@ -2376,6 +2412,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                     self.resources.completion_cache.cloned(),
                                     context["version"] == 3,
                                     context["dependency_contract"] == "output-dependencies-v3",
+                                    feature_output,
                                 );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;

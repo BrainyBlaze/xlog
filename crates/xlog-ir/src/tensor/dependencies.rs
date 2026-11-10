@@ -49,6 +49,35 @@ pub struct TensorValueFacts {
     pub zero_or_nan: bool,
 }
 
+impl TensorValueFacts {
+    /// Canonical proof transfer for complete values and partial source slots.
+    /// An unknown slot supplies false (no proof), never an invented value.
+    /// Scalar widths and Gather indices cannot introduce a numeric dependency.
+    pub fn prove_zero_or_nan(
+        operation: &str,
+        operand: &dyn Fn(&str) -> bool,
+        inputs: Option<&[bool]>,
+    ) -> bool {
+        match operation {
+            "zeros" => true,
+            "multiply" => operand("left") || operand("right"),
+            "add" => operand("left") && operand("right"),
+            "tanh" | "broadcast" | "gather_columns" | "row" => operand("input"),
+            "stack" => inputs.is_some_and(|inputs| !inputs.is_empty() && inputs.iter().all(|x| *x)),
+            "select" => {
+                if operand("condition") {
+                    operand("negative")
+                } else {
+                    operand("positive") && operand("negative")
+                }
+            }
+            // The caller owns the existing Zero/returned-formal callee summary.
+            "call" => operand("returned"),
+            _ => false,
+        }
+    }
+}
+
 impl TensorOutputDependencies {
     /// Join possible dependencies, preserving physical parameter aliases.
     pub fn merge(&mut self, other: &Self) {
@@ -125,22 +154,39 @@ impl TensorProgram {
         )?;
         let mut zero_or_nan = dependencies.value_identity == Some(TensorValueIdentity::Zero);
         zero_or_nan |= match operation {
-            TensorOperation::Multiply { left, right } => {
-                value(*left)?.zero_or_nan || value(*right)?.zero_or_nan
-            }
-            TensorOperation::Add { left, right } => {
-                value(*left)?.zero_or_nan && value(*right)?.zero_or_nan
+            TensorOperation::Multiply { left, right } | TensorOperation::Add { left, right } => {
+                let left = value(*left)?.zero_or_nan;
+                let right = value(*right)?.zero_or_nan;
+                let tag = if matches!(operation, TensorOperation::Multiply { .. }) {
+                    "multiply"
+                } else {
+                    "add"
+                };
+                TensorValueFacts::prove_zero_or_nan(
+                    tag,
+                    &|name| if name == "left" { left } else { right },
+                    None,
+                )
             }
             TensorOperation::Tanh { input }
             | TensorOperation::Broadcast { input }
             | TensorOperation::GatherColumns { input, .. }
-            | TensorOperation::Row { input, .. } => value(*input)?.zero_or_nan,
+            | TensorOperation::Row { input, .. } => {
+                let tag = match operation {
+                    TensorOperation::Tanh { .. } => "tanh",
+                    TensorOperation::Broadcast { .. } => "broadcast",
+                    TensorOperation::GatherColumns { .. } => "gather_columns",
+                    _ => "row",
+                };
+                let input = value(*input)?.zero_or_nan;
+                TensorValueFacts::prove_zero_or_nan(tag, &|_| input, None)
+            }
             TensorOperation::Stack { inputs } => {
-                let mut all = !inputs.is_empty();
-                for input in inputs {
-                    all &= value(*input)?.zero_or_nan;
-                }
-                all
+                let inputs = inputs
+                    .iter()
+                    .map(|id| Ok(value(*id)?.zero_or_nan))
+                    .collect::<Result<Vec<_>>>()?;
+                TensorValueFacts::prove_zero_or_nan("stack", &|_| false, Some(&inputs))
             }
             TensorOperation::Select {
                 condition,
@@ -148,29 +194,40 @@ impl TensorProgram {
                 negative,
             } => {
                 let negative = value(*negative)?;
-                if value(*condition)?.zero_or_nan {
+                let condition = value(*condition)?.zero_or_nan;
+                let positive = value(*positive)?.zero_or_nan;
+                if condition {
                     // Preserve the executable strict comparison, including NaN.
                     // The arithmetic that produced the condition is not rewritten.
                     dependencies = negative.dependencies;
-                    negative.zero_or_nan
-                } else {
-                    value(*positive)?.zero_or_nan && negative.zero_or_nan
                 }
+                TensorValueFacts::prove_zero_or_nan(
+                    "select",
+                    &|name| match name {
+                        "condition" => condition,
+                        "positive" => positive,
+                        _ => negative.zero_or_nan,
+                    },
+                    None,
+                )
             }
             TensorOperation::Call {
                 function,
                 arguments,
-            } => match callee(function)?.value_identity {
-                Some(TensorValueIdentity::Zero) => true,
-                Some(TensorValueIdentity::Argument(argument)) => {
-                    let input = arguments
-                        .get(argument)
-                        .ok_or_else(|| invalid("callee predicate argument is absent"))?;
-                    value(*input)?.zero_or_nan
-                }
-                // Opaque callees do not export this private predicate proof.
-                _ => false,
-            },
+            } => {
+                let returned = match callee(function)?.value_identity {
+                    Some(TensorValueIdentity::Zero) => true,
+                    Some(TensorValueIdentity::Argument(argument)) => {
+                        let input = arguments
+                            .get(argument)
+                            .ok_or_else(|| invalid("callee predicate argument is absent"))?;
+                        value(*input)?.zero_or_nan
+                    }
+                    // Opaque callees do not export this private predicate proof.
+                    _ => false,
+                };
+                TensorValueFacts::prove_zero_or_nan("call", &|_| returned, None)
+            }
             // In particular, do not infer facts from parameter contents, a lack
             // of dependencies, division, or a scan cell without its initial span.
             _ => false,
@@ -391,6 +448,18 @@ impl TensorProgram {
         &self,
         resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
     ) -> Result<TensorOutputDependencies> {
+        Ok(self
+            .output_predicate_facts(resolve)?
+            .dependencies
+            .into_callee_summary())
+    }
+
+    /// Retain the local returned-value proof for a new entry's admission gate.
+    /// Exported callee records still use `output_predicate_dependencies`.
+    pub fn output_predicate_facts(
+        &self,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+    ) -> Result<TensorValueFacts> {
         let mut values = Vec::<TensorValueFacts>::with_capacity(self.operations.len());
         for operation in &self.operations {
             let facts = self.operation_predicate_dependencies(
@@ -408,7 +477,7 @@ impl TensorProgram {
         }
         values
             .get(self.output)
-            .map(|facts| facts.dependencies.clone().into_callee_summary())
+            .cloned()
             .ok_or_else(|| invalid("numerical dependency output is absent"))
     }
 }

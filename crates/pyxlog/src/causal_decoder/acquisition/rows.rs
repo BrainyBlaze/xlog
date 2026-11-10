@@ -375,6 +375,7 @@ pub(super) fn definitions(
     named_body: bool,
     expressions: bool,
     value_references: bool,
+    feature_output: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -462,6 +463,7 @@ pub(super) fn definitions(
             false,
             None,
             value_references,
+            feature_output,
         )
         .map_err(|error| error.to_string())?;
     }
