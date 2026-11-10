@@ -16125,6 +16125,24 @@ fn completed_truth_kinds(truth: &[xlog_cuda::SemanticTruth]) -> Vec<&'static str
 }
 
 #[cfg(feature = "semantic-policy")]
+fn completed_point_truth_codes(truth: &[Option<xlog_cuda::SemanticTruth>]) -> Vec<Option<u64>> {
+    truth
+        .iter()
+        .map(|value| value.map(|value| value as u64))
+        .collect()
+}
+
+#[cfg(feature = "semantic-policy")]
+fn completed_point_truth_kinds(
+    truth: &[Option<xlog_cuda::SemanticTruth>],
+) -> Vec<Option<&'static str>> {
+    completed_point_truth_codes(truth)
+        .into_iter()
+        .map(|value| value.map(completed_truth_kind))
+        .collect()
+}
+
+#[cfg(feature = "semantic-policy")]
 #[pymethods]
 impl PySemanticCompletedMaterial {
     #[getter]
@@ -16517,7 +16535,10 @@ impl PySemanticCompletedTaskFacts {
     fn truth_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         PyTuple::new(
             py,
-            self.inner.truth.iter().copied().map(completed_truth_kind),
+            self.inner
+                .truth
+                .iter()
+                .map(|value| value.map(completed_truth_kind)),
         )
         .map(Bound::unbind)
     }
@@ -16538,27 +16559,60 @@ impl PySemanticCompletedTaskFacts {
         self.inner
             .correct
             .as_ref()
-            .map(|values| values.iter().sum())
+            .and_then(|values| values.iter().copied().sum())
     }
     #[getter]
     fn solves_expected_truths(&self) -> Option<bool> {
-        self.inner.correct.as_ref().map(|_| self.inner.p == 1)
+        self.correct_count().map(|_| self.inner.complete == 1)
     }
     #[getter]
-    fn attained_count(&self) -> u64 {
-        self.inner.g
+    fn attained_count(&self) -> Option<u64> {
+        (!self.inner.attained.is_empty())
+            .then(|| self.inner.attained.iter().copied().sum())
+            .flatten()
     }
     #[getter]
     fn all_goals_attained(&self) -> Option<bool> {
-        self.inner.correct.is_none().then_some(self.inner.p == 1)
+        self.inner
+            .correct
+            .is_none()
+            .then(|| self.attained_count().map(|_| self.inner.complete == 1))
+            .flatten()
     }
     #[getter]
     fn measured_work(&self) -> u64 {
         self.inner.c
     }
     #[getter]
-    fn value(&self) -> i64 {
-        self.inner.v
+    fn expected_g_bits(&self) -> u64 {
+        self.inner.expected_g_bits
+    }
+    #[getter]
+    fn expected_p_bits(&self) -> u64 {
+        self.inner.expected_p_bits
+    }
+    #[getter]
+    fn value_bits(&self) -> u64 {
+        self.inner.value_bits
+    }
+    #[getter]
+    fn query_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, &self.inner.query_kinds).map(Bound::unbind)
+    }
+    #[getter]
+    fn query_masses_bits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(
+            py,
+            self.inner
+                .query_masses_bits
+                .iter()
+                .map(|row| (row[0], row[1], row[2], row[3])),
+        )
+        .map(Bound::unbind)
+    }
+    #[getter]
+    fn attainment_mass_bits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        PyTuple::new(py, &self.inner.attainment_mass_bits).map(Bound::unbind)
     }
     #[getter]
     fn eligible(&self) -> bool {
@@ -16595,7 +16649,8 @@ impl PySemanticCompletedLaneOutcome {
     fn truth_codes(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
         match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
-                PyTuple::new(py, completed_truth_codes(truth)).map(|value| Some(value.unbind()))
+                PyTuple::new(py, completed_point_truth_codes(truth))
+                    .map(|value| Some(value.unbind()))
             }
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => Ok(None),
         }
@@ -16604,7 +16659,8 @@ impl PySemanticCompletedLaneOutcome {
     fn truth_kinds(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
         match &self.inner {
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Executed(truth) => {
-                PyTuple::new(py, completed_truth_kinds(truth)).map(|value| Some(value.unbind()))
+                PyTuple::new(py, completed_point_truth_kinds(truth))
+                    .map(|value| Some(value.unbind()))
             }
             xlog_cuda::SemanticCompletedLaneOutcomeMaterial::Refused(_) => Ok(None),
         }
@@ -16778,11 +16834,11 @@ impl PySemanticCompletedTaskGround {
     }
     #[getter]
     fn base_truth_codes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, completed_truth_codes(&self.inner.base_truth)).map(Bound::unbind)
+        PyTuple::new(py, completed_point_truth_codes(&self.inner.base_truth)).map(Bound::unbind)
     }
     #[getter]
     fn base_truth_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, completed_truth_kinds(&self.inner.base_truth)).map(Bound::unbind)
+        PyTuple::new(py, completed_point_truth_kinds(&self.inner.base_truth)).map(Bound::unbind)
     }
     #[getter]
     fn semantic_goal_root(&self, py: Python<'_>) -> Py<PyBytes> {
@@ -17053,7 +17109,7 @@ impl PySemanticCompletedActionProjection {
     }
     #[getter]
     fn total_return(&self) -> f64 {
-        self.inner.total_return_bits as i64 as f64
+        f64::from_bits(self.inner.total_return_bits)
     }
     #[getter]
     fn batch_root(&self, py: Python<'_>) -> Py<PyBytes> {
@@ -20407,7 +20463,7 @@ impl PySemanticPolicyInvocation {
         let result = PyDict::new(py);
         result.set_item("binding", PyBytes::new(py, task.binding.as_bytes()))?;
         result.set_item("winner", task.winner)?;
-        result.set_item("return_value", task.return_value)?;
+        result.set_item("total_return_bits", task.return_bits)?;
         result.set_item("importance_weight", observation.importance_weight)?;
         result.set_item("next_proposal", observation.next_proposal)?;
         result.set_item("query_count", task.query_count)?;
@@ -20460,28 +20516,44 @@ impl PySemanticPolicyInvocation {
             })
             .collect::<PyResult<Vec<_>>>()?;
         result.set_item("program_rules", PyTuple::new(py, program_rules)?)?;
-        result.set_item(
-            "facts",
-            PyTuple::new(
-                py,
-                task.facts
-                    .iter()
-                    .map(|fact| {
-                        Ok((
-                            fact.correct
-                                .as_ref()
-                                .map(|values| PyTuple::new(py, values))
-                                .transpose()?,
-                            fact.g,
-                            fact.p,
-                            fact.c,
-                            fact.v,
-                            fact.eligible,
-                        ))
-                    })
-                    .collect::<PyResult<Vec<_>>>()?,
-            )?,
-        )?;
+        result.set_item("schema", "xlog/semantic-policy-result/v2")?;
+        let facts = task
+            .facts
+            .iter()
+            .map(|fact| {
+                let row = PyDict::new(py);
+                row.set_item("truths", PyTuple::new(py, &fact.truth)?)?;
+                row.set_item(
+                    "correct",
+                    fact.correct
+                        .as_ref()
+                        .map(|values| PyTuple::new(py, values))
+                        .transpose()?,
+                )?;
+                row.set_item("attained", PyTuple::new(py, &fact.attained)?)?;
+                row.set_item("query_kinds", PyTuple::new(py, &fact.query_kinds)?)?;
+                row.set_item(
+                    "query_masses_bits",
+                    PyTuple::new(
+                        py,
+                        fact.query_masses_bits
+                            .iter()
+                            .map(|masses| (masses[0], masses[1], masses[2], masses[3])),
+                    )?,
+                )?;
+                row.set_item(
+                    "attainment_mass_bits",
+                    PyTuple::new(py, &fact.attainment_mass_bits)?,
+                )?;
+                row.set_item("expected_g_bits", fact.expected_g_bits)?;
+                row.set_item("expected_p_bits", fact.expected_p_bits)?;
+                row.set_item("value_bits", fact.value_bits)?;
+                row.set_item("measured_work", fact.c)?;
+                row.set_item("eligible", fact.eligible == 1)?;
+                Ok(row.unbind())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        result.set_item("facts", PyTuple::new(py, facts)?)?;
         Ok(result.unbind())
     }
 

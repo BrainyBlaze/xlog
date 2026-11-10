@@ -8,7 +8,7 @@ namespace semantic_task_ground {
 
 constexpr uint64_t kMagic = 0x584c4f4754475244ULL;
 constexpr uint64_t kPublicationRole = 58;
-constexpr uint64_t kQueryWords = 44;
+constexpr uint64_t kQueryWords = 50;
 constexpr uint64_t kObservationWords = 18;
 constexpr uint64_t kBindingWords = 36;
 constexpr uint64_t kInheritedMagic = 0x584c4f47494e484fULL;
@@ -191,7 +191,9 @@ __device__ bool decode(const uint64_t* words,uint64_t count,Task* output) {
     *output=task;return true;
 }
 
-struct Query { uint64_t receipt[42],truth,attained; };
+struct Query {
+    uint64_t receipt[42],truth,attained,kind,masses_bits[4],attainment_bits;
+};
 // The first word is an origin tag: zero is absent, one is Action, two is Intent.
 // The historical action word group holds the origin identity for either tag.
 struct Observation { uint64_t present,truth,receipt[4],action[4],intent[4],support[4]; };
@@ -202,7 +204,7 @@ struct InheritedObservation {
     semantic_program::Fact fact;
     Observation observation;
 };
-static_assert(sizeof(Query)==352,"task query record ABI");
+static_assert(sizeof(Query)==kQueryWords*8,"task query record ABI");
 static_assert(sizeof(Observation)==144,"task observation record ABI");
 static_assert(sizeof(InheritedObservation)==176,"inherited observation record ABI");
 
@@ -238,7 +240,7 @@ __device__ bool decode_plane(uint64_t address,uint64_t bytes,const Task& task,Pl
        footer[31]+task.bindings+task.snapshot_count>UINT32_MAX/2)return false;
     const uint64_t inherited_offset=snapshot_offset+256+uint64_t(task.bindings)*144+
         footer[31]*sizeof(InheritedObservation)+uint64_t(geometry.statements)*42*8+uint64_t(geometry.entry_supports)*13*8+16;
-    if(header[0]!=kMagic || header[1]!=6 || header[2]!=task.queries || header[3]!=task.bindings ||
+    if(header[0]!=kMagic || header[1]!=7 || header[2]!=task.queries || header[3]!=task.bindings ||
        header[4]!=kQueryWords || header[5]!=kObservationWords || header[6]>capacity || header[7]!=capacity ||
        bytes<inherited_offset+footer_bytes)return false;
     const auto* inherited_header=reinterpret_cast<const uint64_t*>(address+inherited_offset-16);
@@ -305,34 +307,5 @@ struct Observations {
         return {fact,observation.truth,uint64_t(observation.present!=0)};
     }
 };
-
-// Raw derivability is unchanged. Attainment consumes the original protected
-// dependency graph after every query truth has been materialized.
-__device__ bool attained(const Task& task,const Plane& plane,uint32_t slot,uint32_t query,
-        uint64_t truth,uint32_t fact_index,uint32_t fact_count,
-        const semantic_program::DualSupport& support,uint64_t* inspected) {
-    ++*inspected;
-    uint64_t target=0;
-    if(!task.target(query,&target) || truth!=target)return false;
-    const auto* row=task.requirements+task.requirement_offsets[query];
-    for(uint64_t index=0;index<row[1];++index) {
-        ++*inspected;
-        if(plane.query(slot,uint32_t(row[3+index])).attained!=1)return false;
-    }
-    const auto query_fact=semantic_program::bank_fact(task.program,query);
-    for(uint64_t index=0;index<row[2];++index) {
-        ++*inspected;
-        const uint32_t binding=uint32_t(row[3+row[1]+index]);
-        const auto& observation=plane.observations[binding];
-        if((observation.present!=1 && observation.present!=2) || observation.truth!=1 || fact_index==fact_count)return false;
-        semantic_program::Fact observed{};task.observation_fact(binding,&observed);
-        if(observed.predicate!=query_fact.predicate || observed.arity!=query_fact.arity ||
-           observed.first!=query_fact.first ||
-           (query_fact.arity==2 && observed.second!=query_fact.second))return false;
-        const uint64_t sources=support.lineage[(uint64_t(fact_index)*2)*support.words+(uint64_t(binding)*2)/64];
-        if(!(sources&(uint64_t(1)<<((uint64_t(binding)*2)%64))))return false;
-    }
-    return true;
-}
 
 } // namespace semantic_task_ground

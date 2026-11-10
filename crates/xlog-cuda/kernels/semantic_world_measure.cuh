@@ -59,7 +59,7 @@ struct Measure {
     double *masses=nullptr,*factor_gradients=nullptr,*log_potentials=nullptr;
     uint32_t count=2,variables=0,condition=1,view_condition=1,rule_capacity=0;
     uint32_t fact_capacity=0,image_nodes=0,lineage_events=0;
-    bool has_measure=false;
+    bool has_measure=false,complete=false,hard=true;
     MeasureStatus status=MeasureStatus::Ok;
     uint64_t* spent=nullptr;
     uint64_t fuel=0;
@@ -457,15 +457,16 @@ struct Measure {
         const double numerator=root_value(root);
         if(numerator==-INFINITY)return 0.0;
         const double value=exp(numerator-normalizer);
-        if(!isfinite(value) || value<0.0 || value>1.0+0x1p-40)fail(MeasureStatus::InvalidNumerics);
+        if(!isfinite(value) || value<0.0 || value>1.0)fail(MeasureStatus::InvalidNumerics);
         return value;
     }
     __device__ void seed_probability(uint32_t root,double probability,double coefficient) {
         const double cotangent=probability*coefficient;
         if(cotangent!=0.0) { seed(root,cotangent);seed(condition,-cotangent); }
     }
-    __device__ bool finish_results(uint32_t slot,uint32_t joint,double correct_weight,
-            double all_correct_weight,double work_cost) {
+    template<class Observe>
+    __device__ bool finish_results(uint32_t slot,uint32_t joint,uint32_t forbidden,
+            double correct_weight,double all_correct_weight,double work_cost,Observe observe) {
         if(slot>2)return false;
         double normalizer=0.0;
         if(has_measure) {
@@ -482,16 +483,24 @@ struct Measure {
                 const double value=probability(uint32_t(read(query_roots,uint64_t(query)*4+truth)),normalizer,kind);
                 if(!charge())return false;masses[(uint64_t(slot)*context.queries+query)*4+truth]=value;
             }
-            correct+=probability(uint32_t(read(attainment_roots,query)),normalizer,kind);
+            const double attained=probability(uint32_t(read(attainment_roots,query)),normalizer,kind);
+            correct=__dadd_rn(correct,attained);
+            if(!charge(4))return false;
+            observe(query,masses+(uint64_t(slot)*context.queries+query)*4,attained);
             if(certificate && kind==1)fail(MeasureStatus::CertificateUnavailable);
         }
         if(status!=MeasureStatus::Ok)return false;
         const double all_correct=probability(joint,normalizer,uint32_t(has_measure));
-        const double value=correct_weight*correct+all_correct_weight*all_correct-work_cost;
+        const double value=__dsub_rn(__dadd_rn(__dmul_rn(correct_weight,correct),
+            __dmul_rn(all_correct_weight,all_correct)),work_cost);
         if(!isfinite(value)) { fail(MeasureStatus::InvalidNumerics);return false; }
         if(!charge(3))return false;
         header[14+slot]=__double_as_longlong(correct);header[17+slot]=__double_as_longlong(all_correct);
         header[20+slot]=__double_as_longlong(value);
+        // Zero-potential assignments were removed from condition at binding.
+        // Reduced event identity proves certainty without thresholding a mass.
+        complete=has_measure ? joint==condition : assignment(joint);
+        hard=forbidden==0;
         if(has_measure) {
             if(!clear_reverse())return false;
             for(uint32_t query=0;query<context.queries;++query) {
