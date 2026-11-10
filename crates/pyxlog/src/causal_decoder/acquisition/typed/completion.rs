@@ -402,7 +402,7 @@ impl Search<'_> {
     }
 
     fn visit(&self, program: Program, retain_prefix: bool) -> bool {
-        let Some(program) = self.producers(program) else {
+        let Some(mut program) = self.producers(program) else {
             return false;
         };
         let output = program.planned_output.unwrap();
@@ -451,19 +451,31 @@ impl Search<'_> {
             }
             return result;
         }
+        let count = program.body.operations.len();
         let mut next = BTreeMap::new();
         for operation in self.operations(&program, &values) {
-            let mut candidate = program.clone();
-            if candidate.push(operation, self.signatures).is_err() {
-                continue;
+            if program.push(operation, self.signatures).is_ok() {
+                let id = program.body.operations.len() - 1;
+                let reads = program.body.value_argument_dependencies();
+                let value = value_key(&program, id, reads[id]);
+                if !values.iter().any(|(_, available)| available.covers(&value)) {
+                    next.entry(value)
+                        .or_insert_with(|| program.body.operations[id].clone());
+                }
             }
-            let id = candidate.body.operations.len() - 1;
-            let reads = candidate.body.value_argument_dependencies();
-            let value = value_key(&candidate, id, reads[id]);
-            if values.iter().any(|(_, available)| available.covers(&value)) {
-                continue;
+            // Push can fail after appending the operation but before appending
+            // its facts. Restore every stack before the next trial, then keep
+            // only the representative operation rather than a cloned prefix.
+            program.body.operations.truncate(count);
+            for shapes in &mut program.shapes {
+                shapes.truncate(count);
             }
-            next.entry(value).or_insert(candidate);
+            program
+                .dependencies
+                .as_mut()
+                .unwrap()
+                .values
+                .truncate(count);
         }
         let required = program.entry_requirements.as_ref().unwrap();
         let mut next = next.into_iter().collect::<Vec<_>>();
@@ -495,9 +507,10 @@ impl Search<'_> {
                 !value.numeric_arguments,
             ))
         });
-        let result = next
-            .into_iter()
-            .any(|(_, candidate)| self.visit(candidate, false));
+        let result = next.into_iter().any(|(_, operation)| {
+            let mut candidate = program.clone();
+            candidate.push(operation, self.signatures).is_ok() && self.visit(candidate, false)
+        });
         self.cache
             .entries
             .lock()
