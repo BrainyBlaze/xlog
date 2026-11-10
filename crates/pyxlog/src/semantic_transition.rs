@@ -20491,7 +20491,11 @@ impl PySemanticPolicyInvocation {
                 py,
                 task.facts
                     .iter()
-                    .map(|fact| PyTuple::new(py, &fact.truth))
+                    .map(|fact| {
+                        (!fact.truth.is_empty())
+                            .then(|| PyTuple::new(py, &fact.truth))
+                            .transpose()
+                    })
                     .collect::<PyResult<Vec<_>>>()?,
             )?,
         )?;
@@ -20504,6 +20508,7 @@ impl PySemanticPolicyInvocation {
                     .map(|fact| {
                         fact.correct
                             .as_ref()
+                            .filter(|values| !values.is_empty())
                             .map(|values| PyTuple::new(py, values))
                             .transpose()
                     })
@@ -20516,7 +20521,11 @@ impl PySemanticPolicyInvocation {
                 py,
                 task.facts
                     .iter()
-                    .map(|fact| PyTuple::new(py, &fact.attained))
+                    .map(|fact| {
+                        (!fact.attained.is_empty())
+                            .then(|| PyTuple::new(py, &fact.attained))
+                            .transpose()
+                    })
                     .collect::<PyResult<Vec<_>>>()?,
             )?,
         )?;
