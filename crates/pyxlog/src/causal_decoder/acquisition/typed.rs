@@ -17,6 +17,57 @@ use xlog_ir::tensor::{
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
 
 #[derive(Clone)]
+pub(super) enum Operand {
+    Value(String),
+    Argument(usize),
+}
+
+pub(super) struct Ancestor {
+    pub(super) fields: Map<String, Value>,
+    pub(super) operand: Operand,
+}
+
+/// Only source-known siblings are carried here. An unknown sibling ends the
+/// chain; reaching the root instead requires the current definition's output.
+#[derive(Clone, Copy)]
+pub(super) struct Continuation<'a> {
+    pub(super) ancestors: &'a [Ancestor],
+    pub(super) root: bool,
+}
+
+impl Continuation<'_> {
+    fn allows(self, program: &Program, signatures: &Signatures) -> bool {
+        let id = program.body.operations.len() - 1;
+        let Some((ancestor, rest)) = self.ancestors.split_first() else {
+            return !self.root || program.outputs().contains(&id);
+        };
+        let mut fields = ancestor.fields.clone();
+        match &ancestor.operand {
+            Operand::Value(name) => {
+                fields.insert(name.clone(), Value::from(id));
+            }
+            Operand::Argument(slot) => {
+                let arguments = fields
+                    .get_mut("arguments")
+                    .and_then(Value::as_array_mut)
+                    .unwrap();
+                debug_assert_eq!(arguments.len(), *slot);
+                arguments.push(Value::from(id));
+            }
+        }
+        program.possible(
+            &fields,
+            None,
+            signatures,
+            Some(Self {
+                ancestors: rest,
+                root: self.root,
+            }),
+        )
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct EntryRequirements {
     pub(super) calls: BTreeSet<String>,
     pub(super) parameters: BTreeSet<String>,
@@ -331,6 +382,26 @@ impl Program {
         Ok(())
     }
 
+    /// Push can fail after appending an operation but before its facts. Every
+    /// prospective caller restores all stacks, including that failure path.
+    fn with_trial(
+        &mut self,
+        operation: Op,
+        signatures: &Signatures,
+        accept: impl FnOnce(&Self) -> bool,
+    ) -> bool {
+        let count = self.body.operations.len();
+        let accepted = self.push(operation, signatures).is_ok() && accept(self);
+        self.body.operations.truncate(count);
+        for shapes in &mut self.shapes {
+            shapes.truncate(count);
+        }
+        if let Some(facts) = &mut self.dependencies {
+            facts.values.truncate(count);
+        }
+        accepted
+    }
+
     pub(super) fn is_output_slot(&self) -> bool {
         self.continuation_output() == Some(self.body.operations.len())
     }
@@ -430,10 +501,6 @@ impl Program {
         let first = self.shapes[0].last()?;
         let last = self.shapes[1].last()?;
         Some([[first.rows, first.columns], [last.rows, last.columns]])
-    }
-
-    fn compatible(&self, operation: Op, signatures: &Signatures) -> bool {
-        self.compatible_with_dependencies(operation, signatures, None)
     }
 
     fn compatible_with_dependencies(
@@ -843,7 +910,7 @@ impl Program {
         function: &str,
         signature: &TensorSignature,
         mut arguments: Vec<usize>,
-        signatures: &Signatures,
+        check: &mut impl FnMut(Op, Option<TensorOutputDependencies>) -> bool,
     ) -> bool {
         let [Ok(first), Ok(last)] = [
             signature.arguments(1),
@@ -862,12 +929,12 @@ impl Program {
             )
             .into_iter()
             .any(|arguments| {
-                self.compatible(
+                check(
                     Op::Call {
                         function: function.into(),
                         arguments,
                     },
-                    signatures,
+                    None,
                 )
             });
         }
@@ -903,7 +970,7 @@ impl Program {
             .as_ref()
             .filter(|_| !abstract_values.is_empty())
         else {
-            return self.compatible(operation, signatures);
+            return check(operation, None);
         };
         let dependencies = self.body.operation_output_dependencies(
             &Op::Call {
@@ -923,9 +990,7 @@ impl Program {
                 })
             },
         );
-        dependencies.is_ok_and(|dependencies| {
-            self.compatible_with_dependencies(operation, signatures, Some(&dependencies))
-        })
+        dependencies.is_ok_and(|dependencies| check(operation, Some(dependencies)))
     }
 
     pub(super) fn number_possible(
@@ -934,10 +999,11 @@ impl Program {
         name: &str,
         value: usize,
         signatures: &Signatures,
+        continuation: Option<Continuation<'_>>,
     ) -> bool {
         let mut candidate = fields.clone();
         candidate.insert(name.into(), Value::from(value));
-        self.possible(&candidate, None, signatures)
+        self.possible(&candidate, None, signatures, continuation)
     }
 
     pub(super) fn array_range(
@@ -971,8 +1037,9 @@ impl Program {
         prefix: &[usize],
         value: usize,
         signatures: &Signatures,
+        continuation: Option<Continuation<'_>>,
     ) -> bool {
-        if name == "indices" && !self.searches_completion() {
+        if name == "indices" && !self.searches_completion() && continuation.is_none() {
             // The contiguous domain is exact; the complete array still uses
             // canonical gather inference in array_can_end.
             return true;
@@ -981,7 +1048,7 @@ impl Program {
         let mut values = prefix.to_vec();
         values.push(value);
         candidate.insert(name.into(), serde_json::json!(values));
-        self.possible(&candidate, Some(name), signatures)
+        self.possible(&candidate, Some(name), signatures, continuation)
     }
 
     pub(super) fn array_can_end(
@@ -990,10 +1057,11 @@ impl Program {
         name: &str,
         prefix: &[usize],
         signatures: &Signatures,
+        continuation: Option<Continuation<'_>>,
     ) -> bool {
         let mut candidate = fields.clone();
         candidate.insert(name.into(), serde_json::json!(prefix));
-        self.possible(&candidate, None, signatures)
+        self.possible(&candidate, None, signatures, continuation)
     }
 
     pub(super) fn possible(
@@ -1001,6 +1069,7 @@ impl Program {
         fields: &Map<String, Value>,
         open_array: Option<&str>,
         signatures: &Signatures,
+        continuation: Option<Continuation<'_>>,
     ) -> bool {
         let Some(tag) = fields.get("operation").and_then(Value::as_str) else {
             return false;
@@ -1027,17 +1096,41 @@ impl Program {
                     .collect::<Vec<_>>()
             })
         };
-        let check = |operation| self.compatible(operation, signatures);
+        let mut trial = continuation.map(|_| {
+            let mut trial = self.clone();
+            // Open ancestors already count in the source reader. This trial
+            // checks their local types, not an additional flat-row completion.
+            // With no output slot it cannot consult or poison generic caches.
+            trial.planned_output = None;
+            trial.row_allowance = None;
+            trial
+        });
+        let mut check =
+            |operation: Op, dependencies: Option<TensorOutputDependencies>| {
+                if let Some(continuation) = continuation {
+                    if !trial.as_mut().unwrap().with_trial(
+                        operation.clone(),
+                        signatures,
+                        |program| continuation.allows(program, signatures),
+                    ) {
+                        return false;
+                    }
+                }
+                self.compatible_with_dependencies(operation, signatures, dependencies.as_ref())
+            };
         match tag {
             "zeros" => {
                 if self.searches_completion() && !fields.contains_key("columns") {
                     self.completion_widths(signatures)
                         .into_iter()
-                        .any(|columns| check(Op::Zeros { columns }))
+                        .any(|columns| check(Op::Zeros { columns }, None))
                 } else {
-                    check(Op::Zeros {
-                        columns: scalar("columns", self.output_columns().unwrap_or(1)),
-                    })
+                    check(
+                        Op::Zeros {
+                            columns: scalar("columns", self.output_columns().unwrap_or(1)),
+                        },
+                        None,
+                    )
                 }
             }
             "argument" => self
@@ -1047,11 +1140,11 @@ impl Program {
                     self.body.signature.arguments(1).unwrap().len(),
                 )
                 .into_iter()
-                .any(|argument| check(Op::Argument { argument })),
+                .any(|argument| check(Op::Argument { argument }, None)),
             "parameter" => self
                 .references(fields, "weight", self.body.parameters.len())
                 .into_iter()
-                .any(|weight| check(Op::Parameter { weight })),
+                .any(|weight| check(Op::Parameter { weight }, None)),
             "token_indicators" => {
                 let mut token_ids = array("token_ids").unwrap_or_default();
                 if self.searches_completion()
@@ -1073,9 +1166,15 @@ impl Program {
                                 }
                             }
                             candidate.len() == columns
-                                && check(Op::TokenIndicators {
-                                    token_ids: candidate.into_iter().map(|id| id as u32).collect(),
-                                })
+                                && check(
+                                    Op::TokenIndicators {
+                                        token_ids: candidate
+                                            .into_iter()
+                                            .map(|id| id as u32)
+                                            .collect(),
+                                    },
+                                    None,
+                                )
                         });
                 }
                 if !fields.contains_key("token_ids") || open_array == Some("token_ids") {
@@ -1091,39 +1190,48 @@ impl Program {
                         }
                     }
                 }
-                check(Op::TokenIndicators {
-                    token_ids: token_ids.into_iter().map(|id| id as u32).collect(),
-                })
+                check(
+                    Op::TokenIndicators {
+                        token_ids: token_ids.into_iter().map(|id| id as u32).collect(),
+                    },
+                    None,
+                )
             }
             "broadcast" => refs("input")
                 .into_iter()
-                .any(|input| check(Op::Broadcast { input })),
+                .any(|input| check(Op::Broadcast { input }, None)),
             "tanh" => refs("input")
                 .into_iter()
-                .any(|input| check(Op::Tanh { input })),
+                .any(|input| check(Op::Tanh { input }, None)),
             "linear" => refs("input").into_iter().any(|input| {
                 self.references(fields, "weight", self.body.parameters.len())
                     .into_iter()
-                    .any(|weight| check(Op::Linear { input, weight }))
+                    .any(|weight| check(Op::Linear { input, weight }, None))
             }),
             "add" | "subtract" | "multiply" | "divide" => refs("left").into_iter().any(|left| {
                 refs("right").into_iter().any(|right| {
-                    check(match tag {
-                        "add" => Op::Add { left, right },
-                        "subtract" => Op::Subtract { left, right },
-                        "multiply" => Op::Multiply { left, right },
-                        _ => Op::Divide { left, right },
-                    })
+                    check(
+                        match tag {
+                            "add" => Op::Add { left, right },
+                            "subtract" => Op::Subtract { left, right },
+                            "multiply" => Op::Multiply { left, right },
+                            _ => Op::Divide { left, right },
+                        },
+                        None,
+                    )
                 })
             }),
             "select" => refs("condition").into_iter().any(|condition| {
                 refs("positive").into_iter().any(|positive| {
                     refs("negative").into_iter().any(|negative| {
-                        check(Op::Select {
-                            condition,
-                            positive,
-                            negative,
-                        })
+                        check(
+                            Op::Select {
+                                condition,
+                                positive,
+                                negative,
+                            },
+                            None,
+                        )
                     })
                 })
             }),
@@ -1140,10 +1248,13 @@ impl Program {
                         .any(|columns| {
                             let mut candidate = indices.clone();
                             candidate.resize(columns, 0);
-                            check(Op::GatherColumns {
-                                input,
-                                indices: candidate,
-                            })
+                            check(
+                                Op::GatherColumns {
+                                    input,
+                                    indices: candidate,
+                                },
+                                None,
+                            )
                         });
                 }
                 if let Some(columns) = self.output_columns() {
@@ -1156,7 +1267,7 @@ impl Program {
                 } else if indices.is_empty() && open_array == Some("indices") {
                     indices.push(0);
                 }
-                check(Op::GatherColumns { input, indices })
+                check(Op::GatherColumns { input, indices }, None)
             }),
             "call" => {
                 let selected = fields.get("function").and_then(Value::as_str);
@@ -1180,7 +1291,7 @@ impl Program {
                             return false;
                         }
                         if self.dependencies.is_some() {
-                            return self.possible_call(function, signature, arguments, signatures);
+                            return self.possible_call(function, signature, arguments, &mut check);
                         }
                         let mut arguments = arguments;
                         for slot in arguments.len()..first.len() {
@@ -1192,10 +1303,13 @@ impl Program {
                             };
                             arguments.push(id);
                         }
-                        check(Op::Call {
-                            function: function.clone(),
-                            arguments,
-                        })
+                        check(
+                            Op::Call {
+                                function: function.clone(),
+                                arguments,
+                            },
+                            None,
+                        )
                     })
             }
             "scan" => {
@@ -1206,12 +1320,15 @@ impl Program {
                     .any(|function| {
                         refs("input").into_iter().any(|input| {
                             refs("initial").into_iter().any(|initial| {
-                                check(Op::Scan {
-                                    input,
-                                    initial,
-                                    function: function.clone(),
-                                    max_steps: scalar("max_steps", self.body.max_context),
-                                })
+                                check(
+                                    Op::Scan {
+                                        input,
+                                        initial,
+                                        function: function.clone(),
+                                        max_steps: scalar("max_steps", self.body.max_context),
+                                    },
+                                    None,
+                                )
                             })
                         })
                     })

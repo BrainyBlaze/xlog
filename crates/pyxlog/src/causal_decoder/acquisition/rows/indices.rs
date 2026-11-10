@@ -162,6 +162,7 @@ pub(crate) fn admit_prefix(
     signatures: &typed::Signatures,
     projected_bytes: usize,
     context: &Value,
+    continuation: Option<typed::Continuation<'_>>,
 ) -> Result<(), serde_json::Error> {
     let columns = program
         .input_columns(pending.target.input)
@@ -174,6 +175,7 @@ pub(crate) fn admit_prefix(
         columns,
         projected_bytes,
         maximum: maximum_width(context),
+        continuation,
     })
     .deserialize(&mut decoder);
     match result {
@@ -190,6 +192,7 @@ struct Fields<'a> {
     columns: usize,
     projected_bytes: usize,
     maximum: usize,
+    continuation: Option<typed::Continuation<'a>>,
 }
 
 impl<'de> DeserializeSeed<'de> for Fields<'_> {
@@ -245,7 +248,8 @@ impl<'de> Visitor<'de> for Fields<'_> {
                         ("input".into(), json!(self.pending.target.input)),
                         ("indices".into(), Value::Array(vec![json!(0); count])),
                     ]);
-                    self.program.possible(&material, None, self.signatures)
+                    self.program
+                        .possible(&material, None, self.signatures, self.continuation)
                 },
                 bytes: self.pending.bytes,
             };
