@@ -40548,6 +40548,23 @@ impl SemanticTransitionSession {
         self.join_task_release(TaskReleaseKind::ObservedCold)
     }
 
+    /// Join a known failed import whose original cold caller received no task
+    /// handle. Select the existing join from the actual native binding state;
+    /// every unpublished-owner, pending-effect and reader guard still applies.
+    pub fn join_failed_import_release(&mut self) -> Result<(), SemanticTransitionError> {
+        if !self.poisoned {
+            return Err(publication_input_error(
+                "failed import release requires its original aborted Session",
+            ));
+        }
+        let kind = if self.task.is_none() {
+            TaskReleaseKind::ObservedCold
+        } else {
+            TaskReleaseKind::Aborted
+        };
+        self.join_task_release(kind)
+    }
+
     /// Join the real ordinary import before releasing its model-free,
     /// unpublished storage. An Unknown wait retains the same terminal join;
     /// it never makes the imported task usable again.

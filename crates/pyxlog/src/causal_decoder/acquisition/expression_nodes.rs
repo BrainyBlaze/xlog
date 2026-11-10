@@ -71,7 +71,8 @@ impl Resources<'_> {
         let (parents, _) = self.source_expression.unwrap();
         let mut ancestors = Vec::new();
         for (index, parent) in parents.iter().enumerate() {
-            let active_open = index + 1 < parents.len();
+            let active_open = index + 1 < parents.len()
+                || (index + 1 == parents.len() && nodes.reference_pending);
             let mut minimum = None;
             for (name, required) in self.operation_fields.unwrap() {
                 if !operation_prefix(&parent.tag_prefix, name)
@@ -121,7 +122,14 @@ impl Resources<'_> {
                     });
                     let expected = self.expression_expected(&ancestors)?;
                     ancestors.pop();
-                    future += leaves.minimum(self, expected);
+                    // A preceding unfinished sibling may later provide a
+                    // matching reference. Absence among today's closed values
+                    // cannot strengthen this future source occurrence to two.
+                    future += if self.value_references {
+                        1
+                    } else {
+                        leaves.minimum(self, expected)
+                    };
                 }
                 if required.iter().any(|field| field == "arguments") {
                     let arguments = fields
@@ -154,8 +162,14 @@ impl Resources<'_> {
                             Some(
                                 (opened..count)
                                     .map(|slot| {
-                                        leaves
-                                            .minimum(self, [first[slot].into(), last[slot].into()])
+                                        if self.value_references {
+                                            1
+                                        } else {
+                                            leaves.minimum(
+                                                self,
+                                                [first[slot].into(), last[slot].into()],
+                                            )
+                                        }
                                     })
                                     .sum::<usize>(),
                             )
