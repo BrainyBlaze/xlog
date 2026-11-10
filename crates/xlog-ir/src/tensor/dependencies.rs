@@ -6,7 +6,8 @@ use super::*;
 
 /// Output-reaching identities and inputs in the canonical numerical ABI.
 /// Arguments address numeric arguments; causal tokens are a separate input.
-/// These are structural dependencies, not a proof of semantic nonconstancy.
+/// The original contract records structural dependencies. Explicit value-aware
+/// analysis additionally carries sound identities, never general nonconstancy.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TensorOutputDependencies {
@@ -18,6 +19,23 @@ pub struct TensorOutputDependencies {
     pub definitions: BTreeSet<String>,
     /// Physical parameter identities reached by the returned value.
     pub parameters: BTreeSet<String>,
+    /// Absent in the original structural contract. Local operation identities
+    /// are scoped to one body and become unknown in exported callee summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_identity: Option<TensorValueIdentity>,
+}
+
+/// Proven returned-value identities, without evaluating parameters or rewriting IR.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum TensorValueIdentity {
+    /// No identity or constant has been established.
+    Unknown,
+    /// Every element is the positive FP32 zero produced by `Zeros` or copying it.
+    Zero,
+    /// The unchanged numeric formal in the current signature.
+    Argument(usize),
+    /// An actual preceding value in this body, never a callee-local identifier.
+    Operation(usize),
 }
 
 impl TensorOutputDependencies {
@@ -27,6 +45,17 @@ impl TensorOutputDependencies {
         self.tokens |= other.tokens;
         self.definitions.extend(other.definitions.iter().cloned());
         self.parameters.extend(other.parameters.iter().cloned());
+        if self.value_identity != other.value_identity {
+            self.value_identity = None;
+        }
+    }
+
+    /// Preserve proofs meaningful to a caller, hiding body-local SSA identities.
+    pub fn into_callee_summary(mut self) -> Self {
+        if matches!(self.value_identity, Some(TensorValueIdentity::Operation(_))) {
+            self.value_identity = Some(TensorValueIdentity::Unknown);
+        }
+        self
     }
 
     /// Whether the result may depend on a numeric argument or raw tokens.
@@ -44,13 +73,97 @@ impl TensorProgram {
         value: &dyn Fn(usize) -> Result<TensorOutputDependencies>,
         resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
     ) -> Result<TensorOutputDependencies> {
+        self.operation_dependencies(operation, value, resolve, None)
+    }
+
+    /// The same dependency owner with explicit local identities and known zeros.
+    /// `output` is the canonical index of this operation, not a guessed future ID.
+    pub fn operation_value_dependencies(
+        &self,
+        operation: &TensorOperation,
+        output: usize,
+        value: &dyn Fn(usize) -> Result<TensorOutputDependencies>,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+    ) -> Result<TensorOutputDependencies> {
+        self.operation_dependencies(operation, value, resolve, Some(output))
+    }
+
+    fn operation_dependencies(
+        &self,
+        operation: &TensorOperation,
+        value: &dyn Fn(usize) -> Result<TensorOutputDependencies>,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+        output: Option<usize>,
+    ) -> Result<TensorOutputDependencies> {
         let mut result = TensorOutputDependencies::default();
+        let mut identity = output.map(TensorValueIdentity::Operation);
+        let same_value = |left: &TensorOutputDependencies, right: &TensorOutputDependencies| {
+            left.value_identity.as_ref().is_some_and(|identity| {
+                *identity != TensorValueIdentity::Unknown
+                    && right.value_identity.as_ref() == Some(identity)
+            })
+        };
         match operation {
             TensorOperation::Argument { argument } => {
                 if *argument >= self.signature.arguments(1)?.len() {
                     return Err(invalid("unknown numerical dependency argument"));
                 }
                 result.arguments.insert(*argument);
+                if output.is_some() {
+                    identity = Some(TensorValueIdentity::Argument(*argument));
+                }
+            }
+            TensorOperation::Zeros { .. } if output.is_some() => {
+                identity = Some(TensorValueIdentity::Zero);
+            }
+            TensorOperation::Select {
+                condition,
+                positive,
+                negative,
+            } if output.is_some() => {
+                let condition = value(*condition)?;
+                let positive_value = value(*positive)?;
+                let negative_value = value(*negative)?;
+                if condition.value_identity == Some(TensorValueIdentity::Zero) {
+                    // The executable predicate is condition > 0, including +0.
+                    result = negative_value;
+                    identity = result.value_identity.clone();
+                } else if positive == negative || same_value(&positive_value, &negative_value) {
+                    identity = positive_value.value_identity.clone();
+                    result.merge(&positive_value);
+                    result.merge(&negative_value);
+                } else {
+                    result.merge(&condition);
+                    result.merge(&positive_value);
+                    result.merge(&negative_value);
+                }
+            }
+            TensorOperation::Finite { input } if output.is_some() => {
+                result = value(*input)?;
+                // On successful execution the finiteness check and scale by
+                // one preserve this finite FP32 value, including signed zero.
+                identity = result.value_identity.clone();
+            }
+            TensorOperation::Broadcast { input }
+            | TensorOperation::GatherColumns { input, .. }
+            | TensorOperation::Row { input, .. }
+                if output.is_some() =>
+            {
+                result = value(*input)?;
+                if result.value_identity == Some(TensorValueIdentity::Zero) {
+                    identity = Some(TensorValueIdentity::Zero);
+                }
+            }
+            TensorOperation::Stack { inputs } if output.is_some() => {
+                let mut zero = true;
+                for input in inputs {
+                    let input = value(*input)?;
+                    zero &= input.value_identity == Some(TensorValueIdentity::Zero);
+                    result.merge(&input);
+                }
+                if zero && !inputs.is_empty() {
+                    identity = Some(TensorValueIdentity::Zero);
+                }
             }
             TensorOperation::TokenIndicators { .. } | TensorOperation::Embedding { .. } => {
                 result.tokens = true;
@@ -60,6 +173,20 @@ impl TensorProgram {
                 arguments,
             } => {
                 let callee = resolve(function)?;
+                if output.is_some() {
+                    match callee.value_identity {
+                        Some(TensorValueIdentity::Zero) => {
+                            identity = Some(TensorValueIdentity::Zero);
+                        }
+                        Some(TensorValueIdentity::Argument(argument)) => {
+                            let input = arguments.get(argument).ok_or_else(|| {
+                                invalid("callee value identity argument is absent")
+                            })?;
+                            identity = value(*input)?.value_identity;
+                        }
+                        _ => {}
+                    }
+                }
                 result.tokens = callee.tokens;
                 result.definitions = callee.definitions;
                 result.definitions.insert(function.clone());
@@ -104,6 +231,9 @@ impl TensorProgram {
                 .ok_or_else(|| invalid("unknown numerical dependency parameter"))?;
             result.parameters.insert(parameter.name.clone());
         }
+        if output.is_some() {
+            result.value_identity = Some(identity.unwrap_or(TensorValueIdentity::Unknown));
+        }
         Ok(result)
     }
 
@@ -112,9 +242,17 @@ impl TensorProgram {
         &self,
         resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
     ) -> Result<Vec<TensorOutputDependencies>> {
+        self.value_dependencies(resolve, false)
+    }
+
+    fn value_dependencies(
+        &self,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+        identities: bool,
+    ) -> Result<Vec<TensorOutputDependencies>> {
         let mut values = Vec::<TensorOutputDependencies>::with_capacity(self.operations.len());
         for operation in &self.operations {
-            let dependencies = self.operation_output_dependencies(
+            let dependencies = self.operation_dependencies(
                 operation,
                 &|id| {
                     values
@@ -123,6 +261,7 @@ impl TensorProgram {
                         .ok_or_else(|| invalid("dependency value is not preceding"))
                 },
                 resolve,
+                identities.then_some(values.len()),
             )?;
             values.push(dependencies);
         }
@@ -137,6 +276,19 @@ impl TensorProgram {
         self.value_output_dependencies(resolve)?
             .get(self.output)
             .cloned()
+            .ok_or_else(|| invalid("numerical dependency output is absent"))
+    }
+
+    /// Export returned-value facts without leaking a body-local SSA identity.
+    /// Unknown arithmetic, parameters and nonzero values stay unknown.
+    pub fn output_value_dependencies(
+        &self,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+    ) -> Result<TensorOutputDependencies> {
+        self.value_dependencies(resolve, true)?
+            .get(self.output)
+            .cloned()
+            .map(TensorOutputDependencies::into_callee_summary)
             .ok_or_else(|| invalid("numerical dependency output is absent"))
     }
 }

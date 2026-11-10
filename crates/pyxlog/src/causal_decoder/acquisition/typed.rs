@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use xlog_core::XlogError;
 use xlog_ir::tensor::{
     TensorOperation as Op, TensorOutputDependencies, TensorProgram, TensorShapeConstraint,
-    TensorSignature, TensorValueShape,
+    TensorSignature, TensorValueIdentity, TensorValueShape,
 };
 
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
@@ -153,6 +153,7 @@ struct OutputDependencies {
     values: Vec<TensorOutputDependencies>,
     reserve_frontier: bool,
     completion_cache: Option<Arc<CompletionCache>>,
+    value_identities: bool,
 }
 
 impl EntryRequirements {
@@ -182,19 +183,30 @@ impl OutputDependencies {
         body: &TensorProgram,
         operation: &Op,
     ) -> Result<TensorOutputDependencies, XlogError> {
-        body.operation_output_dependencies(
-            operation,
-            &|id| {
-                self.values.get(id).cloned().ok_or_else(|| {
-                    XlogError::Compilation("dependency value is not preceding".into())
-                })
-            },
-            &mut |name| {
-                self.callees.get(name).cloned().ok_or_else(|| {
-                    XlogError::Compilation("callee output dependencies are absent".into())
-                })
-            },
-        )
+        self.operation_with(body, operation, &|id| {
+            self.values
+                .get(id)
+                .cloned()
+                .ok_or_else(|| XlogError::Compilation("dependency value is not preceding".into()))
+        })
+    }
+
+    fn operation_with(
+        &self,
+        body: &TensorProgram,
+        operation: &Op,
+        value: &dyn Fn(usize) -> Result<TensorOutputDependencies, XlogError>,
+    ) -> Result<TensorOutputDependencies, XlogError> {
+        let mut resolve = |name: &str| {
+            self.callees.get(name).cloned().ok_or_else(|| {
+                XlogError::Compilation("callee output dependencies are absent".into())
+            })
+        };
+        if self.value_identities {
+            body.operation_value_dependencies(operation, self.values.len(), value, &mut resolve)
+        } else {
+            body.operation_output_dependencies(operation, value, &mut resolve)
+        }
     }
 }
 
@@ -420,12 +432,14 @@ impl Program {
         callees: BTreeMap<String, TensorOutputDependencies>,
         reserve_frontier: bool,
         completion_cache: Option<Arc<CompletionCache>>,
+        value_identities: bool,
     ) {
         self.dependencies = Some(OutputDependencies {
             callees,
             values: Vec::new(),
             reserve_frontier,
             completion_cache,
+            value_identities,
         });
     }
 
@@ -434,7 +448,8 @@ impl Program {
             .as_ref()
             .and_then(|dependencies| dependencies.values.get(self.body.output))
             .cloned()
-            .ok_or_else(|| "numerical output dependencies are absent".into())
+            .map(TensorOutputDependencies::into_callee_summary)
+            .ok_or_else(|| "numerical output dependencies are absent".to_owned())
     }
 
     fn infer(
@@ -462,6 +477,15 @@ impl Program {
     }
 
     pub(super) fn push(&mut self, operation: Op, signatures: &Signatures) -> Result<(), String> {
+        self.push_with_dependencies(operation, signatures, None)
+    }
+
+    fn push_with_dependencies(
+        &mut self,
+        operation: Op,
+        signatures: &Signatures,
+        prospective: Option<&TensorOutputDependencies>,
+    ) -> Result<(), String> {
         if self
             .row_allowance
             .is_some_and(|rows| self.body.operations.len() >= rows)
@@ -488,7 +512,11 @@ impl Program {
         let dependencies = self
             .dependencies
             .as_ref()
-            .map(|facts| facts.operation(&self.body, &operation))
+            .map(|facts| {
+                prospective
+                    .cloned()
+                    .map_or_else(|| facts.operation(&self.body, &operation), Ok)
+            })
             .transpose()
             .map_err(|error| error.to_string())?;
         self.body.operations.push(operation);
@@ -516,8 +544,21 @@ impl Program {
         signatures: &Signatures,
         accept: impl FnOnce(&Self) -> bool,
     ) -> bool {
+        self.with_trial_dependencies(operation, signatures, None, accept)
+    }
+
+    fn with_trial_dependencies(
+        &mut self,
+        operation: Op,
+        signatures: &Signatures,
+        prospective: Option<&TensorOutputDependencies>,
+        accept: impl FnOnce(&Self) -> bool,
+    ) -> bool {
         let count = self.body.operations.len();
-        let accepted = self.push(operation, signatures).is_ok() && accept(self);
+        let accepted = self
+            .push_with_dependencies(operation, signatures, prospective)
+            .is_ok()
+            && accept(self);
         self.body.operations.truncate(count);
         for shapes in &mut self.shapes {
             shapes.truncate(count);
@@ -1079,8 +1120,19 @@ impl Program {
                 // preceding values, not an authored replacement argument.
                 // Once the array is complete, every argument is exact.
                 let mut dependencies = TensorOutputDependencies::default();
+                let identity = facts.values[id].value_identity.clone();
+                let same_identity = choices
+                    .iter()
+                    .all(|&id| facts.values[id].value_identity == identity);
                 for id in choices {
                     dependencies.merge(&facts.values[id]);
+                }
+                if facts.value_identities {
+                    dependencies.value_identity = Some(if same_identity {
+                        identity.unwrap_or(TensorValueIdentity::Unknown)
+                    } else {
+                        TensorValueIdentity::Unknown
+                    });
                 }
                 let id = count + slot;
                 abstract_arguments.push(id);
@@ -1098,7 +1150,8 @@ impl Program {
         else {
             return check(operation, None);
         };
-        let dependencies = self.body.operation_output_dependencies(
+        let dependencies = facts.operation_with(
+            &self.body,
             &Op::Call {
                 function: function.into(),
                 arguments: abstract_arguments,
@@ -1109,11 +1162,6 @@ impl Program {
                     .or_else(|| facts.values.get(id))
                     .cloned()
                     .ok_or_else(|| XlogError::Compilation("dependency value is absent".into()))
-            },
-            &mut |name| {
-                facts.callees.get(name).cloned().ok_or_else(|| {
-                    XlogError::Compilation("callee output dependencies are absent".into())
-                })
             },
         );
         dependencies.is_ok_and(|dependencies| check(operation, Some(dependencies)))
@@ -1334,19 +1382,24 @@ impl Program {
             trial.row_allowance = None;
             trial
         });
-        let mut check =
-            |operation: Op, dependencies: Option<TensorOutputDependencies>| {
-                if let Some(continuation) = continuation {
-                    if !trial.as_mut().unwrap().with_trial(
-                        operation.clone(),
-                        signatures,
-                        |program| continuation.allows(program, signatures),
-                    ) {
-                        return false;
-                    }
+        let mut check = |operation: Op, dependencies: Option<TensorOutputDependencies>| {
+            if let Some(continuation) = continuation {
+                let prospective = dependencies.as_ref().filter(|_| {
+                    self.dependencies
+                        .as_ref()
+                        .is_some_and(|facts| facts.value_identities)
+                });
+                if !trial.as_mut().unwrap().with_trial_dependencies(
+                    operation.clone(),
+                    signatures,
+                    prospective,
+                    |program| continuation.allows(program, signatures),
+                ) {
+                    return false;
                 }
-                self.compatible_with_dependencies(operation, signatures, dependencies.as_ref())
-            };
+            }
+            self.compatible_with_dependencies(operation, signatures, dependencies.as_ref())
+        };
         match tag {
             "zeros" => {
                 if self.searches_completion() && !fields.contains_key("columns") {

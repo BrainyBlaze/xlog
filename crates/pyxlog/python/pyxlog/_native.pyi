@@ -97,6 +97,11 @@ class NativeCausalModel:
         V30 selects numerical-expressions-v2: child slots may explicitly reference
         closed body-local operation IDs; each source occurrence still counts once.
         Its original-ID suffix contract is v3; root values remain operation tuples.
+        V31 selects numerical-expressions-v3 with identical authored syntax and
+        context3/output-dependencies-v2. Canonical SSA/formal identities and exact
+        positive zeros remove proven irrelevant Select conditions. The same facts
+        govern prefix/reference choices, complete decoding and original-source fork.
+        Unknown values remain unknown; this does not prove general nonconstancy.
         """
         ...
     def fork_acquired(
@@ -104,7 +109,14 @@ class NativeCausalModel:
         insertion_layer: int = 17, train_down_projection: bool = True,
         source_encoding: str = "funcdef-json-v1",
         require_output_dependencies: bool = False,
-    ) -> NativeCausalModel: ...
+    ) -> NativeCausalModel:
+        """Original-source admission and allocation through the native owner.
+
+        numerical-expressions-v3 requires value-aware dependency admission even
+        when the legacy require_output_dependencies keyword is false. Older
+        source encodings retain that keyword's original semantics.
+        """
+        ...
     @property
     def adaptation_manifest(self) -> str: ...
     @property
@@ -135,19 +147,21 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–30 require positive remaining original IDs including this choice and paid EOS.
+        """V21–31 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
         V21–24 use ordered-structural-subsequence-v1; V25–29 require v2;
-        V30 requires v3 for integer-or-tuple child values and decimal extensions.
+        V30–31 require v3 for integer-or-tuple child values and decimal extensions.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–30 prefix facts as JSON; no token selection or final admission."""
+        """Version4–31 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–30 source into canonical JSON using the captured context."""
+        """Elaborate complete v7–31 source with its captured context; v31 also applies
+        the same value-aware admission before returning canonical initializer input.
+        """
 
 class _LogitSelection(TypedDict):
     raw_argmax: int

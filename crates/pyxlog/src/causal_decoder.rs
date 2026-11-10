@@ -130,7 +130,10 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 12..=30) {
+        let context = if language_version == 31 {
+            self.inner
+                .acquisition_context_with_value_dependencies(insertion_layer)
+        } else if matches!(language_version, 12..=30) {
             self.inner
                 .acquisition_context_with_output_dependencies(insertion_layer)
         } else {
@@ -172,9 +175,12 @@ impl PyNativeCausalModel {
             | acquisition::SELF_DELIMITED_ROWS_ENCODING
             | acquisition::NAMED_BODY_ROWS_ENCODING
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
-            | acquisition::EXPRESSION_REFERENCES_ENCODING => {
-                let value_references =
-                    source_encoding == acquisition::EXPRESSION_REFERENCES_ENCODING;
+            | acquisition::EXPRESSION_REFERENCES_ENCODING
+            | acquisition::VALUE_DEPENDENCIES_ENCODING => {
+                let value_identities = source_encoding == acquisition::VALUE_DEPENDENCIES_ENCODING;
+                let value_references = source_encoding
+                    == acquisition::EXPRESSION_REFERENCES_ENCODING
+                    || value_identities;
                 let expressions = source_encoding == acquisition::NUMERICAL_EXPRESSIONS_ENCODING
                     || value_references;
                 let named_body =
@@ -186,7 +192,10 @@ impl PyNativeCausalModel {
                     || self_delimited;
                 let compact_indices = source_encoding == acquisition::COMPACT_INDICES_ROWS_ENCODING
                     || compact_metadata;
-                let context = if compact_indices {
+                let context = if value_identities {
+                    self.inner
+                        .acquisition_context_with_value_dependencies(insertion_layer)
+                } else if compact_indices {
                     self.inner
                         .acquisition_context_with_output_dependencies(insertion_layer)
                 } else {
@@ -205,8 +214,17 @@ impl PyNativeCausalModel {
                     expressions,
                     value_references,
                 )?;
-                self.inner
-                    .fork_acquired_definitions_with_dependencies(
+                if value_identities {
+                    self.inner
+                        .fork_acquired_definitions_with_value_dependencies(
+                            entrypoint,
+                            definitions,
+                            parameter_values,
+                            insertion_layer,
+                            train_down_projection,
+                        )
+                } else {
+                    self.inner.fork_acquired_definitions_with_dependencies(
                         entrypoint,
                         definitions,
                         parameter_values,
@@ -214,7 +232,8 @@ impl PyNativeCausalModel {
                         train_down_projection,
                         require_output_dependencies,
                     )
-                    .map_err(xlog_err)
+                }
+                .map_err(xlog_err)
             }
             _ => Err(PyValueError::new_err(
                 "unsupported acquired source encoding",

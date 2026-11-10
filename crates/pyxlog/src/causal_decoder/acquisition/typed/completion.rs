@@ -23,6 +23,7 @@ impl ValueKey {
 
     fn covers(&self, other: &Self) -> bool {
         self.shapes == other.shapes
+            && self.dependencies.value_identity == other.dependencies.value_identity
             && (!self.numeric_arguments || other.numeric_arguments)
             && (!other.dependencies.tokens || self.dependencies.tokens)
             && self
@@ -218,7 +219,14 @@ pub(super) fn call_arguments(
     }
     let facts = program.dependencies.as_ref().unwrap();
     let reads = program.body.value_argument_dependencies();
-    let mut partial = BTreeMap::from([((TensorOutputDependencies::default(), false), Vec::new())]);
+    let mut partial = BTreeMap::from([(
+        (
+            TensorOutputDependencies::default(),
+            false,
+            Vec::<TensorValueIdentity>::new(),
+        ),
+        Vec::new(),
+    )]);
     for slot in 0..first.len() {
         let used = facts.callees[name].arguments.contains(&slot);
         let mut choices = prefix
@@ -233,15 +241,24 @@ pub(super) fn call_arguments(
             choices.truncate(1);
         }
         let mut next = BTreeMap::new();
-        for ((dependencies, numeric), arguments) in partial {
+        for ((dependencies, numeric, identities), arguments) in partial {
             for &id in &choices {
                 let mut dependencies = dependencies.clone();
+                let mut identities = identities.clone();
                 if used {
                     dependencies.merge(&facts.values[id]);
+                    if facts.value_identities {
+                        identities.push(
+                            facts.values[id]
+                                .value_identity
+                                .clone()
+                                .unwrap_or(TensorValueIdentity::Unknown),
+                        );
+                    }
                 }
                 let mut arguments = arguments.clone();
                 arguments.push(id);
-                next.entry((dependencies, numeric || reads[id]))
+                next.entry((dependencies, numeric || reads[id], identities))
                     .or_insert(arguments);
             }
         }
@@ -259,7 +276,7 @@ pub(super) fn possible(
 ) -> bool {
     let facts = source.dependencies.as_ref().unwrap();
     let required = source.entry_requirements.as_ref().unwrap();
-    let environment = serde_json::to_vec(&(
+    let environment = (
         &body.signature,
         &body.parameters,
         body.vocabulary,
@@ -270,7 +287,12 @@ pub(super) fn possible(
         &facts.callees,
         &required.calls,
         &required.parameters,
-    ))
+    );
+    let environment = if facts.value_identities {
+        serde_json::to_vec(&(environment, "output-dependencies-v2"))
+    } else {
+        serde_json::to_vec(&environment)
+    }
     .unwrap();
     // Parsing a cumulative prefix revisits the completed operation count even
     // after later operations have arrived. Its empty-body feasibility proof is
@@ -565,8 +587,9 @@ impl Search<'_> {
                 }
             }
         }
-        // All acquired values are FP32. Select with a repeated operand has
-        // the same shape/dependency transition as a binary elementwise join.
+        // The original structural contract treats Select as a three-input
+        // join. Value-aware analysis also needs actual binary joins and every
+        // distinct condition placement: known zero conditions change its facts.
         for (index, (left, shape)) in values.iter().enumerate() {
             for (right_index, (right, other)) in values.iter().enumerate().skip(index + 1) {
                 if shape.shapes != other.shapes {
@@ -577,6 +600,17 @@ impl Search<'_> {
                     positive: *left,
                     negative: *right,
                 });
+                if program.dependencies.as_ref().unwrap().value_identities {
+                    operations.push(Op::Add {
+                        left: *left,
+                        right: *right,
+                    });
+                    operations.push(Op::Select {
+                        condition: *right,
+                        positive: *right,
+                        negative: *left,
+                    });
+                }
                 for (third, other) in values.iter().skip(right_index + 1) {
                     if shape.shapes == other.shapes {
                         operations.push(Op::Select {
@@ -584,6 +618,18 @@ impl Search<'_> {
                             positive: *right,
                             negative: *third,
                         });
+                        if program.dependencies.as_ref().unwrap().value_identities {
+                            operations.push(Op::Select {
+                                condition: *right,
+                                positive: *left,
+                                negative: *third,
+                            });
+                            operations.push(Op::Select {
+                                condition: *third,
+                                positive: *left,
+                                negative: *right,
+                            });
+                        }
                     }
                 }
             }
