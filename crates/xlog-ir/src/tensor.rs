@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use xlog_core::{Result, XlogError};
 
+mod constraints;
 mod functions;
+pub use constraints::TensorShapeConstraint;
 pub use functions::TensorSignature;
 mod dependencies;
 pub use dependencies::TensorOutputDependencies;
