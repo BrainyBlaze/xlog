@@ -20,7 +20,7 @@ cudarc = { workspace = true }
 rand = "0.8"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 sha2 = "0.11"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
 xlog-core.workspace = true
 xlog-cuda.workspace = true
