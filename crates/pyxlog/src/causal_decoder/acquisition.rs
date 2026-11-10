@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use xlog_ir::tensor::{
     TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
+    TensorValueIdentity,
 };
 use xlog_logic::ast::FuncDef;
 
@@ -52,6 +53,7 @@ const EXPRESSION_ANCESTOR_LANGUAGE: &str = "xlog-contextual-acquisition-v27";
 const PARTIAL_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v28";
 const EXPRESSION_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v29";
 const EXPRESSION_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v30";
+const VALUE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v31";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -61,6 +63,7 @@ pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCOD
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
+pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -79,7 +82,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=30) {
+    if !matches!(version, 1..=31) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -319,6 +322,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 31 {
+                schema["description"] = json!(format!(
+                    "{} The explicit value-aware dependency contract propagates canonical SSA/formal identities and proven positive zeros through copy operations and calls. Select with identical proven branches carries branch dependencies without its condition; a proven zero condition selects the negative branch. Unknown arithmetic and parameter values stay unknown. These same facts govern prospective choices, existing-value references, callee summaries and final native admission without rewriting operations or proving general nonconstancy or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -404,6 +413,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                31 => VALUE_DEPENDENCY_LANGUAGE,
                 30 => EXPRESSION_REFERENCE_LANGUAGE,
                 29 => EXPRESSION_NODE_LANGUAGE,
                 28 => PARTIAL_EXPRESSION_LANGUAGE,
@@ -584,7 +594,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE;
+        let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE;
+        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities;
         let expression_node_obligations =
             language["id"] == EXPRESSION_NODE_LANGUAGE || value_references;
         let partial_expressions =
@@ -651,8 +662,21 @@ impl PyNativeAcquisitionMask {
             && language["id"] != INTENT_LANGUAGE
             && language["id"] != ENTRY_BUDGET_LANGUAGE
             && !output_dependencies)
-            || context["version"] != if output_dependencies { 2 } else { 1 }
-            || (output_dependencies && context["dependency_contract"] != "output-dependencies-v1")
+            || context["version"]
+                != if value_identities {
+                    3
+                } else if output_dependencies {
+                    2
+                } else {
+                    1
+                }
+            || (output_dependencies
+                && context["dependency_contract"]
+                    != if value_identities {
+                        "output-dependencies-v2"
+                    } else {
+                        "output-dependencies-v1"
+                    })
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
                 "nodes": ACQUIRED_NODES, "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
@@ -718,14 +742,42 @@ impl PyNativeAcquisitionMask {
                     .output(max_context, token_bytes.len())
                     .map_err(value_error)?;
                 if output_dependencies {
+                    let record = &callee["output_dependencies"];
+                    if record.as_object().is_none_or(|record| {
+                        record.len() != if value_identities { 5 } else { 4 }
+                            || ["arguments", "tokens", "definitions", "parameters"]
+                                .iter()
+                                .any(|key| !record.contains_key(*key))
+                            || (value_identities && !record.contains_key("value_identity"))
+                    }) {
+                        return Err(value_error("retained output dependency fields differ"));
+                    }
                     let dependencies: TensorOutputDependencies =
                         serde_json::from_value(callee["output_dependencies"].clone())
                             .map_err(value_error)?;
                     let arguments = signature.arguments(1).map_err(value_error)?.len();
-                    if dependencies
-                        .arguments
-                        .iter()
-                        .any(|&argument| argument >= arguments)
+                    let identity_valid = match &dependencies.value_identity {
+                        None => !value_identities,
+                        Some(TensorValueIdentity::Unknown) => value_identities,
+                        Some(TensorValueIdentity::Zero) => {
+                            value_identities
+                                && !dependencies.has_input()
+                                && dependencies.parameters.is_empty()
+                        }
+                        Some(TensorValueIdentity::Argument(argument)) => {
+                            value_identities
+                                && *argument < arguments
+                                && dependencies.arguments == BTreeSet::from([*argument])
+                                && !dependencies.tokens
+                                && dependencies.parameters.is_empty()
+                        }
+                        Some(TensorValueIdentity::Operation(_)) => false,
+                    };
+                    if !identity_valid
+                        || dependencies
+                            .arguments
+                            .iter()
+                            .any(|&argument| argument >= arguments)
                         || !dependencies.definitions.contains(name)
                         || dependencies
                             .definitions
@@ -922,6 +974,14 @@ impl PyNativeAcquisitionMask {
             self.value_references,
         )
         .map_err(value_error)?;
+        if self.typed_context.as_ref().unwrap()["version"] == 3 {
+            // Complete-source elaboration precedes seeded parameter creation.
+            // Reuse the live prefix owner so decode cannot admit a value that
+            // the same captured semantic contract rejects during token choice.
+            let canonical = self.canonical_prefix(source_bytes).map_err(value_error)?;
+            self.resources(&canonical, None, false, None)
+                .map_err(value_error)?;
+        }
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
             .map_err(value_error)
     }
@@ -2181,6 +2241,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                     self.resources.dependencies.clone(),
                                     self.resources.frontier_completion,
                                     self.resources.completion_cache.cloned(),
+                                    context["version"] == 3,
                                 );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;
