@@ -51,6 +51,7 @@ const EXPRESSION_PREREQUISITE_LANGUAGE: &str = "xlog-contextual-acquisition-v26"
 const EXPRESSION_ANCESTOR_LANGUAGE: &str = "xlog-contextual-acquisition-v27";
 const PARTIAL_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v28";
 const EXPRESSION_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v29";
+const EXPRESSION_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v30";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -59,6 +60,7 @@ pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_E
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
+pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -77,7 +79,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=29) {
+    if !matches!(version, 1..=30) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -285,7 +287,7 @@ pub(super) fn language(
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
             if version >= 25 {
-                rows::expressions::schema(&mut schema, &operation_fields()?);
+                rows::expressions::schema(&mut schema, &operation_fields()?, version >= 30);
             }
             if version >= 26 {
                 schema["description"] = json!(format!(
@@ -308,6 +310,12 @@ pub(super) fn language(
             if version >= 29 {
                 schema["description"] = json!(format!(
                     "{} The shared source reader also reserves every mandatory unopened child occurrence, remaining source-compatible Call argument and future entry root against the global 64-node allowance. Closed children and an active child already represented by an open frame are not charged twice. Partial tags and callee prefixes retain only compatible catalogue domains within this necessary bound. A future hole needs at least two nodes only when canonical candidate inference at both context lengths proves that no zero-child source operation can match its partial type; otherwise its lower bound is one. This reservation selects no node, operand or graph, grants no CSE discount, and does not prove a complete or useful tree.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version >= 30 {
+                schema["description"] = json!(format!(
+                    "{} Only child value slots admit explicit model-selected references to preceding closed operations in the current body. Both context lengths and the same partial/known ancestor continuation constrain the decimal domain. Unfinished reference occurrences are charged once even without an operation frame. Future reference-capable holes keep a conservative one-source-node minimum: an earlier unfinished sibling may still supply their referenced value. A missing matching value now does not exclude a later reference. No future ID or value is supplied, and root operations retain the last-postorder output contract.",
                     schema["description"].as_str().unwrap()
                 ));
             }
@@ -396,6 +404,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                30 => EXPRESSION_REFERENCE_LANGUAGE,
                 29 => EXPRESSION_NODE_LANGUAGE,
                 28 => PARTIAL_EXPRESSION_LANGUAGE,
                 27 => EXPRESSION_ANCESTOR_LANGUAGE,
@@ -427,7 +436,9 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: if version >= 25 {
+            token_cost_contract: if version >= 30 {
+                Some(rows::budget::REFERENCE_CONTRACT)
+            } else if version >= 25 {
                 Some(rows::budget::EXPRESSION_CONTRACT)
             } else {
                 (version >= 21).then_some(rows::budget::CONTRACT)
@@ -547,6 +558,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     ancestor_typing: bool,
     partial_expressions: bool,
     expression_node_obligations: bool,
+    value_references: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -562,6 +574,7 @@ struct CanonicalPrefix<'a> {
     expression_parents: Vec<rows::expressions::Parent>,
     expression_operation: usize,
     expression_nodes: rows::expressions::Nodes,
+    expression_reference: Option<rows::expressions::Reference<'a>>,
     budget: rows::budget::State,
 }
 
@@ -571,7 +584,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let expression_node_obligations = language["id"] == EXPRESSION_NODE_LANGUAGE;
+        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE;
+        let expression_node_obligations =
+            language["id"] == EXPRESSION_NODE_LANGUAGE || value_references;
         let partial_expressions =
             language["id"] == PARTIAL_EXPRESSION_LANGUAGE || expression_node_obligations;
         let ancestor_typing = language["id"] == EXPRESSION_ANCESTOR_LANGUAGE || partial_expressions;
@@ -596,7 +611,9 @@ impl PyNativeAcquisitionMask {
         let self_delimited =
             language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        let cost_contract = if expressions {
+        let cost_contract = if value_references {
+            rows::budget::REFERENCE_CONTRACT
+        } else if expressions {
             rows::budget::EXPRESSION_CONTRACT
         } else {
             rows::budget::CONTRACT
@@ -749,6 +766,7 @@ impl PyNativeAcquisitionMask {
             ancestor_typing,
             partial_expressions,
             expression_node_obligations,
+            value_references,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -901,6 +919,7 @@ impl PyNativeAcquisitionMask {
             self.self_delimited,
             self.named_body,
             self.expressions,
+            self.value_references,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -944,12 +963,16 @@ impl PyNativeAcquisitionMask {
             self.partial_expressions,
             self.expression_node_obligations
                 .then_some(prefix.expression_nodes),
+            self.value_references,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
         }
         resources.admit_expression_ancestors()?;
         resources.admit_expression_nodes()?;
+        if let Some(reference) = prefix.expression_reference {
+            resources.admit_expression_reference(reference)?;
+        }
         // These common source obligations cannot be reduced by choosing a
         // count or retained reference. Reject them before exploring either
         // domain; both searches below only check the same parsed facts.
@@ -1036,6 +1059,7 @@ impl PyNativeAcquisitionMask {
                     expression_parents: prefix.expression_parents.clone(),
                     expression_operation: prefix.expression_operation,
                     expression_nodes: prefix.expression_nodes,
+                    expression_reference: prefix.expression_reference,
                     budget: rows::budget::State::default(),
                 };
                 // Completing a reference domain spends no original IDs. Keep
@@ -1070,6 +1094,7 @@ impl PyNativeAcquisitionMask {
                 self.self_delimited,
                 self.named_body,
                 self.expressions,
+                self.value_references,
                 self.parent_prerequisites,
                 self.ancestor_typing,
                 self.token_budget.is_some(),
@@ -1091,6 +1116,7 @@ impl PyNativeAcquisitionMask {
                 expression_parents: prefix.expression_parents,
                 expression_operation: prefix.expression_operation,
                 expression_nodes: prefix.expression_nodes,
+                expression_reference: prefix.expression_reference,
                 budget: prefix.budget,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -1105,6 +1131,7 @@ impl PyNativeAcquisitionMask {
                 expression_parents: Vec::new(),
                 expression_operation: 0,
                 expression_nodes: rows::expressions::Nodes::default(),
+                expression_reference: None,
                 budget: rows::budget::State::default(),
             })
         }
@@ -1144,6 +1171,7 @@ pub(super) fn decode_numerical_rows(
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    value_references: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1156,6 +1184,7 @@ pub(super) fn decode_numerical_rows(
         self_delimited,
         named_body,
         expressions,
+        value_references,
     )
     .map_err(value_error)
 }
@@ -1196,6 +1225,7 @@ struct Resources<'a> {
     source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
     partial_expressions: bool,
     expression_nodes: Option<rows::expressions::Nodes>,
+    value_references: bool,
 }
 
 struct ExpressionContinuation {
@@ -1258,6 +1288,7 @@ fn resource_prefix<'a>(
     source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
     partial_expressions: bool,
     expression_nodes: Option<rows::expressions::Nodes>,
+    value_references: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1323,6 +1354,7 @@ fn resource_prefix<'a>(
         source_expression,
         partial_expressions,
         expression_nodes,
+        value_references,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -1385,9 +1417,16 @@ impl Resources<'_> {
     fn expression_continuation(&self) -> Option<ExpressionContinuation> {
         self.current_expression()?;
         let (parents, _) = self.source_expression?;
+        Some(self.expression_ancestors_continuation(&parents[..parents.len() - 1]))
+    }
+
+    fn expression_ancestors_continuation(
+        &self,
+        parents: &[rows::expressions::Parent],
+    ) -> ExpressionContinuation {
         let mut ancestors = Vec::new();
         let mut root = true;
-        for parent in parents[..parents.len() - 1].iter().rev() {
+        for parent in parents.iter().rev() {
             let required =
                 &self.operation_fields.unwrap()[parent.selected["operation"].as_str().unwrap()];
             let Some(operand) = parent.operand.as_ref().filter(|_| {
@@ -1409,7 +1448,7 @@ impl Resources<'_> {
             });
         }
         let partial = self.partial_expressions.then(|| {
-            parents[..parents.len() - 1]
+            parents
                 .iter()
                 .map(|parent| typed::Ancestor {
                     fields: parent.selected.clone(),
@@ -1417,11 +1456,80 @@ impl Resources<'_> {
                 })
                 .collect()
         });
-        Some(ExpressionContinuation {
+        ExpressionContinuation {
             ancestors,
             root,
             partial,
-        })
+        }
+    }
+
+    fn admit_expression_reference(
+        &self,
+        reference: rows::expressions::Reference<'_>,
+    ) -> Result<(), serde_json::Error> {
+        if !self.value_references
+            || self.current_expression().is_none()
+            || self.definition_index != Some(reference.definition_index)
+            || self.program.operations != reference.operations
+        {
+            return Err(serde_json::Error::custom(
+                "expression reference owner differs",
+            ));
+        }
+        let continuation =
+            self.expression_ancestors_continuation(self.source_expression.unwrap().0);
+        let program = self.program.typed.as_ref().unwrap();
+        let parent = self.current_expression().unwrap();
+        let mut decoder = serde_json::Deserializer::from_slice(reference.bytes);
+        NumberChoice {
+            values: 0..reference.operations,
+            extensions: None,
+            accepts: |id| {
+                if let Some(typed::Operand::Argument(slot)) = &parent.operand {
+                    let Some(mut arguments) = parent
+                        .selected
+                        .get("arguments")
+                        .and_then(Value::as_array)
+                        .cloned()
+                    else {
+                        return false;
+                    };
+                    if arguments.len() != *slot {
+                        return false;
+                    }
+                    arguments.push(json!(id));
+                    let Some(signature) = parent
+                        .selected
+                        .get("function")
+                        .and_then(Value::as_str)
+                        .and_then(|name| self.signatures.get(name))
+                    else {
+                        return false;
+                    };
+                    if program
+                        .source_call_arity(
+                            signature,
+                            &arguments,
+                            arguments.len(),
+                            [Default::default(); 2],
+                        )
+                        .is_none()
+                    {
+                        return false;
+                    }
+                }
+                program.reference_possible(
+                    id,
+                    &self.signatures,
+                    continuation.borrow(self.operation_fields.unwrap()),
+                ) && self.token_budget.is_none_or(|bound| {
+                    bound.permits_decimal(reference.bytes, id, self.token_obligations(bound.state))
+                })
+            },
+            bytes: reference.bytes,
+        }
+        .deserialize(&mut decoder)?;
+        decoder.end()
     }
 
     fn admit_expression_ancestors(&self) -> Result<(), serde_json::Error> {

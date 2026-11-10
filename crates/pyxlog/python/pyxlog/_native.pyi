@@ -94,6 +94,9 @@ class NativeCausalModel:
         and scalar tails, sharing the concrete IR type owner.
         V29 also reserves mandatory unopened expression occurrences and roots against
         the global node cap; canonical leaf infeasibility can strengthen a hole to two.
+        V30 selects numerical-expressions-v2: child slots may explicitly reference
+        closed body-local operation IDs; each source occurrence still counts once.
+        Its original-ID suffix contract is v3; root values remain operation tuples.
         """
         ...
     def fork_acquired(
@@ -132,18 +135,19 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–29 require positive remaining original IDs including this choice and paid EOS.
+        """V21–30 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
-        V21–24 use ordered-structural-subsequence-v1; V25–29 require v2, which
-        does not infer flat row capacity for expressions.
+        V21–24 use ordered-structural-subsequence-v1; V25–29 require v2;
+        V30 requires v3 for integer-or-tuple child values and decimal extensions.
+        Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–28 prefix facts as JSON; no token selection or final admission."""
+        """Version4–30 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–28 source into canonical JSON using the captured context."""
+        """Elaborate complete v7–30 source into canonical JSON using the captured context."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int

@@ -7,6 +7,7 @@ use super::super::{is_value_reference, ACQUIRED_SOURCE_BYTES};
 
 pub(crate) const CONTRACT: &str = "ordered-structural-subsequence-v1";
 pub(crate) const EXPRESSION_CONTRACT: &str = "ordered-structural-subsequence-v2";
+pub(crate) const REFERENCE_CONTRACT: &str = "ordered-structural-subsequence-v3";
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Atom {
@@ -14,6 +15,7 @@ pub(crate) enum Atom {
     Letter,
     Digit,
     Symbol,
+    ValueStart,
 }
 
 impl Atom {
@@ -27,7 +29,9 @@ impl Atom {
     }
 
     fn matches(self, actual: Self) -> bool {
-        self == actual || (self == Self::Symbol && matches!(actual, Self::Letter | Self::Digit))
+        self == actual
+            || (self == Self::Symbol && matches!(actual, Self::Letter | Self::Digit))
+            || (self == Self::ValueStart && matches!(actual, Self::Digit | Self::Byte(b'[')))
     }
 }
 
@@ -65,9 +69,19 @@ pub(crate) fn expression() -> Unit {
     text("[\"\",]")
 }
 
-pub(crate) fn expression_field(name: &str) -> Unit {
-    if is_value_reference(name) {
+pub(crate) fn expression_value(references: bool) -> Unit {
+    if references {
+        // A future value may begin with an integer or an operation tuple.
+        // Its remaining unknown syntax has no common required delimiters.
+        Unit::Bytes(vec![Atom::ValueStart])
+    } else {
         expression()
+    }
+}
+
+pub(crate) fn expression_field(name: &str, references: bool) -> Unit {
+    if is_value_reference(name) {
+        expression_value(references)
     } else {
         field(name)
     }
@@ -442,6 +456,28 @@ pub(crate) struct Bound<'a> {
 }
 
 impl Bound<'_> {
+    /// Decimal references use the same alphabet and suffix obligations. A
+    /// viable longer ID must cover its still-unconsumed digits and paid EOS.
+    pub(crate) fn permits_decimal(
+        &self,
+        prefix: &[u8],
+        value: usize,
+        parameters: Obligations,
+    ) -> bool {
+        let spelling = value.to_string();
+        let Some(tail) = spelling.as_bytes().strip_prefix(prefix) else {
+            return false;
+        };
+        if self.eos {
+            return false;
+        }
+        let mut pattern = vec![Atom::Digit; tail.len()];
+        pattern.extend(self.state.pattern(None, parameters));
+        self.remaining
+            .checked_sub(1)
+            .is_some_and(|allowance| self.alphabet.covers(pattern, allowance))
+    }
+
     /// Invert the same necessary suffix bound for the active body's total rows.
     /// The reader's completed count includes a partly emitted row whose remaining
     /// bytes are already in the unfinished units. No row is paid twice.

@@ -3,12 +3,21 @@
 use super::*;
 
 pub(crate) const ENCODING: &str = "numerical-expressions-v1";
+pub(crate) const REFERENCE_ENCODING: &str = "numerical-expressions-v2";
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Nodes {
     pub spent: usize,
     pub pending_roots: usize,
     pub current_root_pending: bool,
+    pub reference_pending: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Reference<'a> {
+    pub bytes: &'a [u8],
+    pub definition_index: usize,
+    pub operations: usize,
 }
 
 /// Source-selected parent facts, separate from not-yet-emitted child values.
@@ -22,14 +31,21 @@ pub(crate) struct Parent {
     pub projected: bool,
 }
 
-pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>) {
+pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>, references: bool) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
+        let value = format!("{name}Value");
+        if references {
+            defs[&value] = json!({"anyOf": [
+                {"$ref": format!("#/$defs/{name}")},
+                {"type": "integer", "minimum": 0, "maximum": ACQUIRED_NODES - 1}
+            ]});
+        }
         for operation in defs[name]["anyOf"].as_array_mut().unwrap() {
             let tag = operation["prefixItems"][0]["const"].as_str().unwrap();
             let fields = &fields[tag];
             for (position, field) in fields.iter().enumerate().skip(1) {
-                let child = json!({"$ref": format!("#/$defs/{name}")});
+                let child = json!({"$ref": format!("#/$defs/{}", if references { value.as_str() } else { name })});
                 if is_value_reference(field) {
                     operation["prefixItems"][position] = child;
                 } else if field == "arguments" {
@@ -55,6 +71,11 @@ pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>)
     schema["description"] = json!(
         "Numerical-expressions-v1 acquisition. Root fields are intent,helpers,entry. Entry has exactly the ordered keys weights,return; helpers use [local_name,signature,body] with the same body. Weights retain the physical FP32 declaration/reference table. Return is one model-authored operation tuple from the canonical catalogue: value operands contain child expressions, and Call arguments contain an array of expressions. Other scalar indices, widths, symbols, token arrays and Gather indices keep their existing positions and domains. The shared native reader lowers each source node once in deterministic left-to-right postorder, without CSE, chosen operands or a supplied graph. The root is the last canonical operation. All source nodes, including duplicates and unfinished ancestors, share the existing 64-node limit; source and projected bytes remain bounded. Canonical shape, causality, physical dependencies, initialization and execution are unchanged. Ordered-structural-subsequence-v2 reserves mandatory selected syntax and ancestor closings plus future entry and paid EOS. Unknown tree structure is relaxed, never projected as a flat row sequence or assigned a token-derived row capacity. This necessary bound does not prove whole-grammar completion, original-ID fit, semantic nonconstancy or usefulness."
     );
+    if references {
+        schema["description"] = json!(
+            "Numerical-expressions-v2 acquisition. Root fields are intent,helpers,entry; each ordered body has weights,return. Return is a canonical operation tuple. Only value child operands and Call argument elements may instead contain a model-selected nonnegative integer identifying an already closed canonical operation of this body. Native assigns IDs only to emitted operations in left-to-right postorder; a reference reuses exactly that value without an operation, new ID, automatic CSE or chosen graph. Root integers, future or open-ancestor IDs and cross-definition references are invalid; IDs reset in each body. Other scalar indices, widths, arrays, descriptors and symbols keep their existing meanings. Every operation tuple and integer reference occurrence, including duplicate or unfinished occurrences, counts toward the same 64 source-construct/depth limit. Lowered operations separately retain their 64-node limit. Source/projected bytes, scalar limits, FP32 physical aliases, shape/causal/dependency inference, initialization, execution and gradients keep their canonical owners. Ordered-structural-subsequence-v3 uses the actual original-ID remainder and paid EOS, selected syntax and ancestor closures, future entry and the integer-or-tuple alternative for unknown child values. This necessary relaxation is neither exact grammar-coupled completion nor an original-ID fit or usefulness witness."
+        );
+    }
 }
 
 impl Reader<'_> {
@@ -153,15 +174,10 @@ impl Reader<'_> {
         let frame = self.budget.enter();
         self.budget.set(frame, || vec![budget::text("\"\",]")]);
         self.take(b'[')?;
-        self.expression_nodes += 1;
+        self.open_expression_node()?;
         if self.expression_root_pending {
             self.expression_roots -= 1;
             self.expression_root_pending = false;
-        }
-        if self.expression_nodes > ACQUIRED_NODES {
-            return Err(Stop::Invalid(
-                "expression nodes exceed the acquisition node allowance".into(),
-            ));
         }
         let mut operation = Output {
             bytes: Vec::new(),
@@ -200,18 +216,19 @@ impl Reader<'_> {
             .get(&tag)
             .ok_or_else(|| Stop::Invalid("unknown numerical operation tag".into()))?;
         let mut input = None;
+        let value_references = self.value_references;
         for (position, field) in fields.iter().enumerate().skip(1) {
             let following = || {
                 let mut units = Vec::new();
                 for field in fields.iter().skip(position + 1) {
                     units.push(budget::text(","));
-                    units.push(budget::expression_field(field));
+                    units.push(budget::expression_field(field, value_references));
                 }
                 units.push(budget::text("]"));
                 units
             };
             self.budget.set(frame, || {
-                let mut units = vec![budget::expression_field(field)];
+                let mut units = vec![budget::expression_field(field, value_references)];
                 units.extend(following());
                 units
             });
@@ -225,7 +242,7 @@ impl Reader<'_> {
                     self.expression_parents[parent].operand =
                         Some(typed::Operand::Value(field.clone()));
                 }
-                let id = self.expression()?;
+                let id = self.expression_value()?;
                 if self.ancestor_typing {
                     self.expression_parents[parent].operand = None;
                     self.expression_parents[parent]
@@ -249,7 +266,7 @@ impl Reader<'_> {
                     let function = self.expression_scalar(
                         &mut operation,
                         project_partial,
-                        budget::expression_field(field),
+                        budget::expression_field(field, self.value_references),
                         |reader| reader.symbol(true),
                     );
                     if self.parent_prerequisites {
@@ -267,7 +284,7 @@ impl Reader<'_> {
                     let value = self.expression_scalar(
                         &mut operation,
                         project_partial,
-                        budget::expression_field(field),
+                        budget::expression_field(field, self.value_references),
                         |reader| {
                             if field == "indices" && reader.peek()? == b'{' {
                                 reader
@@ -326,7 +343,7 @@ impl Reader<'_> {
                     self.expression_parents[parent].operand =
                         Some(typed::Operand::Argument(arguments.len()));
                 }
-                arguments.push(self.expression()?);
+                arguments.push(self.expression_value()?);
                 if self.ancestor_typing {
                     self.expression_parents[parent].operand = None;
                     self.expression_parents[parent]
@@ -343,5 +360,55 @@ impl Reader<'_> {
         self.take(b']')?;
         self.budget.leave(frame);
         Ok(arguments)
+    }
+
+    fn open_expression_node(&mut self) -> Result<(), Stop> {
+        self.expression_nodes += 1;
+        if self.expression_nodes > ACQUIRED_NODES {
+            return Err(Stop::Invalid(
+                "expression nodes exceed the acquisition node allowance".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only child slots call this method. A body root remains an operation.
+    fn expression_value(&mut self) -> Result<usize, Stop> {
+        if !self.value_references {
+            return self.expression();
+        }
+        let frame = self.budget.enter();
+        self.budget
+            .set(frame, || vec![budget::expression_value(true)]);
+        let first = self.peek()?;
+        if first == b'[' {
+            self.budget.leave(frame);
+            return self.expression();
+        }
+        if !first.is_ascii_digit() {
+            return Err(Stop::Invalid(
+                "expression value must be an operation or preceding integer reference".into(),
+            ));
+        }
+        self.open_expression_node()?;
+        let start = self.offset;
+        self.expression_reference =
+            Some((start, self.definition_index, self.expression_operations));
+        self.budget.set(frame, || vec![]);
+        let value = self.raw(false)?;
+        let id = serde_json::from_str::<usize>(value.get())?;
+        if self.offset == self.source.len() {
+            // NumberChoice owns the complete decimal extension domain. Do not
+            // put this snapshot ID into a parent while digits can still extend.
+            return Err(Stop::Incomplete);
+        }
+        if id >= self.expression_operations {
+            return Err(Stop::Invalid(
+                "expression reference must name a closed operation of this body".into(),
+            ));
+        }
+        self.expression_reference = None;
+        self.budget.leave(frame);
+        Ok(id)
     }
 }
