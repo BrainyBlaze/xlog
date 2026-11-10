@@ -1099,7 +1099,8 @@ __device__ void replay_copy_snapshot(const PublicationControl& control,
 }
 
 extern "C" __global__ void semantic_prepared_replay_parent(uint64_t control_ptr,
-        uint64_t lease_ptr,uint64_t arena,ReplayCopyDescriptor copy,uint64_t native_work0,uint64_t native_work1) {
+        uint64_t lease_ptr,uint64_t arena,ReplayCopyDescriptor copy,
+        uint64_t measure_status0,uint64_t measure_status1,uint64_t native_work0,uint64_t native_work1) {
     const auto& control=*reinterpret_cast<const PublicationControl*>(control_ptr);
     const auto& lease=*reinterpret_cast<const PublicationLease*>(lease_ptr);
     if(lease.bank>1) { semantic_content_integrity_trap();return; }
@@ -1117,6 +1118,15 @@ extern "C" __global__ void semantic_prepared_replay_parent(uint64_t control_ptr,
     replay_copy_snapshot(control,*bank,copy,arena,threadIdx.x,blockDim.x,work);
     __syncthreads();
     if(threadIdx.x==0) {
+        // This producer precedes both conditional branches on every replay.
+        // A skipped bank remains unavailable instead of exposing stale output.
+        const uint64_t status_pointers[2]={measure_status0,measure_status1};
+        for(uint32_t bank_index=0;bank_index<2;++bank_index) {
+            if(!status_pointers[bank_index])continue;
+            auto* status=reinterpret_cast<uint64_t*>(status_pointers[bank_index]);
+            for(uint64_t word=0;word<semantic_world::Measure::kHeaderWords;++word)
+                status[word]=semantic_graph::written_word(0,work);
+        }
         auto* actual=reinterpret_cast<uint64_t*>(copy.actual);
         actual[0]=bytes;actual[1]=bank->header.publication_word;actual[2]=1;
     }

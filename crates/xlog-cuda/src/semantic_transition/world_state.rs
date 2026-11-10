@@ -53,6 +53,8 @@ pub(super) struct MeasureGeometry {
     pub log_potentials: usize,
 }
 
+pub(super) const MEASURE_HEADER_WORDS: usize = 32;
+
 fn invalid_world(detail: &str) -> SemanticTransitionError {
     publication_input_error(detail)
 }
@@ -363,7 +365,7 @@ impl SemanticWorldContext {
             .and_then(|count| count.checked_add(layout.library_count))
             .filter(|count| *count <= u32::MAX as usize)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let mut words = 32usize;
+        let mut words = MEASURE_HEADER_WORDS;
         for (count, width) in [
             (cap.nodes as usize, 4),
             (cap.unique_slots as usize, 1),

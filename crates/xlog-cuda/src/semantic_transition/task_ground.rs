@@ -1012,7 +1012,13 @@ impl TaskGroundStorage {
         let queries = geometry.queries;
         let factors = geometry.factors;
         let views = [
-            (0, 32, vec![32], vec![1], (1, 64)),
+            (
+                0,
+                super::world_state::MEASURE_HEADER_WORDS,
+                vec![super::world_state::MEASURE_HEADER_WORDS as i64],
+                vec![1],
+                (1, 64),
+            ),
             (
                 geometry.masses,
                 12 * queries,

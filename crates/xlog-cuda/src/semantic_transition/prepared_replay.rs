@@ -70,6 +70,7 @@ pub(super) struct PreparedReplayCustody {
     input_bindings: TrackedCudaSlice<PublicationStepInput>,
     input_views: BTreeMap<(u64, u64), (DeviceMemoryView<u8>, SemanticTensorLayout)>,
     original_inputs: Arc<PreparedStepInputs>,
+    measure_status: [Option<DeviceMemoryView<u64>>; 2],
     copy: CudaFunction,
     #[cfg(feature = "semantic-policy")]
     learning_phases: Vec<SemanticLearningPhaseRecord>,
@@ -199,6 +200,7 @@ impl PreparedReplayCustody {
         stream: &CudaStream,
         storage: &PublicationStorage,
         inputs: &Arc<PreparedStepInputs>,
+        measure_status: [Option<DeviceMemoryView<u64>>; 2],
         arena_words: usize,
         reservation: &mut GpuMemoryReservation,
         learning_phases: &[SemanticLearningPhaseRecord],
@@ -278,6 +280,7 @@ impl PreparedReplayCustody {
             input_bindings,
             input_views,
             original_inputs: Arc::clone(inputs),
+            measure_status,
             successor: ReplaySnapshot::allocate(
                 stream,
                 storage,
@@ -381,6 +384,16 @@ impl PreparedReplayCustody {
         ceiling[0] = 1;
         ceiling[1] = ceiling[1]
             .checked_add(8)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        // Charge the original result headers separately from snapshot bytes.
+        let status_bytes = self
+            .measure_status
+            .iter()
+            .flatten()
+            .map(|view| view.len() as u64 * size_of::<u64>() as u64)
+            .sum::<u64>();
+        ceiling[8] = ceiling[8]
+            .checked_add(status_bytes)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         Ok(ceiling)
     }
@@ -490,6 +503,9 @@ impl PreparedReplayCustody {
             }
         }
         self.parent.record(&mut recorder);
+        for status in self.measure_status.iter().flatten() {
+            recorder.write(status);
+        }
         enqueue_recorded(domain, poisoned, recorder, |enqueue| {
             // SAFETY: source publication/arena and every private destination are
             // retained by the original step. Native selection validates the exact
@@ -507,6 +523,12 @@ impl PreparedReplayCustody {
                         lease.device_ptr_value(),
                         *graph.transition_arena_view().device_ptr(),
                         self.parent.descriptor(),
+                        self.measure_status[0]
+                            .as_ref()
+                            .map_or(0, |status| *status.device_ptr()),
+                        self.measure_status[1]
+                            .as_ref()
+                            .map_or(0, |status| *status.device_ptr()),
                         native_work.as_ref().map_or(0, |work| *work[0].device_ptr()),
                         native_work.as_ref().map_or(0, |work| *work[1].device_ptr()),
                     ),

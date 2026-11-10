@@ -25963,6 +25963,14 @@ impl SemanticTransitionSession {
                         &self.stream,
                         &storage,
                         &inputs,
+                        std::array::from_fn(|bank| {
+                            branches[bank].task_ground.as_ref().map(|ground| {
+                                ground
+                                    .measure
+                                    .view()
+                                    .slice(0..world_state::MEASURE_HEADER_WORDS)
+                            })
+                        }),
                         self.graph.transition_arena_view().len(),
                         &mut reservation,
                         &self.learning_phases,
