@@ -11666,6 +11666,57 @@ fn parse_replay_rows_with_live(
         .collect()
 }
 
+enum ObservedSourceScreening {
+    PrivateGenerated,
+    Benchmark,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservedSourceScreeningRecord {
+    law: String,
+    references: Vec<[String; 3]>,
+}
+
+fn observed_source_screening(
+    provenance: &[ColdValue],
+) -> PyResult<Option<ObservedSourceScreening>> {
+    let mut result = None;
+    for binding in provenance[6].strings()? {
+        let Some(record) = binding.strip_prefix("task-screening:") else {
+            continue;
+        };
+        if result.is_some() {
+            return Err(invalid(
+                "observed source manifest repeats its screening law",
+            ));
+        }
+        let record: ObservedSourceScreeningRecord = serde_json::from_str(record)
+            .map_err(|_| invalid("observed source manifest has an invalid screening record"))?;
+        result = Some(match record.law.as_str() {
+            "dlm-new.private-project-generated/1" if record.references.is_empty() => {
+                ObservedSourceScreening::PrivateGenerated
+            }
+            "dlm-new.benchmark-task-screening/1"
+                if !record.references.is_empty()
+                    && record
+                        .references
+                        .iter()
+                        .flatten()
+                        .all(|value| !value.is_empty()) =>
+            {
+                ObservedSourceScreening::Benchmark
+            }
+            _ => {
+                return Err(invalid(
+                    "observed source screening law and original reference roster disagree",
+                ))
+            }
+        });
+    }
+    Ok(result)
+}
+
 impl TaskAuthority {
     fn parse(values: &[ColdValue]) -> PyResult<Self> {
         Self::parse_with_payload_validation(values, ReplayPayloadValidation::Required)
@@ -11774,7 +11825,7 @@ impl TaskAuthority {
         for value in values.sequence()? {
             // Exact projection of the data owner's sealed manifest entry and
             // separately observed token payload, supplied by trusted Runtime.
-            let fields = value.fields(6)?;
+            let fields = value.fields(7)?;
             let identity = fields[0].text()?;
             if !identities.insert(identity.to_owned()) {
                 return Err(invalid("duplicate initial source identity"));
@@ -11783,6 +11834,22 @@ impl TaskAuthority {
             let tokenizer = fields[2].text()?;
             let revision = fields[3].text()?;
             let entry = fields[4].fields(10)?;
+            // Retain the admission provenance from the same sealed entry owner.
+            let provenance = fields[6].fields(10)?;
+            provenance[0].strings()?;
+            provenance[1].text()?;
+            provenance[4].strings()?;
+            provenance[5].text()?;
+            provenance[8].strings()?;
+            if provenance[2].text()? != tokenizer
+                || provenance[3].text()? != revision
+                || provenance[9] != entry[5]
+            {
+                return Err(invalid(
+                    "observed source manifest tokenizer or report differs from its entry",
+                ));
+            }
+            let screening = observed_source_screening(provenance)?;
             entry[0].text()?;
             for digest in &entry[2..5] {
                 checked_digest(digest)?;
@@ -11828,7 +11895,23 @@ impl TaskAuthority {
                 .first()
                 .ok_or_else(|| invalid("source origin is absent"))?
                 .text()?;
-            if branch == "corpus" || entry[5] != ColdValue::None {
+            if branch == "live" && screening.is_some() {
+                return Err(invalid(
+                    "live source cannot declare generated corpus screening",
+                ));
+            }
+            if matches!(screening, Some(ObservedSourceScreening::PrivateGenerated)) {
+                if branch != "corpus" || entry[5] != ColdValue::None {
+                    return Err(invalid(
+                        "private-generated source must retain its corpus origin without a benchmark report",
+                    ));
+                }
+            } else if branch == "corpus" || entry[5] != ColdValue::None {
+                if entry[5] == ColdValue::None {
+                    return Err(invalid(
+                        "corpus observed source requires its original decontamination report or an explicit private-generation law",
+                    ));
+                }
                 checked_digest(&entry[5])?;
             }
             let source_envelopes = self.source_lineage_envelopes(identity)?;
@@ -11966,7 +12049,7 @@ impl TaskAuthority {
         // Preserve the original canonical task payload and extend that same
         // retained authority record with the complete admitted source values.
         let source_bytes = values.canonical_bytes();
-        let mut binding = b"xlog.task.observed-sources.v1\0".to_vec();
+        let mut binding = b"xlog.task.observed-sources.v2\0".to_vec();
         for bytes in [&self.canonical, &source_bytes] {
             binding.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
             binding.extend_from_slice(bytes);
@@ -24785,8 +24868,8 @@ impl PySemanticTransitionController {
     /// the retained program and the actual native execution bound to this task.
     ///
     /// ``initial_sources`` rows are ``(source_id, manifest_hash, tokenizer_hash,
-    /// tokenizer_revision, manifest_entry, tokens)``. The trusted application
-    /// obtains observed tokens from its data reader and the complete entry from
+    /// tokenizer_revision, manifest_entry, tokens, manifest_provenance)``.
+    /// The trusted application obtains observed tokens and the complete entry from
     /// the same sealed manifest. The ten-field entry retains example, split,
     /// acquired/transform/normalized digests, decontamination, leakage keys,
     /// full corpus/live origin, admission and the observed-field binding.
@@ -24794,6 +24877,13 @@ impl PySemanticTransitionController {
     /// token_count)``. The normalized mixed training-row digest is never used
     /// as the observation digest. Native verifies the actual observed payload
     /// and transformation; provenance references alone grant no operation.
+    /// The ten-field manifest provenance is the same sealed owner's canonical
+    /// record. Its tokenizer hash/revision and report must match this source.
+    /// Derivation inputs retain the original explicit task-screening law and
+    /// reference roster. Private generation declares an empty benchmark roster
+    /// and no report; ordinary and benchmark corpus require their real report.
+    /// Source authority retains all seven fields under observed-sources v2
+    /// through original import, parent binding and checkpoint restoration.
     /// ``source_mapping`` rows are ``(source_id, token_offset, logical_position)``;
     /// no second token ID is accepted. Each source resolves through the same
     /// complete data/control graph; target-value ancestry is rejected even when
