@@ -8,7 +8,7 @@ mod functions;
 pub use constraints::TensorShapeConstraint;
 pub use functions::TensorSignature;
 mod dependencies;
-pub use dependencies::{TensorOutputDependencies, TensorValueIdentity};
+pub use dependencies::{TensorOutputDependencies, TensorValueFacts, TensorValueIdentity};
 
 // Internally tagged enums buffer their fields through Serde's Content. When the
 // application's serde_json enables arbitrary_precision, a fractional JSON number

@@ -57,6 +57,7 @@ const EXPRESSION_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v30";
 const VALUE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v31";
 const TYPED_COLLECTION_LANGUAGE: &str = "xlog-contextual-acquisition-v32";
 const COLLECTION_CHOICE_LANGUAGE: &str = "xlog-contextual-acquisition-v33";
+const PREDICATE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v34";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -67,6 +68,7 @@ pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
+pub(super) const PREDICATE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v4";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -85,7 +87,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=33) {
+    if !matches!(version, 1..=34) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -343,6 +345,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 34 {
+                schema["description"] = json!(format!(
+                    "{} Numerical-expressions-v4 explicitly selects output-dependencies-v3 with the same authored tuples and references. A separate query-local proof tracks values restricted to signed zero or NaN through zero products, addition, Tanh and copying. Such a Select condition can never satisfy the executable strict >0 predicate, so only its negative branch contributes output dependencies. Arithmetic dependencies and numeric identities remain unchanged; equal predicate proofs never establish equal values. Prefix trials, completion memo keys, complete decoding and original-source fork share this mode. The proof is not exported in the unchanged five-field callee records; opaque callees remain unknown. Historical modes, kernels and gradients are unchanged. This necessary analysis does not prove general nonconstancy or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -428,6 +436,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                34 => PREDICATE_DEPENDENCY_LANGUAGE,
                 33 => COLLECTION_CHOICE_LANGUAGE,
                 32 => TYPED_COLLECTION_LANGUAGE,
                 31 => VALUE_DEPENDENCY_LANGUAGE,
@@ -617,7 +626,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE;
+        let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE;
+        let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
         let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
         let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE || typed_collections;
         let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities;
@@ -701,7 +711,9 @@ impl PyNativeAcquisitionMask {
                 }
             || (output_dependencies
                 && context["dependency_contract"]
-                    != if value_identities {
+                    != if predicate_values {
+                        "output-dependencies-v3"
+                    } else if value_identities {
                         "output-dependencies-v2"
                     } else {
                         "output-dependencies-v1"
@@ -2363,6 +2375,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                     self.resources.frontier_completion,
                                     self.resources.completion_cache.cloned(),
                                     context["version"] == 3,
+                                    context["dependency_contract"] == "output-dependencies-v3",
                                 );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;

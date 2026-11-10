@@ -1,6 +1,6 @@
 //! Possible value dependencies of a numerical result, without executing it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -36,6 +36,17 @@ pub enum TensorValueIdentity {
     Argument(usize),
     /// An actual preceding value in this body, never a callee-local identifier.
     Operation(usize),
+}
+
+/// Query-local predicate proof alongside the unchanged exported dependency record.
+/// This is not a value identity: distinct signed zeros and NaNs remain distinct.
+/// The proof is deliberately absent from callee JSON and saved numerical IR.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TensorValueFacts {
+    /// The existing output-reaching identities and inputs, unchanged on arithmetic.
+    pub dependencies: TensorOutputDependencies,
+    /// Every element belongs to {-0, +0, NaN}, so the CUDA predicate >0 is false.
+    pub zero_or_nan: bool,
 }
 
 impl TensorOutputDependencies {
@@ -86,6 +97,88 @@ impl TensorProgram {
         resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
     ) -> Result<TensorOutputDependencies> {
         self.operation_dependencies(operation, value, resolve, Some(output))
+    }
+
+    /// Explicit predicate-aware mode. Historical structural/value entrypoints
+    /// keep their original transfer; arithmetic dependencies are never erased.
+    pub fn operation_predicate_dependencies(
+        &self,
+        operation: &TensorOperation,
+        output: usize,
+        value: &dyn Fn(usize) -> Result<TensorValueFacts>,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+    ) -> Result<TensorValueFacts> {
+        let mut callees = BTreeMap::<String, TensorOutputDependencies>::new();
+        let mut callee = |name: &str| {
+            if let Some(facts) = callees.get(name) {
+                return Ok(facts.clone());
+            }
+            let facts = resolve(name)?;
+            callees.insert(name.to_owned(), facts.clone());
+            Ok(facts)
+        };
+        let mut dependencies = self.operation_value_dependencies(
+            operation,
+            output,
+            &|id| Ok(value(id)?.dependencies),
+            &mut callee,
+        )?;
+        let mut zero_or_nan = dependencies.value_identity == Some(TensorValueIdentity::Zero);
+        zero_or_nan |= match operation {
+            TensorOperation::Multiply { left, right } => {
+                value(*left)?.zero_or_nan || value(*right)?.zero_or_nan
+            }
+            TensorOperation::Add { left, right } => {
+                value(*left)?.zero_or_nan && value(*right)?.zero_or_nan
+            }
+            TensorOperation::Tanh { input }
+            | TensorOperation::Broadcast { input }
+            | TensorOperation::GatherColumns { input, .. }
+            | TensorOperation::Row { input, .. } => value(*input)?.zero_or_nan,
+            TensorOperation::Stack { inputs } => {
+                let mut all = !inputs.is_empty();
+                for input in inputs {
+                    all &= value(*input)?.zero_or_nan;
+                }
+                all
+            }
+            TensorOperation::Select {
+                condition,
+                positive,
+                negative,
+            } => {
+                let negative = value(*negative)?;
+                if value(*condition)?.zero_or_nan {
+                    // Preserve the executable strict comparison, including NaN.
+                    // The arithmetic that produced the condition is not rewritten.
+                    dependencies = negative.dependencies;
+                    negative.zero_or_nan
+                } else {
+                    value(*positive)?.zero_or_nan && negative.zero_or_nan
+                }
+            }
+            TensorOperation::Call {
+                function,
+                arguments,
+            } => match callee(function)?.value_identity {
+                Some(TensorValueIdentity::Zero) => true,
+                Some(TensorValueIdentity::Argument(argument)) => {
+                    let input = arguments
+                        .get(argument)
+                        .ok_or_else(|| invalid("callee predicate argument is absent"))?;
+                    value(*input)?.zero_or_nan
+                }
+                // Opaque callees do not export this private predicate proof.
+                _ => false,
+            },
+            // In particular, do not infer facts from parameter contents, a lack
+            // of dependencies, division, or a scan cell without its initial span.
+            _ => false,
+        };
+        Ok(TensorValueFacts {
+            dependencies,
+            zero_or_nan,
+        })
     }
 
     fn operation_dependencies(
@@ -289,6 +382,33 @@ impl TensorProgram {
             .get(self.output)
             .cloned()
             .map(TensorOutputDependencies::into_callee_summary)
+            .ok_or_else(|| invalid("numerical dependency output is absent"))
+    }
+
+    /// The same operation transfer used by prospective predicate-aware choices.
+    /// Only the existing five-field dependency record crosses a callee boundary.
+    pub fn output_predicate_dependencies(
+        &self,
+        resolve: &mut dyn FnMut(&str) -> Result<TensorOutputDependencies>,
+    ) -> Result<TensorOutputDependencies> {
+        let mut values = Vec::<TensorValueFacts>::with_capacity(self.operations.len());
+        for operation in &self.operations {
+            let facts = self.operation_predicate_dependencies(
+                operation,
+                values.len(),
+                &|id| {
+                    values
+                        .get(id)
+                        .cloned()
+                        .ok_or_else(|| invalid("predicate value is not preceding"))
+                },
+                resolve,
+            )?;
+            values.push(facts);
+        }
+        values
+            .get(self.output)
+            .map(|facts| facts.dependencies.clone().into_callee_summary())
             .ok_or_else(|| invalid("numerical dependency output is absent"))
     }
 }

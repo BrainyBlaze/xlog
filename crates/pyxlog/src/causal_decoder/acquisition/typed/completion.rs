@@ -11,6 +11,8 @@ struct ValueKey {
     shapes: [(usize, usize, bool); 2],
     dependencies: TensorOutputDependencies,
     numeric_arguments: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zero_or_nan: Option<bool>,
 }
 
 impl ValueKey {
@@ -23,6 +25,7 @@ impl ValueKey {
 
     fn covers(&self, other: &Self) -> bool {
         self.shapes == other.shapes
+            && self.zero_or_nan == other.zero_or_nan
             && self.dependencies.value_identity == other.dependencies.value_identity
             && (!self.numeric_arguments || other.numeric_arguments)
             && (!other.dependencies.tokens || self.dependencies.tokens)
@@ -169,6 +172,10 @@ fn value_key(program: &Program, id: usize, numeric_arguments: bool) -> ValueKey 
         }),
         dependencies: program.dependencies.as_ref().unwrap().values[id].clone(),
         numeric_arguments,
+        zero_or_nan: program
+            .dependencies
+            .as_ref()
+            .and_then(|facts| facts.predicate_values.then_some(facts.predicates[id])),
     }
 }
 
@@ -224,6 +231,7 @@ pub(super) fn call_arguments(
             TensorOutputDependencies::default(),
             false,
             Vec::<TensorValueIdentity>::new(),
+            Vec::<bool>::new(),
         ),
         Vec::new(),
     )]);
@@ -241,10 +249,11 @@ pub(super) fn call_arguments(
             choices.truncate(1);
         }
         let mut next = BTreeMap::new();
-        for ((dependencies, numeric, identities), arguments) in partial {
+        for ((dependencies, numeric, identities, predicates), arguments) in partial {
             for &id in &choices {
                 let mut dependencies = dependencies.clone();
                 let mut identities = identities.clone();
+                let mut predicates = predicates.clone();
                 if used {
                     dependencies.merge(&facts.values[id]);
                     if facts.value_identities {
@@ -255,10 +264,13 @@ pub(super) fn call_arguments(
                                 .unwrap_or(TensorValueIdentity::Unknown),
                         );
                     }
+                    if facts.predicate_values {
+                        predicates.push(facts.predicates[id]);
+                    }
                 }
                 let mut arguments = arguments.clone();
                 arguments.push(id);
-                next.entry((dependencies, numeric || reads[id], identities))
+                next.entry((dependencies, numeric || reads[id], identities, predicates))
                     .or_insert(arguments);
             }
         }
@@ -273,6 +285,7 @@ pub(super) fn possible(
     output: usize,
     signatures: &Signatures,
     cache: &CompletionCache,
+    prospective: Option<&TensorValueFacts>,
 ) -> bool {
     let facts = source.dependencies.as_ref().unwrap();
     let required = source.entry_requirements.as_ref().unwrap();
@@ -288,7 +301,9 @@ pub(super) fn possible(
         &required.calls,
         &required.parameters,
     );
-    let environment = if facts.value_identities {
+    let environment = if facts.predicate_values {
+        serde_json::to_vec(&(environment, "output-dependencies-v3"))
+    } else if facts.value_identities {
         serde_json::to_vec(&(environment, "output-dependencies-v2"))
     } else {
         serde_json::to_vec(&environment)
@@ -313,7 +328,11 @@ pub(super) fn possible(
     program.dependencies.as_mut().unwrap().completion_cache = None;
     if body.operations.len() > facts.values.len()
         && program
-            .push(body.operations.last().unwrap().clone(), signatures)
+            .push_with_dependencies(
+                body.operations.last().unwrap().clone(),
+                signatures,
+                prospective.filter(|_| facts.predicate_values),
+            )
             .is_err()
     {
         return false;
