@@ -1052,14 +1052,47 @@ still apply. No preceding SSA value, tensor, default scalar, source operation or
 whole-tree completion is supplied for a missing slot. Unknown output usage is
 not invented; the existing current-definition dependency owner remains required.
 
-Only version28 enables this partial mode. Packets through version27 retain their
-literal schema, masks, prefix completion, suffix costs and restore semantics.
+Version28 introduces this partial mode; version29 inherits it. Packets through
+version27 retain their literal schema, masks, prefix completion, suffix costs and
+restore semantics.
 The exact four-field packet, context2, expression encoding, fresh V2 actual-ID
 suffix bound, node/depth/scalar/byte limits, initialization, numerical execution
 and gradients are unchanged. Contradictory known facts can rule out a prefix;
 consistent partial constraints do not establish a completed or useful expression.
 
-For a version4 through version28 packet,
+Version29 (`xlog-contextual-acquisition-v29`) also reserves mandatory unopened
+source expression occurrences before committing partial or escaped tags, scalar
+tails and callee prefixes. The shared reader counts every actually opened source
+node globally, including completed helpers and pending ancestors. The canonical
+catalogue supplies value-child fields; compatible real callee signatures supply
+Call argument arity. Closed children and an active child with an already opened
+stack frame have no remaining occurrence charge. A required child before its
+opening `[` still needs a node. Each occurrence counts separately, including
+duplicate expressions and physical aliases, with no CSE discount.
+
+The reader reserves the required future entry root once and a started helper's
+unopened body root once. It assigns no optional future helpers. Each remaining
+hole needs at least one node. When the existing canonical candidate enumerator
+proves that no zero-child operation can satisfy its partial shape at both context
+lengths, that hole needs at least two. This proof uses real formal arguments,
+closed physical weights, the raw-token alphabet, scalar extension domains and
+zero-arity callees through canonical push/rollback. Unresolved facts keep the
+one-node bound. Call prefixes use the same numerical ABI owner as concrete
+inference, including known argument types and causal boundaries.
+
+Admission requires actual opened nodes plus these necessary future nodes to fit
+the unchanged shared limit of 64. For example, 64 opened tags followed by a
+Broadcast still awaiting its child cannot complete within that limit. This check
+runs freshly after parsed-prefix reuse and inside retained-symbol domains; its
+query-local leaf facts do not enter generic completion caches or trigger generic
+successor searches. It emits no operations, operands, default scalars or graph.
+The exact four-field packet, context2, expression encoding, V2 actual-ID suffix
+bound, source/depth/scalar/byte limits, complete decoding, initialization, numerical
+execution and gradients remain unchanged. Packets through version28 retain their
+literal schema, masks, completion, costs and restoration. Necessary node bounds
+do not establish whole-tree completion, original-ID fit, nonconstancy or usefulness.
+
+For a version4 through version29 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1082,7 +1115,7 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
-For versions25–28, `last_value` can describe a completed child while its parent
+For versions25–29, `last_value` can describe a completed child while its parent
 expression remains unfinished; it becomes the root only after that node closes.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the

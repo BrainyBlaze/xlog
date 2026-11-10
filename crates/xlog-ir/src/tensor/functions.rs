@@ -75,6 +75,38 @@ impl TensorSignature {
             Self::Pure { output_width, .. } => fp32(1, *output_width),
         }
     }
+
+    /// Check a numerical call's ABI, leaving only unauthored arguments unknown.
+    /// Concrete inference supplies every argument; source-prefix admission may
+    /// omit shapes without inventing values or relaxing the causal boundary.
+    pub fn call_output(
+        &self,
+        caller: &Self,
+        tokens: usize,
+        vocabulary: usize,
+        arguments: impl IntoIterator<Item = Result<Option<TensorValueShape>>>,
+    ) -> Result<TensorValueShape> {
+        if matches!(self, Self::Decoder)
+            || (matches!(caller, Self::Pure { .. }) && !matches!(self, Self::Pure { .. }))
+        {
+            return Err(invalid(
+                "numerical call arguments or causal boundary differ",
+            ));
+        }
+        let arguments = arguments.into_iter().collect::<Result<Vec<_>>>()?;
+        let expected = self.arguments(tokens)?;
+        if arguments.len() != expected.len()
+            || arguments
+                .iter()
+                .zip(expected)
+                .any(|(actual, expected)| actual.is_some_and(|actual| actual != expected))
+        {
+            return Err(invalid(
+                "numerical call arguments or causal boundary differ",
+            ));
+        }
+        self.output(tokens, vocabulary)
+    }
 }
 
 impl TensorOperation {
@@ -366,20 +398,12 @@ impl TensorProgram {
                 arguments,
             } => {
                 let signature = resolve(function)?;
-                if matches!(signature, TensorSignature::Decoder)
-                    || (matches!(self.signature, TensorSignature::Pure { .. })
-                        && !matches!(signature, TensorSignature::Pure { .. }))
-                    || arguments
-                        .iter()
-                        .map(|&id| input(id))
-                        .collect::<Result<Vec<_>>>()?
-                        != signature.arguments(tokens)?
-                {
-                    return Err(invalid(
-                        "numerical call arguments or causal boundary differ",
-                    ));
-                }
-                signature.output(tokens, self.vocabulary)?
+                signature.call_output(
+                    &self.signature,
+                    tokens,
+                    self.vocabulary,
+                    arguments.iter().map(|&id| input(id).map(Some)),
+                )?
             }
             Scan {
                 input: id,

@@ -4,6 +4,13 @@ use super::*;
 
 pub(crate) const ENCODING: &str = "numerical-expressions-v1";
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Nodes {
+    pub spent: usize,
+    pub pending_roots: usize,
+    pub current_root_pending: bool,
+}
+
 /// Source-selected parent facts, separate from not-yet-emitted child values.
 #[derive(Clone)]
 pub(crate) struct Parent {
@@ -147,6 +154,10 @@ impl Reader<'_> {
         self.budget.set(frame, || vec![budget::text("\"\",]")]);
         self.take(b'[')?;
         self.expression_nodes += 1;
+        if self.expression_root_pending {
+            self.expression_roots -= 1;
+            self.expression_root_pending = false;
+        }
         if self.expression_nodes > ACQUIRED_NODES {
             return Err(Stop::Invalid(
                 "expression nodes exceed the acquisition node allowance".into(),

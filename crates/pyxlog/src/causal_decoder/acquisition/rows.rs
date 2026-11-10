@@ -146,6 +146,7 @@ pub(super) struct Prefix<'a> {
     pub pending_retained: Option<metadata::PendingReference>,
     pub expression_parents: Vec<expressions::Parent>,
     pub expression_operation: usize,
+    pub expression_nodes: expressions::Nodes,
     pub budget: budget::State,
 }
 
@@ -231,6 +232,8 @@ struct Reader<'a> {
     ancestor_typing: bool,
     expression_parents: Vec<expressions::Parent>,
     expression_nodes: usize,
+    expression_roots: usize,
+    expression_root_pending: bool,
     expression_operations: usize,
     expression_pending_bytes: usize,
     declarations: Option<metadata::Declarations>,
@@ -283,6 +286,8 @@ pub(super) fn prefix<'a>(
         ancestor_typing,
         expression_parents: Vec::new(),
         expression_nodes: 0,
+        expression_roots: usize::from(expressions),
+        expression_root_pending: false,
         expression_operations: 0,
         expression_pending_bytes: 0,
         declarations: self_delimited.then(|| metadata::Declarations::new(Some(context))),
@@ -326,6 +331,11 @@ pub(super) fn prefix<'a>(
         pending_retained: reader.pending_retained,
         expression_parents: reader.expression_parents,
         expression_operation: reader.expression_operations,
+        expression_nodes: expressions::Nodes {
+            spent: reader.expression_nodes,
+            pending_roots: reader.expression_roots,
+            current_root_pending: reader.expression_root_pending,
+        },
         budget: reader.budget,
     })
 }
@@ -426,6 +436,7 @@ pub(super) fn definitions(
             false,
             None,
             false,
+            None,
         )
         .map_err(|error| error.to_string())?;
     }
@@ -785,6 +796,10 @@ impl Reader<'_> {
             },
             b'{',
         )?;
+        if self.expressions {
+            self.expression_root_pending = true;
+            self.expression_roots += usize::from(!entry);
+        }
         let signature: TensorSignature = if entry {
             self.definition_name = self.context["entrypoint"].as_str().unwrap().to_owned();
             self.output.extend_from_slice(b"\"name\":")?;

@@ -34,7 +34,7 @@ pub(super) struct PartialConstraints<'a> {
 }
 
 impl PartialConstraints<'_> {
-    fn expected(
+    pub(super) fn expected(
         self,
         program: &Program,
         length: usize,
@@ -85,11 +85,19 @@ pub(super) struct Continuation<'a> {
     pub(super) ancestors: &'a [Ancestor],
     pub(super) root: bool,
     pub(super) partial: Option<PartialConstraints<'a>>,
+    pub(super) expected: Option<[TensorShapeConstraint; 2]>,
 }
 
 impl Continuation<'_> {
     fn allows(self, program: &Program, signatures: &Signatures) -> bool {
         let id = program.body.operations.len() - 1;
+        if self.expected.is_some_and(|expected| {
+            expected.into_iter().enumerate().any(|(length, mut shape)| {
+                shape.intersect(program.shapes[length][id].into()).is_err()
+            })
+        }) {
+            return false;
+        }
         if self
             .partial
             .is_some_and(|partial| !partial.allows(program, id))
@@ -123,6 +131,7 @@ impl Continuation<'_> {
                 // The partial path belongs to the original current candidate,
                 // not each subsequent concrete ancestor or generic successor.
                 partial: None,
+                expected: None,
             }),
         )
     }
@@ -1177,6 +1186,85 @@ impl Program {
         self.possible(&candidate, None, signatures, continuation)
     }
 
+    /// Necessary leaf feasibility uses the same scalar domains and canonical
+    /// push/rollback, with no output slot or generic successor search.
+    pub(super) fn leaf_possible(
+        &self,
+        catalogue: &BTreeMap<String, Vec<String>>,
+        signatures: &Signatures,
+        expected: [TensorShapeConstraint; 2],
+    ) -> bool {
+        let mut program = self.clone();
+        program.planned_output = None;
+        program.row_allowance = None;
+        catalogue.iter().any(|(name, required)| {
+            if required
+                .iter()
+                .any(|field| super::is_value_reference(field))
+            {
+                return false;
+            }
+            let mut fields = Map::from_iter([("operation".into(), Value::from(name.as_str()))]);
+            if required.iter().any(|field| field == "arguments") {
+                // A closed empty argument domain admits only real zero-arity
+                // callees. It supplies neither an SSA operand nor source bytes.
+                fields.insert("arguments".into(), Value::Array(Vec::new()));
+            }
+            program.possible(
+                &fields,
+                None,
+                signatures,
+                Some(Continuation {
+                    ancestors: &[],
+                    root: false,
+                    partial: None,
+                    expected: Some(expected),
+                }),
+            )
+        })
+    }
+
+    pub(super) fn source_call_arity(
+        &self,
+        signature: &TensorSignature,
+        arguments: &[Value],
+        minimum: usize,
+        expected: [TensorShapeConstraint; 2],
+    ) -> Option<usize> {
+        let count = signature.arguments(1).ok()?.len();
+        if count < minimum {
+            return None;
+        }
+        (0..2)
+            .all(|length| {
+                signature
+                    .call_output(
+                        &self.body.signature,
+                        [1, self.body.max_context][length],
+                        self.body.vocabulary,
+                        (0..count).map(|slot| {
+                            arguments.get(slot).map_or(Ok(None), |value| {
+                                value
+                                    .as_u64()
+                                    .and_then(|id| self.shapes[length].get(id as usize))
+                                    .copied()
+                                    .map(Some)
+                                    .ok_or_else(|| {
+                                        XlogError::Compilation(
+                                            "call operand is not preceding".into(),
+                                        )
+                                    })
+                            })
+                        }),
+                    )
+                    .is_ok_and(|shape| {
+                        let mut required = expected[length];
+                        required.intersect(shape.into()).is_ok()
+                    })
+            })
+            .then_some(count)
+    }
+
     pub(super) fn possible(
         &self,
         fields: &Map<String, Value>,
@@ -1188,6 +1276,13 @@ impl Program {
             return false;
         };
         let count = self.body.operations.len();
+        let widths = || {
+            let mut widths = self.completion_widths(signatures);
+            if let Some(expected) = continuation.and_then(|continuation| continuation.expected) {
+                widths.extend(expected.into_iter().filter_map(|shape| shape.columns));
+            }
+            widths
+        };
         let refs = |name| {
             if self.searches_completion() && fields.get(name).and_then(Value::as_u64).is_none() {
                 completion::operand_representatives(self)
@@ -1234,7 +1329,7 @@ impl Program {
         match tag {
             "zeros" => {
                 if self.searches_completion() && !fields.contains_key("columns") {
-                    self.completion_widths(signatures)
+                    widths()
                         .into_iter()
                         .any(|columns| check(Op::Zeros { columns }, None))
                 } else {
@@ -1263,7 +1358,7 @@ impl Program {
                 if self.searches_completion()
                     && (!fields.contains_key("token_ids") || open_array == Some("token_ids"))
                 {
-                    let mut widths = self.completion_widths(signatures);
+                    let mut widths = widths();
                     widths.insert(token_ids.len().max(1));
                     return widths
                         .into_iter()
@@ -1353,7 +1448,7 @@ impl Program {
                 if self.searches_completion()
                     && (!fields.contains_key("indices") || open_array == Some("indices"))
                 {
-                    let mut widths = self.completion_widths(signatures);
+                    let mut widths = widths();
                     widths.insert(indices.len().max(1));
                     return widths
                         .into_iter()
