@@ -9,6 +9,7 @@
 #endif
 #include "semantic_transition_catalogue.cuh"
 #include "semantic_feedback_encoding.cuh"
+#include "semantic_world.cuh"
 #include "semantic_program.cuh"
 #include "semantic_task_ground.cuh"
 #include "semantic_rule_action.cuh"
@@ -7647,10 +7648,12 @@ __device__ bool publication_plan_rule_cells(const PublicationControl& control,co
     const auto* source=publication_find_range(ranges,base.header.range_count,SEMANTIC_WORLD_SOURCE_ROLE,0,work);
     const auto* cells=publication_find_range(ranges,base.header.range_count,SEMANTIC_WORLD_STATE_ROLE,0,work);
     if(!source || !cells || source->offset_bytes%8 || cells->offset_bytes%8 ||
-       source->length_bytes!=13*8 || cells->length_bytes<16*8)return false;
+       source->length_bytes<semantic_world::kSourceHeaderWords*8 || cells->length_bytes<16*8)return false;
     const auto* original=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*source));
     const auto* current=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*cells));
-    if(!original || !current || semantic_world_word(original,0,work)!=1 ||
+    semantic_world::Source authored{};
+    if(!current || !semantic_world::decode_source(original,source->length_bytes,&authored,
+            [&](const uint64_t* words,uint64_t index) { return semantic_world_word(words,index,work); }) ||
        semantic_world_word(current,0,work)!=1)return false;
     for(uint32_t word=1;word<9;++word)
         if(semantic_world_word(original,word,work)!=semantic_world_word(current,word,work))return false;
