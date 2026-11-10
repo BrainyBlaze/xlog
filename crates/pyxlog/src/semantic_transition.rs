@@ -548,6 +548,7 @@ pub(crate) struct PySemanticTransitionSession {
     inner: Arc<Mutex<Option<SemanticTransitionSession>>>,
     editable_source: Mutex<EditableSessionSource>,
     importing: Arc<AtomicBool>,
+    failed_initial_import: AtomicBool,
     recording: AtomicBool,
     retiring: AtomicBool,
     prepared_segment: Mutex<Option<PreparedPythonSegment>>,
@@ -743,6 +744,7 @@ enum TaskReleaseCustody {
     },
     ObservedCold {
         cold_task: Py<cold_task::PySemanticTransitionColdTask>,
+        failed_import: bool,
     },
     Publications {
         releases: Vec<PublicationRelease>,
@@ -775,11 +777,15 @@ impl TaskReleaseCustody {
                     && controller.as_ptr() == original_controller.as_ptr()
             }
             (
-                Self::ObservedCold { cold_task },
+                Self::ObservedCold {
+                    cold_task,
+                    failed_import,
+                },
                 Self::ObservedCold {
                     cold_task: original,
+                    failed_import: original_failed_import,
                 },
-            ) => cold_task.as_ptr() == original.as_ptr(),
+            ) => cold_task.as_ptr() == original.as_ptr() && failed_import == original_failed_import,
             (
                 Self::Publications {
                     releases,
@@ -1114,8 +1120,10 @@ impl PySemanticTransitionSession {
         cold_task: &Bound<'_, cold_task::PySemanticTransitionColdTask>,
     ) -> PyResult<()> {
         self.require_creator()?;
+        let failed_import = self.failed_initial_import.load(Ordering::Acquire);
         let custody = TaskReleaseCustody::ObservedCold {
             cold_task: cold_task.clone().unbind(),
+            failed_import,
         };
         if self
             .task_release
@@ -1128,9 +1136,10 @@ impl PySemanticTransitionSession {
             return self.release_task(py, custody);
         }
         self.require_task_release_idle()?;
-        if self.issuance.load(Ordering::Acquire) != 0 {
+        let issuance = self.issuance.load(Ordering::Acquire);
+        if !((issuance == 0 && !failed_import) || (issuance == 1 && failed_import)) {
             return Err(invalid(
-                "fresh cold release requires its original unused Session",
+                "cold release requires its original unused Session or a known failed first import without a TaskUse",
             ));
         }
         self.release_task(py, custody)
@@ -1202,7 +1211,7 @@ impl PySemanticTransitionSession {
                     .setattr("controller", controller.bind(py))?;
                 pending.value(py).setattr("task_use", task_use.bind(py))?;
             }
-            TaskReleaseCustody::ObservedCold { cold_task } => {
+            TaskReleaseCustody::ObservedCold { cold_task, .. } => {
                 pending.value(py).setattr("cold_task", cold_task.bind(py))?;
             }
             TaskReleaseCustody::Publications {
@@ -1284,7 +1293,13 @@ impl PySemanticTransitionSession {
                         TaskReleaseKind::Imported => live.join_imported_task_release(),
                         TaskReleaseKind::Aborted => live.join_aborted_task_release(),
                     },
-                    TaskReleaseCustody::ObservedCold { .. } => live.join_observed_cold_release(),
+                    TaskReleaseCustody::ObservedCold { failed_import, .. } => {
+                        if *failed_import {
+                            live.join_failed_import_release()
+                        } else {
+                            live.join_observed_cold_release()
+                        }
+                    }
                     TaskReleaseCustody::Publications { releases, .. } => {
                         let parents = releases
                             .iter()
@@ -1598,6 +1613,7 @@ impl PySemanticTransitionSession {
                 observer_source: editable_source.and_then(|source| source.observer_source.clone()),
             }),
             importing: Arc::new(AtomicBool::new(false)),
+            failed_initial_import: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),
@@ -15549,6 +15565,14 @@ impl Drop for ColdImportGuard<'_> {
         if !self.committed {
             if let Some(owner) = owner.as_mut() {
                 owner.abort();
+                // This known first-import failure returned no TaskUse.
+                // Pending/private/final-use custody above keeps its original
+                // disposition; consuming an issuance is never undone.
+                if self.issuance.generation == 1 && !self.deferred && !self.retained_final_use {
+                    self.session
+                        .failed_initial_import
+                        .store(true, Ordering::Release);
+                }
             }
         }
         if !self.deferred {
@@ -31275,6 +31299,7 @@ mod tests {
             editable_program: None,
             editable_observer_source: None,
             importing: Arc::new(AtomicBool::new(false)),
+            failed_initial_import: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             retiring: AtomicBool::new(false),
             prepared_segment: Mutex::new(None),

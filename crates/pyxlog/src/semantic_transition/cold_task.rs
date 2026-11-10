@@ -2013,9 +2013,10 @@ impl PySemanticTransitionColdTask {
         Ok(())
     }
 
-    /// Terminally release this observed-only fresh CUDA Session before a
-    /// restored Session is allocated. Immutable task content and statement
-    /// ordinals remain readable; saved Session/controller aliases cannot run.
+    /// Terminally release this original cold CUDA Session before a restored
+    /// Session is allocated, including a known first import failure that
+    /// returned no TaskUse. Immutable task content and statement ordinals
+    /// remain readable; saved Session/controller aliases cannot run.
     /// An unfinished terminal join retains this same ColdTask for another close;
     /// fatal CUDA failure requires terminating the isolated task process.
     fn close(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
