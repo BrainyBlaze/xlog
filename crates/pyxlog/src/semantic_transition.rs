@@ -16528,37 +16528,47 @@ impl PySemanticCompletedTaskFacts {
         self.slot
     }
     #[getter]
-    fn truth_codes(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, &self.inner.truth).map(Bound::unbind)
+    fn truth_codes(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.truth.is_empty())
+            .then(|| PyTuple::new(py, &self.inner.truth).map(Bound::unbind))
+            .transpose()
     }
     #[getter]
-    fn truth_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(
-            py,
-            self.inner
-                .truth
-                .iter()
-                .map(|value| value.map(completed_truth_kind)),
-        )
-        .map(Bound::unbind)
+    fn truth_kinds(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.truth.is_empty())
+            .then(|| {
+                PyTuple::new(
+                    py,
+                    self.inner
+                        .truth
+                        .iter()
+                        .map(|value| value.map(completed_truth_kind)),
+                )
+                .map(Bound::unbind)
+            })
+            .transpose()
     }
     #[getter]
     fn correct(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
         self.inner
             .correct
             .as_ref()
+            .filter(|values| !values.is_empty())
             .map(|values| PyTuple::new(py, values).map(Bound::unbind))
             .transpose()
     }
     #[getter]
-    fn attained(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, &self.inner.attained).map(Bound::unbind)
+    fn attained(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.attained.is_empty())
+            .then(|| PyTuple::new(py, &self.inner.attained).map(Bound::unbind))
+            .transpose()
     }
     #[getter]
     fn correct_count(&self) -> Option<u64> {
         self.inner
             .correct
             .as_ref()
+            .filter(|values| !values.is_empty())
             .and_then(|values| values.iter().copied().sum())
     }
     #[getter]
@@ -16596,23 +16606,31 @@ impl PySemanticCompletedTaskFacts {
         self.inner.value_bits
     }
     #[getter]
-    fn query_kinds(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, &self.inner.query_kinds).map(Bound::unbind)
+    fn query_kinds(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.query_kinds.is_empty())
+            .then(|| PyTuple::new(py, &self.inner.query_kinds).map(Bound::unbind))
+            .transpose()
     }
     #[getter]
-    fn query_masses_bits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(
-            py,
-            self.inner
-                .query_masses_bits
-                .iter()
-                .map(|row| (row[0], row[1], row[2], row[3])),
-        )
-        .map(Bound::unbind)
+    fn query_masses_bits(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.query_masses_bits.is_empty())
+            .then(|| {
+                PyTuple::new(
+                    py,
+                    self.inner
+                        .query_masses_bits
+                        .iter()
+                        .map(|row| (row[0], row[1], row[2], row[3])),
+                )
+                .map(Bound::unbind)
+            })
+            .transpose()
     }
     #[getter]
-    fn attainment_mass_bits(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
-        PyTuple::new(py, &self.inner.attainment_mass_bits).map(Bound::unbind)
+    fn attainment_mass_bits(&self, py: Python<'_>) -> PyResult<Option<Py<PyTuple>>> {
+        (!self.inner.attainment_mass_bits.is_empty())
+            .then(|| PyTuple::new(py, &self.inner.attainment_mass_bits).map(Bound::unbind))
+            .transpose()
     }
     #[getter]
     fn eligible(&self) -> bool {
@@ -20522,28 +20540,49 @@ impl PySemanticPolicyInvocation {
             .iter()
             .map(|fact| {
                 let row = PyDict::new(py);
-                row.set_item("truths", PyTuple::new(py, &fact.truth)?)?;
+                let queried = !fact.truth.is_empty();
+                row.set_item(
+                    "truths",
+                    queried.then(|| PyTuple::new(py, &fact.truth)).transpose()?,
+                )?;
                 row.set_item(
                     "correct",
                     fact.correct
                         .as_ref()
+                        .filter(|values| !values.is_empty())
                         .map(|values| PyTuple::new(py, values))
                         .transpose()?,
                 )?;
-                row.set_item("attained", PyTuple::new(py, &fact.attained)?)?;
-                row.set_item("query_kinds", PyTuple::new(py, &fact.query_kinds)?)?;
+                row.set_item(
+                    "attained",
+                    queried
+                        .then(|| PyTuple::new(py, &fact.attained))
+                        .transpose()?,
+                )?;
+                row.set_item(
+                    "query_kinds",
+                    queried
+                        .then(|| PyTuple::new(py, &fact.query_kinds))
+                        .transpose()?,
+                )?;
                 row.set_item(
                     "query_masses_bits",
-                    PyTuple::new(
-                        py,
-                        fact.query_masses_bits
-                            .iter()
-                            .map(|masses| (masses[0], masses[1], masses[2], masses[3])),
-                    )?,
+                    queried
+                        .then(|| {
+                            PyTuple::new(
+                                py,
+                                fact.query_masses_bits
+                                    .iter()
+                                    .map(|masses| (masses[0], masses[1], masses[2], masses[3])),
+                            )
+                        })
+                        .transpose()?,
                 )?;
                 row.set_item(
                     "attainment_mass_bits",
-                    PyTuple::new(py, &fact.attainment_mass_bits)?,
+                    queried
+                        .then(|| PyTuple::new(py, &fact.attainment_mass_bits))
+                        .transpose()?,
                 )?;
                 row.set_item("expected_g_bits", fact.expected_g_bits)?;
                 row.set_item("expected_p_bits", fact.expected_p_bits)?;
