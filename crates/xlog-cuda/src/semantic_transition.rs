@@ -17551,39 +17551,67 @@ impl SemanticFeedbackSchema {
                 "native feedback requires the original nonempty typed statement roster",
             ));
         }
-        let feature_width = statement_bytes
-            .checked_mul(9)
-            .and_then(|n| n.checked_add(4))
-            .filter(|&n| i64::try_from(n).is_ok())
-            .ok_or_else(|| publication_input_error("native feedback schema width overflows"))?;
+        Self::for_statement_bytes(statement_bytes)
+    }
+
+    /// The same complete structural schema serves declarations, prepared
+    /// allocations, acquired feedback, model metadata and restored sessions.
+    pub fn for_statement_bytes(statement_bytes: usize) -> Result<Self, SemanticTransitionError> {
+        use xlog_ir::semantic_value as value;
+        let schema = value::SemanticValueFeedbackSchema::new(statement_bytes)
+            .map_err(|error| publication_input_error(&error.to_string()))?;
+        let fields = schema
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name,
+                    field.offset,
+                    field.length,
+                    field.dtype,
+                    field.units,
+                    field.defined_when,
+                )
+            })
+            .collect::<Vec<_>>();
+        let estimators = value::SEMANTIC_VALUE_ESTIMATORS
+            .iter()
+            .map(|estimator| {
+                (
+                    estimator.name,
+                    estimator.sample_count_defined,
+                    estimator.confidence_defined,
+                    estimator.error_bound_kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        let material = serde_json::to_vec(&(
+            2u64,
+            statement_bytes,
+            schema.feature_width,
+            fields,
+            value::SEMANTIC_VALUE_RECEIPT_FIELDS,
+            value::SEMANTIC_VALUE_SUPPORT_FIELDS,
+            estimators,
+            value::SEMANTIC_VALUE_NUMERIC_LAW,
+        ))
+        .map_err(|error| runtime_error("feedback schema material", error))?;
         let mut hash = Sha256::new();
-        hash.update(b"xlog.feedback.flat-bit-presence.v1\0");
-        hash.update((statement_bytes as u64).to_le_bytes());
-        hash.update(b"byte[i]:bits[0..8],presence;pro,1,contra,1;invalid:all-zero");
+        hash.update(b"xlog.feedback.semantic-value.v2\0");
+        hash.update((material.len() as u64).to_le_bytes());
+        hash.update(material);
         Ok(Self {
             identity: hash.finalize().into(),
             statement_bytes,
-            feature_width,
+            feature_width: schema.feature_width,
         })
     }
 }
 
 /// Named columns of each current feedback support row. These service values do
 /// not enter the learned feature schema. Rows follow newest-to-oldest ancestry.
-pub const SEMANTIC_FEEDBACK_SUPPORT_FIELDS: [&str; 12] = [
-    "original_statement",
-    "original_support",
-    "support_slot",
-    "support_generation",
-    "version_slot",
-    "version_generation",
-    "insertion_ordinal",
-    "polarity",
-    "support_digest_0",
-    "support_digest_1",
-    "support_digest_2",
-    "support_digest_3",
-];
+pub const SEMANTIC_FEEDBACK_SUPPORT_FIELDS: &[&str] =
+    xlog_ir::semantic_value::SEMANTIC_VALUE_SUPPORT_FIELDS;
 
 /// Features, validity and current causal provenance from one acquired bank.
 /// Original outputs retain their step independently of later bank retirement.
@@ -17655,10 +17683,30 @@ impl FeedbackAllocationPlan {
                 [self.slots as u64, schema.feature_width as u64, 0, 0],
             ),
             (8, 1, 1, [self.slots as u64, 0, 0, 0]),
-            (3, 8, 2, [self.slots as u64, 42, 0, 0]),
+            (
+                3,
+                8,
+                2,
+                [
+                    self.slots as u64,
+                    xlog_ir::semantic_value::SEMANTIC_VALUE_RECEIPT_FIELDS.len() as u64,
+                    0,
+                    0,
+                ],
+            ),
             (3, 8, 1, [self.slots as u64, 0, 0, 0]),
             (3, 8, 1, [self.offset_cells as u64, 0, 0, 0]),
-            (3, 8, 2, [self.support_capacity as u64, 12, 0, 0]),
+            (
+                3,
+                8,
+                2,
+                [
+                    self.support_capacity as u64,
+                    SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len() as u64,
+                    0,
+                    0,
+                ],
+            ),
         ];
         let mut layouts = [SemanticTensorLayout::default(); 6];
         for (index, (scalar_type, element_bytes, rank, dimensions)) in
@@ -17700,7 +17748,7 @@ impl FeedbackAllocationPlan {
             .checked_mul(schema.feature_width)
             .ok_or_else(|| publication_input_error("feedback feature extent overflows"))?;
         let query_cells = slots
-            .checked_mul(42)
+            .checked_mul(xlog_ir::semantic_value::SEMANTIC_VALUE_RECEIPT_FIELDS.len())
             .ok_or_else(|| publication_input_error("feedback receipt extent overflows"))?;
         let support_cells = support_capacity
             .checked_mul(SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len())
@@ -17860,6 +17908,7 @@ impl FeedbackBuffers {
         graph: &SemanticHypergraph,
         storage: &PublicationStorage,
         task: &TrackedCudaSlice<u64>,
+        ground: &task_ground::TaskGroundStorage,
         lease: &TrackedCudaSlice<PublicationLease>,
         descriptor: Descriptor,
     ) -> Result<(), SemanticTransitionError> {
@@ -17869,6 +17918,7 @@ impl FeedbackBuffers {
             graph,
             storage,
             task,
+            ground,
             lease,
             descriptor,
             #[cfg(feature = "semantic-policy")]
@@ -17883,6 +17933,7 @@ impl FeedbackBuffers {
         graph: &SemanticHypergraph,
         storage: &PublicationStorage,
         task: &TrackedCudaSlice<u64>,
+        ground: &task_ground::TaskGroundStorage,
         lease: &TrackedCudaSlice<PublicationLease>,
         mut descriptor: Descriptor,
         #[cfg(feature = "semantic-policy")] mut original: Option<(
@@ -17895,92 +17946,18 @@ impl FeedbackBuffers {
         let cold_work = original.as_ref().map(|(_, work, _)| *work);
         #[cfg(not(feature = "semantic-policy"))]
         let cold_work: Option<&DeviceMemoryView<u64>> = None;
+        if descriptor.task_ground != ground.device.device_ptr_value()
+            || descriptor.task_ground_bytes != ground.layout.bytes as u64
+            || descriptor.task_measure_words != ground.measure.len() as u64
+            || (!ground.measure.is_empty()
+                && descriptor.task_measure != ground.measure.device_ptr_value())
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
         descriptor.publication.native_work = cold_work.map_or(0, |work| *work.device_ptr());
         let mut recorder = domain.new_strict_recorder();
-        recorder.read(lease);
-        recorder.read(&storage.control);
-        recorder.read(&storage.storage);
-        recorder.read(&storage.contract);
-        for bank in &storage.banks {
-            recorder.read(bank);
-        }
-        for directory in &storage.directories {
-            recorder.read(directory);
-        }
-        for allocation in &storage.allocations {
-            if let Some(owner) = allocation.live_slice() {
-                recorder.read(&owner);
-            }
-        }
-        recorder.write(&self.features);
-        recorder.write(&self.validity);
-        recorder.write(&self.status);
-        if let Some(work) = cold_work {
-            recorder.read_write(work);
-        }
-        let arguments = (
-            storage.control.device_ptr_value(),
-            lease.device_ptr_value(),
-            self.schema.statement_bytes as u64,
-            self.slots as u64,
-            self.features.device_ptr_value(),
-            self.validity.device_ptr_value(),
-            self.status.device_ptr_value(),
-            cold_work.map_or(0, |work| *work.device_ptr()),
-        );
-        let launch = |stream: &CudaEnqueue<'_>, entered: &mut bool, submitted: &mut bool| {
-            let (control, lease, width, slots, features, validity, status, tally) = arguments;
-            let control = control.into_kernel_param_storage();
-            let lease = lease.into_kernel_param_storage();
-            let width = width.into_kernel_param_storage();
-            let slots = slots.into_kernel_param_storage();
-            let features = features.into_kernel_param_storage();
-            let validity = validity.into_kernel_param_storage();
-            let status = status.into_kernel_param_storage();
-            let tally = tally.into_kernel_param_storage();
-            let mut parameters = [
-                control.as_kernel_param(),
-                lease.as_kernel_param(),
-                width.as_kernel_param(),
-                slots.as_kernel_param(),
-                features.as_kernel_param(),
-                validity.as_kernel_param(),
-                status.as_kernel_param(),
-                tally.as_kernel_param(),
-            ];
-            // SAFETY: both directories and every selectable allocation are
-            // retained. The kernel resolves and validates the acquired lease's
-            // original ranges; output extents were checked during preparation.
-            unsafe {
-                self.encode.launch_raw_in_original(
-                    stream,
-                    LaunchConfig {
-                        grid_dim: (self.slots.min(65535) as u32, 1, 1),
-                        block_dim: (256, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut parameters,
-                    false,
-                    entered,
-                    submitted,
-                )
-            }
-            .map_err(|error| XlogError::Kernel(error.to_string()))
-        };
-        #[cfg(feature = "semantic-policy")]
-        if let Some((commands, _, _)) = original.as_mut() {
-            commands[0].run(domain, poisoned, recorder, launch)?;
-        } else {
-            enqueue_recorded(domain, poisoned, recorder, |stream| {
-                launch(stream, &mut false, &mut false)
-            })?;
-        }
-        #[cfg(not(feature = "semantic-policy"))]
-        enqueue_recorded(domain, poisoned, recorder, |stream| {
-            launch(stream, &mut false, &mut false)
-        })?;
-        let mut recorder = domain.new_strict_recorder();
         graph.record_transition(&mut recorder);
+        ground.record(&mut recorder);
         storage.record(&mut recorder);
         recorder.read(lease);
         recorder.read(task);
@@ -18044,6 +18021,94 @@ impl FeedbackBuffers {
                     LaunchConfig {
                         grid_dim: (1, 1, 1),
                         block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut parameters,
+                    false,
+                    entered,
+                    submitted,
+                )
+            }
+            .map_err(|error| XlogError::Kernel(error.to_string()))
+        };
+        #[cfg(feature = "semantic-policy")]
+        if let Some((commands, _, _)) = original.as_mut() {
+            commands[0].run(domain, poisoned, recorder, launch)?;
+        } else {
+            enqueue_recorded(domain, poisoned, recorder, |stream| {
+                launch(stream, &mut false, &mut false)
+            })?;
+        }
+        #[cfg(not(feature = "semantic-policy"))]
+        enqueue_recorded(domain, poisoned, recorder, |stream| {
+            launch(stream, &mut false, &mut false)
+        })?;
+        let mut recorder = domain.new_strict_recorder();
+        recorder.read(lease);
+        recorder.read(&storage.control);
+        recorder.read(&storage.storage);
+        recorder.read(&storage.contract);
+        for bank in &storage.banks {
+            recorder.read(bank);
+        }
+        for directory in &storage.directories {
+            recorder.read(directory);
+        }
+        for allocation in &storage.allocations {
+            if let Some(owner) = allocation.live_slice() {
+                recorder.read(&owner);
+            }
+        }
+        recorder.write(&self.features);
+        recorder.write(&self.validity);
+        recorder.read_write(&self.status);
+        recorder.read(&self.query_receipts);
+        if let Some(work) = cold_work {
+            recorder.read_write(work);
+        }
+        let arguments = (
+            storage.control.device_ptr_value(),
+            lease.device_ptr_value(),
+            self.schema.statement_bytes as u64,
+            self.slots as u64,
+            self.features.device_ptr_value(),
+            self.validity.device_ptr_value(),
+            self.status.device_ptr_value(),
+            self.query_receipts.device_ptr_value(),
+            cold_work.map_or(0, |work| *work.device_ptr()),
+        );
+        let launch = |stream: &CudaEnqueue<'_>, entered: &mut bool, submitted: &mut bool| {
+            let (control, lease, width, slots, features, validity, status, values, tally) =
+                arguments;
+            let control = control.into_kernel_param_storage();
+            let lease = lease.into_kernel_param_storage();
+            let width = width.into_kernel_param_storage();
+            let slots = slots.into_kernel_param_storage();
+            let features = features.into_kernel_param_storage();
+            let validity = validity.into_kernel_param_storage();
+            let status = status.into_kernel_param_storage();
+            let values = values.into_kernel_param_storage();
+            let tally = tally.into_kernel_param_storage();
+            let mut parameters = [
+                control.as_kernel_param(),
+                lease.as_kernel_param(),
+                width.as_kernel_param(),
+                slots.as_kernel_param(),
+                features.as_kernel_param(),
+                validity.as_kernel_param(),
+                status.as_kernel_param(),
+                values.as_kernel_param(),
+                tally.as_kernel_param(),
+            ];
+            // SAFETY: both directories and every selectable allocation are
+            // retained. The kernel resolves and validates the acquired lease's
+            // original ranges; output extents were checked during preparation.
+            unsafe {
+                self.encode.launch_raw_in_original(
+                    stream,
+                    LaunchConfig {
+                        grid_dim: (self.slots.min(65535) as u32, 1, 1),
+                        block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
                     &mut parameters,
@@ -23339,12 +23404,15 @@ mod prepared_completion_tests {
 
     #[test]
     fn prepared_allocation_plan_counts_original_banks_before_expanding_bound() {
-        let schema = SemanticFeedbackSchema::new([&[1u8; 64], &[2u8; 64], &[3u8; 64]]).unwrap();
+        let schema = SemanticFeedbackSchema::new(vec![&[1u8; 64], &[2u8; 64], &[3u8; 64]]).unwrap();
         let feedback = FeedbackAllocationPlan::new(&schema, 2, 3).unwrap();
         let expected_feedback = 2 * schema.feature_width * size_of::<f32>()
             + 2 * 9
-            + (2 * 42 + 2 + 3 + 3 * SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len()) * size_of::<u64>()
-            + 6 * 4 * size_of::<u64>();
+            + (2 * xlog_ir::semantic_value::SEMANTIC_VALUE_RECEIPT_FIELDS.len()
+                + 2
+                + 3
+                + 6 * SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len())
+                * size_of::<u64>();
         assert_eq!(feedback.bytes, expected_feedback);
         let input_bytes = PreparedStepInputs::allocation_bytes(&[]).unwrap();
         assert_eq!(
@@ -31869,6 +31937,9 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .ok_or(SemanticTransitionError::InvalidTaskBank)?
                 .1,
+            self.task_ground
+                .as_ref()
+                .ok_or(SemanticTransitionError::NotBound)?,
             &owner.prepared.as_ref().expect("prepared lease").reader,
             descriptor,
         )?;
@@ -38647,6 +38718,9 @@ impl SemanticTransitionSession {
                     .as_ref()
                     .ok_or(SemanticTransitionError::InvalidTaskBank)?
                     .1,
+                self.task_ground
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
                 &reader.device,
                 descriptor,
             )?;
@@ -38683,11 +38757,20 @@ impl SemanticTransitionSession {
                         .ok_or(SemanticTransitionError::ObservationMismatch)?;
                     self.export_step_view(lease, bytes, shape, strides, (1, 64), consumer_stream)
                 };
-            let query_receipts = export_words(queries, vec![slots as i64, 42], vec![42, 1])?;
+            let receipt_words = xlog_ir::semantic_value::SEMANTIC_VALUE_RECEIPT_FIELDS.len() as i64;
+            let support_words = SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len() as i64;
+            let query_receipts = export_words(
+                queries,
+                vec![slots as i64, receipt_words],
+                vec![receipt_words, 1],
+            )?;
             let original_statements = export_words(originals, vec![slots as i64], vec![1])?;
             let support_offsets = export_words(offsets, vec![offset_cells as i64], vec![1])?;
-            let supports =
-                export_words(support_rows, vec![support_capacity as i64, 12], vec![12, 1])?;
+            let supports = export_words(
+                support_rows,
+                vec![support_capacity as i64, support_words],
+                vec![support_words, 1],
+            )?;
             Ok(SemanticFeedback {
                 parent: lease.identity,
                 schema,
@@ -42893,11 +42976,13 @@ impl SemanticTransitionSession {
     /// any statement value, task identity, observer answer or authority decision.
     pub fn feedback_adapter_identity() -> Identity256 {
         let mut hash = Sha256::new();
-        hash.update(b"xlog.native.flat-feedback-adapter.v1\0");
+        hash.update(b"xlog.native.semantic-value-feedback-adapter.v2\0");
         hash.update(include_bytes!("semantic_transition.rs"));
         hash.update(include_bytes!("../kernels/semantic_transition.cu"));
         hash.update(include_bytes!("../kernels/philox.cuh"));
         hash.update(include_bytes!("../kernels/semantic_feedback_encoding.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_world_measure.cuh"));
+        hash.update(include_bytes!("../kernels/semantic_world.cuh"));
         Identity256::from_bytes(hash.finalize().into())
     }
 

@@ -9,12 +9,15 @@ use xlog_ir::semantic_world::{SemanticInitialRuleCells, SemanticWorldDeclaration
 mod source;
 
 pub(super) const SOURCE_HEADER_WORDS: usize = source::HEADER_WORDS;
+pub(super) const SOURCE_CONTEXT_WORDS: usize = source::CONTEXT_WORDS;
 const STATE_HEADER_WORDS: usize = 16;
 const CELL_WORDS: usize = 6;
 
 // Source header: format, world ID[4], seed ID[4], context count, original
 // declaration byte extent, cell capacity, original cell count, followed by the
-// device layout and the complete authored event/factor/context records.
+// device layout, original numeric-law identity and the complete authored
+// event/factor/context records. Each context retains its original context and
+// conditioned-measure identities, excluded from every learned projection.
 // State header: format, world ID[4], seed ID[4], context count, ledger generation,
 // cell count/capacity, next birth low/high, qualified context. Context-local next
 // rule indices follow it, then (context, rule, birth low/high, generation, code).
@@ -80,11 +83,15 @@ impl SemanticWorldSource {
         material: Arc<[u8]>,
         identity: Identity256,
         seed_identity: Identity256,
+        context_identities: Vec<[Identity256; 2]>,
+        numeric_law_identity: Identity256,
     ) -> Result<Arc<Self>, SemanticTransitionError> {
         declaration
             .validate()
             .map_err(|error| invalid_world(&error.to_string()))?;
-        if programs.len() != declaration.contexts.len() {
+        if programs.len() != declaration.contexts.len()
+            || context_identities.len() != declaration.contexts.len()
+        {
             return Err(invalid_world(
                 "common world compiler and context rosters differ",
             ));
@@ -137,6 +144,8 @@ impl SemanticWorldSource {
             seed_identity,
             cell_capacity,
             original_cells,
+            &context_identities,
+            numeric_law_identity,
         )?;
         Ok(Arc::new(Self {
             declaration,

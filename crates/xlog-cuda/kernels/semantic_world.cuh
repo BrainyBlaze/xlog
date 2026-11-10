@@ -4,8 +4,8 @@
 
 namespace semantic_world {
 
-constexpr uint64_t kSourceHeaderWords = 32;
-constexpr uint64_t kContextWords = 12;
+constexpr uint64_t kSourceHeaderWords = 36;
+constexpr uint64_t kContextWords = 20;
 constexpr uint64_t kEventWords = 4;
 constexpr uint64_t kFactorWords = 4;
 
@@ -26,7 +26,7 @@ __device__ bool decode_source(const uint64_t* words,uint64_t bytes,
     if(!words || !output || bytes%8 || bytes/8<kSourceHeaderWords)return false;
     uint64_t h[kSourceHeaderWords];
     for(uint32_t index=0;index<kSourceHeaderWords;++index)h[index]=read(words,index);
-    if(h[0]!=2 || !h[9] || h[9]>UINT32_MAX || h[13]<2 || h[13]>UINT32_MAX ||
+    if(h[0]!=3 || !h[9] || h[9]>UINT32_MAX || h[13]<2 || h[13]>UINT32_MAX ||
        !h[14] || h[14]>UINT32_MAX || h[19]!=bytes/8 || h[15]!=kSourceHeaderWords ||
        h[30]!=kEventWords || h[31]!=kContextWords || h[11]<h[12])return false;
     const uint64_t events=kSourceHeaderWords+h[9]*kContextWords;

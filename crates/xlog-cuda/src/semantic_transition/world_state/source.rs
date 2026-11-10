@@ -6,8 +6,8 @@ use xlog_ir::semantic_world::{
     SemanticValueProofKind, SemanticValueQueryKind,
 };
 
-pub(super) const HEADER_WORDS: usize = 32;
-const CONTEXT_WORDS: usize = 12;
+pub(super) const HEADER_WORDS: usize = 36;
+pub(super) const CONTEXT_WORDS: usize = 20;
 const EVENT_WORDS: usize = 4;
 const FACTOR_WORDS: usize = 4;
 
@@ -37,6 +37,10 @@ fn rows(count: usize, width: usize) -> Result<usize, SemanticTransitionError> {
         .ok_or(SemanticTransitionError::GenerationExhausted)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the immutable encoding retains its original world, context and numerical-law owners"
+)]
 pub(super) fn encode(
     declaration: &SemanticWorldDeclaration,
     programs: &[Arc<crate::SemanticProgramAdmission>],
@@ -45,6 +49,8 @@ pub(super) fn encode(
     seed_identity: Identity256,
     cell_capacity: usize,
     original_cells: usize,
+    context_identities: &[[Identity256; 2]],
+    numeric_law_identity: Identity256,
 ) -> Result<Arc<[u8]>, SemanticTransitionError> {
     let mut words = Vec::new();
     reserve(&mut words, HEADER_WORDS)?;
@@ -155,7 +161,7 @@ pub(super) fn encode(
             words[assignment_begin + index] = u64::from(*value);
         }
         let row = contexts + index * CONTEXT_WORDS;
-        words[row..row + CONTEXT_WORDS].copy_from_slice(&[
+        words[row..row + 12].copy_from_slice(&[
             u64::from(context.view.world_ordinal),
             kind(context.view.kind),
             u64::from(context.view.condition_event),
@@ -169,9 +175,15 @@ pub(super) fn encode(
             assignment_begin as u64,
             signed,
         ]);
+        for (seal, identity) in context_identities[index].iter().enumerate() {
+            for (word, bytes) in identity.as_bytes().chunks_exact(8).enumerate() {
+                words[row + 12 + seal * 4 + word] =
+                    u64::from_le_bytes(bytes.try_into().expect("identity word"));
+            }
+        }
     }
     let cap = declaration.capacities;
-    words[0] = 2;
+    words[0] = 3;
     for (index, chunk) in identity.as_bytes().chunks_exact(8).enumerate() {
         words[1 + index] = u64::from_le_bytes(chunk.try_into().expect("identity word"));
     }
@@ -179,7 +191,7 @@ pub(super) fn encode(
         words[5 + index] = u64::from_le_bytes(chunk.try_into().expect("seed identity word"));
     }
     let word_count = words.len() as u64;
-    words[9..HEADER_WORDS].copy_from_slice(&[
+    words[9..32].copy_from_slice(&[
         declaration.contexts.len() as u64,
         material_bytes as u64,
         cell_capacity as u64,
@@ -204,6 +216,9 @@ pub(super) fn encode(
         EVENT_WORDS as u64,
         CONTEXT_WORDS as u64,
     ]);
+    for (word, bytes) in numeric_law_identity.as_bytes().chunks_exact(8).enumerate() {
+        words[32 + word] = u64::from_le_bytes(bytes.try_into().expect("identity word"));
+    }
     Ok(words
         .into_iter()
         .flat_map(u64::to_le_bytes)

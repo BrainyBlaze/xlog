@@ -3158,6 +3158,9 @@ impl SemanticTransitionSession {
                             .as_ref()
                             .ok_or(SemanticTransitionError::NotBound)?,
                         task,
+                        self.task_ground
+                            .as_ref()
+                            .ok_or(SemanticTransitionError::NotBound)?,
                         &self.readers[&lease.token].device,
                         descriptor,
                         Some((

@@ -35,7 +35,7 @@ pub(super) struct OriginalUpdateTrainingRoster {
     _metadata: Vec<xlog_cuda::SemanticReplayMaterialReservation>,
 }
 
-fn cold_clone_extent(value: &ColdValue) -> PyResult<usize> {
+pub(super) fn cold_clone_extent(value: &ColdValue) -> PyResult<usize> {
     let mut bytes = std::mem::size_of::<ColdValue>();
     match value {
         ColdValue::Integer(text) | ColdValue::Text(text) => bytes = add(bytes, text.len())?,
@@ -1095,14 +1095,10 @@ impl PySemanticPreparedSourceContentGeometry {
             let binding = self.inner.policy_binding();
             let (spans, cells) = self.inner.policy_support_layout();
             let schema = self.inner.feedback_schema();
-            let fields = usize::try_from(schema.statement_bytes)
-                .map_err(|_| invalid("original feedback field roster exceeds address space"))?
-                .checked_add(2)
-                .ok_or_else(|| invalid("original feedback field roster overflow"))?;
             let mut extent = python_metadata_tuple_extent(py, 10)?;
             // These are the reached canonical serializers' actual shapes. The
             // original raw task projection reserves its own metadata separately.
-            for count in [4, 2, law.coefficients.len(), 2, 6, 2, 2, 2, 2, 3, 2, 7, 3] {
+            for count in [4, 2, law.coefficients.len(), 2, 6, 2, 2, 2, 2, 3, 2, 3] {
                 extent = add(extent, python_metadata_tuple_extent(py, count)?)?;
             }
             extent = add(
@@ -1133,29 +1129,19 @@ impl PySemanticPreparedSourceContentGeometry {
                     )?,
                 )?,
             )?;
-            extent = add(extent, python_metadata_tuple_extent(py, fields)?)?;
             extent = add(
                 extent,
-                multiply(
-                    fields,
-                    add(
-                        python_metadata_tuple_extent(py, 4)?,
-                        python_metadata_text_extent(py, "statement")?,
-                    )?,
-                )?,
+                world::value_schema_projection_extent(py, schema.statement_bytes)?,
             )?;
             let integers = add(
-                27 + law.coefficients.len(),
-                add(
-                    multiply(layout.fields.len(), 6)?,
-                    add(multiply(spans.len(), 2)?, multiply(fields, 2)?)?,
-                )?,
+                23 + law.coefficients.len(),
+                add(multiply(layout.fields.len(), 6)?, multiply(spans.len(), 2)?)?,
             )?;
             extent = add(extent, multiply(integers, integer_extent(py)?)?)?;
             let identities = if self.inner.task_spec().training_domain.is_some() {
-                9
+                7
             } else {
-                8
+                6
             };
             extent = add(
                 extent,
@@ -1170,12 +1156,9 @@ impl PySemanticPreparedSourceContentGeometry {
             let metadata = self.reserve(extent)?;
             let _scratch = self.reserve(add(
                 multiply(spans.len(), std::mem::size_of::<(usize, usize)>())?,
-                add(
-                    multiply(fields, std::mem::size_of::<(&str, u64, u8, bool)>())?,
-                    multiply(
-                        add(add(layout.fields.len(), fields)?, law.coefficients.len())?,
-                        std::mem::size_of::<Py<PyAny>>(),
-                    )?,
+                multiply(
+                    add(layout.fields.len(), law.coefficients.len())?,
+                    std::mem::size_of::<Py<PyAny>>(),
                 )?,
             )?)?;
             let domain = if let Some(domain) = &self.inner.task_spec().training_domain {
@@ -1873,7 +1856,7 @@ pub(super) fn integer_extent(py: Python<'_>) -> PyResult<usize> {
     material_bytes::python_integer_extent(py)
 }
 
-fn projection_extent(py: Python<'_>, value: &ColdValue) -> PyResult<usize> {
+pub(super) fn projection_extent(py: Python<'_>, value: &ColdValue) -> PyResult<usize> {
     match value {
         ColdValue::Bytes(bytes) => add(
             material_bytes::python_instance_extent::<PyBytes>(py)?,
@@ -1902,7 +1885,7 @@ fn projection_extent(py: Python<'_>, value: &ColdValue) -> PyResult<usize> {
     }
 }
 
-fn projection_scratch_extent(value: &ColdValue) -> PyResult<usize> {
+pub(super) fn projection_scratch_extent(value: &ColdValue) -> PyResult<usize> {
     let ColdValue::Sequence(items) = value else {
         return Ok(0);
     };

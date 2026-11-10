@@ -163,12 +163,6 @@ impl OriginalSourcePortProjection {
         ports: &SemanticPreparedSourceContentPorts,
     ) -> PyResult<u64> {
         let count = ports.caches.len();
-        let fields = ports
-            .feedback
-            .schema
-            .statement_bytes
-            .checked_add(2)
-            .ok_or_else(|| invalid("SOURCE feedback field extent overflow"))?;
         let mut extent = count
             .checked_mul(
                 std::mem::size_of::<OriginalSourceCacheProjection>()
@@ -211,37 +205,29 @@ impl OriginalSourcePortProjection {
             3,
             5,
             3,
-            7,
             6,
             xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len(),
-            fields,
         ] {
             extent = extent
                 .checked_add(python_metadata_tuple_extent(py, len)?)
                 .ok_or_else(|| invalid("SOURCE tuple projection extent overflow"))?;
         }
-        let field_extent = python_metadata_tuple_extent(py, 4)?
-            + material_bytes::python_instance_extent::<PyString>(py)?
-            + 9
-            + 2 * (material_bytes::python_instance_extent::<PyInt>(py)? + 32)
-            + std::mem::size_of::<(&str, usize, u8, bool)>();
         let per_cache = python_metadata_tuple_extent(py, 2)?
             + material_bytes::python_instance_extent::<PyNativeTensorAllocation>(py)?;
         extent = extent
-            .checked_add(
-                fields
-                    .checked_mul(field_extent)
-                    .ok_or_else(|| invalid("SOURCE field projection extent overflow"))?,
-            )
+            .checked_add(world::value_schema_projection_extent(
+                py,
+                ports.feedback.schema.statement_bytes,
+            )?)
             .and_then(|value| value.checked_add(count.checked_mul(per_cache)?))
             .and_then(|value| {
                 value.checked_add(
-                    12 * (material_bytes::python_instance_extent::<PyBytes>(py).ok()? + 32),
+                    10 * (material_bytes::python_instance_extent::<PyBytes>(py).ok()? + 32),
                 )
             })
             .and_then(|value| {
                 value.checked_add(
-                    40 * (material_bytes::python_instance_extent::<PyInt>(py).ok()? + 32),
+                    36 * (material_bytes::python_instance_extent::<PyInt>(py).ok()? + 32),
                 )
             })
             .and_then(|value| {
@@ -376,7 +362,10 @@ impl OriginalSourcePortProjection {
             self.feedback[1].project(py, session, budget)?,
             (
                 task_epoch,
-                PyTuple::new(py, xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS)?,
+                PyTuple::new(
+                    py,
+                    xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS.iter().copied(),
+                )?,
                 self.feedback[2].project(py, session, budget)?,
                 self.feedback[3].project(py, session, budget)?,
                 self.feedback[4].project(py, session, budget)?,

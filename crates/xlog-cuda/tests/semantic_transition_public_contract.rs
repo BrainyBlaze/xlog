@@ -76,6 +76,8 @@ fn feedback_coordinates_use_the_cuda_producers_shared_encoder() {
         std::process::Command::new(std::env::var_os("CXX").unwrap_or_else(|| "c++".into()))
             .args(["-std=c++17", "-Wall", "-Wextra", "-Werror", "-I"])
             .arg(root.join("kernels"))
+            .arg("-I")
+            .arg(env!("OUT_DIR"))
             .arg(root.join("tests/semantic_feedback_encoding.cpp"))
             .arg("-o")
             .arg(output.0.join("encoder-test"))
