@@ -982,7 +982,35 @@ admission and production qualification remain required. Packets1–24 and row
 encodings1–7 retain their literal schemas, masks, costs and interpretation;
 earlier encodings do not accept the new expression body.
 
-For a version4 through version25 packet,
+Version26 (`xlog-contextual-acquisition-v26`) keeps `numerical-expressions-v1`,
+the four-field packet, context2 / `output-dependencies-v1` and the V2 cost contract.
+It checks expression parents against already known resource prerequisites before
+each hypothetical spelling is committed, including unfinished operation tags.
+The same canonical tag-prefix matcher intersects the existing required-field
+catalogue with completed helper and retained signatures, formal argument domains,
+the closed physical parameter table and the captured raw-token alphabet. A parent
+requiring a function cannot be selected when its callee domain is empty. Selected
+local or retained function-symbol prefixes must intersect that same domain.
+
+Child-value operands and Call arguments remain future expressions. They are not
+rejected because their postorder values have not yet been emitted. This check uses
+known domains only; full signature, shape, causality, dependency and scalar
+admission remains with the existing canonical owner after children and scalar
+tails are selected. It neither inserts operands nor infers shapes for child holes.
+The reader carries current pending parents separately from canonical operation
+checkpoints, so prefix reuse still checks those facts in the current definition
+scope together with the fresh actual-ID suffix bound. All tree/node/byte/scalar
+limits, postorder lowering, initialization and execution remain unchanged.
+
+This early prerequisite mode belongs only to version26. Packets through version25
+retain their literal schema, masks, prefix completion, costs and restoration,
+including failed-attempt prefixes. Complete source decoding and
+`fork_acquired(..., source_encoding="numerical-expressions-v1")` retain the same
+canonical admission and semantics for legal complete definitions. Nonempty known
+domains do not prove a complete tree, original-ID fit, semantic nonconstancy or
+usefulness; actual production qualification remains required.
+
+For a version4 through version26 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1005,7 +1033,7 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
-For version25, `last_value` can describe a completed child while its parent
+For versions25–26, `last_value` can describe a completed child while its parent
 expression remains unfinished; it becomes the root only after that node closes.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the

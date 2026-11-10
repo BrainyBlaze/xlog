@@ -4,6 +4,14 @@ use super::*;
 
 pub(crate) const ENCODING: &str = "numerical-expressions-v1";
 
+/// Source-selected parent facts, separate from not-yet-emitted child values.
+#[derive(Clone)]
+pub(crate) struct Parent {
+    pub definition_index: usize,
+    pub tag_prefix: Vec<u8>,
+    pub function_prefix: Option<Vec<u8>>,
+}
+
 pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
@@ -144,11 +152,25 @@ impl Reader<'_> {
             bounded: true,
         };
         self.expression_bytes(&mut operation, b"{\"operation\":")?;
+        let tag_start = operation.bytes.len() - 1;
+        let parent = self.expression_parents.len();
+        if self.parent_prerequisites {
+            self.expression_parents.push(Parent {
+                definition_index: self.definition_index,
+                tag_prefix: Vec::new(),
+                function_prefix: None,
+            });
+        }
         self.budget.set(frame, || vec![budget::text(",]")]);
-        let tag =
-            self.expression_scalar(&mut operation, false, budget::text("\"\""), |reader| {
-                reader.value::<String>()
-            })?;
+        let tag = self.expression_scalar(&mut operation, false, budget::text("\"\""), |reader| {
+            reader.value::<String>()
+        });
+        if self.parent_prerequisites {
+            // Keep the canonical colon/string prefix for the existing tag
+            // matcher, including incomplete and JSON-escaped spellings.
+            self.expression_parents[parent].tag_prefix = operation.bytes[tag_start..].to_vec();
+        }
+        let tag = tag?;
         let fields = self
             .fields
             .get(&tag)
@@ -189,12 +211,18 @@ impl Reader<'_> {
                     .skip(position + 1)
                     .any(|field| is_value_reference(field) || field == "arguments");
                 if field == "function" {
-                    self.expression_scalar(
+                    let start = operation.bytes.len() - 1;
+                    let function = self.expression_scalar(
                         &mut operation,
                         project_partial,
                         budget::expression_field(field),
                         |reader| reader.symbol(true),
-                    )?;
+                    );
+                    if self.parent_prerequisites {
+                        self.expression_parents[parent].function_prefix =
+                            Some(operation.bytes[start..].to_vec());
+                    }
+                    function?;
                 } else {
                     let index = self.expression_operations;
                     self.expression_scalar(
@@ -224,6 +252,9 @@ impl Reader<'_> {
         self.expression_bytes(&mut operation, b"}")?;
         let id = self.expression_operations;
         self.emit_expression(&operation, true)?;
+        if self.parent_prerequisites {
+            self.expression_parents.pop();
+        }
         self.budget.leave(frame);
         Ok(id)
     }

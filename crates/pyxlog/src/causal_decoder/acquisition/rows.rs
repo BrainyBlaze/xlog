@@ -144,6 +144,7 @@ pub(super) struct Prefix<'a> {
     pub indices: Vec<indices::Record>,
     pub pending_indices: Option<indices::Pending<'a>>,
     pub pending_retained: Option<metadata::PendingReference>,
+    pub expression_parents: Vec<expressions::Parent>,
     pub budget: budget::State,
 }
 
@@ -225,6 +226,8 @@ struct Reader<'a> {
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    parent_prerequisites: bool,
+    expression_parents: Vec<expressions::Parent>,
     expression_nodes: usize,
     expression_operations: usize,
     expression_pending_bytes: usize,
@@ -250,6 +253,7 @@ pub(super) fn prefix<'a>(
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    parent_prerequisites: bool,
     track_token_budget: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -272,6 +276,8 @@ pub(super) fn prefix<'a>(
         self_delimited,
         named_body,
         expressions,
+        parent_prerequisites,
+        expression_parents: Vec::new(),
         expression_nodes: 0,
         expression_operations: 0,
         expression_pending_bytes: 0,
@@ -314,6 +320,7 @@ pub(super) fn prefix<'a>(
                 target,
             }),
         pending_retained: reader.pending_retained,
+        expression_parents: reader.expression_parents,
         budget: reader.budget,
     })
 }
@@ -343,6 +350,7 @@ pub(super) fn definitions(
         self_delimited,
         named_body,
         expressions,
+        false,
         false,
     )?;
     if !decoded.complete {
