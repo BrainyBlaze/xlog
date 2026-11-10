@@ -102,6 +102,9 @@ class NativeCausalModel:
         positive zeros remove proven irrelevant Select conditions. The same facts
         govern prefix/reference choices, complete decoding and original-source fork.
         Unknown values remain unknown; this does not prove general nonconstancy.
+        V32 keeps that syntax/context and selects original-ID cost v4: selected
+        literal numeric arrays reserve canonically required missing coordinates,
+        separators and unfinished decimal tails before the same suffix and EOS.
         """
         ...
     def fork_acquired(
@@ -147,19 +150,21 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–31 require positive remaining original IDs including this choice and paid EOS.
+        """V21–32 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
         V21–24 use ordered-structural-subsequence-v1; V25–29 require v2;
         V30–31 require v3 for integer-or-tuple child values and decimal extensions.
+        V32 requires v4 with typed literal-array obligations; other array forms
+        and unknown cardinalities retain their conservative existing bounds.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–31 prefix facts as JSON; no token selection or final admission."""
+        """Version4–32 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–31 source with its captured context; v31 also applies
+        """Elaborate complete v7–32 source with its captured context; v31–32 also apply
         the same value-aware admission before returning canonical initializer input.
         """
 
