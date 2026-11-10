@@ -1827,6 +1827,7 @@ fn program_query_native_work_ceiling(
         0,
         ceiling_sum([
             1_000_000,
+            34, // Original measure-header reset and terminal diagnostic writes.
             ceiling_product(facts, facts)?,
             ceiling_product(2, ceiling_product(queries, facts)?)?,
         ])?,

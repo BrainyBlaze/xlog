@@ -612,15 +612,6 @@ impl TaskGroundLayout {
             .nodes
             .checked_mul(4)
             .and_then(|bytes| stack.checked_add(bytes))
-            .and_then(|bytes| bytes.checked_add(7))
-            .map(|bytes| bytes & !7)
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    (2 * self.support_binding_capacity())
-                        .div_ceil(64)
-                        .checked_mul(8)?,
-                )
-            })
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         if rules > u32::MAX as usize || bytes > super::SCRATCH_BYTES - 8 * 1024 * 1024 {
             return Err(publication_input_error(
@@ -941,10 +932,15 @@ pub(super) struct TaskGroundStorage {
     pub device: super::TrackedCudaSlice<u8>,
     pub support_truths: super::TrackedCudaSlice<u8>,
     pub support_lineage: super::TrackedCudaSlice<u64>,
+    pub measure_geometry: super::world_state::MeasureGeometry,
+    pub measure: super::TrackedCudaSlice<u64>,
 }
 
 impl TaskGroundStorage {
-    pub fn allocation_bytes(layout: TaskGroundLayout) -> Result<usize, SemanticTransitionError> {
+    pub fn allocation_bytes(
+        layout: TaskGroundLayout,
+        measure: super::world_state::MeasureGeometry,
+    ) -> Result<usize, SemanticTransitionError> {
         let facts = layout.image.facts;
         let words = (2 * layout.support_binding_capacity()).div_ceil(64) + 1;
         facts
@@ -954,6 +950,7 @@ impl TaskGroundStorage {
             .and_then(|cells| cells.checked_mul(8))
             .and_then(|bytes| bytes.checked_add(5 * facts))
             .and_then(|bytes| bytes.checked_add(layout.bytes))
+            .and_then(|bytes| bytes.checked_add(measure.words.checked_mul(8)?))
             .ok_or_else(|| {
                 publication_input_error("task derivation geometry exceeds addressable storage")
             })
@@ -961,6 +958,7 @@ impl TaskGroundStorage {
 
     pub fn allocate(
         layout: TaskGroundLayout,
+        measure_geometry: super::world_state::MeasureGeometry,
         reservation: &mut super::GpuMemoryReservation,
     ) -> Result<Self, SemanticTransitionError> {
         let facts = layout.image.facts;
@@ -972,7 +970,7 @@ impl TaskGroundStorage {
             .ok_or_else(|| {
                 publication_input_error("task derivation geometry exceeds addressable storage")
             })?;
-        Self::allocation_bytes(layout)?;
+        Self::allocation_bytes(layout, measure_geometry)?;
         Ok(Self {
             layout,
             device: reservation
@@ -984,6 +982,12 @@ impl TaskGroundStorage {
             support_lineage: reservation
                 .alloc::<u64>(cells)
                 .map_err(|error| super::runtime_error("task provenance allocation", error))?,
+            measure_geometry,
+            measure: reservation
+                .alloc::<u64>(measure_geometry.words)
+                .map_err(|error| {
+                    super::runtime_error("original joint measure allocation", error)
+                })?,
         })
     }
 
@@ -991,6 +995,75 @@ impl TaskGroundStorage {
         recorder.read_write(&self.device);
         recorder.write(&self.support_truths);
         recorder.write(&self.support_lineage);
+        recorder.read_write(&self.measure);
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    pub(super) fn export_measure(
+        &self,
+        device: i32,
+        aliases: std::sync::Arc<()>,
+        publication: std::sync::Arc<super::PublicationStorage>,
+    ) -> Result<[super::DlpackManagedTensor; 5], SemanticTransitionError> {
+        let geometry = self.measure_geometry;
+        if self.measure.len() != geometry.words {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let queries = geometry.queries;
+        let factors = geometry.factors;
+        let views = [
+            (0, 32, vec![32], vec![1], (1, 64)),
+            (
+                geometry.masses,
+                12 * queries,
+                vec![3, queries as i64, 4],
+                vec![4 * queries as i64, 4, 1],
+                (2, 64),
+            ),
+            (14, 9, vec![3, 3], vec![3, 1], (2, 64)),
+            (
+                geometry.factor_gradients,
+                6 * factors,
+                vec![3, factors as i64, 2],
+                vec![2 * factors as i64, 2, 1],
+                (2, 64),
+            ),
+            (
+                geometry.log_potentials,
+                2 * factors,
+                vec![factors as i64, 2],
+                vec![2, 1],
+                (2, 64),
+            ),
+        ];
+        let tensors = views
+            .into_iter()
+            .map(|(begin, count, shape, strides, dtype)| {
+                let end = begin
+                    .checked_add(count)
+                    .filter(|end| *end <= geometry.words)
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                // SAFETY: all views are exact aligned spans of the invocation's
+                // original u64 arena. Only FP64 result regions are labelled FP64;
+                // the status/header view remains unsigned integer storage.
+                let view = unsafe { self.measure.view().slice(begin..end).cast::<u8>() }
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?;
+                Ok(super::export_owned_allocation(
+                    view,
+                    shape,
+                    strides,
+                    dtype,
+                    device,
+                    std::sync::Arc::clone(&aliases),
+                    Some(std::sync::Arc::clone(&publication)),
+                    None,
+                    None,
+                ))
+            })
+            .collect::<Result<Vec<_>, SemanticTransitionError>>()?;
+        tensors
+            .try_into()
+            .map_err(|_| SemanticTransitionError::ObservationMismatch)
     }
 }
 

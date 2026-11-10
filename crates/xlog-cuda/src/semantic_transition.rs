@@ -18537,6 +18537,8 @@ struct Descriptor {
     task_support_truths: u64,
     task_support_lineage: u64,
     task_support_lineage_words: u64,
+    task_measure: u64,
+    task_measure_words: u64,
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
@@ -20122,13 +20124,13 @@ const _: () = assert!(std::mem::offset_of!(PolicyUniformDescriptor, transferred)
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 296);
-const _: () = assert!(size_of::<Descriptor>() == 1472);
+const _: () = assert!(size_of::<Descriptor>() == 1488);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, work) == 176);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, baseline_snapshot) == 184);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, score_cotangent_snapshot) == 192);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, numerical) == 200);
-const _: () = assert!(std::mem::offset_of!(Descriptor, policy_work) == 1456);
-const _: () = assert!(std::mem::offset_of!(Descriptor, policy_score) == 1464);
+const _: () = assert!(std::mem::offset_of!(Descriptor, policy_work) == 1472);
+const _: () = assert!(std::mem::offset_of!(Descriptor, policy_score) == 1480);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -20171,7 +20173,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1472);
+        assert_eq!(size_of::<Descriptor>(), 1488);
     }
 
     #[test]
@@ -25438,9 +25440,14 @@ impl SemanticTransitionSession {
             .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add(block_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let ground_layout = self.task_ground.as_ref().map(|ground| ground.layout);
+        let ground_layout = self
+            .task_ground
+            .as_ref()
+            .map(|ground| (ground.layout, ground.measure_geometry));
         let ground_bytes = ground_layout
-            .map(task_ground::TaskGroundStorage::allocation_bytes)
+            .map(|(layout, measure)| {
+                task_ground::TaskGroundStorage::allocation_bytes(layout, measure)
+            })
             .transpose()?
             .unwrap_or(0)
             .checked_mul(2)
@@ -25889,8 +25896,12 @@ impl SemanticTransitionSession {
                 let branches = [
                     PreparedBranchStorage {
                         task_ground: ground_layout
-                            .map(|layout| {
-                                task_ground::TaskGroundStorage::allocate(layout, &mut reservation)
+                            .map(|(layout, measure)| {
+                                task_ground::TaskGroundStorage::allocate(
+                                    layout,
+                                    measure,
+                                    &mut reservation,
+                                )
                             })
                             .transpose()?,
                         model_update: model_update_zero,
@@ -25913,8 +25924,12 @@ impl SemanticTransitionSession {
                     },
                     PreparedBranchStorage {
                         task_ground: ground_layout
-                            .map(|layout| {
-                                task_ground::TaskGroundStorage::allocate(layout, &mut reservation)
+                            .map(|(layout, measure)| {
+                                task_ground::TaskGroundStorage::allocate(
+                                    layout,
+                                    measure,
+                                    &mut reservation,
+                                )
                             })
                             .transpose()?,
                         model_update: model_update_one,
@@ -41086,7 +41101,12 @@ impl SemanticTransitionSession {
         if let Some(program) = binding.spec.program.editable_program() {
             ground_layout.require_program_workspace(program)?;
         }
-        let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
+        let measure_geometry = binding
+            .spec
+            .semantic_context
+            .measure_geometry(ground_layout)?;
+        let ground_bytes =
+            task_ground::TaskGroundStorage::allocation_bytes(ground_layout, measure_geometry)?;
         let task_bytes = words
             .len()
             .checked_mul(size_of::<u64>())
@@ -41100,7 +41120,11 @@ impl SemanticTransitionSession {
         let device = reservation
             .alloc::<u64>(words.len())
             .map_err(|error| runtime_error("private task allocation", error))?;
-        let ground = task_ground::TaskGroundStorage::allocate(ground_layout, &mut reservation)?;
+        let ground = task_ground::TaskGroundStorage::allocate(
+            ground_layout,
+            measure_geometry,
+            &mut reservation,
+        )?;
         // Retain the new owner before the first may-enqueue boundary. A failed
         // upload/adoption poisons reuse and keeps its storage until Session drop.
         self.captured = None;
@@ -41647,6 +41671,56 @@ impl SemanticTransitionSession {
         let tensors = export_policy_uniform_domains(
             buffers,
             self.codebooks.input_cells,
+            self.provider.device().ordinal() as i32,
+            Arc::clone(&original.aliases),
+            Arc::clone(
+                self.publication
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            ),
+        )?;
+        self.steps
+            .get_mut(&step.token)
+            .expect("checked original step")
+            .consumer_streams
+            .insert(consumer_stream);
+        self.order_content_consumers(consumer_stream)?;
+        Ok(tensors)
+    }
+
+    /// Original native joint query masses, expected task values and their
+    /// log-potential VJP. These are derived outputs of this Proposal invocation,
+    /// not a continuous model producer or permission to mutate rule cells.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_world_measure_values(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        consumer_stream: u64,
+    ) -> Result<[DlpackManagedTensor; 5], SemanticTransitionError> {
+        self.check_prepared_content_stream(step, consumer_stream)?;
+        if bank > 1 || self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "world measure values require their original Proposal bank",
+            ));
+        }
+        let original = &self.steps[&step.token];
+        let prepared = original.prepared.as_ref().expect("checked original step");
+        if prepared.transition_recorded & (1 << bank) == 0 {
+            return Err(publication_input_error(
+                "world measure consumer must follow its original native Proposal",
+            ));
+        }
+        let ground = prepared.branches[bank]
+            .task_ground
+            .as_ref()
+            .ok_or_else(|| publication_input_error("original world measure storage is absent"))?;
+        if ground.measure.is_empty() {
+            return Err(publication_input_error(
+                "world measure values require the original compiled native program",
+            ));
+        }
+        let tensors = ground.export_measure(
             self.provider.device().ordinal() as i32,
             Arc::clone(&original.aliases),
             Arc::clone(
@@ -42949,7 +43023,10 @@ impl SemanticTransitionSession {
             .task_ground
             .as_ref()
             .map(|ground| {
-                let bytes = task_ground::TaskGroundStorage::allocation_bytes(ground.layout)?;
+                let bytes = task_ground::TaskGroundStorage::allocation_bytes(
+                    ground.layout,
+                    ground.measure_geometry,
+                )?;
                 let mut reservation = self
                     .provider
                     .memory()
@@ -42958,7 +43035,11 @@ impl SemanticTransitionSession {
                             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                     )
                     .map_err(|error| runtime_error("original policy ground reservation", error))?;
-                task_ground::TaskGroundStorage::allocate(ground.layout, &mut reservation)
+                task_ground::TaskGroundStorage::allocate(
+                    ground.layout,
+                    ground.measure_geometry,
+                    &mut reservation,
+                )
             })
             .transpose()?;
         let replacement = PolicyReplacement {
@@ -46799,6 +46880,16 @@ impl SemanticTransitionSession {
             task_support_lineage_words: io
                 .task_ground
                 .map_or(0, |ground| ground.support_lineage.len() as u64),
+            task_measure: io.task_ground.map_or(0, |ground| {
+                if ground.measure.is_empty() {
+                    0
+                } else {
+                    ground.measure.device_ptr_value()
+                }
+            }),
+            task_measure_words: io
+                .task_ground
+                .map_or(0, |ground| ground.measure.len() as u64),
             publication: PublicationCommand {
                 control: self
                     .publication
@@ -46914,6 +47005,12 @@ impl SemanticTransitionSession {
                 ranges.push((
                     ground.support_lineage.device_ptr_value(),
                     (ground.support_lineage.len() * 8) as u64,
+                ));
+            }
+            if !ground.measure.is_empty() {
+                ranges.push((
+                    ground.measure.device_ptr_value(),
+                    (ground.measure.len() * 8) as u64,
                 ));
             }
         }

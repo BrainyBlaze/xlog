@@ -193,6 +193,47 @@ __device__ semantic_program::Status acyclic(const Frame& frame,uint8_t* colors,
 }
 // Execute every active root against one immutable entry. A block materializer
 // receives that same entry, never a preceding tree's staged result.
+__device__ bool event_order(const Frame& frame,semantic_world::Measure& world,
+        uint32_t* ordered) {
+    if(frame.geometry.nodes!=world.image_nodes)return false;
+    uint32_t active=0,count=0;
+    for(uint32_t node=0;node<frame.geometry.nodes;++node) {
+        if(!world.charge(2))return false;
+        world.image_degree[node]=0;
+        active+=frame.node(node)[0]!=0;
+    }
+    for(uint32_t node=0;node<frame.geometry.nodes;++node) {
+        if(!world.charge())return false;
+        const auto* row=frame.node(node);
+        if(row[0]!=1)continue;
+        for(uint32_t edge=0;edge<4;++edge) {
+            if(!world.charge(3))return false;
+            if(row[2+edge]>=frame.geometry.nodes)return false;
+            ++world.image_degree[row[2+edge]];
+        }
+    }
+    for(uint32_t node=0;node<frame.geometry.nodes;++node) {
+        if(!world.charge(2))return false;
+        if(frame.node(node)[0] && !world.image_degree[node])world.image_order[count++]=node;
+    }
+    for(uint32_t next=0;next<count;++next) {
+        if(!world.charge(2))return false;
+        const auto* row=frame.node(uint32_t(world.image_order[next]));
+        if(row[0]!=1)continue;
+        for(uint32_t edge=0;edge<4;++edge) {
+            if(!world.charge(3))return false;
+            const uint32_t child=uint32_t(row[2+edge]);
+            if(!world.image_degree[child])return false;
+            if(!--world.image_degree[child]) {
+                if(count==frame.geometry.nodes)return false;
+                world.image_order[count++]=child;
+            }
+        }
+    }
+    *ordered=count;
+    return count==active;
+}
+
 template<class Observations>
 __device__ semantic_program::Result execute(const semantic_program::Bank& bank,const Frame& frame,
         semantic_program::Fact* input,semantic_program::Rule* rules,uint32_t rule_capacity,
@@ -200,14 +241,18 @@ __device__ semantic_program::Result execute(const semantic_program::Bank& bank,c
         semantic_program::Fact* block_output,semantic_program::DualSupport block_support,
         semantic_program::Fact* output,semantic_program::DualSupport output_support,
         uint32_t capacity,uint64_t fuel,const Observations& observations,
-        const uint64_t* library,uint32_t library_count,uint64_t* path_lineage) {
+        const uint64_t* library,uint32_t library_count) {
     using semantic_program::Status;using semantic_program::Result;
     if(!bank.words || !frame.header || capacity!=bank.fact_capacity || !input || !entry ||
        !block_output || !output || !output_support.truth || !entry_support.truth ||
        !block_support.truth || entry_support.words!=output_support.words ||
        block_support.words!=output_support.words || bank.initial_count>capacity ||
-       library_count>64 || (library_count && !library))return {Status::InvalidProgram,0,0,0};
+        library_count>64 || (library_count && !library) || !output_support.world ||
+        entry_support.world!=output_support.world || block_support.world!=output_support.world)
+        return {Status::InvalidProgram,0,0,0};
     uint64_t charged=0;
+    auto& world=*output_support.world;
+    semantic_world::MeasureFuel measure_fuel(&world,&charged,fuel);
     auto tick=[&](uint64_t count=1) {
         if(count>fuel-charged)return false;charged+=count;return true;
     };
@@ -224,6 +269,14 @@ __device__ semantic_program::Result execute(const semantic_program::Bank& bank,c
         output_support.truth[index]=index<base.fact_count ? entry_support.truth[index] : 0;
         if(index<base.fact_count)output[index]=entry[index];
         for(uint32_t channel=0;channel<2;++channel) {
+            const uint64_t cell=uint64_t(index)*2+channel;
+            if(!world.charge())return {Status::FuelExhausted,0,0,charged};
+            output_support.events[cell]=index<base.fact_count ? entry_support.events[cell] : 0;
+            for(uint32_t origin=0;origin<world.lineage_events;++origin) {
+                if(!world.charge())return {Status::FuelExhausted,0,0,charged};
+                output_support.lineage_events[cell*world.lineage_events+origin]=index<base.fact_count ?
+                    entry_support.lineage_events[cell*world.lineage_events+origin] : 0;
+            }
             if(output_support.leaf_refs)output_support.leaf_refs[uint64_t(index)*2+channel]=0;
             for(uint32_t word=0;word<output_support.words;++word) {
                 if(!tick())return {Status::FuelExhausted,0,0,charged};
@@ -233,6 +286,7 @@ __device__ semantic_program::Result execute(const semantic_program::Bank& bank,c
         }
     }
     uint32_t count=base.fact_count,derived=0;
+    uint32_t current=0,path_event=1;
     auto merge=[&](semantic_program::Fact fact,uint8_t truth,uint32_t source,
             const semantic_program::DualSupport* provenance,uint64_t leaf_ref) {
         const uint32_t index=semantic_program::find_fact(output,count,fact,&charged,fuel);
@@ -244,18 +298,26 @@ __device__ semantic_program::Result execute(const semantic_program::Bank& bank,c
         for(uint32_t channel=0;channel<2;++channel) {
             if(!tick())return Status::FuelExhausted;
             const uint8_t bit=uint8_t(1U<<channel);
-            if(!(truth&bit) || (output_support.truth[index]&bit))continue;
-            output_support.truth[index]|=bit;++derived;
-            if(output_support.leaf_refs)output_support.leaf_refs[uint64_t(index)*2+channel]=leaf_ref;
-            for(uint32_t word=0;word<output_support.words;++word) {
-                if(!tick())return Status::FuelExhausted;
-                output_support.lineage[(uint64_t(index)*2+channel)*output_support.words+word]=
-                    (provenance ? provenance->lineage[(uint64_t(source)*2+channel)*provenance->words+word] : 0) |
-                    path_lineage[word];
-            }
+            const uint64_t source_cell=uint64_t(source)*2+channel;
+            const uint32_t event=world.intersection(path_event,provenance ?
+                uint32_t(world.read(provenance->events,source_cell)) : truth&bit ? world.view_condition : 0);
+            if(!event)continue;
+            const bool absent=!(output_support.truth[index]&bit);
+            semantic_program::merge_world_support(output_support,index,channel,event,
+                [&](uint32_t origin) {
+                    const uint32_t inherited=provenance ? uint32_t(world.read(provenance->lineage_events,
+                        source_cell*world.lineage_events+origin)) : 0;
+                    return world.unite(inherited,uint32_t(world.read(world.image_lineage_events,
+                        uint64_t(current)*world.lineage_events+origin)));
+                },leaf_ref);
+            derived+=uint32_t(absent && (output_support.truth[index]&bit));
+            if(world.status!=semantic_world::MeasureStatus::Ok)return Status::InvalidProgram;
         }
         return Status::Ok;
     };
+    uint32_t ordered=0;
+    if(!event_order(frame,world,&ordered))return {world.status==semantic_world::MeasureStatus::FuelExhausted ?
+        Status::FuelExhausted : Status::CyclicImage,0,0,charged};
     bool active=false;
     for(uint32_t root=0;root<frame.geometry.roots;++root) {
         if(!tick())return {Status::FuelExhausted,0,0,charged};
@@ -263,92 +325,116 @@ __device__ semantic_program::Result execute(const semantic_program::Bank& bank,c
         if(initial==UINT32_MAX)continue;
         if(initial>=frame.geometry.nodes)return {Status::InvalidProgram,0,0,charged};
         active=true;
-        for(uint32_t word=0;word<output_support.words;++word) {
+        for(uint32_t node=0;node<frame.geometry.nodes;++node) {
             if(!tick())return {Status::FuelExhausted,0,0,charged};
-            path_lineage[word]=0;
-        }
-        uint32_t current=uint32_t(initial),depth=0;
-        for(;;) {
-            if(!tick())return {Status::FuelExhausted,0,0,charged};
-            if(current>=frame.geometry.nodes || depth++>=frame.geometry.nodes)
-                return {Status::CyclicImage,0,0,charged};
-            const auto* node=frame.node(current);
-            if(node[0]==2)break;
-            if(node[0]!=1 || node[1]>=bank.image.guard_count)return {Status::InvalidProgram,0,0,charged};
-            const auto fact=bank.image.guard(uint32_t(node[1]));
-            const uint32_t found=semantic_program::find_fact(entry,base.fact_count,fact,&charged,fuel);
-            if(found==UINT32_MAX)return {Status::FuelExhausted,0,0,charged};
-            const uint32_t truth=found==base.fact_count ? 0 : entry_support.truth[found];
-            if(truth>3)return {Status::InvalidProgram,0,0,charged};
-            if(found<base.fact_count)for(uint32_t channel=0;channel<2;++channel) {
-                if(!(truth&(uint32_t(1)<<channel)))continue;
-                for(uint32_t word=0;word<output_support.words;++word) {
-                    if(!tick())return {Status::FuelExhausted,0,0,charged};
-                    path_lineage[word]|=entry_support.lineage[(uint64_t(found)*2+channel)*entry_support.words+word];
-                }
-            }
-            const uint32_t edge=truth==1 ? 0 : truth==2 ? 1 : truth==3 ? 2 : 3;
-            if(node[2+edge]>=frame.geometry.nodes)return {Status::InvalidProgram,0,0,charged};
-            current=uint32_t(node[2+edge]);
-        }
-        const uint64_t effect=frame.node(current)[6];
-        if(effect>=bank.image.leaf_count)return {Status::InvalidProgram,0,0,charged};
-        const auto* leaf=bank.image.leaves+effect*4;
-        const uint64_t leaf_ref=(uint64_t(root)<<32)|uint64_t(current);
-        if(leaf_ref==UINT64_MAX)return {Status::InvalidProgram,0,0,charged};
-        if(leaf[0]==0)continue;
-        if(leaf[0]==1) {
-            for(uint64_t event=0;event<leaf[2];++event) {
+            world.image_paths[node]=node==initial ? world.view_condition : 0;
+            for(uint32_t origin=0;origin<world.lineage_events;++origin) {
                 if(!tick())return {Status::FuelExhausted,0,0,charged};
-                const auto* row=bank.image.events+(leaf[1]+event)*2;
-                if(row[0]>=bank.image.guard_count || row[1]<1 || row[1]>2)return {Status::InvalidProgram,0,0,charged};
-                const auto fact=bank.image.guard(uint32_t(row[0]));
-                for(uint32_t binding=0;binding<observations.protected_size();++binding) {
-                    if(!tick())return {Status::FuelExhausted,0,0,charged};
-                    const auto protected_fact=observations[binding].fact;
-                    if(fact.predicate==protected_fact.predicate && fact.arity==protected_fact.arity &&
-                       fact.first==protected_fact.first && fact.second==protected_fact.second)
-                        return {Status::ProtectedObservation,0,0,charged};
+                world.image_lineage_events[uint64_t(node)*world.lineage_events+origin]=0;
+            }
+        }
+        for(uint32_t position=0;position<ordered;++position) {
+            if(!tick(2))return {Status::FuelExhausted,0,0,charged};
+            current=uint32_t(world.image_order[position]);path_event=uint32_t(world.image_paths[current]);
+            if(!path_event)continue;
+            const auto* node=frame.node(current);
+            if(node[0]!=2) {
+                if(node[0]!=1 || node[1]>=bank.image.guard_count)return {Status::InvalidProgram,0,0,charged};
+                const auto fact=bank.image.guard(uint32_t(node[1]));
+                const uint32_t found=semantic_program::find_fact(entry,base.fact_count,fact,&charged,fuel);
+                if(found==UINT32_MAX)return {Status::FuelExhausted,0,0,charged};
+                const uint32_t pro=found==base.fact_count ? 0 : uint32_t(world.read(entry_support.events,uint64_t(found)*2));
+                const uint32_t contra=found==base.fact_count ? 0 : uint32_t(world.read(entry_support.events,uint64_t(found)*2+1));
+                const uint32_t not_pro=world.complement(pro),not_contra=world.complement(contra);
+                const uint32_t outcomes[4]={world.intersection(pro,not_contra),world.intersection(not_pro,contra),
+                    world.intersection(pro,contra),world.intersection(not_pro,not_contra)};
+                for(uint32_t edge=0;edge<4;++edge) {
+                    const uint32_t child=uint32_t(node[2+edge]);
+                    const uint32_t event=world.intersection(path_event,outcomes[edge]);
+                    if(!event)continue;
+                    const uint32_t prior=uint32_t(world.read(world.image_paths,child));
+                    const uint32_t added=world.intersection(event,world.complement(prior));
+                    const uint32_t combined=world.unite(prior,event);
+                    if(!tick())return {Status::FuelExhausted,0,0,charged};world.image_paths[child]=combined;
+                    for(uint32_t origin=0;origin<world.lineage_events;++origin) {
+                        uint32_t inherited=uint32_t(world.read(world.image_lineage_events,
+                            uint64_t(current)*world.lineage_events+origin));
+                        if(found<base.fact_count)for(uint32_t channel=0;channel<2;++channel)
+                            inherited=world.unite(inherited,uint32_t(world.read(entry_support.lineage_events,
+                                (uint64_t(found)*2+channel)*world.lineage_events+origin)));
+                        const uint64_t offset=uint64_t(child)*world.lineage_events+origin;
+                        const uint32_t proof=world.unite(uint32_t(world.read(world.image_lineage_events,offset)),
+                            world.intersection(added,inherited));
+                        if(!tick())return {Status::FuelExhausted,0,0,charged};world.image_lineage_events[offset]=proof;
+                    }
                 }
-                const Status status=merge(fact,uint8_t(row[1]),0,nullptr,leaf_ref+1);
+                if(world.status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+                continue;
+            }
+            const uint64_t effect=frame.node(current)[6];
+            if(effect>=bank.image.leaf_count)return {Status::InvalidProgram,0,0,charged};
+            const auto* leaf=bank.image.leaves+effect*4;
+            const uint64_t leaf_ref=(uint64_t(root)<<32)|uint64_t(current);
+            if(leaf_ref==UINT64_MAX)return {Status::InvalidProgram,0,0,charged};
+            if(leaf[0]==0)continue;
+            if(leaf[0]==1) {
+                for(uint64_t event=0;event<leaf[2];++event) {
+                    if(!tick())return {Status::FuelExhausted,0,0,charged};
+                    const auto* row=bank.image.events+(leaf[1]+event)*2;
+                    if(row[0]>=bank.image.guard_count || row[1]<1 || row[1]>2)return {Status::InvalidProgram,0,0,charged};
+                    const auto fact=bank.image.guard(uint32_t(row[0]));
+                    for(uint32_t binding=0;binding<observations.protected_size();++binding) {
+                        if(!tick())return {Status::FuelExhausted,0,0,charged};
+                        const auto protected_fact=observations[binding].fact;
+                        if(fact.predicate==protected_fact.predicate && fact.arity==protected_fact.arity &&
+                           fact.first==protected_fact.first && fact.second==protected_fact.second)
+                            return {Status::ProtectedObservation,0,0,charged};
+                    }
+                    const Status status=merge(fact,uint8_t(row[1]),0,nullptr,leaf_ref+1);
+                    if(status!=Status::Ok)return {status,0,0,charged};
+                }
+                continue;
+            }
+            if(leaf[0]!=2 || leaf[1]>=bank.image.block_count)return {Status::InvalidProgram,0,0,charged};
+            const uint32_t block=uint32_t(leaf[1]);
+            const auto* block_row=bank.image.blocks+uint64_t(block)*2;
+            uint32_t rule_count=0;
+            for(uint64_t index=0;index<block_row[1];++index) {
+                if(!tick(semantic_program::kRuleWords))return {Status::FuelExhausted,0,0,charged};
+                if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
+                const uint32_t ordinal=uint32_t(bank.image.references[block_row[0]+index]);
+                world.rule_ordinals[rule_count]=ordinal;
+                rules[rule_count++]=semantic_program::bank_rule(bank,ordinal);
+            }
+            const uint32_t protected_begin=rule_count;
+            for(uint32_t index=0;index<frame.header[4];++index) {
+                if(!tick())return {Status::FuelExhausted,0,0,charged};
+                if(frame.rule_blocks[index]!=block)continue;
+                if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
+                world.rule_ordinals[rule_count]=uint64_t(bank.rule_count)+index;
+                rules[rule_count++]=frame.rules[index];
+            }
+            const uint64_t mask=frame.activity[block];
+            const uint64_t permitted=library_count==64 ? UINT64_MAX : (uint64_t(1)<<library_count)-1;
+            if(mask&~permitted)return {Status::InvalidProgram,0,0,charged};
+            for(uint32_t index=0;index<library_count;++index) {
+                if(!tick())return {Status::FuelExhausted,0,0,charged};
+                if(!(mask&(uint64_t(1)<<index)))continue;
+                if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
+                world.rule_ordinals[rule_count]=UINT32_MAX;
+                rules[rule_count++]=semantic_program::rule_words(library+uint64_t(index)*semantic_program::kRuleWords);
+            }
+            auto result=semantic_program::materialize(input,bank.initial_count,rules,rule_count,bank,
+                block_output,capacity,fuel-charged,&block_support,observations,protected_begin,path_event,uint32_t(frame.header[4]));
+            charged+=result.charged_pairs;
+            if(result.status!=Status::Ok)return {result.status,0,0,charged};
+            for(uint32_t index=0;index<result.fact_count;++index) {
+                const Status status=merge(block_output[index],block_support.truth[index],index,&block_support,leaf_ref+1);
                 if(status!=Status::Ok)return {status,0,0,charged};
             }
-            continue;
-        }
-        if(leaf[0]!=2 || leaf[1]>=bank.image.block_count)return {Status::InvalidProgram,0,0,charged};
-        const uint32_t block=uint32_t(leaf[1]);
-        const auto* block_row=bank.image.blocks+uint64_t(block)*2;
-        uint32_t rule_count=0;
-        for(uint64_t index=0;index<block_row[1];++index) {
-            if(!tick(semantic_program::kRuleWords))return {Status::FuelExhausted,0,0,charged};
-            if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
-            rules[rule_count++]=semantic_program::bank_rule(bank,uint32_t(bank.image.references[block_row[0]+index]));
-        }
-        const uint32_t protected_begin=rule_count;
-        for(uint32_t index=0;index<frame.header[4];++index) {
-            if(!tick())return {Status::FuelExhausted,0,0,charged};
-            if(frame.rule_blocks[index]!=block)continue;
-            if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
-            rules[rule_count++]=frame.rules[index];
-        }
-        const uint64_t mask=frame.activity[block];
-        const uint64_t permitted=library_count==64 ? UINT64_MAX : (uint64_t(1)<<library_count)-1;
-        if(mask&~permitted)return {Status::InvalidProgram,0,0,charged};
-        for(uint32_t index=0;index<library_count;++index) {
-            if(!tick())return {Status::FuelExhausted,0,0,charged};
-            if(!(mask&(uint64_t(1)<<index)))continue;
-            if(rule_count==rule_capacity)return {Status::RuleCapacity,0,0,charged};
-            rules[rule_count++]=semantic_program::rule_words(library+uint64_t(index)*semantic_program::kRuleWords);
-        }
-        auto result=semantic_program::materialize(input,bank.initial_count,rules,rule_count,bank,
-            block_output,capacity,fuel-charged,&block_support,observations,protected_begin);
-        charged+=result.charged_pairs;
-        if(result.status!=Status::Ok)return {result.status,0,0,charged};
-        for(uint32_t index=0;index<result.fact_count;++index) {
-            const Status status=merge(block_output[index],block_support.truth[index],index,&block_support,leaf_ref+1);
-            if(status!=Status::Ok)return {status,0,0,charged};
         }
     }
+    if(world.status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
     return active ? Result{Status::Ok,count,derived,charged} : Result{Status::InvalidProgram,0,0,charged};
 }
 } // namespace semantic_program_image

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "semantic_world_measure.cuh"
 
 namespace semantic_program {
 
@@ -87,7 +88,47 @@ struct DualSupport {
     uint64_t* lineage;
     uint32_t words;
     uint64_t* leaf_refs;
+    semantic_world::Measure* world=nullptr;
+    uint64_t* events=nullptr;
+    uint64_t* lineage_events=nullptr;
 };
+
+// Retain the first proof separately in each part of the original sample space.
+// A later alternative expands support by Boolean union, without overwriting the
+// provenance of worlds already proved by an earlier derivation.
+template<class Lineage>
+__device__ bool merge_world_support(DualSupport& support,uint32_t fact,uint32_t channel,
+        uint32_t event,const Lineage& lineage,uint64_t leaf=0) {
+    auto& world=*support.world;
+    if(fact>=world.fact_capacity || channel>1) {
+        world.fail(semantic_world::MeasureStatus::InvalidSource);return false;
+    }
+    const uint64_t cell=uint64_t(fact)*2+channel;
+    const uint32_t before=uint32_t(world.read(support.events,cell));
+    const bool was_visible=world.visible(before);
+    const uint32_t added=world.intersection(event,world.complement(before));
+    if(!added || world.status!=semantic_world::MeasureStatus::Ok)return false;
+    const uint32_t combined=world.unite(before,event);
+    if(!world.charge(2))return false;
+    support.events[cell]=combined;
+    const bool now_visible=world.visible(combined);
+    if(now_visible)support.truth[fact]|=uint8_t(1U<<channel);
+    if(!was_visible && now_visible && support.leaf_refs) {
+        if(!world.charge())return false;support.leaf_refs[cell]=leaf;
+    }
+    for(uint32_t origin=0;origin<world.lineage_events;++origin) {
+        const uint32_t proof=world.intersection(added,lineage(origin));
+        const uint64_t offset=cell*world.lineage_events+origin;
+        const uint32_t retained=uint32_t(world.read(support.lineage_events,offset));
+        const uint32_t merged=world.unite(retained,proof);
+        if(!world.charge())return false;support.lineage_events[offset]=merged;
+        if(world.visible(merged)) {
+            if(!world.charge(2))return false;
+            support.lineage[cell*support.words+origin/64]|=uint64_t(1)<<(origin%64);
+        }
+    }
+    return world.status==semantic_world::MeasureStatus::Ok;
+}
 
 struct Observation { Fact fact;uint64_t truth,present; };
 struct NoObservations {
@@ -357,7 +398,8 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                               const Bank& bank, Fact* output,
                               uint32_t capacity, uint64_t fuel,
                               DualSupport* support,const Observations& observations,
-                              uint32_t protected_rule_begin) {
+                              uint32_t protected_rule_begin,uint32_t active_event=1,
+                              uint32_t appended_rules=0) {
     if (!bank.predicate_count || !bank.predicate_arities ||
         (initial_count && (!initial || !output)) ||
         ((rule_count || observations.size()) && !output) || (rule_count && !rules) ||
@@ -371,13 +413,17 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
     for (uint32_t index = 0; index < initial_count; ++index)
         if (!valid_fact(initial[index], bank)) return {Status::InvalidProgram, 0, 0, 0};
     uint64_t charged=0;
+    auto* world=support ? support->world : nullptr;
+    semantic_world::MeasureFuel measure_fuel(world,&charged,fuel);
+    if(world && (!support->events || (world->lineage_events && !support->lineage_events)))
+        return {Status::InvalidProgram,0,0,charged};
     for (uint32_t binding = 0; binding < observations.size(); ++binding) {
         if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
         ++charged;
         const Observation observation = observations[binding];
         if (observation.present > 1 || observation.truth > 3 ||
             !valid_fact(observation.fact, bank) || !support || (uint64_t(binding)*2+1) / 64 >= support->words)
-            return {Status::InvalidProgram, 0, 0, 0};
+            return {Status::InvalidProgram, 0, 0, charged};
     }
     if(support)for(uint32_t fact=0;fact<capacity;++fact) {
         support->truth[fact]=0;
@@ -390,6 +436,14 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                 if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
                 ++charged;support->lineage[(uint64_t(fact)*2+channel)*support->words+word]=0;
             }
+        if(world)for(uint32_t channel=0;channel<2;++channel) {
+            if(!world->charge())return {Status::FuelExhausted,0,0,charged};
+            const uint64_t cell=uint64_t(fact)*2+channel;support->events[cell]=0;
+            for(uint32_t origin=0;origin<world->lineage_events;++origin) {
+                if(!world->charge())return {Status::FuelExhausted,0,0,charged};
+                support->lineage_events[cell*world->lineage_events+origin]=0;
+            }
+        }
     }
     uint32_t count = 0;
     for (uint32_t index = 0; index < initial_count; ++index) {
@@ -398,7 +452,12 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
             if (count == capacity) return {Status::FactCapacity, 0, 0, charged};
             output[count++] = initial[index];
         }
-        if(support)support->truth[slot]|=1;
+        if(world) {
+            for(uint32_t channel=0;channel<2;++channel)
+                merge_world_support(*support,slot,channel,world->fact_event(index,channel),
+                    [](uint32_t) { return uint32_t(0); });
+            if(world->status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+        } else if(support)support->truth[slot]|=1;
     }
     for(uint32_t binding=0;binding<observations.size();++binding) {
         if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
@@ -412,6 +471,13 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
             output[count++]=observation.fact;
         }
         const uint8_t added=uint8_t(observation.truth)&~support->truth[slot];
+        if(world) {
+            for(uint32_t channel=0;channel<2;++channel)if(observation.truth&(uint64_t(1)<<channel))
+                merge_world_support(*support,slot,channel,world->view_condition,
+                    [=](uint32_t origin) { return uint32_t(origin==binding*2+channel); });
+            if(world->status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+            continue;
+        }
         support->truth[slot]|=uint8_t(observation.truth);
         for(uint32_t channel=0;channel<2;++channel)if(added&(uint64_t(1)<<channel)) {
             if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
@@ -425,6 +491,15 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
         bool changed=false;
         for (uint32_t rule_index = 0; rule_index < rule_count; ++rule_index) {
             const Rule& rule = rules[rule_index];
+            uint32_t head_channel=0,body_channels=0,gate=1;
+            if(world) {
+                if(rule_index>=world->rule_capacity)return {Status::InvalidProgram,0,0,charged};
+                gate=world->rule_gate(uint32_t(world->read(world->rule_ordinals,rule_index)),
+                    appended_rules,&head_channel,&body_channels);
+                gate=world->intersection(gate,active_event);
+                if(world->status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+                if(!gate)continue;
+            }
             uint32_t next[kBodyCapacity] = {};
             uint32_t matched[kBodyCapacity] = {};
             uint32_t values[kBodyCapacity + 1][kVariableCapacity] = {};
@@ -441,7 +516,9 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                 const uint32_t fact_index = next[depth]++;
                 if (charged == fuel) return {Status::FuelExhausted, 0, 0, charged};
                 ++charged;
-                if (support && !(support->truth[fact_index] & 1)) continue;
+                const uint32_t channel=(body_channels>>depth)&1;
+                if (support && (world ? !world->read(support->events,uint64_t(fact_index)*2+channel) :
+                    !(support->truth[fact_index] & (uint32_t(1)<<channel)))) continue;
                 for (uint32_t variable = 0; variable < kVariableCapacity; ++variable) {
                     values[depth + 1][variable] = values[depth][variable];
                     bound[depth + 1][variable] = bound[depth][variable];
@@ -455,6 +532,14 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                     continue;
                 }
                 const Fact head = substitute_head(rule.head, values[depth + 1]);
+                uint32_t effect=gate;
+                if(world) {
+                    for(uint32_t body=0;body<rule.body_count;++body)
+                        effect=world->intersection(effect,uint32_t(world->read(support->events,
+                            uint64_t(matched[body])*2+((body_channels>>body)&1))));
+                    if(world->status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+                    if(!effect)continue;
+                }
                 if(rule_index>=protected_rule_begin) {
                     for(uint32_t binding=0;binding<observations.protected_size();++binding) {
                         if(charged==fuel)return {Status::FuelExhausted,0,0,charged};
@@ -472,6 +557,20 @@ __device__ Result materialize(const Fact* initial, uint32_t initial_count,
                     changed=true;
                 }
                 if(support) {
+                    if(world) {
+                        changed|=merge_world_support(*support,slot,head_channel,effect,
+                            [&](uint32_t origin) {
+                                uint32_t sources=0;
+                                for(uint32_t body=0;body<rule.body_count;++body) {
+                                    const uint64_t cell=uint64_t(matched[body])*2+((body_channels>>body)&1);
+                                    sources=world->unite(sources,uint32_t(world->read(support->lineage_events,
+                                        cell*world->lineage_events+origin)));
+                                }
+                                return sources;
+                            });
+                        if(world->status!=semantic_world::MeasureStatus::Ok)return {Status::InvalidProgram,0,0,charged};
+                        continue;
+                    }
                     if(support->truth[slot]&1)continue;
                     changed=true;support->truth[slot]|=1;
                     for(uint32_t word=0;word<support->words;++word) {
