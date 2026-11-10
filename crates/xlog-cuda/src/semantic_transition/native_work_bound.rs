@@ -2793,7 +2793,11 @@ fn publication_finalization_native_work_ceiling(
         &mut result,
         [
             0,
-            ceiling_sum([ceiling_product(3, n)?, 60])?,
+            ceiling_sum([
+                ceiling_product(3, n)?,
+                60,
+                world_state::SOURCE_HEADER_WORDS as u64,
+            ])?,
             0,
             0,
             0,

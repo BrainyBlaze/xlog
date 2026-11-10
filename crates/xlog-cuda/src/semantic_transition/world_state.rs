@@ -6,12 +6,15 @@
 use super::*;
 use xlog_ir::semantic_world::{SemanticInitialRuleCells, SemanticWorldDeclaration};
 
-const SOURCE_HEADER_WORDS: usize = 13;
+mod source;
+
+pub(super) const SOURCE_HEADER_WORDS: usize = source::HEADER_WORDS;
 const STATE_HEADER_WORDS: usize = 16;
 const CELL_WORDS: usize = 6;
 
 // Source header: format, world ID[4], seed ID[4], context count, original
-// declaration byte extent, cell capacity, original cell count.
+// declaration byte extent, cell capacity, original cell count, followed by the
+// device layout and the complete authored event/factor/context records.
 // State header: format, world ID[4], seed ID[4], context count, ledger generation,
 // cell count/capacity, next birth low/high, qualified context. Context-local next
 // rule indices follow it, then (context, rule, birth low/high, generation, code).
@@ -22,9 +25,11 @@ const CELL_WORDS: usize = 6;
 pub struct SemanticWorldSource {
     declaration: Arc<SemanticWorldDeclaration>,
     programs: Arc<[Arc<crate::SemanticProgramAdmission>]>,
-    material: Arc<[u8]>,
+    // Retain the original portable material owner alongside its device encoding.
+    _material: Arc<[u8]>,
     identity: Identity256,
     seed_identity: Identity256,
+    device_source: Arc<[u8]>,
     original_cells: usize,
     cell_capacity: usize,
 }
@@ -110,12 +115,22 @@ impl SemanticWorldSource {
             .and_then(|words| words.checked_add(CELL_WORDS.checked_mul(cell_capacity)?))
             .and_then(|words| words.checked_mul(8))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let device_source = source::encode(
+            &declaration,
+            &programs,
+            material.len(),
+            identity,
+            seed_identity,
+            cell_capacity,
+            original_cells,
+        )?;
         Ok(Arc::new(Self {
             declaration,
             programs: programs.into(),
-            material,
+            _material: material,
             identity,
             seed_identity,
+            device_source,
             original_cells,
             cell_capacity,
         }))
@@ -133,6 +148,8 @@ impl SemanticWorldSource {
                         .checked_mul(size_of::<Arc<crate::SemanticProgramAdmission>>())?,
                 )
             })
+            .and_then(|bytes| bytes.checked_add(2 * size_of::<usize>()))
+            .and_then(|bytes| bytes.checked_add(self.device_source.len()))
             .ok_or(SemanticTransitionError::GenerationExhausted)
     }
 
@@ -153,19 +170,7 @@ impl SemanticWorldSource {
     }
 
     fn source_bytes(&self) -> Vec<u8> {
-        // The full immutable declaration remains in its original run owner.
-        // Every checkpoint binds that explicit owner by its complete content ID;
-        // it never instantiates or copies another declaration from saved state.
-        let length = SOURCE_HEADER_WORDS * 8;
-        let mut bytes = Vec::with_capacity(length);
-        push_word(&mut bytes, 1);
-        bytes.extend_from_slice(self.identity.as_bytes());
-        bytes.extend_from_slice(self.seed_identity.as_bytes());
-        push_word(&mut bytes, self.declaration.contexts.len() as u64);
-        push_word(&mut bytes, self.material.len() as u64);
-        push_word(&mut bytes, self.cell_capacity as u64);
-        push_word(&mut bytes, self.original_cells as u64);
-        bytes
+        self.device_source.to_vec()
     }
 
     fn initial_state(&self, context: u32) -> Vec<u8> {
@@ -343,17 +348,8 @@ impl SemanticWorldContext {
                     && range.range.index == 0
             })
             .ok_or(SemanticTransitionError::ObservationMismatch)?;
-        let bytes = saved.bytes.as_ref();
-        let source = &self.source;
-        if bytes.len() != SOURCE_HEADER_WORDS * 8
-            || saved.capacity != bytes.len()
-            || word(bytes, 0) != 1
-            || &bytes[8..40] != source.identity.as_bytes()
-            || &bytes[40..72] != source.seed_identity.as_bytes()
-            || word(bytes, 9) != source.declaration.contexts.len() as u64
-            || word(bytes, 10) != source.material.len() as u64
-            || word(bytes, 11) != source.cell_capacity as u64
-            || word(bytes, 12) != source.original_cells as u64
+        if saved.capacity != self.source.device_source.len()
+            || saved.bytes.as_ref() != self.source.device_source.as_ref()
         {
             return Err(invalid_world(
                 "checkpoint changes the complete original semantic world or seed namespace",
