@@ -730,12 +730,32 @@ impl PySemanticWorldOwner {
                 .extract::<PyRef<'_, PySemanticWorldDeclaration>>()?
                 .inner,
         );
+        let (_, law_identity) = value_numeric_law();
+        let context_identities = inner
+            .local_identities
+            .iter()
+            .enumerate()
+            .map(|(index, local)| {
+                let context = bound_context_identity(inner.identity, *local, index as u32);
+                let mut measure = Sha256::new();
+                measure.update(b"xlog.semantic-context.measure.v1\0");
+                measure.update(inner.identity);
+                measure.update(context);
+                measure.update(law_identity);
+                [
+                    xlog_cuda::Identity256::from_bytes(context),
+                    xlog_cuda::Identity256::from_bytes(measure.finalize().into()),
+                ]
+            })
+            .collect();
         let native = xlog_cuda::SemanticWorldSource::new(
             Arc::clone(&inner.native),
             inner.programs.clone(),
             Arc::clone(&inner.material),
             xlog_cuda::Identity256::from_bytes(inner.identity),
             xlog_cuda::Identity256::from_bytes(seed_identity),
+            context_identities,
+            xlog_cuda::Identity256::from_bytes(law_identity),
         )
         .map_err(xlog_err)?;
         Ok(Self {
@@ -821,9 +841,21 @@ fn integer(value: usize) -> ColdValue {
     ColdValue::Integer(value.to_string())
 }
 
-pub(super) fn value_schema_object(py: Python<'_>, statement_bytes: usize) -> PyResult<Py<PyTuple>> {
+fn value_numeric_law() -> (Vec<u8>, [u8; 32]) {
+    let law = checkpoint_cold_value_bytes(&ColdValue::Sequence(
+        value::SEMANTIC_VALUE_NUMERIC_LAW
+            .iter()
+            .map(|field| text(field))
+            .collect(),
+    ));
+    let identity = hash_material(b"xlog.semantic-value.numeric-law.v1\0", &law);
+    (law, identity)
+}
+
+fn value_schema_value(statement_bytes: usize) -> PyResult<ColdValue> {
     let schema = value::SemanticValueFeedbackSchema::new(statement_bytes)
         .map_err(|error| invalid(&error.to_string()))?;
+    let native = FeedbackSchema::for_statement_bytes(statement_bytes).map_err(xlog_err)?;
     let features = ColdValue::Sequence(
         schema
             .fields
@@ -865,34 +897,15 @@ pub(super) fn value_schema_object(py: Python<'_>, statement_bytes: usize) -> PyR
             })
             .collect(),
     );
-    let law = checkpoint_cold_value_bytes(&ColdValue::Sequence(
-        value::SEMANTIC_VALUE_NUMERIC_LAW
-            .iter()
-            .map(|field| text(field))
-            .collect(),
-    ));
-    let law_identity = hash_material(b"xlog.semantic-value.numeric-law.v1\0", &law);
-    let structural = ColdValue::Sequence(vec![
-        text("xlog.feedback.semantic-value.v1"),
-        integer(statement_bytes),
-        integer(schema.feature_width),
-        features.clone(),
-        receipts.clone(),
-        supports.clone(),
-        estimators.clone(),
-        ColdValue::Bytes(Arc::from(law.clone())),
-        ColdValue::Bytes(Arc::from(law_identity)),
-    ]);
-    let identity = hash_material(
-        b"xlog.feedback.semantic-value.v1\0",
-        &checkpoint_cold_value_bytes(&structural),
-    );
+    let (law, law_identity) = value_numeric_law();
+    let identity = native.identity;
     let mut adapter = Sha256::new();
-    adapter.update(b"xlog.python.semantic-value-adapter.v1\0");
+    adapter.update(b"xlog.python.semantic-value-adapter.v2\0");
     adapter.update(identity);
+    adapter.update(SemanticTransitionSession::feedback_adapter_identity().as_bytes());
     adapter.update(include_bytes!("world.rs"));
     let adapter_identity: [u8; 32] = adapter.finalize().into();
-    let result = ColdValue::Sequence(vec![
+    Ok(ColdValue::Sequence(vec![
         integer(2),
         ColdValue::Bytes(Arc::from(identity)),
         ColdValue::Bytes(Arc::from(adapter_identity)),
@@ -904,9 +917,36 @@ pub(super) fn value_schema_object(py: Python<'_>, statement_bytes: usize) -> PyR
         estimators,
         ColdValue::Bytes(Arc::from(law)),
         ColdValue::Bytes(Arc::from(law_identity)),
-    ])
-    .python_value(py)?;
+    ]))
+}
+
+#[cfg(feature = "semantic-policy")]
+pub(super) fn value_schema_projection_extent(
+    py: Python<'_>,
+    statement_bytes: usize,
+) -> PyResult<usize> {
+    let value = value_schema_value(statement_bytes)?;
+    source_content_geometry::add(
+        source_content_geometry::projection_extent(py, &value)?,
+        source_content_geometry::add(
+            source_content_geometry::projection_scratch_extent(&value)?,
+            source_content_geometry::cold_clone_extent(&value)?,
+        )?,
+    )
+}
+
+pub(super) fn value_schema_object(py: Python<'_>, statement_bytes: usize) -> PyResult<Py<PyTuple>> {
+    let result = value_schema_value(statement_bytes)?.python_value(py)?;
     Ok(result.bind(py).cast::<PyTuple>()?.clone().unbind())
+}
+
+fn bound_context_identity(world: [u8; 32], local: [u8; 32], index: u32) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"xlog.semantic-bound-context.v1\0");
+    digest.update(world);
+    digest.update(local);
+    digest.update(index.to_le_bytes());
+    digest.finalize().into()
 }
 
 pub(super) fn context_data(
@@ -918,12 +958,7 @@ pub(super) fn context_data(
         .local_identities
         .get(context_index as usize)
         .ok_or_else(|| invalid("semantic context index is outside the original declaration"))?;
-    let mut digest = Sha256::new();
-    digest.update(b"xlog.semantic-bound-context.v1\0");
-    digest.update(declaration.identity);
-    digest.update(local);
-    digest.update(context_index.to_le_bytes());
-    let identity: [u8; 32] = digest.finalize().into();
+    let identity = bound_context_identity(declaration.identity, *local, context_index);
     let material = checkpoint_cold_value_bytes(&ColdValue::Sequence(vec![
         ColdValue::Text(CONTEXT_TAG.into()),
         ColdValue::Bytes(Arc::from(declaration.identity)),

@@ -901,6 +901,41 @@ fn compile_kernels(
         .expect("kernel result cache poisoned")
 }
 
+fn write_semantic_value_schema(out_dir: &Path) {
+    use xlog_ir::semantic_value::{
+        SemanticValueFeedbackSchema, SEMANTIC_VALUE_ESTIMATORS, SEMANTIC_VALUE_RECEIPT_FIELDS,
+        SEMANTIC_VALUE_SUPPORT_FIELDS,
+    };
+
+    let mut cuda = String::from("#pragma once\n#include <stdint.h>\nnamespace semantic_value {\n");
+    for (name, fields) in [
+        ("receipt", SEMANTIC_VALUE_RECEIPT_FIELDS),
+        ("support", SEMANTIC_VALUE_SUPPORT_FIELDS),
+    ] {
+        cuda.push_str(&format!("namespace {name} {{\n"));
+        for (index, field) in fields.iter().enumerate() {
+            cuda.push_str(&format!("constexpr uint32_t {field}={index};\n"));
+        }
+        cuda.push_str(&format!("constexpr uint32_t words={};\n}}\n", fields.len()));
+    }
+    cuda.push_str("namespace feature {\n");
+    let schema = SemanticValueFeedbackSchema::new(1).expect("semantic value feature schema");
+    for field in schema.fields.iter().skip(1) {
+        cuda.push_str(&format!(
+            "constexpr uint32_t {}={};\n",
+            field.name,
+            field.offset - 9
+        ));
+    }
+    cuda.push_str(&format!(
+        "constexpr uint32_t tail_words={};\nconstexpr uint32_t estimators={};\n}}\n}}\n",
+        schema.feature_width - 9,
+        SEMANTIC_VALUE_ESTIMATORS.len()
+    ));
+    write_if_changed(out_dir.join("semantic_value_schema.cuh"), cuda)
+        .expect("write semantic value kernel schema");
+}
+
 fn main() {
     // SAFETY: Cargo owns these inherited jobserver descriptors. Acquire the
     // client before opening files or starting children, and retain every extra
@@ -912,6 +947,7 @@ fn main() {
         .canonicalize()
         .expect("resolve Cargo kernel output directory");
     write_semantic_transition_catalogue(&out_dir);
+    write_semantic_value_schema(&out_dir);
     let semantic_policy = prepare_semantic_policy_header(&out_dir);
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let kernels_dir = find_kernel_sources(&manifest_dir);

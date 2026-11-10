@@ -15037,29 +15037,7 @@ fn policy_support_layout_object(
 }
 
 fn feedback_schema_object(py: Python<'_>, schema: &FeedbackSchema) -> PyResult<Py<PyTuple>> {
-    let mut adapter = Sha256::new();
-    adapter.update(b"xlog.python.typed-feedback-adapter.v1\0");
-    adapter.update(SemanticTransitionSession::feedback_adapter_identity().as_bytes());
-    adapter.update(include_bytes!("semantic_transition.rs"));
-    let adapter: [u8; 32] = adapter.finalize().into();
-    let fields = PyTuple::new(
-        py,
-        (0..schema.statement_bytes)
-            .map(|offset| ("statement", offset, 8u8, false))
-            .chain([("record", 32, 1, true), ("record", 40, 1, true)])
-            .collect::<Vec<_>>(),
-    )?;
-    Ok((
-        1u64,
-        PyBytes::new(py, &schema.identity),
-        PyBytes::new(py, &adapter),
-        schema.statement_bytes,
-        schema.feature_width,
-        2u64,
-        fields,
-    )
-        .into_pyobject(py)?
-        .unbind())
+    world::value_schema_object(py, schema.statement_bytes)
 }
 
 /// A controller-issued, task-bound use. It cannot issue or refresh grants.
@@ -21870,7 +21848,10 @@ impl PySemanticPublishedParent {
         };
         let lineage = (
             task_use.task_epoch,
-            PyTuple::new(py, xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS)?,
+            PyTuple::new(
+                py,
+                xlog_cuda::SEMANTIC_FEEDBACK_SUPPORT_FIELDS.iter().copied(),
+            )?,
             export(queries)?,
             export(originals)?,
             export(offsets)?,
@@ -33725,29 +33706,18 @@ mapping = [('source', 1, 7)]
 
     #[test]
     fn feedback_schema_depends_on_layout_not_statement_values() {
-        let first = FeedbackSchema::new([&[0, 1], &[2], &[3]]).unwrap();
-        let other = FeedbackSchema::new([&[255, 3], &[4], &[5]]).unwrap();
+        let first = FeedbackSchema::new(vec![&[0, 1], &[2], &[3]]).unwrap();
+        let other = FeedbackSchema::new(vec![&[255, 3], &[4], &[5]]).unwrap();
         assert_eq!(first.statement_bytes, 2);
-        assert_eq!(first.feature_width, 22);
+        assert_eq!(first.feature_width, 38);
         assert_eq!(first.identity, other.identity);
         assert_ne!(
             first.identity,
-            FeedbackSchema::new([&[0], &[1], &[2]]).unwrap().identity
+            FeedbackSchema::new(vec![&[0], &[1], &[2]])
+                .unwrap()
+                .identity
         );
-        assert!(FeedbackSchema::new([&[], &[1], &[2]]).is_err());
-    }
-
-    #[test]
-    fn feedback_schema_seals_flat_bit_and_presence_order() {
-        use sha2::{Digest, Sha256};
-
-        let schema = FeedbackSchema::new([&[0, 1], &[2], &[3]]).unwrap();
-        let mut hash = Sha256::new();
-        hash.update(b"xlog.feedback.flat-bit-presence.v1\0");
-        hash.update(2u64.to_le_bytes());
-        hash.update(b"byte[i]:bits[0..8],presence;pro,1,contra,1;invalid:all-zero");
-        let expected: [u8; 32] = hash.finalize().into();
-        assert_eq!(schema.identity, expected);
+        assert!(FeedbackSchema::new(vec![&[], &[1], &[2]]).is_err());
     }
 
     #[test]

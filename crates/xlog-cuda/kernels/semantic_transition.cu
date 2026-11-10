@@ -5855,7 +5855,8 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
         RawFeedbackRecord expected{};
         if(program.editable) {
             const auto& actual=plane.query(selected,index);
-            if(actual.truth>3 || actual.receipt[1]!=PROGRAM_FOREST_QUERY_TAG ||
+            if(actual.kind>1 || (actual.kind==0 ? actual.truth>3 : actual.truth!=UINT64_MAX) ||
+               actual.receipt[1]!=PROGRAM_FOREST_QUERY_TAG ||
                actual.receipt[2]!=actual.truth || actual.receipt[3]!=selected || actual.receipt[4]!=index)return 6;
             for(uint32_t word=0;word<42;++word) {
                 semantic_graph::charge_native(native_work,semantic_graph::NativeWorkEvent::TableSlot,1);
@@ -5864,11 +5865,13 @@ __device__ uint64_t publication_write_feedback(const Descriptor& descriptor,Publ
         } else {
             semantic_call(descriptor,semantic_graph::kResidentRootTruthAdmission,&root,nullptr,&expected.query_receipt,&statement,nullptr,work);
         }
-        if(expected.query_receipt.words[0]!=semantic_graph::kOk || expected.query_receipt.words[2]>3)return 6;
+        if(expected.query_receipt.words[0]!=semantic_graph::kOk ||
+           (expected.query_receipt.words[2]>3 && expected.query_receipt.words[2]!=UINT64_MAX))return 6;
         expected.valid=1;expected.statement_index=index;
         expected.statement_length_bytes=statement_range->length_bytes;
-        expected.pro=expected.query_receipt.words[2]&1;
-        expected.contra=(expected.query_receipt.words[2]>>1)&1;
+        const bool assignment=expected.query_receipt.words[2]!=UINT64_MAX;
+        expected.pro=assignment ? expected.query_receipt.words[2]&1 : 0;
+        expected.contra=assignment ? (expected.query_receipt.words[2]>>1)&1 : 0;
         if(restored) {
             const auto& saved=output[index];
             if(saved.valid!=expected.valid || saved.statement_index!=expected.statement_index ||
@@ -8156,12 +8159,12 @@ struct FeedbackSupportCollector {
         if(!(channels&support[5]))return true;
         for(uint64_t index=begin;index<count;++index) {
             semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
-            const auto* prior=rows+12*index;
+            const auto* prior=rows+semantic_value::support::words*index;
             if(prior[2]==version[5] && prior[3]==support[1] && prior[4]==slot && prior[5]==version[1])return true;
         }
         if(count>=capacity) { refusal=1;return false; }
         if(support[10]==UINT32_MAX) { refusal=2;return false; }
-        uint64_t* row=rows+12*count++;
+        uint64_t* row=rows+semantic_value::support::words*count++;
         row[0]=support[10];row[1]=support[11];row[2]=version[5];row[3]=support[1];
         row[4]=slot;row[5]=version[1];row[6]=version[13];row[7]=support[5];
         semantic_graph::copy_identity(row+8,support+6);
@@ -8224,18 +8227,127 @@ __device__ uint64_t publication_feedback_inputs(uint64_t control_ptr,
     return 0;
 }
 
+struct SemanticValueQueryBytes {
+    const uint64_t* words;
+    __device__ uint8_t operator[](uint64_t index) const {
+        constexpr char domain[]="xlog.semantic-value.query.v1";
+        if(index<sizeof(domain))return uint8_t(domain[index]);
+        index-=sizeof(domain);
+        return uint8_t(words[index/8]>>(8*(index%8)));
+    }
+};
+
+// Every reference is qualified by the same acquired publication and immutable
+// common-world source. Event indices belong to the original image generation;
+// they are service references, never learned scalar coordinates.
+__device__ bool publication_feedback_value(uint64_t* value,
+        const RawFeedbackRecord& saved,const semantic_graph::Receipt& original,
+        const PublicationBank& bank,semantic_world::Measure& world,bool editable,
+        uint64_t original_statement,uint64_t image_generation,uint64_t derivation,uint32_t pro,uint32_t contra,
+        semantic_graph::NativeWorkTally* work) {
+    namespace r=semantic_value::receipt;
+    const uint32_t query=uint32_t(saved.statement_index),kind=world.query_kind(query);
+    if(original.words[0]!=semantic_graph::kOk || query>=world.context.queries ||
+       kind>1 || (!editable && kind!=0))return false;
+    value[r::status]=semantic_graph::kOk;
+    value[r::original_statement]=original_statement;
+    // Program statements use the admitted record table and original image;
+    // root queries retain their actual live statement slot/generation.
+    value[r::statement_slot]=editable ? original_statement : original.words[8] ? original.words[7] : UINT64_MAX;
+    value[r::statement_generation]=editable ? image_generation : original.words[8];
+    value[r::value_slot]=query;
+    value[r::value_generation]=bank.header.sealed_epoch;
+    const auto* context=world.source.words+world.source.context_offset+
+        uint64_t(world.context.ordinal)*semantic_world::kContextWords;
+    value[r::world_ordinal]=world.read(context,0);
+    value[r::context_ordinal]=world.context.ordinal;
+    value[r::condition_slot]=world.context.condition;
+    value[r::condition_generation]=1; // Immutable authored event table.
+    value[r::graph_generation]=bank.header.semantic_generation;
+    value[r::image_generation]=image_generation;
+    value[r::coefficient_generation]=world.rule_cells.generation;
+    value[r::measure_generation]=world.rule_cells.generation;
+    value[r::representation_generation]=image_generation;
+    value[r::pro_event_slot]=pro;value[r::pro_event_generation]=image_generation;
+    value[r::contra_event_slot]=contra;value[r::contra_event_generation]=image_generation;
+    value[r::derivation_slot]=derivation;
+    value[r::derivation_generation]=derivation==UINT64_MAX ? 0 : editable ? image_generation : original.words[12];
+    value[r::query_kind]=kind;
+    value[r::proof_kind]=world.read(world.source.words,world.context.query_offset+uint64_t(query)*2+1);
+    value[r::completion]=1;
+    value[r::estimator_kind]=0; // The declared exact-structure evaluator.
+    value[r::assignment_defined]=uint64_t(kind==0);
+    value[r::mass_defined]=uint64_t(kind==1);
+    // Exact event structure does not certify transcendental WMC arithmetic.
+    // Undefined bounds/sampling fields remain zero with explicit availability.
+    value[r::error_bound_defined]=0;
+    if(kind==1) {
+        uint32_t roots[4];
+        for(uint32_t truth=0;truth<4;++truth)roots[truth]=world.query_event(query,pro,contra,truth);
+        if(!world.forward())return false;
+        const double normalizer=world.root_value(world.condition);
+        if(!isfinite(normalizer))return false;
+        value[r::log_normalizer_f64_bits]=__double_as_longlong(normalizer);
+        for(uint32_t truth=0;truth<4;++truth) {
+            const double probability=world.probability(roots[truth],normalizer,kind);
+            if(!isfinite(probability) || probability<0.0 || probability>1.0)return false;
+            value[r::joint_mass_00_f64_bits+truth]=__double_as_longlong(probability);
+        }
+    }
+    semantic_graph::copy_identity(value+r::parent_instance_0,bank.header.instance,work);
+    value[r::publication_word]=bank.header.publication_word;
+    semantic_graph::copy_identity(value+r::parent_logical_digest_0,bank.header.logical_digest,work);
+    for(uint32_t word=0;word<4;++word) {
+        value[r::world_identity_0+word]=world.read(world.source.words,1+word);
+        value[r::context_identity_0+word]=world.read(context,12+word);
+        value[r::measure_identity_0+word]=world.read(context,16+word);
+        value[r::numeric_law_identity_0+word]=world.read(world.source.words,32+word);
+        value[r::semantic_rng_namespace_0+word]=world.read(world.source.words,5+word);
+    }
+    value[r::semantic_rng_entry_slot]=UINT64_MAX; // This evaluator drew no samples.
+    if(world.status!=semantic_world::MeasureStatus::Ok)return false;
+    semantic_graph::sha256(SemanticValueQueryBytes{value},
+        sizeof("xlog.semantic-value.query.v1")+uint64_t(r::native_query_identity_0)*8,
+        value+r::native_query_identity_0,work);
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,r::words*8);
+    return !work || !work->overflow;
+}
+
+__device__ void publication_feedback_dependency(uint64_t* row,
+        const uint64_t* value,uint64_t event,bool observation,
+        semantic_graph::NativeWorkTally* work) {
+    namespace s=semantic_value::support;
+    namespace r=semantic_value::receipt;
+    row[s::dependency_kind]=uint64_t(observation);
+    row[s::dependency_slot]=row[s::support_slot];
+    row[s::dependency_generation]=row[s::support_generation];
+    row[s::parent_dependency_slot]=row[s::version_slot];
+    row[s::parent_dependency_generation]=row[s::version_generation];
+    row[s::world_ordinal]=value[r::world_ordinal];
+    row[s::context_ordinal]=value[r::context_ordinal];
+    row[s::event_slot]=event;row[s::event_generation]=value[r::representation_generation];
+    row[s::rule_slot]=UINT64_MAX;row[s::rule_generation]=0;
+    row[s::coefficient_generation]=value[r::coefficient_generation];
+    row[s::measure_generation]=value[r::measure_generation];
+    row[s::representation_generation]=value[r::representation_generation];
+    row[s::semantic_rng_entry_slot]=UINT64_MAX;row[s::semantic_rng_entry_generation]=0;
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,(s::words-12)*8);
+}
+
 __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
         const PublicationLease* lease,uint64_t slots,
-        semantic_graph::Receipt* queries,uint64_t* original_statements,uint64_t* offsets,
+        uint64_t* queries,uint64_t* original_statements,uint64_t* offsets,
         uint64_t* supports,uint64_t support_capacity,semantic_graph::NativeWorkTally* work=nullptr) {
     for(uint64_t slot=0;slot<slots;++slot) {
-        queries[slot]=semantic_graph::Receipt{};original_statements[slot]=UINT64_MAX;offsets[slot]=0;
+        for(uint32_t word=0;word<semantic_value::receipt::words;++word)
+            queries[slot*semantic_value::receipt::words+word]=0;
+        original_statements[slot]=UINT64_MAX;offsets[slot]=0;
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
-            sizeof(semantic_graph::Receipt)+2*sizeof(uint64_t));
+            (semantic_value::receipt::words+2)*sizeof(uint64_t));
     }
     offsets[slots]=0;
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
-    for(uint64_t i=0;i<support_capacity*12;++i) {
+    for(uint64_t i=0;i<support_capacity*semantic_value::support::words;++i) {
         supports[i]=0;
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
     }
@@ -8266,6 +8378,22 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
         closure=task_program_closure(descriptor,program,plane,0,&lineage,&facts,&world,nullptr,work,lease);
         if(closure.status!=semantic_program::Status::Ok)return 1;
     }
+    uint64_t measure_charged=0;
+    semantic_world::MeasureFuel measure_fuel(&world,&measure_charged,PROGRAM_FUEL-closure.charged_pairs);
+    struct FeedbackMeasureWork {
+        uint64_t* charged;semantic_graph::NativeWorkTally* work;
+        __device__ ~FeedbackMeasureWork() {
+            semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,*charged);
+        }
+    } measure_work{&measure_charged,work};
+    if(!program.editable) {
+        const auto source=task_world_original(descriptor,SEMANTIC_WORLD_SOURCE_ROLE,world,lease);
+        const auto cells=task_world_original(descriptor,SEMANTIC_WORLD_STATE_ROLE,world,lease);
+        auto read=[&](const uint64_t* words,uint64_t index) { return world.read(words,index); };
+        if(!semantic_world::decode_source(source.words,source.bytes,&world.source,read) ||
+           !semantic_rule_cells::bind(cells.words,cells.bytes,&world.rule_cells,read) ||
+           !semantic_world::decode_context(world.source,uint32_t(world.rule_cells.context),&world.context,read))return 1;
+    }
     FeedbackSupportCollector collector{supports,support_capacity,0,0};
     collector.work=work;
     for(uint64_t slot=0;slot<slots;++slot) {
@@ -8284,15 +8412,22 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
         statement.record=uint32_t(view.query(uint32_t(saved.statement_index))[4]);
         for(uint32_t i=0;i<8;++i)
             statement.identity_words[i]=uint32_t(view.query(uint32_t(saved.statement_index))[i/2]>>(32*(i%2)));
-        auto& query=queries[slot];
+        semantic_graph::Receipt query{};
+        auto* value=queries+slot*semantic_value::receipt::words;
         if(program.editable) {
             const auto query_fact=semantic_program::bank_fact(program.program,saved.statement_index);
             const uint32_t fact_index=semantic_program::find_fact(facts,closure.fact_count,query_fact);
-            const uint64_t truth=fact_index==closure.fact_count ? 0 : lineage.truth[fact_index];
-            if(truth!=(saved.pro|(saved.contra<<1)) || saved.query_receipt.words[1]!=PROGRAM_FOREST_QUERY_TAG ||
+            const uint32_t pro=fact_index==closure.fact_count ? 0 : uint32_t(world.read(lineage.events,uint64_t(fact_index)*2));
+            const uint32_t contra=fact_index==closure.fact_count ? 0 : uint32_t(world.read(lineage.events,uint64_t(fact_index)*2+1));
+            const uint32_t kind=world.query_kind(uint32_t(saved.statement_index));
+            const uint64_t truth=kind==0 ? uint64_t(world.assignment(pro))|(uint64_t(world.assignment(contra))<<1) : UINT64_MAX;
+            if((kind==0 && truth!=(saved.pro|(saved.contra<<1))) ||
+               saved.query_receipt.words[1]!=PROGRAM_FOREST_QUERY_TAG ||
                saved.query_receipt.words[2]!=truth || saved.query_receipt.words[4]!=saved.statement_index)return 1;
             query=saved.query_receipt;
             original_statements[slot]=statement.record;
+            if(!publication_feedback_value(value,saved,query,bank,world,true,statement.record,plane.images[0].header[2],
+                    fact_index==closure.fact_count ? UINT64_MAX : fact_index,pro,contra,work))return 1;
             semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,
                 sizeof(semantic_graph::Receipt)+sizeof(uint64_t));
             if(!semantic_graph::equal_identity(saved.query_receipt.words+14,plane.images[0].header+10) ||
@@ -8309,7 +8444,12 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
                     const uint64_t bit=uint64_t(dependency)*2+input;
                     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                     if(lineage.lineage[(uint64_t(fact_index)*2+output)*lineage.words+bit/64] &
-                       (uint64_t(1)<<(bit%64)))channels|=uint64_t(1)<<input;
+                       (uint64_t(1)<<(bit%64))) {
+                        const uint32_t event=uint32_t(world.read(lineage.lineage_events,
+                            (uint64_t(fact_index)*2+output)*world.lineage_events+bit));
+                        if(kind==0 ? world.assignment(event) : world.intersection(event,world.condition)!=0)
+                            channels|=uint64_t(1)<<input;
+                    }
                 }
                 if(!channels)continue;
                 const uint64_t* identity=nullptr;
@@ -8336,7 +8476,7 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
                     witnessed=true;
                     bool duplicate=false;
                     for(uint64_t prior=collector.begin;prior<collector.count;++prior) {
-                        const auto* saved=supports+prior*12;
+                        const auto* saved=supports+prior*semantic_value::support::words;
                         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
                         if(saved[0]==row[1] && saved[1]==row[2] && saved[6]==row[7] &&
                            saved[7]==row[8] && semantic_graph::equal_identity(saved+8,row+9)) {
@@ -8345,9 +8485,15 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
                     }
                     if(duplicate)continue;
                     if(collector.count>=collector.capacity)return 1;
-                    auto* destination=supports+collector.count++*12;
+                    auto* destination=supports+collector.count++*semantic_value::support::words;
                     for(uint32_t word=0;word<12;++word)
                         destination[word]=semantic_graph::written_word(row[1+word],work);
+                    uint32_t event=0;
+                    for(uint32_t input=0;input<2;++input)if(row[8]&(uint64_t(1)<<input))
+                        for(uint32_t output=0;output<2;++output)
+                            event=world.unite(event,uint32_t(world.read(lineage.lineage_events,
+                                (uint64_t(fact_index)*2+output)*world.lineage_events+uint64_t(dependency)*2+input)));
+                    publication_feedback_dependency(destination,value,event,true,work);
                 }
                 if(!witnessed)return 1;
             }
@@ -8375,15 +8521,21 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
             if(!semantic_graph::visit_support_chain(layout,query.words[7],query.words[11]+1,
                     false,collector,&checked))return collector.refusal ? collector.refusal : 1;
         }
+        if(!publication_feedback_value(value,saved,query,bank,world,false,statement.record,bank.header.semantic_generation,
+                query.words[12] ? query.words[11] : UINT64_MAX,uint32_t(saved.pro),uint32_t(saved.contra),work))return 1;
+        for(uint64_t row=collector.begin;row<collector.count;++row) {
+            auto* dependency=supports+row*semantic_value::support::words;
+            publication_feedback_dependency(dependency,value,1,false,work);
+        }
         offsets[slot+1]=collector.count;
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
     }
-    return 0;
+    return world.status==semantic_world::MeasureStatus::Ok ? 0 : 1;
 }
 
 extern "C" __global__ void semantic_feedback_project(Descriptor descriptor,
         const PublicationLease* lease,uint64_t slots,
-        semantic_graph::Receipt* queries,uint64_t* original_statements,uint64_t* offsets,
+        uint64_t* queries,uint64_t* original_statements,uint64_t* offsets,
         uint64_t* supports,uint64_t support_capacity,uint64_t* status) {
     if(blockIdx.x || threadIdx.x)return;
     const uint64_t cold_work_ptr=descriptor.publication.native_work;
@@ -8391,12 +8543,12 @@ extern "C" __global__ void semantic_feedback_project(Descriptor descriptor,
             alignof(semantic_graph::NativeWorkTally))) { semantic_content_integrity_trap();return; }
     auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::Command,1);
-    // The preceding encoder initializes every status on this same stream.
-    // Consumers follow the projection's event; rejected input must never
-    // become usable merely because no host reads its private status buffer.
+    // The complete native value/dependency producer runs before its learned
+    // projection. Refused input cannot become usable without a host status read.
     for(uint64_t slot=0;slot<slots;++slot) {
         semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
-        if(status[slot]) { semantic_content_integrity_trap();return; }
+        status[slot]=0;
+        semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(uint64_t));
     }
     const uint64_t error=publication_feedback_lineage(descriptor,lease,slots,queries,
         original_statements,offsets,supports,support_capacity,work);
@@ -8415,19 +8567,23 @@ extern "C" __global__ void semantic_feedback_project(Descriptor descriptor,
 // Retained output capacity preserves every physical slot, including invalid gaps.
 extern "C" __global__ void semantic_feedback_encode(uint64_t control_ptr,
         const PublicationLease* lease,uint64_t capacity,
-        uint64_t slots, float* features, uint8_t* validity, uint64_t* status,uint64_t cold_work_ptr=0) {
+        uint64_t slots, float* features, uint8_t* validity, uint64_t* status,
+        const uint64_t* values,uint64_t cold_work_ptr=0) {
     if(cold_work_ptr && !publication_pointer_span(cold_work_ptr,sizeof(semantic_graph::NativeWorkTally),
             alignof(semantic_graph::NativeWorkTally))) { semantic_content_integrity_trap();return; }
     auto* work=reinterpret_cast<semantic_graph::NativeWorkTally*>(cold_work_ptr);
     if(blockIdx.x==0 && threadIdx.x==0)
         semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::Command,1);
-    if(!capacity || capacity>(UINT64_MAX-4)/9 || !slots ||
-       slots>UINT64_MAX/(9*capacity+4)/sizeof(float)) { semantic_content_integrity_trap();return; }
-    const uint64_t width = 9 * capacity + 4;
+    if(!capacity || capacity>(UINT64_MAX-semantic_value::feature::tail_words)/9 || !slots || !values ||
+       slots>UINT64_MAX/(9*capacity+semantic_value::feature::tail_words)/sizeof(float)) {
+        semantic_content_integrity_trap();return;
+    }
+    const uint64_t width = 9 * capacity + semantic_value::feature::tail_words;
     __shared__ PublicationFeedbackInputs inputs;
     __shared__ uint64_t input_error;
     __shared__ semantic_feedback::Statement statement;
     __shared__ uint64_t statement_error;
+    __shared__ uint64_t encoding_error;
     if(threadIdx.x==0) {
         // Every block resolves the actual reader and its input geometry. Its
         // reached work is merged atomically without deduplicating execution.
@@ -8455,20 +8611,26 @@ extern "C" __global__ void semantic_feedback_encode(uint64_t control_ptr,
             if(work && local.overflow)atomicExch(reinterpret_cast<unsigned long long*>(&work->overflow),1ULL);
         }
         __syncthreads();
-        const uint64_t error = input_error ? (uint64_t(1)<<32)|input_error : statement_error ? statement_error :
-            semantic_feedback::validate(inputs.records[slot], statement, inputs.statement_count, capacity);
+        const auto* value=values+slot*semantic_value::receipt::words;
         if (threadIdx.x == 0) {
-            status[slot] = error;
-            validity[slot] = error ? 0 : uint8_t(inputs.records[slot].valid);
+            encoding_error = status[slot] ? status[slot] : input_error ? (uint64_t(1)<<32)|input_error :
+                statement_error ? statement_error : semantic_feedback::validate(
+                    inputs.records[slot],statement,inputs.statement_count,capacity,value);
+            status[slot] = encoding_error;
+            validity[slot] = encoding_error ? 0 : uint8_t(inputs.records[slot].valid);
             semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::CanonicalByte,
                 sizeof(uint64_t)+sizeof(uint8_t));
         }
+        __syncthreads();
+        const uint64_t error=encoding_error;
         for (uint64_t column = threadIdx.x; column < width; column += blockDim.x) {
             features[slot * width + column] = error ? 0.0f :
-                semantic_feedback::coordinate(inputs.records[slot], statement, capacity, column);
+                semantic_feedback::coordinate(inputs.records[slot], statement, capacity, column,value);
             semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::CanonicalByte,sizeof(float));
+            semantic_graph::charge_native_parallel(work,semantic_graph::NativeWorkEvent::TableSlot,1);
         }
         __syncthreads();
+        if(error) { semantic_content_integrity_trap();return; }
     }
 }
 

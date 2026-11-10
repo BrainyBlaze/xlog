@@ -1607,7 +1607,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
     ];
     let mut ceiling = [
         2,
-        ceiling_product(slots, ranges)?,
+        ceiling_product(slots, ceiling_sum([ranges, schema.feature_width as u64])?)?,
         0,
         0,
         0,
@@ -1620,7 +1620,10 @@ pub(super) fn feedback_geometry_native_work_ceiling(
         )?,
     ];
     repeat_native_ceiling(&mut ceiling, inputs, ceiling_sum([slots.min(65535), 1])?)?;
-    let receipt = size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64;
+    let original_receipt =
+        size_of::<crate::semantic_hypergraph::SemanticResidentReceiptRecord>() as u64;
+    let receipt = (xlog_ir::semantic_value::SEMANTIC_VALUE_RECEIPT_FIELDS.len() * 8) as u64;
+    let support = (SEMANTIC_FEEDBACK_SUPPORT_FIELDS.len() * 8) as u64;
     add_native_work_ceiling(
         &mut ceiling,
         [
@@ -1635,12 +1638,20 @@ pub(super) fn feedback_geometry_native_work_ceiling(
             ceiling_sum([
                 ceiling_product(slots, ceiling_sum([receipt, 16])?)?,
                 8,
-                ceiling_product(96, capacity)?,
+                ceiling_product(support, capacity)?,
                 ceiling_product(16, slots)?,
-                ceiling_product(slots, ceiling_sum([receipt, 8])?)?,
+                ceiling_product(slots, ceiling_sum([original_receipt, receipt, 64, 8])?)?,
                 ceiling_product(8, slots)?,
             ])?,
         ],
+    )?;
+    repeat_native_ceiling(
+        &mut ceiling,
+        publication_hash_ceiling(ceiling_sum([
+            b"xlog.semantic-value.query.v1\0".len() as u64,
+            receipt - 4 * 8,
+        ])?)?,
+        slots,
     )?;
     let editable = task.program.editable_program().is_some();
     let calls = ceiling_product(slots, if editable { 0 } else { 1 })?;
@@ -1653,7 +1664,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
         0,
         0,
         0,
-        ceiling_sum([ceiling_product(3, receipt)?, 32 * 8])?,
+        ceiling_sum([ceiling_product(3, original_receipt)?, 32 * 8])?,
     ];
     repeat_native_ceiling(&mut ceiling, truth, calls)?;
     repeat_native_ceiling(
@@ -1672,7 +1683,10 @@ pub(super) fn feedback_geometry_native_work_ceiling(
             0,
             0,
             ceiling_product(2, versions)?,
-            ceiling_sum([ceiling_product(265, versions)?, 7 * 8])?,
+            ceiling_sum([
+                ceiling_product(ceiling_sum([265, support - 96])?, versions)?,
+                7 * 8,
+            ])?,
         ],
         calls,
     )?;
@@ -1703,7 +1717,30 @@ pub(super) fn feedback_geometry_native_work_ceiling(
                 0,
                 0,
                 0,
-                ceiling_product(96, ceiling_product(slots, entry_supports)?)?,
+                ceiling_product(support, ceiling_product(slots, entry_supports)?)?,
+            ],
+        )?;
+    } else {
+        // Two acquired original-range scans, the immutable source/context
+        // decoders, six ledger-header reads, and each query's actual seals.
+        add_native_work_ceiling(
+            &mut ceiling,
+            [
+                0,
+                ceiling_sum([
+                    ceiling_product(2, ranges)?,
+                    world_state::SOURCE_HEADER_WORDS as u64,
+                    world_state::SOURCE_CONTEXT_WORDS as u64,
+                    8,
+                    ceiling_product(slots, 3 + 5 * 4)?,
+                ])?,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
             ],
         )?;
     }
