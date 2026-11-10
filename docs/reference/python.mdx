@@ -927,7 +927,172 @@ literal schema, interpretation, costs and saved replay behavior. A named body is
 not accepted as a positional body by those earlier versions. The representation
 and its effect on generated quality still require real production execution.
 
-For a version4 through version24 packet,
+Version25 (`xlog-contextual-acquisition-v25`) selects
+`numerical-expressions-v1`. Root order remains `intent`, `helpers`, `entry`.
+Entry has exactly the ordered keys `weights`, `return`; each helper is
+`[local_name, signature, body]`, with the same body structure. The physical FP32
+weight table, signature and symbol syntax, shared aliases and initialization
+retain their existing owners.
+
+`return` is one model-authored operation tuple from the existing canonical
+catalogue. Its tag and operand positions are unchanged. Value operands
+(`input`, `initial`, `left`, `right`, `condition`, `positive`, `negative`) contain
+child expressions; `call.arguments` contains an array of expressions. Argument
+and weight indices, widths, callee references, token ID arrays, Gather literal
+indices or descriptors and `max_steps` retain their scalar domains. Source
+contains no operation count, operation table, output index or value bindings.
+
+The shared bounded reader lowers the tree in deterministic left-to-right
+postorder. Each source occurrence produces exactly one canonical operation;
+duplicates count separately and are not combined. Native assigns the internal
+value indices, and the root becomes the last canonical value. Completed children
+and selected parents without child holes use the existing canonical prefix
+owner. A parent with unfinished children stays incomplete; no operand or node
+is supplied to fill its holes. Shape, causality, physical output dependencies,
+initializer, registration, execution and VJP use the same canonical numerical
+definitions. The combined helpers and entry retain the limit of 64 actual nodes
+and 65,536 new scalars; opened ancestors count toward the node/depth limit.
+Original and projected source bytes remain independently bounded.
+
+`decode_definition` and
+`fork_acquired(..., source_encoding="numerical-expressions-v1")` use this same
+native reader on the original UTF8 source. The schema uses bare local recursive
+references to the existing operation definitions. The pinned grammar engine's
+[schema converter](https://github.com/guidance-ai/llguidance/blob/856b6067c94d9540084f07ae2c9df168888ec12d/parser/src/json/schema.rs)
+and
+[compiler](https://github.com/guidance-ai/llguidance/blob/856b6067c94d9540084f07ae2c9df168888ec12d/parser/src/json/compiler.rs)
+resolve local recursive references; this source mechanism does not qualify a
+particular compiled grammar or generated acquisition.
+
+The packet has exactly `id`, `context`, `schema`, `token_cost_contract`, retaining
+context version2 and `output-dependencies-v1`. Version25 requires
+`token_cost_contract="ordered-structural-subsequence-v2"`. The positive
+`remaining_tokens` API still counts actual ORIGINAL IDs, including the next
+choice and paid EOS. V2 projects mandatory unconsumed keys, selected operands,
+active ancestor closings and future entry syntax through the same alphabet and
+suffix bound. Consumed bytes are not charged again. Unknown tree structure is
+relaxed optimistically; the flat row projection and inverse token-derived row
+capacity are not applied to expressions. Cumulative canonical node capacity
+still applies. Parsed-prefix and structural-completion reuse cannot replace the
+fresh suffix check with its actual remainder and pending source state.
+
+These are necessary bounds, not a whole-grammar witness, a 512-ID fit guarantee
+or evidence of semantic nonconstancy or usefulness. Actual paid EOS, native
+admission and production qualification remain required. Packets1–24 and row
+encodings1–7 retain their literal schemas, masks, costs and interpretation;
+earlier encodings do not accept the new expression body.
+
+Version26 (`xlog-contextual-acquisition-v26`) keeps `numerical-expressions-v1`,
+the four-field packet, context2 / `output-dependencies-v1` and the V2 cost contract.
+It checks expression parents against already known resource prerequisites before
+each hypothetical spelling is committed, including unfinished operation tags.
+The same canonical tag-prefix matcher intersects the existing required-field
+catalogue with completed helper and retained signatures, formal argument domains,
+the closed physical parameter table and the captured raw-token alphabet. A parent
+requiring a function cannot be selected when its callee domain is empty. Selected
+local or retained function-symbol prefixes must intersect that same domain.
+
+Child-value operands and Call arguments remain future expressions. They are not
+rejected because their postorder values have not yet been emitted. This check uses
+known domains only; full signature, shape, causality, dependency and scalar
+admission remains with the existing canonical owner after children and scalar
+tails are selected. It neither inserts operands nor infers shapes for child holes.
+The reader carries current pending parents separately from canonical operation
+checkpoints, so prefix reuse still checks those facts in the current definition
+scope together with the fresh actual-ID suffix bound. All tree/node/byte/scalar
+limits, postorder lowering, initialization and execution remain unchanged.
+
+Version26 adds this early prerequisite mode; version27 inherits it. Packets through version25
+retain their literal schema, masks, prefix completion, costs and restoration,
+including failed-attempt prefixes. Complete source decoding and
+`fork_acquired(..., source_encoding="numerical-expressions-v1")` retain the same
+canonical admission and semantics for legal complete definitions. Nonempty known
+domains do not prove a complete tree, original-ID fit, semantic nonconstancy or
+usefulness; actual production qualification remains required.
+
+Version27 (`xlog-contextual-acquisition-v27`) additionally checks prospective child
+operations against source-selected ancestors before committing partial or escaped
+tags and scalar/index decimal prefixes. The same bounded reader carries each
+selected tag, scalar, closed child operand and exact active child slot. Canonical
+prospective operation admission and push/rollback infer shapes at one and maximum
+context length. The chain proceeds only while every other child of an ancestor
+and its required scalar/array fields are known. At an unknown field it stops
+optimistically; no preceding value,
+default operand or invented shape fills that hole. If the known chain reaches the
+root, the current helper or entry definition's existing output shape, usage and
+dependency contract applies.
+
+Ancestor checks run freshly before generic completion-cache answers, including
+after parsed-prefix reuse and within retained-symbol and structured-index domains.
+They neither emit operations nor charge already-open parents as additional source
+nodes. Version27 keeps the exact four-field packet, context2, expression encoding
+and V2 actual-ID suffix bound. Packets through version26 retain their literal
+schemas, masks, prefix completion, costs and restore behavior. Complete decoding,
+initialization, execution and gradients are unchanged. These local constraints do
+not prove whole-tree completion, original-ID fit, nonconstancy or usefulness.
+
+Version28 (`xlog-contextual-acquisition-v28`) also propagates necessary partial
+shape constraints through ancestors with unknown siblings and scalar tails.
+The canonical IR relation is shared with concrete shape inference: elementwise
+operations and Select equate their input and output extents and storage types;
+Tanh and Finite preserve their FP32 type; Broadcast requires a one-row input;
+Gather preserves rows while unknown indices leave its output columns free.
+Known source operands and the current definition's output contract constrain
+these relations at both one and maximum context length. A future sibling remains
+an unknown slot, so an equal-extent operation can already reject incompatible
+known input types without choosing its missing operand.
+
+This check runs before partial-tag, scalar and index commitment, including
+NumberChoice extensions, structured Gather, retained-reference domains and parsed
+prefix reuse. Its facts apply to the current candidate before generic cached
+completion, and are not inherited by arbitrary completion-search successors or
+stored as partial-conditioned answers in legacy caches. Unrepresented relations
+leave future slots free; known-parent prerequisites and concrete typed admission
+still apply. No preceding SSA value, tensor, default scalar, source operation or
+whole-tree completion is supplied for a missing slot. Unknown output usage is
+not invented; the existing current-definition dependency owner remains required.
+
+Version28 introduces this partial mode; version29 inherits it. Packets through
+version27 retain their literal schema, masks, prefix completion, suffix costs and
+restore semantics.
+The exact four-field packet, context2, expression encoding, fresh V2 actual-ID
+suffix bound, node/depth/scalar/byte limits, initialization, numerical execution
+and gradients are unchanged. Contradictory known facts can rule out a prefix;
+consistent partial constraints do not establish a completed or useful expression.
+
+Version29 (`xlog-contextual-acquisition-v29`) also reserves mandatory unopened
+source expression occurrences before committing partial or escaped tags, scalar
+tails and callee prefixes. The shared reader counts every actually opened source
+node globally, including completed helpers and pending ancestors. The canonical
+catalogue supplies value-child fields; compatible real callee signatures supply
+Call argument arity. Closed children and an active child with an already opened
+stack frame have no remaining occurrence charge. A required child before its
+opening `[` still needs a node. Each occurrence counts separately, including
+duplicate expressions and physical aliases, with no CSE discount.
+
+The reader reserves the required future entry root once and a started helper's
+unopened body root once. It assigns no optional future helpers. Each remaining
+hole needs at least one node. When the existing canonical candidate enumerator
+proves that no zero-child operation can satisfy its partial shape at both context
+lengths, that hole needs at least two. This proof uses real formal arguments,
+closed physical weights, the raw-token alphabet, scalar extension domains and
+zero-arity callees through canonical push/rollback. Unresolved facts keep the
+one-node bound. Call prefixes use the same numerical ABI owner as concrete
+inference, including known argument types and causal boundaries.
+
+Admission requires actual opened nodes plus these necessary future nodes to fit
+the unchanged shared limit of 64. For example, 64 opened tags followed by a
+Broadcast still awaiting its child cannot complete within that limit. This check
+runs freshly after parsed-prefix reuse and inside retained-symbol domains; its
+query-local leaf facts do not enter generic completion caches or trigger generic
+successor searches. It emits no operations, operands, default scalars or graph.
+The exact four-field packet, context2, expression encoding, V2 actual-ID suffix
+bound, source/depth/scalar/byte limits, complete decoding, initialization, numerical
+execution and gradients remain unchanged. Packets through version28 retain their
+literal schema, masks, completion, costs and restoration. Necessary node bounds
+do not establish whole-tree completion, original-ID fit, nonconstancy or usefulness.
+
+For a version4 through version29 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -950,6 +1115,8 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
+For versions25–29, `last_value` can describe a completed child while its parent
+expression remains unfinished; it becomes the root only after that node closes.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the
 exact saved packet and prefix during restoration. Getter errors must remain

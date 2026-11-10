@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use super::super::ACQUIRED_SOURCE_BYTES;
+use super::super::{is_value_reference, ACQUIRED_SOURCE_BYTES};
 
 pub(crate) const CONTRACT: &str = "ordered-structural-subsequence-v1";
+pub(crate) const EXPRESSION_CONTRACT: &str = "ordered-structural-subsequence-v2";
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Atom {
@@ -59,29 +60,64 @@ pub(crate) fn field(name: &str) -> Unit {
     })
 }
 
-pub(crate) fn entry(self_delimited: bool, named_body: bool) -> Vec<Unit> {
+/// Unknown trees retain only mandatory root syntax, never a flattened row list.
+pub(crate) fn expression() -> Unit {
+    text("[\"\",]")
+}
+
+pub(crate) fn expression_field(name: &str) -> Unit {
+    if is_value_reference(name) {
+        expression()
+    } else {
+        field(name)
+    }
+}
+
+pub(crate) fn result(
+    expressions: bool,
+    definition: usize,
+    count: Option<usize>,
+    completed: usize,
+    leading_comma: bool,
+) -> Unit {
+    if expressions {
+        expression()
+    } else {
+        rows(definition, count, completed, leading_comma)
+    }
+}
+
+pub(crate) fn entry(self_delimited: bool, named_body: bool, expressions: bool) -> Vec<Unit> {
     let mut units = vec![text(",\"entry\":")];
-    units.extend(entry_body(self_delimited, named_body));
+    units.extend(entry_body(self_delimited, named_body, expressions));
     units.push(text("}"));
     units
 }
 
-pub(crate) fn entry_body(self_delimited: bool, named_body: bool) -> Vec<Unit> {
+pub(crate) fn entry_body(self_delimited: bool, named_body: bool, expressions: bool) -> Vec<Unit> {
     vec![
         text(if named_body { "{\"weights\":[" } else { "[[" }),
         Unit::Parameters {
             active: false,
             leading_comma: false,
         },
-        text(if named_body {
+        text(if expressions {
+            "],\"return\":"
+        } else if named_body {
             "],\"ops\":["
         } else if self_delimited {
             "],["
         } else {
             "],1,["
         }),
-        rows(usize::MAX, None, 0, false),
-        text(if named_body { "]}" } else { "]]" }),
+        result(expressions, usize::MAX, None, 0, false),
+        text(if expressions {
+            "}"
+        } else if named_body {
+            "]}"
+        } else {
+            "]]"
+        }),
     ]
 }
 
@@ -112,6 +148,7 @@ pub(crate) struct State {
     pub operation_open: bool,
     row_commas: usize,
     parameter_references: bool,
+    expressions: bool,
 }
 
 impl State {
@@ -140,10 +177,12 @@ impl State {
         enabled: bool,
         fields: &BTreeMap<String, Vec<String>>,
         parameter_references: bool,
+        expressions: bool,
     ) -> Self {
         Self {
             enabled,
             parameter_references,
+            expressions,
             row_commas: if enabled {
                 fields
                     .values()
@@ -407,6 +446,9 @@ impl Bound<'_> {
     /// The reader's completed count includes a partly emitted row whose remaining
     /// bytes are already in the unfinished units. No row is paid twice.
     pub(crate) fn row_capacity(&self, maximum: usize, parameters: Obligations) -> Option<usize> {
+        if self.state.expressions {
+            return None;
+        }
         let completed = self.state.frames.iter().flatten().find_map(|unit| {
             if let Unit::Rows {
                 definition,
@@ -440,6 +482,11 @@ impl Bound<'_> {
     /// These operations may occur in any later definition. Their ordered
     /// projection is a separate necessary bound, not an assigned entry body.
     pub(crate) fn permits_unplaced_rows(&self, rows: usize) -> bool {
+        if self.state.expressions {
+            // The flat operation projection is not ordered for sibling/nested
+            // trees. Canonical node/dependency admission remains independent.
+            return true;
+        }
         let rows = rows.saturating_sub(usize::from(self.state.operation_open));
         if self.eos {
             return self.state.complete && rows == 0;

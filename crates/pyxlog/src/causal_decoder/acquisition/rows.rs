@@ -6,6 +6,7 @@ use serde_json::value::RawValue;
 use xlog_logic::ast::FuncBody;
 
 pub(super) mod budget;
+pub(super) mod expressions;
 pub(super) mod indices;
 pub(super) mod metadata;
 
@@ -143,6 +144,9 @@ pub(super) struct Prefix<'a> {
     pub indices: Vec<indices::Record>,
     pub pending_indices: Option<indices::Pending<'a>>,
     pub pending_retained: Option<metadata::PendingReference>,
+    pub expression_parents: Vec<expressions::Parent>,
+    pub expression_operation: usize,
+    pub expression_nodes: expressions::Nodes,
     pub budget: budget::State,
 }
 
@@ -223,6 +227,15 @@ struct Reader<'a> {
     compact_metadata: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
+    parent_prerequisites: bool,
+    ancestor_typing: bool,
+    expression_parents: Vec<expressions::Parent>,
+    expression_nodes: usize,
+    expression_roots: usize,
+    expression_root_pending: bool,
+    expression_operations: usize,
+    expression_pending_bytes: usize,
     declarations: Option<metadata::Declarations>,
     definition_name: String,
     definition_index: usize,
@@ -244,6 +257,9 @@ pub(super) fn prefix<'a>(
     compact_metadata: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
+    parent_prerequisites: bool,
+    ancestor_typing: bool,
     track_token_budget: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -265,13 +281,22 @@ pub(super) fn prefix<'a>(
         compact_metadata,
         self_delimited,
         named_body,
+        expressions,
+        parent_prerequisites,
+        ancestor_typing,
+        expression_parents: Vec::new(),
+        expression_nodes: 0,
+        expression_roots: usize::from(expressions),
+        expression_root_pending: false,
+        expression_operations: 0,
+        expression_pending_bytes: 0,
         declarations: self_delimited.then(|| metadata::Declarations::new(Some(context))),
         definition_name: String::new(),
         definition_index: 0,
         indices: Vec::new(),
         pending_indices: None,
         pending_retained: None,
-        budget: budget::State::new(track_token_budget, fields, self_delimited),
+        budget: budget::State::new(track_token_budget, fields, self_delimited, expressions),
     };
     let complete = match reader.document() {
         Ok(()) => {
@@ -281,6 +306,12 @@ pub(super) fn prefix<'a>(
         Err(Stop::Incomplete) => false,
         Err(Stop::Invalid(error)) => return Err(error),
     };
+    if expressions {
+        reader
+            .output
+            .ensure(reader.expression_pending_bytes)
+            .map_err(|error| error.to_string())?;
+    }
     if track_token_budget {
         reader.budget.count_prefix = reader
             .pending_operation_count
@@ -298,6 +329,13 @@ pub(super) fn prefix<'a>(
                 target,
             }),
         pending_retained: reader.pending_retained,
+        expression_parents: reader.expression_parents,
+        expression_operation: reader.expression_operations,
+        expression_nodes: expressions::Nodes {
+            spent: reader.expression_nodes,
+            pending_roots: reader.expression_roots,
+            current_root_pending: reader.expression_root_pending,
+        },
         budget: reader.budget,
     })
 }
@@ -314,6 +352,7 @@ pub(super) fn definitions(
     compact_metadata: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -325,6 +364,9 @@ pub(super) fn definitions(
         compact_metadata,
         self_delimited,
         named_body,
+        expressions,
+        false,
+        false,
         false,
     )?;
     if !decoded.complete {
@@ -392,6 +434,9 @@ pub(super) fn definitions(
             None,
             true,
             false,
+            None,
+            false,
+            None,
         )
         .map_err(|error| error.to_string())?;
     }
@@ -571,9 +616,10 @@ impl Reader<'_> {
         let frame = self.budget.enter();
         let self_delimited = self.self_delimited;
         let named_body = self.named_body;
+        let expressions = self.expressions;
         let helpers = || {
             let mut units = vec![budget::text("\"helpers\":[]")];
-            units.extend(budget::entry(self_delimited, named_body));
+            units.extend(budget::entry(self_delimited, named_body, expressions));
             units
         };
         self.budget.set(frame, || helpers());
@@ -601,7 +647,11 @@ impl Reader<'_> {
         }
         self.budget.set(frame, || {
             let mut following = vec![budget::text("[]")];
-            following.extend(budget::entry(self.self_delimited, self.named_body));
+            following.extend(budget::entry(
+                self.self_delimited,
+                self.named_body,
+                self.expressions,
+            ));
             following
         });
         self.key("helpers")?;
@@ -610,7 +660,11 @@ impl Reader<'_> {
         self.output.extend_from_slice(b",\"definitions\":[")?;
         self.budget.set(frame, || {
             let mut following = vec![budget::text("]")];
-            following.extend(budget::entry(self.self_delimited, self.named_body));
+            following.extend(budget::entry(
+                self.self_delimited,
+                self.named_body,
+                self.expressions,
+            ));
             following
         });
         self.take(b'[')?;
@@ -626,19 +680,24 @@ impl Reader<'_> {
             }
         }
         self.budget.set(frame, || {
-            budget::entry(self.self_delimited, self.named_body)
+            budget::entry(self.self_delimited, self.named_body, self.expressions)
         });
         self.take(b']')?;
         self.budget.entry_pending = true;
         self.budget.set(frame, || {
             let mut following = vec![budget::text("\"entry\":")];
-            following.extend(budget::entry_body(self.self_delimited, self.named_body));
+            following.extend(budget::entry_body(
+                self.self_delimited,
+                self.named_body,
+                self.expressions,
+            ));
             following.push(budget::text("}"));
             following
         });
         self.take(b',')?;
         self.budget.set(frame, || {
-            let mut following = budget::entry_body(self.self_delimited, self.named_body);
+            let mut following =
+                budget::entry_body(self.self_delimited, self.named_body, self.expressions);
             following.push(budget::text("}"));
             following
         });
@@ -661,21 +720,31 @@ impl Reader<'_> {
 
     fn definition(&mut self, entry: bool) -> Result<(), Stop> {
         let frame = self.budget.enter();
-        let body_start = if self.named_body {
+        let body_start = if self.expressions {
+            "{\"weights\":[],\"return\":"
+        } else if self.named_body {
             "{\"weights\":[],\"ops\":["
         } else if self.self_delimited {
             "[],["
         } else {
             "[],1,["
         };
-        let after_parameters = if self.named_body {
+        let after_parameters = if self.expressions {
+            ",\"return\":"
+        } else if self.named_body {
             ",\"ops\":["
         } else if self.self_delimited {
             ",["
         } else {
             ",1,["
         };
-        let ending = if self.named_body {
+        let ending = if self.expressions {
+            if entry {
+                "}"
+            } else {
+                "}]"
+            }
+        } else if self.named_body {
             if entry {
                 "]}"
             } else {
@@ -698,7 +767,9 @@ impl Reader<'_> {
                         active: false,
                         leading_comma: false,
                     },
-                    budget::text(if self.named_body {
+                    budget::text(if self.expressions {
+                        "],\"return\":"
+                    } else if self.named_body {
                         "],\"ops\":["
                     } else if self.self_delimited {
                         "],["
@@ -710,7 +781,7 @@ impl Reader<'_> {
                 vec![budget::text(&format!("\"\",[\"\",,1],{body_start}"))]
             };
             following.extend([
-                budget::rows(self.definition_index, None, 0, false),
+                budget::result(self.expressions, self.definition_index, None, 0, false),
                 budget::text(ending),
             ]);
             following
@@ -725,6 +796,10 @@ impl Reader<'_> {
             },
             b'{',
         )?;
+        if self.expressions {
+            self.expression_root_pending = true;
+            self.expression_roots += usize::from(!entry);
+        }
         let signature: TensorSignature = if entry {
             self.definition_name = self.context["entrypoint"].as_str().unwrap().to_owned();
             self.output.extend_from_slice(b"\"name\":")?;
@@ -739,7 +814,7 @@ impl Reader<'_> {
                 self.budget.set(frame, || {
                     vec![
                         budget::text(&format!(",[\"\",,1],{body_start}")),
-                        budget::rows(self.definition_index, None, 0, false),
+                        budget::result(self.expressions, self.definition_index, None, 0, false),
                         budget::text(ending),
                     ]
                 });
@@ -752,7 +827,7 @@ impl Reader<'_> {
             self.budget.set(frame, || {
                 vec![
                     budget::text(&format!("[\"\",,1],{body_start}")),
-                    budget::rows(self.definition_index, None, 0, false),
+                    budget::result(self.expressions, self.definition_index, None, 0, false),
                     budget::text(ending),
                 ]
             });
@@ -763,7 +838,7 @@ impl Reader<'_> {
                 self.budget.set(frame, || {
                     vec![
                         budget::text(&format!(",{body_start}")),
-                        budget::rows(self.definition_index, None, 0, false),
+                        budget::result(self.expressions, self.definition_index, None, 0, false),
                         budget::text(ending),
                     ]
                 });
@@ -776,7 +851,7 @@ impl Reader<'_> {
             self.budget.set(frame, || {
                 vec![
                     budget::text(body_start),
-                    budget::rows(self.definition_index, None, 0, false),
+                    budget::result(self.expressions, self.definition_index, None, 0, false),
                     budget::text(ending),
                 ]
             });
@@ -787,8 +862,12 @@ impl Reader<'_> {
             if !entry {
                 self.budget.set(frame, || {
                     vec![
-                        budget::text("\"weights\":[],\"ops\":["),
-                        budget::rows(self.definition_index, None, 0, false),
+                        budget::text(if self.expressions {
+                            "\"weights\":[],\"return\":"
+                        } else {
+                            "\"weights\":[],\"ops\":["
+                        }),
+                        budget::result(self.expressions, self.definition_index, None, 0, false),
                         budget::text(ending),
                     ]
                 });
@@ -801,8 +880,12 @@ impl Reader<'_> {
                         active: false,
                         leading_comma: false,
                     },
-                    budget::text("],\"ops\":["),
-                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text(if self.expressions {
+                        "],\"return\":"
+                    } else {
+                        "],\"ops\":["
+                    }),
+                    budget::result(self.expressions, self.definition_index, None, 0, false),
                     budget::text(ending),
                 ]
             });
@@ -812,7 +895,7 @@ impl Reader<'_> {
             self.budget.set(frame, || {
                 vec![
                     budget::text(after_parameters),
-                    budget::rows(self.definition_index, None, 0, false),
+                    budget::result(self.expressions, self.definition_index, None, 0, false),
                     budget::text(ending),
                 ]
             });
@@ -824,117 +907,153 @@ impl Reader<'_> {
         }
         self.budget.set(frame, || {
             vec![
-                budget::text(if self.named_body {
+                budget::text(if self.expressions {
+                    "\"return\":"
+                } else if self.named_body {
                     "\"ops\":["
                 } else if self.self_delimited {
                     "["
                 } else {
                     "1,["
                 }),
-                budget::rows(self.definition_index, None, 0, false),
+                budget::result(self.expressions, self.definition_index, None, 0, false),
                 budget::text(ending),
             ]
         });
         self.punctuation(b',', b',')?;
-        let operation_count = if self.self_delimited {
-            None
-        } else if self.context_entry {
-            if !self.compact_metadata {
-                self.key("operation_count")?;
-            }
-            self.output.extend_from_slice(b"\"output\":")?;
+        if self.expressions {
+            self.return_expression(frame, ending)?;
+        } else {
+            let operation_count = if self.self_delimited {
+                None
+            } else if self.context_entry {
+                if !self.compact_metadata {
+                    self.key("operation_count")?;
+                }
+                self.output.extend_from_slice(b"\"output\":")?;
+                self.budget.set(frame, || {
+                    vec![
+                        budget::text(",["),
+                        budget::result(self.expressions, self.definition_index, None, 0, false),
+                        budget::text(ending),
+                    ]
+                });
+                // Retain the original decimal until its canonical output index can
+                // be projected. Subtraction does not preserve decimal prefixes.
+                self.pending_operation_count = Some(self.offset);
+                let count: usize = serde_json::from_str(self.raw(false)?.get())?;
+                // A prefix such as `1` may still become `10`. Do not project its
+                // canonical output index until the number is visibly delimited.
+                if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
+                    return Err(Stop::Invalid("invalid numerical operation count".into()));
+                }
+                self.pending_operation_count = None;
+                self.output
+                    .extend_from_slice((count - 1).to_string().as_bytes())?;
+                Some(count)
+            } else {
+                self.field("output")?;
+                self.value::<usize>()?;
+                None
+            };
             self.budget.set(frame, || {
                 vec![
-                    budget::text(",["),
-                    budget::rows(self.definition_index, None, 0, false),
+                    budget::text("["),
+                    budget::result(
+                        self.expressions,
+                        self.definition_index,
+                        operation_count,
+                        0,
+                        false,
+                    ),
                     budget::text(ending),
                 ]
             });
-            // Retain the original decimal until its canonical output index can
-            // be projected. Subtraction does not preserve decimal prefixes.
-            self.pending_operation_count = Some(self.offset);
-            let count: usize = serde_json::from_str(self.raw(false)?.get())?;
-            // A prefix such as `1` may still become `10`. Do not project its
-            // canonical output index until the number is visibly delimited.
-            if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
-                return Err(Stop::Invalid("invalid numerical operation count".into()));
-            }
-            self.pending_operation_count = None;
-            self.output
-                .extend_from_slice((count - 1).to_string().as_bytes())?;
-            Some(count)
-        } else {
-            self.field("output")?;
-            self.value::<usize>()?;
-            None
-        };
-        self.budget.set(frame, || {
-            vec![
-                budget::text("["),
-                budget::rows(self.definition_index, operation_count, 0, false),
-                budget::text(ending),
-            ]
-        });
-        if !self.self_delimited {
-            self.punctuation(b',', b',')?;
-        }
-        if self.named_body {
-            self.key("ops")?;
-        }
-        if self.compact_metadata {
-            self.output.extend_from_slice(b"\"operations\":")?;
-        } else {
-            self.field("operations")?;
-        }
-        self.budget.set(frame, || {
-            vec![
-                budget::rows(self.definition_index, operation_count, 0, false),
-                budget::text(ending),
-            ]
-        });
-        self.punctuation(b'[', b'[')?;
-        let mut operations = 0;
-        if self.peek()? != b']' {
-            loop {
-                self.budget.set(frame, || {
-                    vec![
-                        budget::rows(self.definition_index, operation_count, operations + 1, true),
-                        budget::text(ending),
-                    ]
-                });
-                self.operation(operations)?;
-                operations += 1;
-                self.budget.set(frame, || {
-                    vec![
-                        budget::rows(self.definition_index, operation_count, operations, true),
-                        budget::text(ending),
-                    ]
-                });
-                if self.peek()? != b',' {
-                    break;
-                }
-                self.budget.set(frame, || {
-                    vec![
-                        budget::rows(self.definition_index, operation_count, operations, false),
-                        budget::text(ending),
-                    ]
-                });
+            if !self.self_delimited {
                 self.punctuation(b',', b',')?;
             }
-        }
-        self.budget.set(frame, || vec![budget::text(&ending[1..])]);
-        self.punctuation(b']', b']')?;
-        if self.self_delimited {
-            let output = operations
-                .checked_sub(1)
-                .ok_or_else(|| Stop::Invalid("numerical operations must be nonempty".into()))?;
-            self.output.extend_from_slice(b",\"output\":")?;
-            self.output.json(&output)?;
-        }
-        if operation_count.is_some_and(|count| count != operations) {
-            return Err(Stop::Invalid(
-                "numerical operation count differs from rows".into(),
-            ));
+            if self.named_body {
+                self.key("ops")?;
+            }
+            if self.compact_metadata {
+                self.output.extend_from_slice(b"\"operations\":")?;
+            } else {
+                self.field("operations")?;
+            }
+            self.budget.set(frame, || {
+                vec![
+                    budget::result(
+                        self.expressions,
+                        self.definition_index,
+                        operation_count,
+                        0,
+                        false,
+                    ),
+                    budget::text(ending),
+                ]
+            });
+            self.punctuation(b'[', b'[')?;
+            let mut operations = 0;
+            if self.peek()? != b']' {
+                loop {
+                    self.budget.set(frame, || {
+                        vec![
+                            budget::result(
+                                self.expressions,
+                                self.definition_index,
+                                operation_count,
+                                operations + 1,
+                                true,
+                            ),
+                            budget::text(ending),
+                        ]
+                    });
+                    self.operation(operations)?;
+                    operations += 1;
+                    self.budget.set(frame, || {
+                        vec![
+                            budget::result(
+                                self.expressions,
+                                self.definition_index,
+                                operation_count,
+                                operations,
+                                true,
+                            ),
+                            budget::text(ending),
+                        ]
+                    });
+                    if self.peek()? != b',' {
+                        break;
+                    }
+                    self.budget.set(frame, || {
+                        vec![
+                            budget::result(
+                                self.expressions,
+                                self.definition_index,
+                                operation_count,
+                                operations,
+                                false,
+                            ),
+                            budget::text(ending),
+                        ]
+                    });
+                    self.punctuation(b',', b',')?;
+                }
+            }
+            self.budget.set(frame, || vec![budget::text(&ending[1..])]);
+            self.punctuation(b']', b']')?;
+            if self.self_delimited {
+                let output = operations
+                    .checked_sub(1)
+                    .ok_or_else(|| Stop::Invalid("numerical operations must be nonempty".into()))?;
+                self.output.extend_from_slice(b",\"output\":")?;
+                self.output.json(&output)?;
+            }
+            if operation_count.is_some_and(|count| count != operations) {
+                return Err(Stop::Invalid(
+                    "numerical operation count differs from rows".into(),
+                ));
+            }
         }
         self.budget.set(frame, || {
             if self.named_body && !entry {

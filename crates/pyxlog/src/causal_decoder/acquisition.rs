@@ -15,6 +15,7 @@ use xlog_ir::tensor::{
 };
 use xlog_logic::ast::FuncDef;
 
+mod expression_nodes;
 mod rows;
 mod typed;
 use xlog_runtime::causal_decoder::acquired::{
@@ -45,6 +46,11 @@ const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
 const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
 const TOKEN_ROW_CAPACITY_LANGUAGE: &str = "xlog-contextual-acquisition-v23";
 const NAMED_BODY_LANGUAGE: &str = "xlog-contextual-acquisition-v24";
+const EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v25";
+const EXPRESSION_PREREQUISITE_LANGUAGE: &str = "xlog-contextual-acquisition-v26";
+const EXPRESSION_ANCESTOR_LANGUAGE: &str = "xlog-contextual-acquisition-v27";
+const PARTIAL_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v28";
+const EXPRESSION_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v29";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -52,6 +58,7 @@ pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENC
 pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
+pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -70,7 +77,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=24) {
+    if !matches!(version, 1..=29) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -277,6 +284,33 @@ pub(super) fn language(
             if version >= 19 {
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
+            if version >= 25 {
+                rows::expressions::schema(&mut schema, &operation_fields()?);
+            }
+            if version >= 26 {
+                schema["description"] = json!(format!(
+                    "{} Before committing even an unfinished parent tag, its canonical required fields must have nonempty already-known function, formal-argument, closed physical-parameter and raw-token domains. The same canonical tag-prefix matcher intersects the existing catalogue with these resource facts and any selected function-symbol prefix. Child-value operands and Call arguments remain unknown future expressions, never missing preceding SSA values. Closed children and selected scalar tails retain the existing canonical typed owner; this prerequisite check does not infer child shapes or prove whole-tree completion or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version >= 27 {
+                schema["description"] = json!(format!(
+                    "{} Prospective expression operations also pass the existing canonical typed admission through source-selected ancestors whose other child operands and required scalar/array fields are known. The exact active child slot receives the trial result; unknown sibling expressions or scalar/array tails stop this local check optimistically. A fully known chain reaches the current definition's existing output shape, usage and dependency contract. Checks precede partial tags, scalar/index decimals and generic completion-cache answers, without inserting source operations or charging already-open parents twice. This is a necessary local constraint, not a whole-tree witness or a usefulness guarantee.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version >= 28 {
+                schema["description"] = json!(format!(
+                    "{} Canonical partial shape constraints additionally propagate through selected ancestors with unknown sibling expressions and scalar tails. Elementwise/Select equal extents, Tanh/Finite preservation, Broadcast one-row input and Gather row preservation share the concrete IR inference owner. Unknown slots stay free; only contradictory known facts reject a tag, operand or decimal extension. Unrepresented relations remain conservative, with existing prerequisites and concrete typed continuation unchanged. No future SSA value, scalar default, source node, graph search or completion witness is supplied.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version >= 29 {
+                schema["description"] = json!(format!(
+                    "{} The shared source reader also reserves every mandatory unopened child occurrence, remaining source-compatible Call argument and future entry root against the global 64-node allowance. Closed children and an active child already represented by an open frame are not charged twice. Partial tags and callee prefixes retain only compatible catalogue domains within this necessary bound. A future hole needs at least two nodes only when canonical candidate inference at both context lengths proves that no zero-child source operation can match its partial type; otherwise its lower bound is one. This reservation selects no node, operand or graph, grants no CSE discount, and does not prove a complete or useful tree.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -326,7 +360,7 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 20 {
+        if (20..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} From the opening of a retained symbol wrapper, its captured-name domain must intersect canonical typed callee or physical alias admission. This check includes unfinished tags and names, reuses the same canonical visitors and selects no name or operation.",
                 schema["description"].as_str().unwrap()
@@ -338,13 +372,13 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 22 {
+        if (22..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Open-body tag and operand prefixes retain a typed structural continuation within the cumulative row allowance. That allowance is not a chosen output. Closing the nonempty body chooses its actual last row, which must satisfy both context lengths, causality and output dependencies. The caller supplies remaining original IDs including the next choice and a paid EOS. Ordered structural suffix coverage uses the supplied spellings and reserves known producer obligations without fixing future helper placement. It is a necessary relaxation, not a whole-grammar witness, a completion guarantee or evidence of usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 23 {
+        if (23..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} The open body's prospective row allowance also intersects the maximum current-body count whose shared ordered suffix projection fits the remaining original IDs and paid EOS. The same typed owner applies this capacity before partial tags and operands, including after parsed-prefix restoration. This inverse structural bound selects no count or graph and remains a necessary relaxation rather than a token-fit witness.",
                 schema["description"].as_str().unwrap()
@@ -362,6 +396,11 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                29 => EXPRESSION_NODE_LANGUAGE,
+                28 => PARTIAL_EXPRESSION_LANGUAGE,
+                27 => EXPRESSION_ANCESTOR_LANGUAGE,
+                26 => EXPRESSION_PREREQUISITE_LANGUAGE,
+                25 => EXPRESSION_LANGUAGE,
                 24 => NAMED_BODY_LANGUAGE,
                 23 => TOKEN_ROW_CAPACITY_LANGUAGE,
                 22 => SELF_DELIMITED_LANGUAGE,
@@ -388,7 +427,11 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: (version >= 21).then_some(rows::budget::CONTRACT),
+            token_cost_contract: if version >= 25 {
+                Some(rows::budget::EXPRESSION_CONTRACT)
+            } else {
+                (version >= 21).then_some(rows::budget::CONTRACT)
+            },
         })
         .map_err(value_error);
     }
@@ -499,6 +542,11 @@ pub(crate) struct PyNativeAcquisitionMask {
     retained_reference_prefix: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
+    parent_prerequisites: bool,
+    ancestor_typing: bool,
+    partial_expressions: bool,
+    expression_node_obligations: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -511,6 +559,9 @@ struct CanonicalPrefix<'a> {
     indices: Vec<rows::indices::Record>,
     pending_indices: Option<rows::indices::Pending<'a>>,
     pending_retained: Option<rows::metadata::PendingReference>,
+    expression_parents: Vec<rows::expressions::Parent>,
+    expression_operation: usize,
+    expression_nodes: rows::expressions::Nodes,
     budget: rows::budget::State,
 }
 
@@ -520,11 +571,37 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let named_body = language["id"] == NAMED_BODY_LANGUAGE;
-        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || named_body;
-        let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity;
+        let expression_node_obligations = language["id"] == EXPRESSION_NODE_LANGUAGE;
+        let partial_expressions =
+            language["id"] == PARTIAL_EXPRESSION_LANGUAGE || expression_node_obligations;
+        let ancestor_typing = language["id"] == EXPRESSION_ANCESTOR_LANGUAGE || partial_expressions;
+        let parent_prerequisites =
+            language["id"] == EXPRESSION_PREREQUISITE_LANGUAGE || ancestor_typing;
+        let expressions = language["id"] == EXPRESSION_LANGUAGE || parent_prerequisites;
+        if expressions
+            && language.as_object().is_none_or(|packet| {
+                packet.len() != 4
+                    || ["id", "context", "schema", "token_cost_contract"]
+                        .iter()
+                        .any(|key| !packet.contains_key(*key))
+            })
+        {
+            return Err(value_error(
+                "native acquisition language packet fields differ",
+            ));
+        }
+        let named_body = language["id"] == NAMED_BODY_LANGUAGE || expressions;
+        let token_row_capacity =
+            language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || language["id"] == NAMED_BODY_LANGUAGE;
+        let self_delimited =
+            language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
+        let cost_contract = if expressions {
+            rows::budget::EXPRESSION_CONTRACT
+        } else {
+            rows::budget::CONTRACT
+        };
+        if token_budget && language["token_cost_contract"] != cost_contract {
             return Err(value_error("native original-token cost contract differs"));
         }
         let retained_reference_prefix =
@@ -667,6 +744,11 @@ impl PyNativeAcquisitionMask {
             retained_reference_prefix,
             self_delimited,
             named_body,
+            expressions,
+            parent_prerequisites,
+            ancestor_typing,
+            partial_expressions,
+            expression_node_obligations,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -818,6 +900,7 @@ impl PyNativeAcquisitionMask {
             self.compact_metadata,
             self.self_delimited,
             self.named_body,
+            self.expressions,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -854,7 +937,19 @@ impl PyNativeAcquisitionMask {
             token_budget,
             self.self_delimited,
             self.token_row_capacity,
+            self.ancestor_typing.then_some((
+                prefix.expression_parents.as_slice(),
+                prefix.expression_operation,
+            )),
+            self.partial_expressions,
+            self.expression_node_obligations
+                .then_some(prefix.expression_nodes),
         )?;
+        for parent in &prefix.expression_parents {
+            resources.admit_expression_parent(parent)?;
+        }
+        resources.admit_expression_ancestors()?;
+        resources.admit_expression_nodes()?;
         // These common source obligations cannot be reduced by choosing a
         // count or retained reference. Reject them before exploring either
         // domain; both searches below only check the same parsed facts.
@@ -902,6 +997,10 @@ impl PyNativeAcquisitionMask {
                 &resources.signatures,
                 resources.bytes.len(),
                 self.typed_context.as_ref().unwrap(),
+                resources
+                    .expression_continuation()
+                    .as_ref()
+                    .map(|continuation| continuation.borrow(resources.operation_fields.unwrap())),
             )?;
         }
         if let Some(pending) = &prefix.pending_retained {
@@ -934,6 +1033,9 @@ impl PyNativeAcquisitionMask {
                     indices: Vec::new(),
                     pending_indices: None,
                     pending_retained: None,
+                    expression_parents: prefix.expression_parents.clone(),
+                    expression_operation: prefix.expression_operation,
+                    expression_nodes: prefix.expression_nodes,
                     budget: rows::budget::State::default(),
                 };
                 // Completing a reference domain spends no original IDs. Keep
@@ -942,7 +1044,7 @@ impl PyNativeAcquisitionMask {
                     &candidate,
                     reusable_prefix,
                     false,
-                    token_budget.filter(|_| self.token_row_capacity),
+                    token_budget.filter(|_| self.token_row_capacity || self.expressions),
                 )
                 .is_ok()
             });
@@ -967,6 +1069,9 @@ impl PyNativeAcquisitionMask {
                 self.compact_metadata,
                 self.self_delimited,
                 self.named_body,
+                self.expressions,
+                self.parent_prerequisites,
+                self.ancestor_typing,
                 self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
@@ -983,6 +1088,9 @@ impl PyNativeAcquisitionMask {
                 } else {
                     None
                 },
+                expression_parents: prefix.expression_parents,
+                expression_operation: prefix.expression_operation,
+                expression_nodes: prefix.expression_nodes,
                 budget: prefix.budget,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -994,6 +1102,9 @@ impl PyNativeAcquisitionMask {
                 indices: Vec::new(),
                 pending_indices: None,
                 pending_retained: None,
+                expression_parents: Vec::new(),
+                expression_operation: 0,
+                expression_nodes: rows::expressions::Nodes::default(),
                 budget: rows::budget::State::default(),
             })
         }
@@ -1032,6 +1143,7 @@ pub(super) fn decode_numerical_rows(
     compact_metadata: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1043,6 +1155,7 @@ pub(super) fn decode_numerical_rows(
         compact_metadata,
         self_delimited,
         named_body,
+        expressions,
     )
     .map_err(value_error)
 }
@@ -1080,6 +1193,29 @@ struct Resources<'a> {
     parsed_prefix: Option<ParsedOperations>,
     token_budget: Option<rows::budget::Bound<'a>>,
     token_row_capacity: bool,
+    source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
+    partial_expressions: bool,
+    expression_nodes: Option<rows::expressions::Nodes>,
+}
+
+struct ExpressionContinuation {
+    ancestors: Vec<typed::Ancestor>,
+    root: bool,
+    partial: Option<Vec<typed::Ancestor>>,
+}
+
+impl ExpressionContinuation {
+    fn borrow<'a>(&'a self, fields: &'a BTreeMap<String, Vec<String>>) -> typed::Continuation<'a> {
+        typed::Continuation {
+            ancestors: &self.ancestors,
+            root: self.root,
+            partial: self
+                .partial
+                .as_ref()
+                .map(|ancestors| typed::PartialConstraints { ancestors, fields }),
+            expected: None,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1119,6 +1255,9 @@ fn resource_prefix<'a>(
     token_budget: Option<rows::budget::Bound<'a>>,
     self_delimited: bool,
     token_row_capacity: bool,
+    source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
+    partial_expressions: bool,
+    expression_nodes: Option<rows::expressions::Nodes>,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1181,6 +1320,9 @@ fn resource_prefix<'a>(
         parsed_prefix: None,
         token_budget,
         token_row_capacity,
+        source_expression,
+        partial_expressions,
+        expression_nodes,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -1197,6 +1339,181 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn current_expression(&self) -> Option<&rows::expressions::Parent> {
+        let (parents, operation) = self.source_expression?;
+        let current = parents.last()?;
+        (self.definition_index == Some(current.definition_index)
+            && self.program_definition_index == self.definition_index
+            && self.program.parameters_complete
+            && self.program.operations == operation)
+            .then_some(current)
+    }
+
+    fn expression_children_known(
+        &self,
+        parent: &rows::expressions::Parent,
+        required: &[String],
+    ) -> bool {
+        required.iter().all(|field| {
+            if is_value_reference(field) {
+                return parent.selected.contains_key(field)
+                    || matches!(&parent.operand, Some(typed::Operand::Value(name)) if name == field);
+            }
+            if field != "arguments" {
+                return true;
+            }
+            let Some(arguments) = parent.selected.get(field).and_then(Value::as_array) else {
+                return false;
+            };
+            let Some(expected) = parent.selected.get("function")
+                .and_then(Value::as_str)
+                .and_then(|name| self.signatures.get(name))
+                .and_then(|signature| signature.arguments(1).ok())
+                .map(|arguments| arguments.len())
+            else {
+                return false;
+            };
+            match &parent.operand {
+                Some(typed::Operand::Argument(slot)) => {
+                    *slot == arguments.len() && arguments.len() + 1 == expected
+                }
+                _ => arguments.len() == expected,
+            }
+        })
+    }
+
+    fn expression_continuation(&self) -> Option<ExpressionContinuation> {
+        self.current_expression()?;
+        let (parents, _) = self.source_expression?;
+        let mut ancestors = Vec::new();
+        let mut root = true;
+        for parent in parents[..parents.len() - 1].iter().rev() {
+            let required =
+                &self.operation_fields.unwrap()[parent.selected["operation"].as_str().unwrap()];
+            let Some(operand) = parent.operand.as_ref().filter(|_| {
+                self.expression_children_known(parent, required)
+                    && required.iter().all(|field| {
+                        is_value_reference(field)
+                            || field == "arguments"
+                            || parent.selected.contains_key(field)
+                    })
+            }) else {
+                // Future siblings and scalar/array tails are unknown. No
+                // prospective default stands in for their source selection.
+                root = false;
+                break;
+            };
+            ancestors.push(typed::Ancestor {
+                fields: parent.selected.clone(),
+                operand: operand.clone(),
+            });
+        }
+        let partial = self.partial_expressions.then(|| {
+            parents[..parents.len() - 1]
+                .iter()
+                .map(|parent| typed::Ancestor {
+                    fields: parent.selected.clone(),
+                    operand: parent.operand.as_ref().unwrap().clone(),
+                })
+                .collect()
+        });
+        Some(ExpressionContinuation {
+            ancestors,
+            root,
+            partial,
+        })
+    }
+
+    fn admit_expression_ancestors(&self) -> Result<(), serde_json::Error> {
+        let Some(parent) = self.current_expression().filter(|parent| !parent.projected) else {
+            return Ok(());
+        };
+        let continuation = self.expression_continuation().unwrap();
+        let program = self.program.typed.as_ref().unwrap();
+        let viable = self
+            .operation_fields
+            .unwrap()
+            .iter()
+            .any(|(name, required)| {
+                if !operation_prefix(&parent.tag_prefix, name) {
+                    return false;
+                }
+                let mut fields = parent.selected.clone();
+                fields.insert("operation".into(), json!(name));
+                let continuation = continuation.borrow(self.operation_fields.unwrap());
+                if continuation
+                    .partial
+                    .is_some_and(|partial| !partial.permits(program, &fields))
+                {
+                    return false;
+                }
+                // This candidate still needs source-authored children. Their types
+                // cannot be borrowed from earlier postorder values.
+                if parent.operand.is_some() || !self.expression_children_known(parent, required) {
+                    return true;
+                }
+                program.possible(&fields, None, &self.signatures, Some(continuation))
+            });
+        if !viable {
+            return Err(serde_json::Error::custom(
+                "expression has no compatible source-selected ancestor continuation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_expression_parent(
+        &self,
+        parent: &rows::expressions::Parent,
+    ) -> Result<(), serde_json::Error> {
+        if self.definition_index != Some(parent.definition_index)
+            || self.program_definition_index != self.definition_index
+            || !self.program.parameters_complete
+        {
+            return Err(serde_json::Error::custom(
+                "expression parent prerequisite owner differs",
+            ));
+        }
+        let viable = self
+            .operation_fields
+            .unwrap()
+            .iter()
+            .any(|(name, required)| {
+                operation_prefix(&parent.tag_prefix, name)
+                    && self.expression_parent_domains(parent, required)
+            });
+        if !viable {
+            return Err(serde_json::Error::custom(
+                "expression parent has no compatible known operand domain",
+            ));
+        }
+        Ok(())
+    }
+
+    fn expression_parent_domains(
+        &self,
+        parent: &rows::expressions::Parent,
+        required: &[String],
+    ) -> bool {
+        required.iter().all(|field| {
+            // Children are source expressions, not unavailable earlier
+            // values. Only their independent resource domains are known.
+            if is_value_reference(field) || field == "arguments" {
+                return true;
+            }
+            match field.as_str() {
+                "function" => self.signatures.keys().any(|name| {
+                    parent
+                        .function_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| operation_prefix(prefix, name))
+                }),
+                "token_ids" => !self.raw_tokens.is_empty(),
+                _ => reference_extent(&self.program, field) != Some(0),
+            }
+        })
+    }
+
     fn unplaced_producer_rows(&self) -> usize {
         let mut read = BTreeSet::new();
         let mut called = BTreeSet::new();
@@ -1381,7 +1698,7 @@ impl Resources<'_> {
             if !self.operation_fields.unwrap().keys().any(|tag| {
                 let mut fields = serde_json::Map::new();
                 fields.insert("operation".into(), json!(tag));
-                candidate.possible(&fields, None, &self.signatures)
+                candidate.possible(&fields, None, &self.signatures, None)
             }) {
                 return false;
             }
@@ -2087,6 +2404,7 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                 }
                 let mut prefix_end = None;
                 if self.resources.ordered {
+                    let continuation = self.resources.expression_continuation();
                     let parsed = decoder.deserialize_map(Operation {
                         program: &self.resources.program,
                         raw_tokens: self.resources.raw_tokens,
@@ -2094,6 +2412,13 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                         operation_fields: self.resources.operation_fields,
                         signatures: &self.resources.signatures,
                         capture_prefix: self.resources.capture_prefix,
+                        source_fields: self
+                            .resources
+                            .current_expression()
+                            .map(|parent| &parent.selected),
+                        continuation: continuation.as_ref().map(|continuation| {
+                            continuation.borrow(self.resources.operation_fields.unwrap())
+                        }),
                     })?;
                     if let (Some(program), Some(operation)) =
                         (&mut self.resources.program.typed, parsed.operation)
@@ -2279,6 +2604,8 @@ struct Operation<'a> {
     operation_fields: Option<&'a BTreeMap<String, Vec<String>>>,
     signatures: &'a typed::Signatures,
     capture_prefix: bool,
+    source_fields: Option<&'a serde_json::Map<String, Value>>,
+    continuation: Option<typed::Continuation<'a>>,
 }
 
 struct ParsedOperation {
@@ -2286,13 +2613,20 @@ struct ParsedOperation {
     following_comma: Option<usize>,
 }
 
+fn is_value_reference(field: &str) -> bool {
+    matches!(
+        field,
+        "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative"
+    )
+}
+
 fn reference_extent(program: &Program, field: &str) -> Option<usize> {
+    if is_value_reference(field) {
+        return Some(program.operations);
+    }
     match field {
         "argument" => program.arguments,
         "weight" => Some(program.parameters),
-        "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative" => {
-            Some(program.operations)
-        }
         _ => None,
     }
 }
@@ -2346,7 +2680,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut tagged = false;
-        let mut material = serde_json::Map::new();
+        let mut material = self.source_fields.cloned().unwrap_or_default();
         let mut last_value_offset = None;
         loop {
             let Some((key, offset)) =
@@ -2366,7 +2700,12 @@ impl<'de> Visitor<'de> for Operation<'_> {
                             && self.program.typed.as_ref().is_none_or(|program| {
                                 let mut candidate = material.clone();
                                 candidate.insert(key.clone(), Value::String(name.clone()));
-                                program.possible(&candidate, None, self.signatures)
+                                program.possible(
+                                    &candidate,
+                                    None,
+                                    self.signatures,
+                                    self.continuation,
+                                )
                             })
                     });
                     if !viable {
@@ -2393,6 +2732,8 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     } else {
                         program.output_columns().map(|columns| columns..columns + 1)
                     }
+                } else if key == "max_steps" && self.continuation.is_some() {
+                    Some(1..program.body.max_context + 1)
                 } else {
                     extent.map(|extent| 0..extent)
                 };
@@ -2408,8 +2749,16 @@ impl<'de> Visitor<'de> for Operation<'_> {
                             },
                         ),
                         accepts: |value| {
-                            (key == "columns" && !program.searches_completion())
-                                || program.number_possible(&material, &key, value, self.signatures)
+                            (key == "columns"
+                                && !program.searches_completion()
+                                && self.continuation.is_none())
+                                || program.number_possible(
+                                    &material,
+                                    &key,
+                                    value,
+                                    self.signatures,
+                                    self.continuation,
+                                )
                         },
                         bytes: self.bytes,
                     })?;
@@ -2426,6 +2775,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                         field: &key,
                         signatures: self.signatures,
                         bytes: self.bytes,
+                        continuation: self.continuation,
                     })?)
                     .map_err(A::Error::custom)?
                 } else if key == "token_ids" {
@@ -2437,6 +2787,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                             program,
                             &material,
                             self.signatures,
+                            self.continuation,
                         )),
                     })?)
                     .map_err(A::Error::custom)?
@@ -2446,7 +2797,12 @@ impl<'de> Visitor<'de> for Operation<'_> {
                         let mut candidate = material.clone();
                         candidate.insert(key.clone(), Value::String(name.clone()));
                         operation_prefix(tail, name)
-                            && program.possible(&candidate, None, self.signatures)
+                            && program.possible(
+                                &candidate,
+                                None,
+                                self.signatures,
+                                self.continuation,
+                            )
                     });
                     if !known {
                         return Err(A::Error::custom("callee has no compatible operands"));
@@ -2456,7 +2812,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     map.next_value::<Value>()?
                 };
                 material.insert(key, value);
-                if !program.possible(&material, None, self.signatures) {
+                if !program.possible(&material, None, self.signatures, self.continuation) {
                     return Err(A::Error::custom(
                         "operands have no compatible operation completion",
                     ));
@@ -2579,6 +2935,7 @@ struct TypedIndices<'a> {
     field: &'a str,
     signatures: &'a typed::Signatures,
     bytes: &'a [u8],
+    continuation: Option<typed::Continuation<'a>>,
 }
 impl<'de> DeserializeSeed<'de> for TypedIndices<'_> {
     type Value = Vec<usize>;
@@ -2604,6 +2961,7 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                         &values,
                         value,
                         self.signatures,
+                        self.continuation,
                     )
                 },
                 bytes: self.bytes,
@@ -2625,6 +2983,7 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                             &values,
                             value,
                             self.signatures,
+                            self.continuation,
                         )
                     })
             {
@@ -2633,10 +2992,13 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                 ));
             }
         }
-        if !self
-            .program
-            .array_can_end(self.material, self.field, &values, self.signatures)
-        {
+        if !self.program.array_can_end(
+            self.material,
+            self.field,
+            &values,
+            self.signatures,
+            self.continuation,
+        ) {
             return Err(A::Error::custom(
                 "operand array cannot complete this operation",
             ));
@@ -2657,17 +3019,18 @@ struct TokenIds<'a> {
         &'a typed::Program,
         &'a serde_json::Map<String, Value>,
         &'a typed::Signatures,
+        Option<typed::Continuation<'a>>,
     )>,
 }
 
 impl TokenIds<'_> {
     fn permits_prefix(&self, values: &[u32]) -> bool {
-        let Some((program, material, signatures)) = self.typed_completion else {
+        let Some((program, material, signatures, continuation)) = self.typed_completion else {
             return true;
         };
         let mut candidate = material.clone();
         candidate.insert("token_ids".into(), json!(values));
-        program.possible(&candidate, Some("token_ids"), signatures)
+        program.possible(&candidate, Some("token_ids"), signatures, continuation)
     }
 }
 impl<'de> DeserializeSeed<'de> for TokenIds<'_> {

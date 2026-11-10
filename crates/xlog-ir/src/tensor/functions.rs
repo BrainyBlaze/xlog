@@ -41,6 +41,20 @@ fn fp32(rows: usize, columns: usize) -> Result<TensorValueShape> {
     })
 }
 
+fn related_shape<const N: usize>(
+    tag: &str,
+    inputs: [TensorValueShape; N],
+    tokens: usize,
+    gather_columns: Option<usize>,
+) -> Result<TensorValueShape> {
+    let mut inputs = inputs.map(TensorShapeConstraint::from);
+    let mut output = TensorShapeConstraint::default();
+    TensorOperation::constrain_shapes(tag, &mut inputs, &mut output, tokens, gather_columns)?;
+    output
+        .concrete()
+        .ok_or_else(|| invalid("numerical output shape is unresolved"))
+}
+
 impl TensorSignature {
     /// Actual numeric argument extents, excluding the explicit causal token boundary.
     pub fn arguments(&self, tokens: usize) -> Result<Vec<TensorValueShape>> {
@@ -60,6 +74,38 @@ impl TensorSignature {
             Self::Causal { output_width, .. } => fp32(tokens, *output_width),
             Self::Pure { output_width, .. } => fp32(1, *output_width),
         }
+    }
+
+    /// Check a numerical call's ABI, leaving only unauthored arguments unknown.
+    /// Concrete inference supplies every argument; source-prefix admission may
+    /// omit shapes without inventing values or relaxing the causal boundary.
+    pub fn call_output(
+        &self,
+        caller: &Self,
+        tokens: usize,
+        vocabulary: usize,
+        arguments: impl IntoIterator<Item = Result<Option<TensorValueShape>>>,
+    ) -> Result<TensorValueShape> {
+        if matches!(self, Self::Decoder)
+            || (matches!(caller, Self::Pure { .. }) && !matches!(self, Self::Pure { .. }))
+        {
+            return Err(invalid(
+                "numerical call arguments or causal boundary differ",
+            ));
+        }
+        let arguments = arguments.into_iter().collect::<Result<Vec<_>>>()?;
+        let expected = self.arguments(tokens)?;
+        if arguments.len() != expected.len()
+            || arguments
+                .iter()
+                .zip(expected)
+                .any(|(actual, expected)| actual.is_some_and(|actual| actual != expected))
+        {
+            return Err(invalid(
+                "numerical call arguments or causal boundary differ",
+            ));
+        }
+        self.output(tokens, vocabulary)
     }
 }
 
@@ -290,12 +336,13 @@ impl TensorProgram {
             }
             Broadcast { input: id } => {
                 let source = float(*id)?;
-                if source.rows != 1 {
-                    return Err(invalid("broadcast requires one row"));
-                }
-                fp32(tokens, source.columns)?
+                let shape = related_shape("broadcast", [source], tokens, None)
+                    .map_err(|_| invalid("broadcast requires one row"))?;
+                fp32(shape.rows, shape.columns)?
             }
-            Tanh { input: id } | Finite { input: id } => float(*id)?,
+            Tanh { input: id } | Finite { input: id } => {
+                related_shape("tanh", [float(*id)?], tokens, None)?
+            }
             Bfloat16 { input: id } => TensorValueShape {
                 float32: false,
                 ..float(*id)?
@@ -303,52 +350,60 @@ impl TensorProgram {
             Add { left, right }
             | Multiply { left, right }
             | Subtract { left, right }
-            | Divide { left, right } => {
-                let lhs = input(*left)?;
-                if lhs != input(*right)? || (!matches!(operation, Add { .. }) && !lhs.float32) {
-                    return Err(invalid(
-                        "elementwise numerical input types or extents differ",
-                    ));
-                }
-                lhs
-            }
+            | Divide { left, right } => related_shape(
+                if matches!(operation, Add { .. }) {
+                    "add"
+                } else {
+                    "multiply"
+                },
+                [input(*left)?, input(*right)?],
+                tokens,
+                None,
+            )
+            .map_err(|_| invalid("elementwise numerical input types or extents differ"))?,
             GatherColumns { input: id, indices } => {
                 let source = float(*id)?;
                 if indices.iter().any(|&index| index >= source.columns) {
                     return Err(invalid("gather index out of bounds"));
                 }
-                fp32(source.rows, indices.len())?
+                let shape = related_shape("gather_columns", [source], tokens, Some(indices.len()))?;
+                fp32(shape.rows, shape.columns)?
             }
             Select {
                 condition,
                 positive,
                 negative,
             } => {
-                let shape = float(*positive)?;
-                if shape != float(*negative)? || shape != float(*condition)? {
-                    return Err(invalid("mask inputs require identical FP32 extents"));
-                }
-                shape
+                let positive = float(*positive)?;
+                let negative = float(*negative)?;
+                let mut inputs = [
+                    TensorShapeConstraint::default(),
+                    positive.into(),
+                    negative.into(),
+                ];
+                let mut output = TensorShapeConstraint::default();
+                // Preserve concrete operand evaluation order and its early
+                // refusal, using the same partial relation for both steps.
+                TensorOperation::constrain_shapes("select", &mut inputs, &mut output, tokens, None)
+                    .map_err(|_| invalid("mask inputs require identical FP32 extents"))?;
+                inputs[0] = float(*condition)?.into();
+                TensorOperation::constrain_shapes("select", &mut inputs, &mut output, tokens, None)
+                    .map_err(|_| invalid("mask inputs require identical FP32 extents"))?;
+                output
+                    .concrete()
+                    .ok_or_else(|| invalid("numerical output shape is unresolved"))?
             }
             Call {
                 function,
                 arguments,
             } => {
                 let signature = resolve(function)?;
-                if matches!(signature, TensorSignature::Decoder)
-                    || (matches!(self.signature, TensorSignature::Pure { .. })
-                        && !matches!(signature, TensorSignature::Pure { .. }))
-                    || arguments
-                        .iter()
-                        .map(|&id| input(id))
-                        .collect::<Result<Vec<_>>>()?
-                        != signature.arguments(tokens)?
-                {
-                    return Err(invalid(
-                        "numerical call arguments or causal boundary differ",
-                    ));
-                }
-                signature.output(tokens, self.vocabulary)?
+                signature.call_output(
+                    &self.signature,
+                    tokens,
+                    self.vocabulary,
+                    arguments.iter().map(|&id| input(id).map(Some)),
+                )?
             }
             Scan {
                 input: id,

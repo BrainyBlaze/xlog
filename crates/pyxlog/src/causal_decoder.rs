@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 12..=24) {
+        let context = if matches!(language_version, 12..=29) {
             self.inner
                 .acquisition_context_with_output_dependencies(insertion_layer)
         } else {
@@ -170,8 +170,11 @@ impl PyNativeCausalModel {
             | acquisition::COMPACT_INDICES_ROWS_ENCODING
             | acquisition::COMPACT_METADATA_ROWS_ENCODING
             | acquisition::SELF_DELIMITED_ROWS_ENCODING
-            | acquisition::NAMED_BODY_ROWS_ENCODING => {
-                let named_body = source_encoding == acquisition::NAMED_BODY_ROWS_ENCODING;
+            | acquisition::NAMED_BODY_ROWS_ENCODING
+            | acquisition::NUMERICAL_EXPRESSIONS_ENCODING => {
+                let expressions = source_encoding == acquisition::NUMERICAL_EXPRESSIONS_ENCODING;
+                let named_body =
+                    source_encoding == acquisition::NAMED_BODY_ROWS_ENCODING || expressions;
                 let self_delimited =
                     source_encoding == acquisition::SELF_DELIMITED_ROWS_ENCODING || named_body;
                 let compact_metadata = source_encoding
@@ -195,6 +198,7 @@ impl PyNativeCausalModel {
                     compact_metadata,
                     self_delimited,
                     named_body,
+                    expressions,
                 )?;
                 self.inner
                     .fork_acquired_definitions_with_dependencies(
