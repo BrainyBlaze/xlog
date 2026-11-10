@@ -92,6 +92,8 @@ class NativeCausalModel:
         known siblings, reaching the current definition's output contract at the root.
         V28 propagates canonical partial shape constraints through unknown siblings
         and scalar tails, sharing the concrete IR type owner.
+        V29 also reserves mandatory unopened expression occurrences and roots against
+        the global node cap; canonical leaf infeasibility can strengthen a hole to two.
         """
         ...
     def fork_acquired(
@@ -130,11 +132,11 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–28 require positive remaining original IDs including this choice and paid EOS.
+        """V21–29 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
-        V21–24 use ordered-structural-subsequence-v1; V25–28 require v2 and
+        V21–24 use ordered-structural-subsequence-v1; V25–29 require v2, which
         does not infer flat row capacity for expressions.
         """
         ...
