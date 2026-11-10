@@ -588,17 +588,19 @@ causal check and dependency propagation as an actual model-authored operation.
 Shape conversions and joins therefore consume rows together; separate values
 do not contribute a free union of their dependencies.
 
-The private search frontier excludes values with more than one row at length1.
-All function outputs and callable inputs have one row at that length; search
+The private search keeps the complete frontier for memoization, output checks
+and dominance pruning, including matrix values. Only future operation operands
+and successor retention exclude values with more than one row at length1. All
+function outputs and callable inputs have one row at that length; search
 transitions preserve rows or require a one-row input and do not include internal
 row extraction or stacking. Such values cannot contribute to a future output.
 Their actual source rows, node/token costs and physical dependency obligations
 remain; matrix parameters stay available as `Linear` weights by their original
 indices. This does not restrict actual operand choices or remove dead source rows.
-The search otherwise keeps only nondominated values with identical shape pairs,
-preserving the distinction between raw-token and numeric-argument reads needed by
-causal scans. Equivalent frontiers are memoized within one mask call. Candidate widths
-come from the actual frontier, parameter dimensions and declared input/output
+The frontier keeps only nondominated values with identical shape pairs, preserving
+the distinction between raw-token and numeric-argument reads needed by causal
+scans. Equivalent frontiers are memoized within one mask call. Candidate widths
+come from all actual values, parameter dimensions and declared input/output
 ABIs; column selection values do not change structural dependency coverage.
 Partial operations enumerate one representative for each equal value key while
 an operand is unselected. Equality retains shapes at both lengths, element type,

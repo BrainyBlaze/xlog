@@ -189,9 +189,7 @@ fn frontier(program: &Program) -> Vec<(usize, ValueKey)> {
     let mut values: Vec<(usize, ValueKey)> = Vec::new();
     for (id, &arguments) in arguments.iter().enumerate() {
         let key = value_key(program, id, arguments);
-        if !key.has_single_row_at_one_token()
-            || values.iter().any(|(_, available)| available.covers(&key))
-        {
+        if values.iter().any(|(_, available)| available.covers(&key)) {
             continue;
         }
         values.retain(|(_, available)| !key.covers(available));
@@ -539,6 +537,13 @@ impl Search<'_> {
 
     fn operations(&self, program: &Program, values: &[(usize, ValueKey)]) -> Vec<Op> {
         let widths = program.completion_widths(self.signatures);
+        // Keep the full frontier for memo keys, output checks and pruning.
+        // Only future operands omit values that cannot reach an output; their
+        // widths and physical Linear weight indices remain available.
+        let values = values
+            .iter()
+            .filter(|(_, value)| value.has_single_row_at_one_token())
+            .collect::<Vec<_>>();
         let mut operations = Vec::new();
         for &columns in &widths {
             operations.push(Op::Zeros { columns });
@@ -554,7 +559,7 @@ impl Search<'_> {
         for weight in 0..program.body.parameters.len() {
             operations.push(Op::Parameter { weight });
         }
-        for (input, value) in values {
+        for (input, value) in &values {
             operations.push(Op::Broadcast { input: *input });
             for &columns in &widths {
                 if value.shapes[0].1 != columns {
