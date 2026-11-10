@@ -46,6 +46,7 @@ const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
 const TOKEN_ROW_CAPACITY_LANGUAGE: &str = "xlog-contextual-acquisition-v23";
 const NAMED_BODY_LANGUAGE: &str = "xlog-contextual-acquisition-v24";
 const EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v25";
+const EXPRESSION_PREREQUISITE_LANGUAGE: &str = "xlog-contextual-acquisition-v26";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -72,7 +73,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=25) {
+    if !matches!(version, 1..=26) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -282,6 +283,12 @@ pub(super) fn language(
             if version >= 25 {
                 rows::expressions::schema(&mut schema, &operation_fields()?);
             }
+            if version >= 26 {
+                schema["description"] = json!(format!(
+                    "{} Before committing even an unfinished parent tag, its canonical required fields must have nonempty already-known function, formal-argument, closed physical-parameter and raw-token domains. The same canonical tag-prefix matcher intersects the existing catalogue with these resource facts and any selected function-symbol prefix. Child-value operands and Call arguments remain unknown future expressions, never missing preceding SSA values. Closed children and selected scalar tails retain the existing canonical typed owner; this prerequisite check does not infer child shapes or prove whole-tree completion or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -367,6 +374,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                26 => EXPRESSION_PREREQUISITE_LANGUAGE,
                 25 => EXPRESSION_LANGUAGE,
                 24 => NAMED_BODY_LANGUAGE,
                 23 => TOKEN_ROW_CAPACITY_LANGUAGE,
@@ -510,6 +518,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     self_delimited: bool,
     named_body: bool,
     expressions: bool,
+    parent_prerequisites: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -522,6 +531,7 @@ struct CanonicalPrefix<'a> {
     indices: Vec<rows::indices::Record>,
     pending_indices: Option<rows::indices::Pending<'a>>,
     pending_retained: Option<rows::metadata::PendingReference>,
+    expression_parents: Vec<rows::expressions::Parent>,
     budget: rows::budget::State,
 }
 
@@ -531,7 +541,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let expressions = language["id"] == EXPRESSION_LANGUAGE;
+        let parent_prerequisites = language["id"] == EXPRESSION_PREREQUISITE_LANGUAGE;
+        let expressions = language["id"] == EXPRESSION_LANGUAGE || parent_prerequisites;
         if expressions
             && language.as_object().is_none_or(|packet| {
                 packet.len() != 4
@@ -699,6 +710,7 @@ impl PyNativeAcquisitionMask {
             self_delimited,
             named_body,
             expressions,
+            parent_prerequisites,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -888,6 +900,9 @@ impl PyNativeAcquisitionMask {
             self.self_delimited,
             self.token_row_capacity,
         )?;
+        for parent in &prefix.expression_parents {
+            resources.admit_expression_parent(parent)?;
+        }
         // These common source obligations cannot be reduced by choosing a
         // count or retained reference. Reject them before exploring either
         // domain; both searches below only check the same parsed facts.
@@ -967,6 +982,7 @@ impl PyNativeAcquisitionMask {
                     indices: Vec::new(),
                     pending_indices: None,
                     pending_retained: None,
+                    expression_parents: prefix.expression_parents.clone(),
                     budget: rows::budget::State::default(),
                 };
                 // Completing a reference domain spends no original IDs. Keep
@@ -1001,6 +1017,7 @@ impl PyNativeAcquisitionMask {
                 self.self_delimited,
                 self.named_body,
                 self.expressions,
+                self.parent_prerequisites,
                 self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
@@ -1017,6 +1034,7 @@ impl PyNativeAcquisitionMask {
                 } else {
                     None
                 },
+                expression_parents: prefix.expression_parents,
                 budget: prefix.budget,
             })
         } else if source.len() > ACQUIRED_SOURCE_BYTES {
@@ -1028,6 +1046,7 @@ impl PyNativeAcquisitionMask {
                 indices: Vec::new(),
                 pending_indices: None,
                 pending_retained: None,
+                expression_parents: Vec::new(),
                 budget: rows::budget::State::default(),
             })
         }
@@ -1233,6 +1252,50 @@ fn resource_prefix<'a>(
 }
 
 impl Resources<'_> {
+    fn admit_expression_parent(
+        &self,
+        parent: &rows::expressions::Parent,
+    ) -> Result<(), serde_json::Error> {
+        if self.definition_index != Some(parent.definition_index)
+            || self.program_definition_index != self.definition_index
+            || !self.program.parameters_complete
+        {
+            return Err(serde_json::Error::custom(
+                "expression parent prerequisite owner differs",
+            ));
+        }
+        let viable = self
+            .operation_fields
+            .unwrap()
+            .iter()
+            .any(|(name, required)| {
+                operation_prefix(&parent.tag_prefix, name)
+                    && required.iter().all(|field| {
+                        // Children are source expressions, not unavailable earlier
+                        // values. Only their independent resource domains are known.
+                        if is_value_reference(field) || field == "arguments" {
+                            return true;
+                        }
+                        match field.as_str() {
+                            "function" => self.signatures.keys().any(|name| {
+                                parent
+                                    .function_prefix
+                                    .as_ref()
+                                    .is_none_or(|prefix| operation_prefix(prefix, name))
+                            }),
+                            "token_ids" => !self.raw_tokens.is_empty(),
+                            _ => reference_extent(&self.program, field) != Some(0),
+                        }
+                    })
+            });
+        if !viable {
+            return Err(serde_json::Error::custom(
+                "expression parent has no compatible known operand domain",
+            ));
+        }
+        Ok(())
+    }
+
     fn unplaced_producer_rows(&self) -> usize {
         let mut read = BTreeSet::new();
         let mut called = BTreeSet::new();
