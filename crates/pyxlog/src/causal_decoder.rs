@@ -130,7 +130,10 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if language_version == 34 {
+        let context = if language_version == 35 {
+            self.inner
+                .acquisition_context_with_feature_output(insertion_layer)
+        } else if language_version == 34 {
             self.inner
                 .acquisition_context_with_predicate_dependencies(insertion_layer)
         } else if matches!(language_version, 31..=33) {
@@ -180,9 +183,12 @@ impl PyNativeCausalModel {
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
-            | acquisition::PREDICATE_DEPENDENCIES_ENCODING => {
-                let predicate_values =
-                    source_encoding == acquisition::PREDICATE_DEPENDENCIES_ENCODING;
+            | acquisition::PREDICATE_DEPENDENCIES_ENCODING
+            | acquisition::FINITE_FEATURE_ENCODING => {
+                let feature_output = source_encoding == acquisition::FINITE_FEATURE_ENCODING;
+                let predicate_values = source_encoding
+                    == acquisition::PREDICATE_DEPENDENCIES_ENCODING
+                    || feature_output;
                 let value_identities =
                     source_encoding == acquisition::VALUE_DEPENDENCIES_ENCODING || predicate_values;
                 let value_references = source_encoding
@@ -199,7 +205,10 @@ impl PyNativeCausalModel {
                     || self_delimited;
                 let compact_indices = source_encoding == acquisition::COMPACT_INDICES_ROWS_ENCODING
                     || compact_metadata;
-                let context = if predicate_values {
+                let context = if feature_output {
+                    self.inner
+                        .acquisition_context_with_feature_output(insertion_layer)
+                } else if predicate_values {
                     self.inner
                         .acquisition_context_with_predicate_dependencies(insertion_layer)
                 } else if value_identities {
@@ -223,8 +232,17 @@ impl PyNativeCausalModel {
                     named_body,
                     expressions,
                     value_references,
+                    feature_output,
                 )?;
-                if predicate_values {
+                if feature_output {
+                    self.inner.fork_acquired_definitions_with_feature_output(
+                        entrypoint,
+                        definitions,
+                        parameter_values,
+                        insertion_layer,
+                        train_down_projection,
+                    )
+                } else if predicate_values {
                     self.inner
                         .fork_acquired_definitions_with_predicate_dependencies(
                             entrypoint,

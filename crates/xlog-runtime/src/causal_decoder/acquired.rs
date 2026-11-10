@@ -16,6 +16,8 @@ pub const ACQUIRED_NODES: usize = 64;
 pub const ACQUIRED_SCALARS: usize = 65_536;
 /// Feature width at the native residual insertion.
 pub const ACQUIRED_WIDTH: usize = 16;
+/// Eligibility of a new entry paired with a fresh zero-initialized projection.
+pub const FEATURE_OUTPUT_CONTRACT: &str = "possible-finite-nonzero-v1";
 
 /// Actual callers and physical parameter reads in a numerical call graph.
 pub struct DefinitionUsage {
@@ -65,7 +67,7 @@ pub fn definition_output_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
-    definition_dependencies(entrypoint, resolve, false, false)
+    definition_dependencies(entrypoint, resolve, false, false, false)
 }
 
 /// Resolve explicit value-aware facts through the same immutable call graph.
@@ -73,7 +75,7 @@ pub fn definition_output_value_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
-    definition_dependencies(entrypoint, resolve, true, false)
+    definition_dependencies(entrypoint, resolve, true, false, false)
 }
 
 /// Resolve the explicit predicate-aware contract without exporting private proofs.
@@ -81,7 +83,15 @@ pub fn definition_output_predicate_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
-    definition_dependencies(entrypoint, resolve, true, true)
+    definition_dependencies(entrypoint, resolve, true, true, false)
+}
+
+/// A newly inserted feature must not be proved incapable of finite nonzero output.
+pub fn definition_output_feature_dependencies<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
+) -> Result<TensorOutputDependencies> {
+    definition_dependencies(entrypoint, resolve, true, true, true)
 }
 
 fn definition_dependencies<'a>(
@@ -89,6 +99,7 @@ fn definition_dependencies<'a>(
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
     value_identities: bool,
     predicate_values: bool,
+    feature_output: bool,
 ) -> Result<TensorOutputDependencies> {
     fn visit<'a>(
         name: &str,
@@ -97,6 +108,7 @@ fn definition_dependencies<'a>(
         active: &mut BTreeSet<String>,
         value_identities: bool,
         predicate_values: bool,
+        feature_output: bool,
     ) -> Result<TensorOutputDependencies> {
         if let Some(dependencies) = saved.get(name) {
             return Ok(dependencies.clone());
@@ -113,10 +125,17 @@ fn definition_dependencies<'a>(
                 active,
                 value_identities,
                 predicate_values,
+                false,
             )
         };
         let mut dependencies = if predicate_values {
-            body.output_predicate_dependencies(&mut callee)?
+            let facts = body.output_predicate_facts(&mut callee)?;
+            if feature_output && facts.zero_or_nan {
+                return Err(invalid(
+                    "new entry feature has no possible finite nonzero output",
+                ));
+            }
+            facts.dependencies.into_callee_summary()
         } else if value_identities {
             body.output_value_dependencies(&mut callee)?
         } else {
@@ -134,6 +153,7 @@ fn definition_dependencies<'a>(
         &mut BTreeSet::new(),
         value_identities,
         predicate_values,
+        feature_output,
     )
 }
 
@@ -217,7 +237,7 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
-        self.acquisition_context_with_dependencies(insertion_layer, false, false)
+        self.acquisition_context_with_dependencies(insertion_layer, false, false, false)
     }
 
     /// The explicit new context carries semantic identities in the same records.
@@ -225,7 +245,7 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
-        self.acquisition_context_with_dependencies(insertion_layer, true, false)
+        self.acquisition_context_with_dependencies(insertion_layer, true, false, false)
     }
 
     /// New explicit semantics, retaining context3 and the five-field callee ABI.
@@ -233,7 +253,15 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
-        self.acquisition_context_with_dependencies(insertion_layer, true, true)
+        self.acquisition_context_with_dependencies(insertion_layer, true, true, false)
+    }
+
+    /// The extra contract applies only to a fresh entry and its zero-initialized P.
+    pub fn acquisition_context_with_feature_output(
+        &self,
+        insertion_layer: usize,
+    ) -> Result<serde_json::Value> {
+        self.acquisition_context_with_dependencies(insertion_layer, true, true, true)
     }
 
     fn acquisition_context_with_dependencies(
@@ -241,6 +269,7 @@ impl NativeCausalModel {
         insertion_layer: usize,
         value_identities: bool,
         predicate_values: bool,
+        feature_output: bool,
     ) -> Result<serde_json::Value> {
         let mut context = self.acquisition_context(insertion_layer)?;
         context["version"] = serde_json::json!(if value_identities { 3 } else { 2 });
@@ -251,12 +280,16 @@ impl NativeCausalModel {
         } else {
             "output-dependencies-v1"
         });
+        if feature_output {
+            context["entry_output_contract"] = serde_json::json!(FEATURE_OUTPUT_CONTRACT);
+        }
         for (name, callee) in context["callees"].as_object_mut().unwrap() {
             let dependencies = definition_dependencies(
                 name,
                 |name| self.functions.numerical(name),
                 value_identities,
                 predicate_values,
+                false,
             )?;
             callee["output_dependencies"] =
                 serde_json::to_value(dependencies).map_err(|error| invalid(error.to_string()))?;
@@ -363,6 +396,7 @@ impl NativeCausalModel {
             require_output_dependencies,
             false,
             false,
+            false,
         )
     }
 
@@ -383,6 +417,7 @@ impl NativeCausalModel {
             train_down_projection,
             true,
             true,
+            false,
             false,
         )
     }
@@ -405,6 +440,29 @@ impl NativeCausalModel {
             true,
             true,
             true,
+            false,
+        )
+    }
+
+    /// Preserve all numerical owners while excluding a proved unusable fresh feature.
+    pub fn fork_acquired_definitions_with_feature_output(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> Result<Self> {
+        self.fork_acquired_definitions_with_contract(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            true,
+            true,
+            true,
+            true,
         )
     }
 
@@ -418,6 +476,7 @@ impl NativeCausalModel {
         require_output_dependencies: bool,
         value_identities: bool,
         predicate_values: bool,
+        feature_output: bool,
     ) -> Result<Self> {
         if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
@@ -493,7 +552,11 @@ impl NativeCausalModel {
             ));
         }
         let usage = if require_output_dependencies {
-            let dependencies = if predicate_values {
+            let dependencies = if feature_output {
+                definition_output_feature_dependencies(&entrypoint, |name| {
+                    functions.numerical(name)
+                })?
+            } else if predicate_values {
                 definition_output_predicate_dependencies(&entrypoint, |name| {
                     functions.numerical(name)
                 })?

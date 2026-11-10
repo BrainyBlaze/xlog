@@ -58,17 +58,24 @@ impl PartialConstraints<'_> {
     }
 
     pub(super) fn permits(self, program: &Program, fields: &Map<String, Value>) -> bool {
-        (0..2).all(|length| {
-            self.expected(program, length)
-                .and_then(|expected| {
-                    program.partial_shape(fields, None, expected, length, self.fields)
-                })
-                .is_ok()
-        })
+        program.partial_feature_possible(fields, self.ancestors)
+            && (0..2).all(|length| {
+                self.expected(program, length)
+                    .and_then(|expected| {
+                        program.partial_shape(fields, None, expected, length, self.fields)
+                    })
+                    .is_ok()
+            })
     }
 
     fn allows(self, program: &Program, id: usize) -> bool {
-        (0..2).all(|length| {
+        program.feature_continuation_possible(
+            program
+                .dependencies
+                .as_ref()
+                .is_some_and(|facts| facts.predicates[id]),
+            self.ancestors,
+        ) && (0..2).all(|length| {
             self.expected(program, length).is_ok_and(|mut expected| {
                 expected
                     .intersect(program.shapes[length][id].into())
@@ -156,6 +163,7 @@ struct OutputDependencies {
     completion_cache: Option<Arc<CompletionCache>>,
     value_identities: bool,
     predicate_values: bool,
+    feature_output: bool,
 }
 
 impl EntryRequirements {
@@ -333,6 +341,99 @@ pub(super) struct Program {
 }
 
 impl Program {
+    fn partial_predicate(
+        &self,
+        fields: &Map<String, Value>,
+        active: Option<(&Operand, bool)>,
+    ) -> bool {
+        let Some(facts) = &self.dependencies else {
+            return false;
+        };
+        let known = |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|id| facts.predicates.get(id as usize))
+                .copied()
+                .unwrap_or(false)
+        };
+        let operand = |name: &str| {
+            if let Some((Operand::Value(field), proof)) = active {
+                if field == name {
+                    return proof;
+                }
+            }
+            if name == "returned" {
+                return fields
+                    .get("function")
+                    .and_then(Value::as_str)
+                    .and_then(|name| facts.callees.get(name))
+                    .is_some_and(|callee| match callee.value_identity {
+                        Some(TensorValueIdentity::Zero) => true,
+                        Some(TensorValueIdentity::Argument(slot)) => {
+                            if let Some((Operand::Argument(current), proof)) = active {
+                                if *current == slot {
+                                    return proof;
+                                }
+                            }
+                            fields
+                                .get("arguments")
+                                .and_then(Value::as_array)
+                                .and_then(|values| values.get(slot))
+                                .is_some_and(known)
+                        }
+                        _ => false,
+                    });
+            }
+            fields.get(name).is_some_and(known)
+        };
+        let inputs = fields
+            .get("inputs")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().map(known).collect::<Vec<_>>());
+        TensorValueFacts::prove_zero_or_nan(
+            fields["operation"].as_str().unwrap(),
+            &operand,
+            inputs.as_deref(),
+        )
+    }
+
+    fn feature_continuation_possible(&self, mut proof: bool, ancestors: &[Ancestor]) -> bool {
+        if !self
+            .dependencies
+            .as_ref()
+            .is_some_and(|facts| facts.feature_output)
+        {
+            return true;
+        }
+        // These are the complete source-selected ancestors, even when concrete
+        // shape/operation continuation stops at an unknown sibling or scalar.
+        for parent in ancestors.iter().rev() {
+            proof = self.partial_predicate(&parent.fields, Some((&parent.operand, proof)));
+        }
+        !proof
+    }
+
+    fn partial_feature_possible(
+        &self,
+        fields: &Map<String, Value>,
+        ancestors: &[Ancestor],
+    ) -> bool {
+        if !self
+            .dependencies
+            .as_ref()
+            .is_some_and(|facts| facts.feature_output)
+        {
+            return true;
+        }
+        self.feature_continuation_possible(self.partial_predicate(fields, None), ancestors)
+    }
+
+    pub(super) fn entry_feature_possible(&self, id: usize) -> bool {
+        self.dependencies.as_ref().is_none_or(|facts| {
+            !facts.feature_output || facts.predicates.get(id).is_some_and(|proof| !proof)
+        })
+    }
+
     fn partial_shape(
         &self,
         fields: &Map<String, Value>,
@@ -461,6 +562,7 @@ impl Program {
         completion_cache: Option<Arc<CompletionCache>>,
         value_identities: bool,
         predicate_values: bool,
+        feature_output: bool,
     ) {
         self.dependencies = Some(OutputDependencies {
             callees,
@@ -470,6 +572,7 @@ impl Program {
             completion_cache,
             value_identities,
             predicate_values,
+            feature_output,
         });
     }
 
@@ -669,19 +772,18 @@ impl Program {
     pub(super) fn outputs(&self) -> Vec<usize> {
         (0..self.body.operations.len())
             .filter(|&id| {
-                self.dependencies
-                    .as_ref()
-                    .is_none_or(|facts| self.satisfies_output(&facts.values[id]))
-                    && [1, self.body.max_context]
-                        .into_iter()
-                        .enumerate()
-                        .all(|(length, tokens)| {
-                            self.body
-                                .signature
-                                .output(tokens, self.body.vocabulary)
-                                .ok()
-                                == Some(self.shapes[length][id])
-                        })
+                self.dependencies.as_ref().is_none_or(|facts| {
+                    self.satisfies_output(&facts.values[id], facts.predicates[id])
+                }) && [1, self.body.max_context]
+                    .into_iter()
+                    .enumerate()
+                    .all(|(length, tokens)| {
+                        self.body
+                            .signature
+                            .output(tokens, self.body.vocabulary)
+                            .ok()
+                            == Some(self.shapes[length][id])
+                    })
             })
             .collect()
     }
@@ -825,12 +927,16 @@ impl Program {
                 })
     }
 
-    fn satisfies_output(&self, dependencies: &TensorOutputDependencies) -> bool {
-        self.entry_requirements.as_ref().is_none_or(|required| {
-            dependencies.has_input()
-                && required.calls.is_subset(&dependencies.definitions)
-                && required.parameters.is_subset(&dependencies.parameters)
-        })
+    fn satisfies_output(&self, dependencies: &TensorOutputDependencies, zero_or_nan: bool) -> bool {
+        !self
+            .dependencies
+            .as_ref()
+            .is_some_and(|facts| facts.feature_output && zero_or_nan)
+            && self.entry_requirements.as_ref().is_none_or(|required| {
+                dependencies.has_input()
+                    && required.calls.is_subset(&dependencies.definitions)
+                    && required.parameters.is_subset(&dependencies.parameters)
+            })
     }
 
     fn dependency_completion_possible(
@@ -870,9 +976,15 @@ impl Program {
                 .chain(next.map(|facts| &facts.dependencies))
         };
         if remaining == 0 {
+            let proof = facts
+                .predicates
+                .get(output)
+                .copied()
+                .or_else(|| next.map(|facts| facts.zero_or_nan))
+                .unwrap_or(false);
             return values()
                 .nth(output)
-                .is_some_and(|dependencies| self.satisfies_output(dependencies));
+                .is_some_and(|dependencies| self.satisfies_output(dependencies, proof));
         }
         let Some(required) = &self.entry_requirements else {
             return true;

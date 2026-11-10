@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::sync::Mutex;
 
-use super::super::ACQUIRED_SOURCE_BYTES;
+use super::super::{ACQUIRED_SOURCE_BYTES, FEATURE_OUTPUT_CONTRACT};
 use super::*;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -301,7 +301,13 @@ pub(super) fn possible(
         &required.calls,
         &required.parameters,
     );
-    let environment = if facts.predicate_values {
+    let environment = if facts.feature_output {
+        serde_json::to_vec(&(
+            environment,
+            "output-dependencies-v3",
+            FEATURE_OUTPUT_CONTRACT,
+        ))
+    } else if facts.predicate_values {
         serde_json::to_vec(&(environment, "output-dependencies-v3"))
     } else if facts.value_identities {
         serde_json::to_vec(&(environment, "output-dependencies-v2"))
@@ -460,7 +466,7 @@ impl Search<'_> {
         }
         let values = frontier(&program);
         if values.iter().any(|(id, key)| {
-            program.satisfies_output(&key.dependencies)
+            program.satisfies_output(&key.dependencies, key.zero_or_nan.unwrap_or(false))
                 && (0..2).all(|length| program.matches_output(program.shapes[length][*id], length))
         }) {
             // A canonical Tanh can fill every remaining slot while preserving
