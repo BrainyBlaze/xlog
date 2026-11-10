@@ -91,6 +91,10 @@ pub(super) struct Continuation<'a> {
 impl Continuation<'_> {
     fn allows(self, program: &Program, signatures: &Signatures) -> bool {
         let id = program.body.operations.len() - 1;
+        self.allows_value(program, id, signatures)
+    }
+
+    fn allows_value(self, program: &Program, id: usize, signatures: &Signatures) -> bool {
         if self.expected.is_some_and(|expected| {
             expected.into_iter().enumerate().any(|(length, mut shape)| {
                 shape.intersect(program.shapes[length][id].into()).is_err()
@@ -1222,6 +1226,23 @@ impl Program {
                 }),
             )
         })
+    }
+
+    /// Check exactly the existing source-selected value through the same
+    /// canonical ancestors, without appending a leaf or a generic successor.
+    pub(super) fn reference_possible(
+        &self,
+        id: usize,
+        signatures: &Signatures,
+        continuation: Continuation<'_>,
+    ) -> bool {
+        if id >= self.body.operations.len() {
+            return false;
+        }
+        let mut program = self.clone();
+        program.planned_output = None;
+        program.row_allowance = None;
+        continuation.allows_value(&program, id, signatures)
     }
 
     pub(super) fn source_call_arity(

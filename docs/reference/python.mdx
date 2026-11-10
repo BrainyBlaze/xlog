@@ -1052,7 +1052,7 @@ still apply. No preceding SSA value, tensor, default scalar, source operation or
 whole-tree completion is supplied for a missing slot. Unknown output usage is
 not invented; the existing current-definition dependency owner remains required.
 
-Version28 introduces this partial mode; version29 inherits it. Packets through
+Version28 introduces this partial mode; versions29–30 inherit it. Packets through
 version27 retain their literal schema, masks, prefix completion, suffix costs and
 restore semantics.
 The exact four-field packet, context2, expression encoding, fresh V2 actual-ID
@@ -1092,7 +1092,52 @@ execution and gradients remain unchanged. Packets through version28 retain their
 literal schema, masks, completion, costs and restoration. Necessary node bounds
 do not establish whole-tree completion, original-ID fit, nonconstancy or usefulness.
 
-For a version4 through version29 packet,
+Version30 (`xlog-contextual-acquisition-v30`) selects `numerical-expressions-v2`.
+The ordered body remains `weights`, `return`; each helper and entry `return`
+must be an operation tuple. Only value child operands and individual
+`Call.arguments` elements may instead be a nonnegative JSON integer naming a
+fully closed canonical operation of the current body. The native reader assigns
+IDs only to emitted operations, in the same left-to-right postorder. IDs reset
+for each body. Future IDs, open ancestors, references across definitions and
+integer roots are invalid. Formal argument/weight indices, widths, token arrays,
+Gather descriptors and callee references retain their original meanings.
+
+A reference uses exactly the model-selected existing value; it emits no new
+operation or ID. There is no automatic reuse, CSE, supplied graph or default
+operand. Every operation tuple and integer-reference occurrence, including
+duplicates and unfinished occurrences, consumes one of the same 64 source nodes.
+Depth, the separate 64 lowered-operation limit, scalar and source/projected byte
+limits remain unchanged. Canonical inference, causal/output dependencies,
+physical aliases and gradient accumulation own the reused operand's semantics.
+
+Unfinished decimals pass through the same `NumberChoice` domain and canonical
+partial/known ancestor continuation at both context lengths. A prefix such as
+`1` remains an unfinished decimal while a longer compatible ID is possible; it
+does not prematurely select that short ID in a parent. Pending scalar references
+count as already opened children even without a separate operation frame.
+Future reference-capable holes conservatively reserve one source occurrence:
+an earlier unfinished sibling may later supply their referenced value, so the
+absence of a matching closed value now cannot justify a two-node lower bound.
+The required body root remains an operation, with its own existing leaf proof.
+
+`ordered-structural-subsequence-v3` preserves the actual remaining original IDs,
+selected syntax, ancestor closures, required future entry and paid EOS. An unknown
+child may start with a digit or an operation tuple; it does not inherit the old
+mandatory tuple delimiters. Once its form is committed, the shared reader owns
+that form's suffix. Compatible decimal extensions reserve their unconsumed digits
+through the same alphabet bound. This remains a necessary relaxation, not exact
+grammar-coupled completion or proof of original-ID fit or usefulness.
+
+`mask.decode_definition(original_bytes)` and
+`fork_acquired(..., source_encoding="numerical-expressions-v2")` use the same
+reader and canonical admission. Seeded initialization uses those same decoded
+definitions. The v30 packet has exactly `id`, `context`, `schema` and
+`token_cost_contract`; context2 and numerical execution/gradients are unchanged.
+Packets through version29 retain their literal schemas, masks, completion,
+source encodings, suffix costs and restoration. Shorter source and useful acquired
+behavior require qualification through the actual production path.
+
+For a version4 through version30 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1115,8 +1160,10 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
-For versions25–29, `last_value` can describe a completed child while its parent
+For versions25–30, `last_value` can describe a completed child while its parent
 expression remains unfinished; it becomes the root only after that node closes.
+In version30, referencing an existing value does not add a completed operation or
+change `last_value` by itself.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the
 exact saved packet and prefix during restoration. Getter errors must remain
