@@ -48,6 +48,7 @@ const NAMED_BODY_LANGUAGE: &str = "xlog-contextual-acquisition-v24";
 const EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v25";
 const EXPRESSION_PREREQUISITE_LANGUAGE: &str = "xlog-contextual-acquisition-v26";
 const EXPRESSION_ANCESTOR_LANGUAGE: &str = "xlog-contextual-acquisition-v27";
+const PARTIAL_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v28";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -74,7 +75,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=27) {
+    if !matches!(version, 1..=28) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -296,6 +297,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 28 {
+                schema["description"] = json!(format!(
+                    "{} Canonical partial shape constraints additionally propagate through selected ancestors with unknown sibling expressions and scalar tails. Elementwise/Select equal extents, Tanh/Finite preservation, Broadcast one-row input and Gather row preservation share the concrete IR inference owner. Unknown slots stay free; only contradictory known facts reject a tag, operand or decimal extension. Unrepresented relations remain conservative, with existing prerequisites and concrete typed continuation unchanged. No future SSA value, scalar default, source node, graph search or completion witness is supplied.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -381,6 +388,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                28 => PARTIAL_EXPRESSION_LANGUAGE,
                 27 => EXPRESSION_ANCESTOR_LANGUAGE,
                 26 => EXPRESSION_PREREQUISITE_LANGUAGE,
                 25 => EXPRESSION_LANGUAGE,
@@ -528,6 +536,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     expressions: bool,
     parent_prerequisites: bool,
     ancestor_typing: bool,
+    partial_expressions: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -551,7 +560,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let ancestor_typing = language["id"] == EXPRESSION_ANCESTOR_LANGUAGE;
+        let partial_expressions = language["id"] == PARTIAL_EXPRESSION_LANGUAGE;
+        let ancestor_typing = language["id"] == EXPRESSION_ANCESTOR_LANGUAGE || partial_expressions;
         let parent_prerequisites =
             language["id"] == EXPRESSION_PREREQUISITE_LANGUAGE || ancestor_typing;
         let expressions = language["id"] == EXPRESSION_LANGUAGE || parent_prerequisites;
@@ -724,6 +734,7 @@ impl PyNativeAcquisitionMask {
             expressions,
             parent_prerequisites,
             ancestor_typing,
+            partial_expressions,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -916,6 +927,7 @@ impl PyNativeAcquisitionMask {
                 prefix.expression_parents.as_slice(),
                 prefix.expression_operation,
             )),
+            self.partial_expressions,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -971,7 +983,7 @@ impl PyNativeAcquisitionMask {
                 resources
                     .expression_continuation()
                     .as_ref()
-                    .map(ExpressionContinuation::borrow),
+                    .map(|continuation| continuation.borrow(resources.operation_fields.unwrap())),
             )?;
         }
         if let Some(pending) = &prefix.pending_retained {
@@ -1162,18 +1174,24 @@ struct Resources<'a> {
     token_budget: Option<rows::budget::Bound<'a>>,
     token_row_capacity: bool,
     source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
+    partial_expressions: bool,
 }
 
 struct ExpressionContinuation {
     ancestors: Vec<typed::Ancestor>,
     root: bool,
+    partial: Option<Vec<typed::Ancestor>>,
 }
 
 impl ExpressionContinuation {
-    fn borrow(&self) -> typed::Continuation<'_> {
+    fn borrow<'a>(&'a self, fields: &'a BTreeMap<String, Vec<String>>) -> typed::Continuation<'a> {
         typed::Continuation {
             ancestors: &self.ancestors,
             root: self.root,
+            partial: self
+                .partial
+                .as_ref()
+                .map(|ancestors| typed::PartialConstraints { ancestors, fields }),
         }
     }
 }
@@ -1216,6 +1234,7 @@ fn resource_prefix<'a>(
     self_delimited: bool,
     token_row_capacity: bool,
     source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
+    partial_expressions: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1279,6 +1298,7 @@ fn resource_prefix<'a>(
         token_budget,
         token_row_capacity,
         source_expression,
+        partial_expressions,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -1364,7 +1384,20 @@ impl Resources<'_> {
                 operand: operand.clone(),
             });
         }
-        Some(ExpressionContinuation { ancestors, root })
+        let partial = self.partial_expressions.then(|| {
+            parents[..parents.len() - 1]
+                .iter()
+                .map(|parent| typed::Ancestor {
+                    fields: parent.selected.clone(),
+                    operand: parent.operand.as_ref().unwrap().clone(),
+                })
+                .collect()
+        });
+        Some(ExpressionContinuation {
+            ancestors,
+            root,
+            partial,
+        })
     }
 
     fn admit_expression_ancestors(&self) -> Result<(), serde_json::Error> {
@@ -1381,14 +1414,21 @@ impl Resources<'_> {
                 if !operation_prefix(&parent.tag_prefix, name) {
                     return false;
                 }
+                let mut fields = parent.selected.clone();
+                fields.insert("operation".into(), json!(name));
+                let continuation = continuation.borrow(self.operation_fields.unwrap());
+                if continuation
+                    .partial
+                    .is_some_and(|partial| !partial.permits(program, &fields))
+                {
+                    return false;
+                }
                 // This candidate still needs source-authored children. Their types
                 // cannot be borrowed from earlier postorder values.
                 if parent.operand.is_some() || !self.expression_children_known(parent, required) {
                     return true;
                 }
-                let mut fields = parent.selected.clone();
-                fields.insert("operation".into(), json!(name));
-                program.possible(&fields, None, &self.signatures, Some(continuation.borrow()))
+                program.possible(&fields, None, &self.signatures, Some(continuation))
             });
         if !viable {
             return Err(serde_json::Error::custom(
@@ -2344,7 +2384,9 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                             .resources
                             .current_expression()
                             .map(|parent| &parent.selected),
-                        continuation: continuation.as_ref().map(ExpressionContinuation::borrow),
+                        continuation: continuation.as_ref().map(|continuation| {
+                            continuation.borrow(self.resources.operation_fields.unwrap())
+                        }),
                     })?;
                     if let (Some(program), Some(operation)) =
                         (&mut self.resources.program.typed, parsed.operation)

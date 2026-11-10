@@ -90,6 +90,8 @@ class NativeCausalModel:
         while child expressions retain their unknown future value domains.
         V27 checks prospective child types through source-selected ancestors with
         known siblings, reaching the current definition's output contract at the root.
+        V28 propagates canonical partial shape constraints through unknown siblings
+        and scalar tails, sharing the concrete IR type owner.
         """
         ...
     def fork_acquired(
@@ -128,18 +130,18 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–27 require positive remaining original IDs including this choice and paid EOS.
+        """V21–28 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
-        V21–24 use ordered-structural-subsequence-v1; V25–27 require v2 and
+        V21–24 use ordered-structural-subsequence-v1; V25–28 require v2 and
         does not infer flat row capacity for expressions.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–27 prefix facts as JSON; no token selection or final admission."""
+        """Version4–28 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–27 source into canonical JSON using the captured context."""
+        """Elaborate complete v7–28 source into canonical JSON using the captured context."""
 
 class _LogitSelection(TypedDict):
     raw_argmax: int

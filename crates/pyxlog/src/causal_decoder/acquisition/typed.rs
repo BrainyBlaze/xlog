@@ -10,8 +10,8 @@ pub(super) use completion::CompletionCache;
 use serde_json::{Map, Value};
 use xlog_core::XlogError;
 use xlog_ir::tensor::{
-    TensorOperation as Op, TensorOutputDependencies, TensorProgram, TensorSignature,
-    TensorValueShape,
+    TensorOperation as Op, TensorOutputDependencies, TensorProgram, TensorShapeConstraint,
+    TensorSignature, TensorValueShape,
 };
 
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
@@ -27,17 +27,75 @@ pub(super) struct Ancestor {
     pub(super) operand: Operand,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct PartialConstraints<'a> {
+    pub(super) ancestors: &'a [Ancestor],
+    pub(super) fields: &'a BTreeMap<String, Vec<String>>,
+}
+
+impl PartialConstraints<'_> {
+    fn expected(
+        self,
+        program: &Program,
+        length: usize,
+    ) -> Result<TensorShapeConstraint, XlogError> {
+        let tokens = [1, program.body.max_context][length];
+        let mut expected = program
+            .body
+            .signature
+            .output(tokens, program.body.vocabulary)?
+            .into();
+        for ancestor in self.ancestors {
+            expected = program.partial_shape(
+                &ancestor.fields,
+                Some(&ancestor.operand),
+                expected,
+                length,
+                self.fields,
+            )?;
+        }
+        Ok(expected)
+    }
+
+    pub(super) fn permits(self, program: &Program, fields: &Map<String, Value>) -> bool {
+        (0..2).all(|length| {
+            self.expected(program, length)
+                .and_then(|expected| {
+                    program.partial_shape(fields, None, expected, length, self.fields)
+                })
+                .is_ok()
+        })
+    }
+
+    fn allows(self, program: &Program, id: usize) -> bool {
+        (0..2).all(|length| {
+            self.expected(program, length).is_ok_and(|mut expected| {
+                expected
+                    .intersect(program.shapes[length][id].into())
+                    .is_ok()
+            })
+        })
+    }
+}
+
 /// Only source-known siblings are carried here. An unknown sibling ends the
 /// chain; reaching the root instead requires the current definition's output.
 #[derive(Clone, Copy)]
 pub(super) struct Continuation<'a> {
     pub(super) ancestors: &'a [Ancestor],
     pub(super) root: bool,
+    pub(super) partial: Option<PartialConstraints<'a>>,
 }
 
 impl Continuation<'_> {
     fn allows(self, program: &Program, signatures: &Signatures) -> bool {
         let id = program.body.operations.len() - 1;
+        if self
+            .partial
+            .is_some_and(|partial| !partial.allows(program, id))
+        {
+            return false;
+        }
         let Some((ancestor, rest)) = self.ancestors.split_first() else {
             return !self.root || program.outputs().contains(&id);
         };
@@ -62,6 +120,9 @@ impl Continuation<'_> {
             Some(Self {
                 ancestors: rest,
                 root: self.root,
+                // The partial path belongs to the original current candidate,
+                // not each subsequent concrete ancestor or generic successor.
+                partial: None,
             }),
         )
     }
@@ -220,6 +281,58 @@ pub(super) struct Program {
 }
 
 impl Program {
+    fn partial_shape(
+        &self,
+        fields: &Map<String, Value>,
+        active: Option<&Operand>,
+        mut output: TensorShapeConstraint,
+        length: usize,
+        catalogue: &BTreeMap<String, Vec<String>>,
+    ) -> Result<TensorShapeConstraint, XlogError> {
+        let tag = fields["operation"].as_str().unwrap();
+        let names = catalogue[tag]
+            .iter()
+            .filter(|field| super::is_value_reference(field))
+            .collect::<Vec<_>>();
+        let mut inputs = names
+            .iter()
+            .map(|name| {
+                fields.get(*name).and_then(Value::as_u64).map_or(
+                    Ok(TensorShapeConstraint::default()),
+                    |id| {
+                        self.shapes[length]
+                            .get(id as usize)
+                            .copied()
+                            .map(TensorShapeConstraint::from)
+                            .ok_or_else(|| {
+                                XlogError::Compilation("partial operand is not preceding".into())
+                            })
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let related = Op::constrain_shapes(
+            tag,
+            &mut inputs,
+            &mut output,
+            [1, self.body.max_context][length],
+            fields
+                .get("indices")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+        )?;
+        // An unsupported relation leaves the active child free. No scalar,
+        // callee, shape or preceding value is supplied for that future slot.
+        match active {
+            Some(Operand::Value(name)) if related => Ok(inputs[names
+                .iter()
+                .position(|field| field.as_str() == name.as_str())
+                .unwrap()]),
+            Some(_) => Ok(TensorShapeConstraint::default()),
+            None => Ok(output),
+        }
+    }
+
     /// Bound retained prefix state without allocating a serialized copy. The
     /// shared completion cache is not copied into an operation checkpoint.
     pub(super) fn fits_prefix_cache(&self, limit: usize) -> bool {
