@@ -45,6 +45,7 @@ const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
 const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
 const TOKEN_ROW_CAPACITY_LANGUAGE: &str = "xlog-contextual-acquisition-v23";
 const NAMED_BODY_LANGUAGE: &str = "xlog-contextual-acquisition-v24";
+const EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v25";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -52,6 +53,7 @@ pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENC
 pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
+pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -70,7 +72,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=24) {
+    if !matches!(version, 1..=25) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -277,6 +279,9 @@ pub(super) fn language(
             if version >= 19 {
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
+            if version >= 25 {
+                rows::expressions::schema(&mut schema, &operation_fields()?);
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -326,7 +331,7 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 20 {
+        if (20..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} From the opening of a retained symbol wrapper, its captured-name domain must intersect canonical typed callee or physical alias admission. This check includes unfinished tags and names, reuses the same canonical visitors and selects no name or operation.",
                 schema["description"].as_str().unwrap()
@@ -338,13 +343,13 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 22 {
+        if (22..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Open-body tag and operand prefixes retain a typed structural continuation within the cumulative row allowance. That allowance is not a chosen output. Closing the nonempty body chooses its actual last row, which must satisfy both context lengths, causality and output dependencies. The caller supplies remaining original IDs including the next choice and a paid EOS. Ordered structural suffix coverage uses the supplied spellings and reserves known producer obligations without fixing future helper placement. It is a necessary relaxation, not a whole-grammar witness, a completion guarantee or evidence of usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 23 {
+        if (23..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} The open body's prospective row allowance also intersects the maximum current-body count whose shared ordered suffix projection fits the remaining original IDs and paid EOS. The same typed owner applies this capacity before partial tags and operands, including after parsed-prefix restoration. This inverse structural bound selects no count or graph and remains a necessary relaxation rather than a token-fit witness.",
                 schema["description"].as_str().unwrap()
@@ -362,6 +367,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                25 => EXPRESSION_LANGUAGE,
                 24 => NAMED_BODY_LANGUAGE,
                 23 => TOKEN_ROW_CAPACITY_LANGUAGE,
                 22 => SELF_DELIMITED_LANGUAGE,
@@ -388,7 +394,11 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: (version >= 21).then_some(rows::budget::CONTRACT),
+            token_cost_contract: if version >= 25 {
+                Some(rows::budget::EXPRESSION_CONTRACT)
+            } else {
+                (version >= 21).then_some(rows::budget::CONTRACT)
+            },
         })
         .map_err(value_error);
     }
@@ -499,6 +509,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     retained_reference_prefix: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -520,11 +531,31 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let named_body = language["id"] == NAMED_BODY_LANGUAGE;
-        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || named_body;
-        let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity;
+        let expressions = language["id"] == EXPRESSION_LANGUAGE;
+        if expressions
+            && language.as_object().is_none_or(|packet| {
+                packet.len() != 4
+                    || ["id", "context", "schema", "token_cost_contract"]
+                        .iter()
+                        .any(|key| !packet.contains_key(*key))
+            })
+        {
+            return Err(value_error(
+                "native acquisition language packet fields differ",
+            ));
+        }
+        let named_body = language["id"] == NAMED_BODY_LANGUAGE || expressions;
+        let token_row_capacity =
+            language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || language["id"] == NAMED_BODY_LANGUAGE;
+        let self_delimited =
+            language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
+        let cost_contract = if expressions {
+            rows::budget::EXPRESSION_CONTRACT
+        } else {
+            rows::budget::CONTRACT
+        };
+        if token_budget && language["token_cost_contract"] != cost_contract {
             return Err(value_error("native original-token cost contract differs"));
         }
         let retained_reference_prefix =
@@ -667,6 +698,7 @@ impl PyNativeAcquisitionMask {
             retained_reference_prefix,
             self_delimited,
             named_body,
+            expressions,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -818,6 +850,7 @@ impl PyNativeAcquisitionMask {
             self.compact_metadata,
             self.self_delimited,
             self.named_body,
+            self.expressions,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -942,7 +975,7 @@ impl PyNativeAcquisitionMask {
                     &candidate,
                     reusable_prefix,
                     false,
-                    token_budget.filter(|_| self.token_row_capacity),
+                    token_budget.filter(|_| self.token_row_capacity || self.expressions),
                 )
                 .is_ok()
             });
@@ -967,6 +1000,7 @@ impl PyNativeAcquisitionMask {
                 self.compact_metadata,
                 self.self_delimited,
                 self.named_body,
+                self.expressions,
                 self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
@@ -1032,6 +1066,7 @@ pub(super) fn decode_numerical_rows(
     compact_metadata: bool,
     self_delimited: bool,
     named_body: bool,
+    expressions: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1043,6 +1078,7 @@ pub(super) fn decode_numerical_rows(
         compact_metadata,
         self_delimited,
         named_body,
+        expressions,
     )
     .map_err(value_error)
 }
@@ -2286,13 +2322,20 @@ struct ParsedOperation {
     following_comma: Option<usize>,
 }
 
+fn is_value_reference(field: &str) -> bool {
+    matches!(
+        field,
+        "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative"
+    )
+}
+
 fn reference_extent(program: &Program, field: &str) -> Option<usize> {
+    if is_value_reference(field) {
+        return Some(program.operations);
+    }
     match field {
         "argument" => program.arguments,
         "weight" => Some(program.parameters),
-        "input" | "initial" | "left" | "right" | "condition" | "positive" | "negative" => {
-            Some(program.operations)
-        }
         _ => None,
     }
 }

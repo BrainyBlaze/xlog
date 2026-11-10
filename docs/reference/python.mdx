@@ -927,7 +927,62 @@ literal schema, interpretation, costs and saved replay behavior. A named body is
 not accepted as a positional body by those earlier versions. The representation
 and its effect on generated quality still require real production execution.
 
-For a version4 through version24 packet,
+Version25 (`xlog-contextual-acquisition-v25`) selects
+`numerical-expressions-v1`. Root order remains `intent`, `helpers`, `entry`.
+Entry has exactly the ordered keys `weights`, `return`; each helper is
+`[local_name, signature, body]`, with the same body structure. The physical FP32
+weight table, signature and symbol syntax, shared aliases and initialization
+retain their existing owners.
+
+`return` is one model-authored operation tuple from the existing canonical
+catalogue. Its tag and operand positions are unchanged. Value operands
+(`input`, `initial`, `left`, `right`, `condition`, `positive`, `negative`) contain
+child expressions; `call.arguments` contains an array of expressions. Argument
+and weight indices, widths, callee references, token ID arrays, Gather literal
+indices or descriptors and `max_steps` retain their scalar domains. Source
+contains no operation count, operation table, output index or value bindings.
+
+The shared bounded reader lowers the tree in deterministic left-to-right
+postorder. Each source occurrence produces exactly one canonical operation;
+duplicates count separately and are not combined. Native assigns the internal
+value indices, and the root becomes the last canonical value. Completed children
+and selected parents without child holes use the existing canonical prefix
+owner. A parent with unfinished children stays incomplete; no operand or node
+is supplied to fill its holes. Shape, causality, physical output dependencies,
+initializer, registration, execution and VJP use the same canonical numerical
+definitions. The combined helpers and entry retain the limit of 64 actual nodes
+and 65,536 new scalars; opened ancestors count toward the node/depth limit.
+Original and projected source bytes remain independently bounded.
+
+`decode_definition` and
+`fork_acquired(..., source_encoding="numerical-expressions-v1")` use this same
+native reader on the original UTF8 source. The schema uses bare local recursive
+references to the existing operation definitions. The pinned grammar engine's
+[schema converter](https://github.com/guidance-ai/llguidance/blob/856b6067c94d9540084f07ae2c9df168888ec12d/parser/src/json/schema.rs)
+and
+[compiler](https://github.com/guidance-ai/llguidance/blob/856b6067c94d9540084f07ae2c9df168888ec12d/parser/src/json/compiler.rs)
+resolve local recursive references; this source mechanism does not qualify a
+particular compiled grammar or generated acquisition.
+
+The packet has exactly `id`, `context`, `schema`, `token_cost_contract`, retaining
+context version2 and `output-dependencies-v1`. Version25 requires
+`token_cost_contract="ordered-structural-subsequence-v2"`. The positive
+`remaining_tokens` API still counts actual ORIGINAL IDs, including the next
+choice and paid EOS. V2 projects mandatory unconsumed keys, selected operands,
+active ancestor closings and future entry syntax through the same alphabet and
+suffix bound. Consumed bytes are not charged again. Unknown tree structure is
+relaxed optimistically; the flat row projection and inverse token-derived row
+capacity are not applied to expressions. Cumulative canonical node capacity
+still applies. Parsed-prefix and structural-completion reuse cannot replace the
+fresh suffix check with its actual remainder and pending source state.
+
+These are necessary bounds, not a whole-grammar witness, a 512-ID fit guarantee
+or evidence of semantic nonconstancy or usefulness. Actual paid EOS, native
+admission and production qualification remain required. Packets1–24 and row
+encodings1–7 retain their literal schemas, masks, costs and interpretation;
+earlier encodings do not accept the new expression body.
+
+For a version4 through version25 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -950,6 +1005,8 @@ When a new definition starts, its shape facts remain `null` until its own
 signature and operations complete. `unread_constants` describes all prefix
 reads; it makes no reachability claim about an unfinished entry. This record
 does not replace final constructor admission or propose a next operation.
+For version25, `last_value` can describe a completed child while its parent
+expression remains unfinished; it becomes the root only after that node closes.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the
 exact saved packet and prefix during restoration. Getter errors must remain
