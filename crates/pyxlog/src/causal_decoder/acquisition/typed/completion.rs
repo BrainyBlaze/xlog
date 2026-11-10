@@ -14,6 +14,13 @@ struct ValueKey {
 }
 
 impl ValueKey {
+    /// At T=1 every callable argument and output has one row. Search consumers
+    /// preserve rows or require one row, and never use Row/Stack, so multirow
+    /// values cannot reach an output. Physical Linear weights remain available.
+    fn has_single_row_at_one_token(&self) -> bool {
+        self.shapes[0].0 == 1
+    }
+
     fn covers(&self, other: &Self) -> bool {
         self.shapes == other.shapes
             && (!self.numeric_arguments || other.numeric_arguments)
@@ -458,7 +465,9 @@ impl Search<'_> {
                 let id = program.body.operations.len() - 1;
                 let reads = program.body.value_argument_dependencies();
                 let value = value_key(&program, id, reads[id]);
-                if !values.iter().any(|(_, available)| available.covers(&value)) {
+                if value.has_single_row_at_one_token()
+                    && !values.iter().any(|(_, available)| available.covers(&value))
+                {
                     next.entry(value)
                         .or_insert_with(|| program.body.operations[id].clone());
                 }
@@ -528,6 +537,13 @@ impl Search<'_> {
 
     fn operations(&self, program: &Program, values: &[(usize, ValueKey)]) -> Vec<Op> {
         let widths = program.completion_widths(self.signatures);
+        // Keep the full frontier for memo keys, output checks and pruning.
+        // Only future operands omit values that cannot reach an output; their
+        // widths and physical Linear weight indices remain available.
+        let values = values
+            .iter()
+            .filter(|(_, value)| value.has_single_row_at_one_token())
+            .collect::<Vec<_>>();
         let mut operations = Vec::new();
         for &columns in &widths {
             operations.push(Op::Zeros { columns });
@@ -543,7 +559,7 @@ impl Search<'_> {
         for weight in 0..program.body.parameters.len() {
             operations.push(Op::Parameter { weight });
         }
-        for (input, value) in values {
+        for (input, value) in &values {
             operations.push(Op::Broadcast { input: *input });
             for &columns in &widths {
                 if value.shapes[0].1 != columns {
