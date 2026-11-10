@@ -65,11 +65,28 @@ pub fn definition_output_dependencies<'a>(
     entrypoint: &str,
     resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
 ) -> Result<TensorOutputDependencies> {
+    definition_dependencies(entrypoint, resolve, false)
+}
+
+/// Resolve explicit value-aware facts through the same immutable call graph.
+pub fn definition_output_value_dependencies<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
+) -> Result<TensorOutputDependencies> {
+    definition_dependencies(entrypoint, resolve, true)
+}
+
+fn definition_dependencies<'a>(
+    entrypoint: &str,
+    resolve: impl Fn(&str) -> Result<&'a TensorProgram>,
+    value_identities: bool,
+) -> Result<TensorOutputDependencies> {
     fn visit<'a>(
         name: &str,
         resolve: &impl Fn(&str) -> Result<&'a TensorProgram>,
         saved: &mut BTreeMap<String, TensorOutputDependencies>,
         active: &mut BTreeSet<String>,
+        value_identities: bool,
     ) -> Result<TensorOutputDependencies> {
         if let Some(dependencies) = saved.get(name) {
             return Ok(dependencies.clone());
@@ -77,8 +94,13 @@ pub fn definition_output_dependencies<'a>(
         if !active.insert(name.to_owned()) {
             return Err(invalid("numerical output dependency graph is cyclic"));
         }
-        let mut dependencies = resolve(name)?
-            .output_dependencies(&mut |callee| visit(callee, resolve, saved, active))?;
+        let body = resolve(name)?;
+        let mut callee = |callee: &str| visit(callee, resolve, saved, active, value_identities);
+        let mut dependencies = if value_identities {
+            body.output_value_dependencies(&mut callee)?
+        } else {
+            body.output_dependencies(&mut callee)?
+        };
         dependencies.definitions.insert(name.to_owned());
         active.remove(name);
         saved.insert(name.to_owned(), dependencies.clone());
@@ -89,6 +111,7 @@ pub fn definition_output_dependencies<'a>(
         &resolve,
         &mut BTreeMap::new(),
         &mut BTreeSet::new(),
+        value_identities,
     )
 }
 
@@ -172,12 +195,35 @@ impl NativeCausalModel {
         &self,
         insertion_layer: usize,
     ) -> Result<serde_json::Value> {
+        self.acquisition_context_with_dependencies(insertion_layer, false)
+    }
+
+    /// The explicit new context carries semantic identities in the same records.
+    pub fn acquisition_context_with_value_dependencies(
+        &self,
+        insertion_layer: usize,
+    ) -> Result<serde_json::Value> {
+        self.acquisition_context_with_dependencies(insertion_layer, true)
+    }
+
+    fn acquisition_context_with_dependencies(
+        &self,
+        insertion_layer: usize,
+        value_identities: bool,
+    ) -> Result<serde_json::Value> {
         let mut context = self.acquisition_context(insertion_layer)?;
-        context["version"] = serde_json::json!(2);
-        context["dependency_contract"] = serde_json::json!("output-dependencies-v1");
+        context["version"] = serde_json::json!(if value_identities { 3 } else { 2 });
+        context["dependency_contract"] = serde_json::json!(if value_identities {
+            "output-dependencies-v2"
+        } else {
+            "output-dependencies-v1"
+        });
         for (name, callee) in context["callees"].as_object_mut().unwrap() {
-            let dependencies =
-                definition_output_dependencies(name, |name| self.functions.numerical(name))?;
+            let dependencies = definition_dependencies(
+                name,
+                |name| self.functions.numerical(name),
+                value_identities,
+            )?;
             callee["output_dependencies"] =
                 serde_json::to_value(dependencies).map_err(|error| invalid(error.to_string()))?;
         }
@@ -274,6 +320,47 @@ impl NativeCausalModel {
         train_down_projection: bool,
         require_output_dependencies: bool,
     ) -> Result<Self> {
+        self.fork_acquired_definitions_with_contract(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            require_output_dependencies,
+            false,
+        )
+    }
+
+    /// Admit the explicit value-aware source through the same physical owner.
+    pub fn fork_acquired_definitions_with_value_dependencies(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+    ) -> Result<Self> {
+        self.fork_acquired_definitions_with_contract(
+            entrypoint,
+            definitions,
+            parameter_values,
+            insertion_layer,
+            train_down_projection,
+            true,
+            true,
+        )
+    }
+
+    fn fork_acquired_definitions_with_contract(
+        &self,
+        entrypoint: String,
+        definitions: Vec<FuncDef>,
+        parameter_values: BTreeMap<String, Vec<f32>>,
+        insertion_layer: usize,
+        train_down_projection: bool,
+        require_output_dependencies: bool,
+        value_identities: bool,
+    ) -> Result<Self> {
         if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
@@ -348,8 +435,11 @@ impl NativeCausalModel {
             ));
         }
         let usage = if require_output_dependencies {
-            let dependencies =
-                definition_output_dependencies(&entrypoint, |name| functions.numerical(name))?;
+            let dependencies = if value_identities {
+                definition_output_value_dependencies(&entrypoint, |name| functions.numerical(name))?
+            } else {
+                definition_output_dependencies(&entrypoint, |name| functions.numerical(name))?
+            };
             if !dependencies.has_input() {
                 return Err(invalid(
                     "acquired output must have a possible dependency on tokens or current hidden",
