@@ -429,7 +429,7 @@ impl ProgramImageLayout {
             previous_generation = previous_generation.checked_add(1).ok_or_else(overflow)?;
             if word(bytes, begin)? != previous_generation
                 || word(bytes, begin + 2)? >= 2
-                || !(2..=5).contains(&word(bytes, begin + 3)?)
+                || !(2..=6).contains(&word(bytes, begin + 3)?)
                 || (0..4).any(|i| word(bytes, begin + 22 + i).ok() != Some(parent[i]))
                 || (0..4).any(|i| word(bytes, begin + 30 + i).ok() != Some(parent[i]))
                 || (0..4).any(|i| word(bytes, begin + 34 + i).ok() != word(bytes, 6 + i).ok())

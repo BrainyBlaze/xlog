@@ -2159,6 +2159,30 @@ fn rule_prefix_native_work_ceiling(
     let forest = ceiling_sum([predicate_bound, ceiling_product(5, operands)?, leaves, 18])?;
     ceiling[1] = ceiling_sum([ceiling[1], ceiling_product(96, forest)?])?;
     ceiling[3] = ceiling_sum([ceiling[3], ceiling_product(4, forest)?])?;
+    if let Some((binding, _)) = &source.task {
+        let cells = binding.spec.semantic_context.rule_cell_capacity();
+        let ranges = source
+            .publication
+            .as_ref()
+            .ok_or(SemanticTransitionError::NotBound)?
+            .bank_templates[0]
+            .len() as u64;
+        // Weight completion scans each actual target once and summarizes the
+        // two typed coefficient choices through the original operand roster.
+        // Each ledger lookup inspects two slots per reserved cell and the
+        // selected handle; the prefix also binds its original captured range.
+        ceiling[1] = ceiling_sum([
+            ceiling[1],
+            ceiling_product(
+                predicate_bound,
+                ceiling_sum([ceiling_product(2, cells)?, 96])?,
+            )?,
+            ceiling_product(32, operands)?,
+            ceiling_product(4, ranges)?,
+            64,
+        ])?;
+        ceiling[3] = ceiling_sum([ceiling[3], predicate_bound, operands, 14])?;
+    }
     native_work_ceiling_units(ceiling)?;
     Ok(ceiling)
 }
@@ -2278,9 +2302,13 @@ pub(super) fn policy_vjp_native_work_ceiling(
         .as_ref()
         .is_some_and(|task| task.0.spec.program.editable_program().is_some())
     {
-        // A reached prefix requires predicate_count < books[1]. Four action
+        // A reached prefix requires predicate_count < books[1]. Every structural action
         // checks and both scans plus the selected check can enter that owner.
-        let prefix_calls = ceiling_sum([4, ceiling_product(2, edit_cells)?, edit_components])?;
+        let prefix_calls = ceiling_sum([
+            SEMANTIC_OPCODE_CARDINALITY as u64 - 2,
+            ceiling_product(2, edit_cells)?,
+            edit_components,
+        ])?;
         repeat_native_ceiling(
             &mut ceiling,
             rule_prefix_native_work_ceiling(source, targets)?,
@@ -2798,6 +2826,13 @@ fn publication_finalization_native_work_ceiling(
                 ceiling_product(3, n)?,
                 60,
                 world_state::SOURCE_HEADER_WORDS as u64,
+                // Planning and rechecking two selected weight targets visit
+                // the frozen ledger capacity; no measured state sizes enter.
+                ceiling_product(
+                    8,
+                    capacity(SemanticStateRole::SemanticWorldState as u64, 0)? / (6 * 8),
+                )?,
+                128,
             ])?,
             0,
             0,
@@ -3120,7 +3155,7 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                 ],
             )?;
             if let Some(prefix) = prefix {
-                repeat_native_ceiling(ceiling, prefix, 4)?;
+                repeat_native_ceiling(ceiling, prefix, SEMANTIC_OPCODE_CARDINALITY as u64 - 2)?;
             }
             native_work_ceiling_units(*ceiling)?;
             continue;
@@ -3362,7 +3397,12 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                     0,
                     ceiling_product(
                         4,
-                        ceiling_sum([ceiling_product(8, ground.image.nodes as u64)?, rules, 160])?,
+                        ceiling_sum([
+                            ceiling_product(8, ground.image.nodes as u64)?,
+                            rules,
+                            ceiling_product(2, task.0.spec.semantic_context.rule_cell_capacity())?,
+                            160,
+                        ])?,
                     )?,
                     0,
                     0,

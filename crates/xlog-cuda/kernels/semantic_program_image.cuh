@@ -1,4 +1,5 @@
 #pragma once
+#include "semantic_rule_cells.cuh"
 #include <stdint.h>
 #include "semantic_program.cuh"
 
@@ -109,6 +110,8 @@ __device__ bool decode_frame(uint64_t address,const Geometry& g,
 struct DecodedEdit {
     uint32_t opcode,target,guard,children[4],effect,block,library_index;
     semantic_program::Rule rule;
+    uint32_t coefficient;
+    semantic_rule_cells::Handle cell;
 };
 // A backward prefix is a read-only view of the acquired entry and the one
 // preceding, already admitted edit. It neither forks truth nor republishes it.

@@ -1138,9 +1138,10 @@ struct TaskProgramBank {
     semantic_task_ground::Task task;
     uint32_t selected_rule_count;
     semantic_program_image::Prefix image;
+    semantic_rule_cells::View cells;
 };
 
-static constexpr uint64_t PROGRAM_IMAGE_EDIT_TAG=0x584c4f47494d4544ULL;
+static constexpr uint64_t PROGRAM_IMAGE_EDIT_TAG=semantic_rule_cells::kEditReceiptTag;
 static constexpr uint64_t PROGRAM_FOREST_QUERY_TAG=0x584c4f4746515259ULL;
 static constexpr uint64_t PROGRAM_FUEL=1000000;
 static constexpr uint64_t PROGRAM_SCRATCH_OFFSET=8*1024*1024;
@@ -4065,6 +4066,11 @@ __device__ bool action_completes(const uint64_t* books,const Component* componen
            bank.image.mutations()-bank.image.inherited_mutations()>=bank.image.geometry.local_mutations ||
            !supported(books,components,support,start,1,opcode,work))return false;
         uint32_t choices[18]{};choices[0]=ACTION_APPLY;choices[1]=opcode;
+        if(opcode==semantic_rule_cells::kReplaceWeight) {
+            return bank.task.rule_control==semantic_task_ground::kStructuralRules &&
+                semantic_program_image_action::weight_prefix_completes(books,components,support,start,
+                    choices,1,opcode,bank.image,bank.cells,NativePrefixWork{work});
+        }
         if(opcode>=3) {
             return bank.task.rule_control==semantic_task_ground::kStructuralRules &&
                 semantic_program_image_action::prefix_completes(books,components,support,start,choices,1,opcode,
@@ -4102,11 +4108,16 @@ __device__ bool legal_category(const Component c,uint32_t category,const uint64_
     if(c.field==0) {
         if(category==0)return actions[0]!=0;
         if(category!=1)return false;
-        for(uint32_t opcode=1;opcode<6;++opcode)if(actions[opcode])return true;
+        for(uint32_t opcode=1;opcode<SEMANTIC_OPCODE_CARDINALITY;++opcode)if(actions[opcode])return true;
         return false;
     }
     if(choices[0]==ACTION_NO_EDIT)return category==0;
-    if(c.field==1)return category<6 && actions[category]!=0;
+    if(c.field==1)return category<SEMANTIC_OPCODE_CARDINALITY && actions[category]!=0;
+    if(choices[1]==semantic_rule_cells::kReplaceWeight) {
+        return bank.editable && bank.task.rule_control==semantic_task_ground::kStructuralRules &&
+            semantic_program_image_action::weight_prefix_completes(books,components,support,start,
+                choices,c.field,category,bank.image,bank.cells,NativePrefixWork{work});
+    }
     if(choices[1]>=3) {
         return bank.editable && bank.task.rule_control==semantic_task_ground::kStructuralRules &&
             semantic_program_image_action::prefix_completes(books,components,support,start,choices,c.field,category,
@@ -4567,6 +4578,10 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         return TaskProgramQueryOutcome::Failure;
     semantic_program::DualSupport support{};
     semantic_world::Measure world{};
+    if(slot) {
+        world.candidate_updates=state->semantic_receipts[1+(slot-1)*3].words;
+        world.candidate_update_count=2;
+    }
     semantic_program::Fact* output=nullptr;
     const auto closure=task_program_closure(descriptor,bank,plane,slot,
         &support,&output,&world,&state->execution_work);
@@ -4763,6 +4778,14 @@ __device__ bool task_program_prefix(const Descriptor& d,TaskProgramBank* bank,
     semantic_task_ground::Plane plane{};
     if(!semantic_task_ground::decode_plane(d.task_ground,d.task_ground_bytes,bank->task,&plane))return false;
     bank->image.reset(plane.images[3]);
+    uint64_t inspected=0;
+    semantic_world::Measure original{};
+    semantic_world::MeasureFuel original_fuel(&original,&inspected,PROGRAM_FUEL);
+    const auto cells=task_world_original(d,SEMANTIC_WORLD_STATE_ROLE,original);
+    const bool bound=semantic_rule_cells::bind(cells.words,cells.bytes,&bank->cells,
+        [&](const uint64_t* data,uint64_t index) { return original.read(data,index); });
+    semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,inspected);
+    if(!bound)return false;
     if(slot) {
         const uint32_t begin=32+lane*68;
         uint32_t choices[18]{};
@@ -4775,10 +4798,15 @@ __device__ bool task_program_prefix(const Descriptor& d,TaskProgramBank* bank,
            prior.words[1]==PROGRAM_IMAGE_EDIT_TAG && prior.words[40]==0) {
             semantic_program_image::DecodedEdit decoded{};
             const bool fixed=bank->task.rule_control==semantic_task_ground::kFixedRuleActivation;
-            if(!semantic_program_image_action::decode(reinterpret_cast<const uint64_t*>(d.codebooks),choices,
+            const bool valid=choices[1]==semantic_rule_cells::kReplaceWeight ?
+                bank->task.rule_control==semantic_task_ground::kStructuralRules &&
+                    semantic_program_image_action::decode_weight(reinterpret_cast<const uint64_t*>(d.codebooks),
+                        choices,bank->image,bank->cells,&decoded,NativePrefixWork{work}) :
+                semantic_program_image_action::decode(reinterpret_cast<const uint64_t*>(d.codebooks),choices,
                     bank->program,bank->image,semantic_opcode_active(choices[1]),semantic_opcode_null(choices[1]),
                     fixed,bank->task.library_rules,bank->task.library_actions,bank->task.library_count,
-                    &decoded,NativePrefixWork{work}))return false;
+                    &decoded,NativePrefixWork{work});
+            if(!valid)return false;
             bank->image.after(decoded);
         }
     }
@@ -4799,10 +4827,15 @@ __device__ semantic_program::Status task_program_mutate(const Descriptor& d,cons
         return Status::InvalidProgram;
     semantic_program_image::DecodedEdit decoded{};
     const bool fixed=bank.task.rule_control==semantic_task_ground::kFixedRuleActivation;
-    if(!semantic_program_image_action::decode(reinterpret_cast<const uint64_t*>(d.codebooks),choices,
+    const bool valid=choices[1]==semantic_rule_cells::kReplaceWeight ?
+        bank.task.rule_control==semantic_task_ground::kStructuralRules &&
+            semantic_program_image_action::decode_weight(reinterpret_cast<const uint64_t*>(d.codebooks),
+                choices,bank.image,bank.cells,&decoded,NativePrefixWork{work}) :
+        semantic_program_image_action::decode(reinterpret_cast<const uint64_t*>(d.codebooks),choices,
             bank.program,bank.image,semantic_opcode_active(choices[1]),semantic_opcode_null(choices[1]),
             fixed,bank.task.library_rules,bank.task.library_actions,bank.task.library_count,
-            &decoded,NativePrefixWork{work}))return Status::InvalidProgram;
+            &decoded,NativePrefixWork{work});
+    if(!valid)return Status::InvalidProgram;
     uint64_t parent[4];semantic_graph::copy_identity(parent,frame.header+10,work);
     const uint64_t row_index=frame.header[3];
     uint64_t before_mask=0,after_mask=0;
@@ -4846,7 +4879,7 @@ __device__ semantic_program::Status task_program_mutate(const Descriptor& d,cons
                 frame.header[4]=semantic_graph::written_word(index+1,work);
             }
         }
-    } else status=Status::InvalidProgram;
+    } else if(decoded.opcode!=semantic_rule_cells::kReplaceWeight)status=Status::InvalidProgram;
     if(status==Status::Ok) {
         const uint64_t generation=frame.header[2]+1;
         frame.header[2]=semantic_graph::written_word(generation,work);
@@ -4892,6 +4925,12 @@ __device__ semantic_program::Status task_program_mutate(const Descriptor& d,cons
     receipt->words[37]=decoded.library_index==UINT32_MAX ? 0 : uint64_t(decoded.library_index)+1;
     receipt->words[38]=before_mask;receipt->words[39]=after_mask;
     receipt->words[40]=uint64_t(status);receipt->words[41]=bank.task.rule_control;
+    if(decoded.opcode==semantic_rule_cells::kReplaceWeight) {
+        receipt->words[32]=decoded.cell.code;receipt->words[33]=decoded.coefficient;
+        receipt->words[34]=decoded.cell.birth_low;receipt->words[35]=decoded.cell.birth_high;
+        receipt->words[36]=decoded.cell.generation;receipt->words[37]=decoded.cell.context;
+        receipt->words[38]=decoded.cell.ordinal;receipt->words[39]=bank.cells.generation;
+    }
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::CanonicalByte,42*8);
     return status;
 }
@@ -5076,7 +5115,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
     auto support=reinterpret_cast<const uint8_t*>(descriptor.support);
     auto books=reinterpret_cast<const uint64_t*>(descriptor.codebooks);
     auto viability=reinterpret_cast<uint32_t*>(descriptor.scratch)+2*262144;
-    __shared__ uint32_t actions[4][6],choices[18];
+    __shared__ uint32_t actions[4][SEMANTIC_OPCODE_CARDINALITY],choices[18];
     __shared__ TaskProgramBank backward_program_bank;
     __shared__ uint32_t legal_count,active_count,selected_active,apply_selected,apply_actor,apply_edit,edit_lane;
     __shared__ uint64_t actor_denominator,edit_denominator;
@@ -5512,7 +5551,7 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
             if(backward_program_bank.editable &&
                !task_program_prefix(descriptor,&backward_program_bank,lane,c.slot,receipts,
                     reinterpret_cast<const State*>(descriptor.state),&work))*status=1;
-            if(!*status)for(uint32_t opcode=0;opcode<6;++opcode)
+            if(!*status)for(uint32_t opcode=0;opcode<SEMANTIC_OPCODE_CARDINALITY;++opcode)
                 actions[edit][opcode]=action_completes(books,components,support,viable,
                     32+lane*68+c.slot*18,opcode,backward_program_bank,&work);
         }
@@ -7765,21 +7804,23 @@ __device__ uint64_t publication_discard_control(const Descriptor& descriptor,Pub
 }
 
 struct SemanticRuleCellPublication {
-    uint64_t created,count,capacity,contexts,context,next_rule,birth_low,birth_high,generation;
+    uint64_t created,updated,count,capacity,contexts,context,next_rule,birth_low,birth_high,generation;
+    semantic_rule_cells::Update updates[2];
 };
 __device__ uint64_t semantic_world_word(const uint64_t* words,uint64_t index,
         semantic_graph::NativeWorkTally* work) {
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,1);
     return words[index];
 }
-// Only the genuinely selected, successfully applied rule-creation receipts
-// allocate cells. Candidate evaluation and stale publication never consume a
-// birth from the immutable common owner.
+// Only genuinely selected, successful receipts allocate or update cells.
+// Candidate evaluation and stale publication never change a selected cell or
+// consume a birth from the immutable common owner.
 __device__ bool publication_plan_rule_cells(const PublicationControl& control,const PublicationBank& base,uint64_t winner,
         const State& state,SemanticRuleCellPublication* plan,semantic_graph::NativeWorkTally* work) {
     *plan={};
     if(!winner)return true;
     uint64_t selected_rules=0;
+    const uint64_t* weight_receipts[2]{};
     for(uint32_t slot=0;slot<2;++slot) {
         const auto& receipt=state.semantic_receipts[1+(winner-1)*3+slot];
         const uint64_t status=semantic_world_word(receipt.words,0,work);
@@ -7792,9 +7833,13 @@ __device__ bool publication_plan_rule_cells(const PublicationControl& control,co
            outcome==uint64_t(semantic_program::Status::Ok)) {
             selected_rules=rules;
             plan->created+=uint64_t(opcode==2 && rule_control!=semantic_task_ground::kFixedRuleActivation);
+            if(opcode==semantic_rule_cells::kReplaceWeight) {
+                if(plan->updated==2)return false;
+                weight_receipts[plan->updated++]=receipt.words;
+            }
         }
     }
-    if(!plan->created)return true;
+    if(!plan->created && !plan->updated)return true;
     const auto* ranges=reinterpret_cast<const PublicationRange*>(
         control.directories[base.header.publication_word&1]);
     const auto* source=publication_find_range(ranges,base.header.range_count,SEMANTIC_WORLD_SOURCE_ROLE,0,work);
@@ -7833,12 +7878,19 @@ __device__ bool publication_plan_rule_cells(const PublicationControl& control,co
     plan->next_rule=semantic_world_word(current,16+plan->context,work);
     if(plan->next_rule>plan->count || !(plan->birth_low|plan->birth_high) ||
        (plan->birth_high==UINT64_MAX && plan->birth_low>UINT64_MAX-plan->created))return false;
+    semantic_rule_cells::View selected{};
+    auto read=[&](const uint64_t* data,uint64_t index) { return semantic_world_word(data,index,work); };
+    if(!semantic_rule_cells::bind(current,cells->length_bytes,&selected,read))return false;
+    for(uint32_t index=0;index<plan->updated;++index) {
+        if(!semantic_rule_cells::read_update(selected,weight_receipts[index],&plan->updates[index],read))return false;
+        if(index && plan->updates[0].original.rule==plan->updates[index].original.rule)return false;
+    }
     return true;
 }
 __device__ bool publication_apply_rule_cells(const PublicationControl& control,
         PublicationBank& next,const SemanticRuleCellPublication& plan,
         semantic_graph::NativeWorkTally* work) {
-    if(!plan.created)return true;
+    if(!plan.created && !plan.updated)return true;
     auto* ranges=reinterpret_cast<PublicationRange*>(control.directories[next.header.publication_word&1]);
     auto* cells=const_cast<PublicationRange*>(publication_find_range(
         ranges,next.header.range_count,SEMANTIC_WORLD_STATE_ROLE,0,work));
@@ -7854,6 +7906,25 @@ __device__ bool publication_apply_rule_cells(const PublicationControl& control,
        !semantic_graph::checked_add(words,cell_words,&words) ||
        !semantic_graph::checked_mul(words,8,&bytes) ||
        cells->offset_bytes>backing.bytes || bytes>backing.bytes-cells->offset_bytes)return false;
+    semantic_rule_cells::View selected{};
+    auto read=[&](const uint64_t* data,uint64_t index) { return semantic_world_word(data,index,work); };
+    if(!semantic_rule_cells::bind(destination,cells->length_bytes,&selected,read) ||
+       selected.context!=plan.context || selected.count!=plan.count ||
+       selected.generation!=plan.generation)return false;
+    for(uint32_t index=0;index<plan.updated;++index) {
+        const auto& expected=plan.updates[index].original;
+        semantic_rule_cells::Handle current{};
+        if(!semantic_rule_cells::lookup(selected,expected.rule,&current,read) ||
+           current.ordinal!=expected.ordinal || current.context!=expected.context ||
+           current.birth_low!=expected.birth_low || current.birth_high!=expected.birth_high ||
+           current.generation!=expected.generation || current.code!=expected.code)return false;
+    }
+    for(uint32_t index=0;index<plan.updated;++index) {
+        const auto& update=plan.updates[index];
+        auto* cell=destination+16+plan.contexts+6*update.original.ordinal;
+        cell[4]=semantic_graph::written_word(update.original.generation+1,work);
+        cell[5]=semantic_graph::written_word(update.coefficient,work);
+    }
     uint64_t low=plan.birth_low,high=plan.birth_high;
     for(uint64_t created=0;created<plan.created;++created) {
         auto* cell=destination+16+plan.contexts+6*(plan.count+created);
@@ -8445,7 +8516,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
     __shared__ uint64_t acquired_word,structural_end,transition_kind;
     __shared__ bool publication_held,publication_staged,numerical_refused,input_bank_admitted;
     __shared__ uint32_t count,invalid,width,failed;
-    __shared__ uint32_t choices[18],actions[4][6],lane_live;
+    __shared__ uint32_t choices[18],actions[4][SEMANTIC_OPCODE_CARDINALITY],lane_live;
     __shared__ TaskProgramBank program_bank;
     __shared__ semantic_graph::Receipt candidate;
     if(threadIdx.x==0) {
@@ -8959,7 +9030,7 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
         for(uint32_t target=threadIdx.x;target<books[1];target+=blockDim.x)
             viable[target]=target_completes(books,components,support,start,target,&sampler_work);
         __syncthreads();
-        if(threadIdx.x==0)for(uint32_t opcode=0;opcode<6;++opcode)actions[edit][opcode]=0;
+        if(threadIdx.x==0)for(uint32_t opcode=0;opcode<SEMANTIC_OPCODE_CARDINALITY;++opcode)actions[edit][opcode]=0;
         __syncthreads();
     }
     execution_work_merge_parallel(state->execution_work,sampler_work);
@@ -8983,11 +9054,11 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             for(uint32_t i=0;i<18;++i)choices[i]=0;
             if(program_bank.editable && !task_program_prefix(descriptor,&program_bank,lane,component.slot,
                     receipts,state,&sampler_work)) { failed=1;state->status=9; }
-            for(uint32_t opcode=0;opcode<6;++opcode)
+            for(uint32_t opcode=0;opcode<SEMANTIC_OPCODE_CARDINALITY;++opcode)
                 actions[edit][opcode]=action_completes(books,components,support,viable,
                     32+lane*68+component.slot*18,opcode,program_bank,&sampler_work);
             bool complete=false;
-            for(uint32_t opcode=0;opcode<6;++opcode)complete|=actions[edit][opcode]!=0;
+            for(uint32_t opcode=0;opcode<SEMANTIC_OPCODE_CARDINALITY;++opcode)complete|=actions[edit][opcode]!=0;
             if(!complete){failed=1;state->status=2;}
         }
         __syncthreads();

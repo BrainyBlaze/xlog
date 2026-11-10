@@ -311,6 +311,7 @@ impl SemanticWorldSource {
             if birth == 0
                 || birth >= next_birth
                 || word(bytes, begin + 4) == 0
+                || word(bytes, begin + 4) > word(bytes, 10)
                 || !births.insert(birth)
                 || !targets.insert((context, rule))
                 || !(1..=32769).contains(&word(bytes, begin + 5))
@@ -430,6 +431,10 @@ impl SemanticWorldContext {
 
     pub(super) fn initial_records(&self) -> [SemanticStateRecord; 2] {
         self.source.initial_records(self.ordinal)
+    }
+
+    pub(super) fn rule_cell_capacity(&self) -> u64 {
+        self.source.cell_capacity as u64
     }
 
     fn validate_source<B: PublicationByteStorage>(

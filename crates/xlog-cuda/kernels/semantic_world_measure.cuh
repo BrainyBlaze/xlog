@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include "semantic_world.cuh"
+#include "semantic_rule_cells.cuh"
 #include "semantic_measure.cuh"
 
 namespace semantic_world {
@@ -48,6 +49,9 @@ struct Measure {
     uint64_t *image_paths=nullptr,*assigned=nullptr,*query_roots=nullptr;
     uint64_t *support_lineage=nullptr,*image_lineage_events=nullptr,*attainment_roots=nullptr;
     const uint64_t* ledger=nullptr;
+    semantic_rule_cells::View rule_cells{};
+    const uint64_t* candidate_updates=nullptr;
+    uint32_t candidate_update_count=0;
     uint64_t ledger_words=0,ledger_cells=0,next_rule=0;
     uint64_t* rule_ordinals=nullptr;
     double *values=nullptr,*adjoints=nullptr,*true_weights=nullptr,*false_weights=nullptr;
@@ -257,6 +261,10 @@ struct Measure {
         }
         next_rule=read(ledger,16+context.ordinal);
         if(next_rule<context.rules || next_rule>UINT32_MAX)fail(MeasureStatus::InvalidSource);
+        if(status==MeasureStatus::Ok &&
+           (!semantic_rule_cells::bind(ledger,bytes,&rule_cells,
+                [&](const uint64_t* data,uint64_t index) { return read(data,index); }) ||
+            rule_cells.context!=context.ordinal))fail(MeasureStatus::InvalidSource);
         return status==MeasureStatus::Ok;
     }
     __device__ uint32_t fact_event(uint32_t fact,uint32_t channel) {
@@ -285,16 +293,17 @@ struct Measure {
         if(next_rule>uint64_t(context.rules)+appended_rules ||
            rule>=uint64_t(context.rules)+appended_rules) { fail(MeasureStatus::InvalidSource);return 0; }
         if(rule>=next_rule)return gate; // Native append creates a unit cell at the sole publication.
-        for(uint64_t cell=0;cell<ledger_cells && status==MeasureStatus::Ok;++cell) {
-            const uint64_t offset=16+source.context_count+cell*6;
-            if(read(ledger,offset)!=context.ordinal || read(ledger,offset+1)!=rule)continue;
-            const uint64_t code=read(ledger,offset+5);
-            if(code==1)return 0;
-            if(code==32769)return gate;
-            fail(code>1 && code<32769 ? MeasureStatus::UnsupportedCoefficient : MeasureStatus::InvalidSource);
-            return 0;
+        semantic_rule_cells::Handle cell{};uint64_t code=0;
+        auto read_cell=[&](const uint64_t* data,uint64_t index) { return read(data,index); };
+        if(!semantic_rule_cells::lookup(rule_cells,rule,&cell,read_cell) ||
+           !semantic_rule_cells::candidate_coefficient(rule_cells,cell,candidate_updates,
+                candidate_update_count,&code,read_cell)) {
+            fail(MeasureStatus::InvalidSource);return 0;
         }
-        fail(MeasureStatus::InvalidSource);return 0;
+        if(code==1)return 0;
+        if(code==32769)return gate;
+        fail(code>1 && code<32769 ? MeasureStatus::UnsupportedCoefficient : MeasureStatus::InvalidSource);
+        return 0;
     }
     __device__ bool assignment(uint32_t root) {
         while(root>=2 && status==MeasureStatus::Ok) {

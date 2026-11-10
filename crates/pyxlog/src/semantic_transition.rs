@@ -20944,6 +20944,12 @@ fn descriptor_meaning_object(
         SemanticActionDescriptor::ProgramLeaf { effect } => {
             ("program_leaf", *effect).into_pyobject(py)?.into_any()
         }
+        SemanticActionDescriptor::RuleCell { rule } => {
+            ("rule_cell", *rule).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::RuleCoefficient { code } => {
+            ("rule_coefficient", *code).into_pyobject(py)?.into_any()
+        }
     };
     Ok(value.unbind())
 }

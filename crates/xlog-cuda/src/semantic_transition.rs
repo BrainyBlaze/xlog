@@ -1722,7 +1722,7 @@ impl SemanticActionCatalogue {
         SCRATCH_BYTES
     }
     /// Active and forced-NULL masks in canonical opcode order.
-    pub const fn field_masks(&self) -> [(u32, u32); 6] {
+    pub const fn field_masks(&self) -> [(u32, u32); SEMANTIC_OPCODE_CARDINALITY] {
         [
             (NO_EDIT_ACTIVE_MASK as u32, NO_EDIT_NULL_MASK as u32),
             (
@@ -1741,6 +1741,10 @@ impl SemanticActionCatalogue {
             (
                 REPLACE_ROOT_ACTIVE_MASK as u32,
                 REPLACE_ROOT_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_WEIGHT_ACTIVE_MASK as u32,
+                REPLACE_WEIGHT_NULL_MASK as u32,
             ),
         ]
     }
@@ -1904,6 +1908,12 @@ pub enum SemanticActionDescriptor {
     ProgramLeaf {
         effect: u32,
     },
+    RuleCell {
+        rule: u32,
+    },
+    RuleCoefficient {
+        code: u32,
+    },
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -1927,6 +1937,7 @@ struct SemanticDecodedProgramEdit {
     children: [u32; 4],
     effect: u32,
     block: u32,
+    coefficient: u32,
     rule: Option<crate::SemanticProgramRule>,
     bytes: Vec<u8>,
 }
@@ -2189,7 +2200,7 @@ impl ActionCodebooks {
         }
         let opcode = choices[1];
         let (_, nulls) = semantic_opcode_masks(opcode).ok_or_else(mismatch)?;
-        if !(2..=5).contains(&opcode)
+        if !(2..=6).contains(&opcode)
             || choices
                 .iter()
                 .enumerate()
@@ -2204,6 +2215,7 @@ impl ActionCodebooks {
             children: [0; 4],
             effect: 0,
             block: 0,
+            coefficient: 0,
             rule: None,
             bytes: Vec::new(),
         };
@@ -2233,6 +2245,29 @@ impl ActionCodebooks {
             edit.rule = Some(value.rule);
             edit.block = value.block;
             edit.effect = self.program_leaf_effect(program, choices[17], true)?.0;
+        } else if opcode == 6 {
+            edit.target = match self
+                .local_category(2, choices[2])
+                .and_then(|index| self.targets.get(index))
+            {
+                Some(SemanticActionDescriptor::RuleCell { rule })
+                    if (*rule as usize)
+                        < program.initial_rules.len()
+                            + program.image.mutation_capacity as usize =>
+                {
+                    *rule
+                }
+                _ => return Err(mismatch()),
+            };
+            edit.coefficient = match self
+                .local_category(3, choices[3])
+                .and_then(|index| self.operands.get(index))
+            {
+                Some(SemanticActionDescriptor::RuleCoefficient {
+                    code: code @ (1 | 32769),
+                }) => *code,
+                _ => return Err(mismatch()),
+            };
         } else {
             let target = self
                 .local_category(2, choices[2])
@@ -2265,7 +2300,7 @@ impl ActionCodebooks {
             }
         }
         edit.bytes.extend_from_slice(b"XLOG-DECODED-PROGRAM-EDIT\0");
-        material_u64(&mut edit.bytes, 1);
+        material_u64(&mut edit.bytes, 2);
         edit.bytes.extend_from_slice(self.binding.digest.as_bytes());
         edit.bytes
             .extend_from_slice(Self::program_binding(program).as_bytes());
@@ -2278,6 +2313,7 @@ impl ActionCodebooks {
             edit.guard,
             edit.effect,
             edit.block,
+            edit.coefficient,
         ]
         .into_iter()
         .chain(edit.children)
@@ -2551,6 +2587,8 @@ impl ActionCodebooks {
                 program.predicate_count as usize
                     + program.image.nodes.len()
                     + program.image.roots.len()
+                    + program.initial_rules.len()
+                    + program.image.mutation_capacity as usize
             })
             .unwrap_or(0);
         let additional_operands = program
@@ -2559,6 +2597,7 @@ impl ActionCodebooks {
                     + 4
                     + program.image.guards.len()
                     + program.image.nodes.len()
+                    + 2
             })
             .unwrap_or(0);
         if [
@@ -2603,6 +2642,10 @@ impl ActionCodebooks {
                 });
             }
             words[53] = target_views.len() as u64 + 1;
+            for rule in 0..program.initial_rules.len() + program.image.mutation_capacity as usize {
+                words.extend([rule as u64, u64::MAX - 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+                target_views.push(SemanticActionDescriptor::RuleCell { rule: rule as u32 });
+            }
             for predicate in 0..program.predicate_count {
                 let arity = program.predicate_arities[predicate as usize];
                 words.extend([
@@ -2664,6 +2707,10 @@ impl ActionCodebooks {
             for index in 0..4 {
                 words.extend([0, 0, 0, 2, u64::from(index), 0]);
                 operand_views.push(SemanticActionDescriptor::RuleVariable { index });
+            }
+            for code in [1, 32769] {
+                words.extend([0, 0, 0, 5, u64::from(code), 0]);
+                operand_views.push(SemanticActionDescriptor::RuleCoefficient { code });
             }
         }
         if words[55] == 0 {
@@ -9615,14 +9662,35 @@ fn validated_program_edit_receipt(
             } else {
                 decoded.target
             })
-        || receipt[32] != u64::from(decoded.guard)
-        || receipt[33..37] != decoded.children.map(u64::from)
+        || (decoded.opcode != 6
+            && (receipt[32] != u64::from(decoded.guard)
+                || receipt[33..37] != decoded.children.map(u64::from)))
         || receipt[41] != control
         || (receipt[40] != 0 && receipt[26] != u64::MAX)
     {
         return Err(mismatch());
     }
-    if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
+    if decoded.opcode == 6 {
+        if control != SemanticEvaluationIntervention::Structural as u64
+            || !matches!(receipt[32], 1 | 32769)
+            || receipt[33] != u64::from(decoded.coefficient)
+            || receipt[32] == receipt[33]
+            || (receipt[34] | receipt[35]) == 0
+            || receipt[36] == 0
+            || receipt[36] == u64::MAX
+            || receipt[39] < receipt[36]
+            || receipt[39] == u64::MAX
+        {
+            return Err(mismatch());
+        }
+        if let Some(previous) =
+            previous_choices.filter(|choices| choices[0] == 1 && choices[1] == 6)
+        {
+            if codebooks.decoded_program_edit(program, previous)?.target == decoded.target {
+                return Err(mismatch());
+            }
+        }
+    } else if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
         let library = library.ok_or_else(mismatch)?;
         let rule = decoded.rule.ok_or_else(mismatch)?;
         let index = library
@@ -9703,8 +9771,16 @@ fn completed_theory_delta_for_slot(
         for word in &hard_decode[12..] {
             material_u64(&mut delta_bytes, *word);
         }
-        let delta =
-            completed_action_child_material(owner, b"program-image-delta", ordinal, &delta_bytes);
+        let delta = completed_action_child_material(
+            owner,
+            if decoded.opcode == 6 {
+                b"rule-coefficient-delta"
+            } else {
+                b"program-image-delta"
+            },
+            ordinal,
+            &delta_bytes,
+        );
         let mut payload = Vec::new();
         payload.extend_from_slice(predecessor_semantic_root_digest.as_bytes());
         payload.extend_from_slice(task_identity.as_bytes());
@@ -9721,7 +9797,11 @@ fn completed_theory_delta_for_slot(
         }
         let evidence = completed_action_child_material(
             owner,
-            b"program-image-delta-evidence",
+            if decoded.opcode == 6 {
+                b"rule-coefficient-delta-evidence"
+            } else {
+                b"program-image-delta-evidence"
+            },
             ordinal,
             &payload,
         );
