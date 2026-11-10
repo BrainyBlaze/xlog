@@ -1137,7 +1137,93 @@ Packets through version29 retain their literal schemas, masks, completion,
 source encodings, suffix costs and restoration. Shorter source and useful acquired
 behavior require qualification through the actual production path.
 
-For a version4 through version30 packet,
+Version31 (`xlog-contextual-acquisition-v31`) selects `numerical-expressions-v3`.
+Its authored syntax, postorder IDs, explicit child references, source counting
+and `ordered-structural-subsequence-v3` bound are identical to version30.
+The change is explicit value-aware output admission through the existing
+canonical numerical dependency owner. The packet still has exactly `id`,
+`context`, `schema` and `token_cost_contract`. Versions31 and32 accept context
+`version: 3` with `dependency_contract: "output-dependencies-v2"`.
+
+Each retained callee's `output_dependencies` record has exactly `arguments`,
+`tokens`, `definitions`, `parameters` and `value_identity`. The last field is
+`"Unknown"`, `"Zero"` or `{"Argument": n}`. `Zero` proves that every element is
+the positive FP32 zero from an explicit `Zeros` operation or a proven copying
+path. `Argument` proves the unchanged numeric formal at index `n`; its argument
+dependencies must be exactly that formal. Both proofs exclude token and physical
+parameter dependencies. Native summaries never publish a body-local operation
+ID. Internally an actual operation identity distinguishes unrelated unknown
+values, while multiple references to the same value retain that identity.
+`Unknown` is not a constant and two unknown values are not assumed equal.
+
+Positive zero propagates through Broadcast, GatherColumns, Row, Stack of proven
+zeros and successful Finite. Finite preserves its successfully checked finite
+input's identity, including signed zero. Calls substitute a returned formal's
+actual operand identity or preserve a proven zero; opaque callee results acquire
+their own caller-local identity. Parameter values, names and storage trainability
+do not establish constants. Tanh and other arithmetic stay conservative: there
+is no multiplication-by-zero, subtraction-of-equal-values or division identity,
+and no assumption that unknown values are finite or that signed zero is positive.
+
+When Select branches have the same actual SSA identity or the same proven value,
+their dependencies survive and its condition contributes none. Two distinct
+explicit positive-zero branches therefore cannot create an input dependency via
+their condition. A proven positive-zero condition selects only the negative
+branch, matching the executable `condition > 0` predicate. The graph, operation
+count, execution, gradients and physical aliases are unchanged; this analysis
+does not rewrite or remove operations.
+
+Actual and prospective operations, helper summaries, partial/known ancestors and
+reference `NumberChoice` checks use these same facts at both context lengths.
+Unchosen Call operands retain an optimistic union, with identity only when every
+eligible value proves the same identity. Their prospective ancestor checks use
+that union rather than treating one representative as the chosen operand.
+Operand grouping, frontier dominance, Call argument grouping and completion keys
+retain identity and the dependency mode. The new completion search includes
+canonical binary joins and distinct Select condition placements; structural
+equivalence of those transitions alone no longer establishes equal value facts.
+
+`mask.decode_definition(original_bytes)` applies the captured semantic admission
+before returning the canonical definitions used by seeded initialization.
+`fork_acquired(..., source_encoding="numerical-expressions-v3")` independently
+requires the same semantic contract before allocation, through the existing
+registry and constructor. This explicit encoding requires that admission even
+if the older `require_output_dependencies` keyword is false. No new Python
+semantic parser or keyword selects the mode. Versions through30, their context2
+records without `value_identity`, source encodings, default constructor behavior,
+masks and restoration retain their original structural contract. The new facts
+exclude some provably input-independent outputs; unknown arithmetic can still
+hide constant results. General nonconstancy, completed generation, token fit,
+numerical parity and useful acquired behavior require separate qualification.
+
+Version32 (`xlog-contextual-acquisition-v32`) retains context3, dependency-v2,
+`numerical-expressions-v3`, the authored reference grammar and the exact four
+packet fields. Its token cost contract is `ordered-structural-subsequence-v4`.
+It strengthens the same Reader/typed/State/Alphabet/Bound path for selected
+literal numeric arrays. The canonical partial shape relations at one and maximum
+context length supply the minimum index or raw-token coordinate count. Unknown
+widths retain the existing positive-extent minimum. No width, index value, graph
+or operand is supplied to the authored program.
+
+The numeric visitor reports already present coordinates, a committed following
+comma and the shortest admitted unfinished decimal tail. Missing coordinates and
+their separators precede the same mandatory ancestor closures, future entry and
+paid EOS in one ordered pattern. A committed comma requires another coordinate;
+an already present coordinate or separator is never charged twice. Query-local
+collection facts are cleared when that array completes. The Reader's original
+literal-array form distinguishes these facts from a descriptor's expanded
+canonical indices. Unselected literal/descriptor alternatives, descriptors and
+Call argument arrays retain their prior bounds and actual ABI checks, including
+valid zero-arity Calls. Unsupported cardinality facts stay optimistic.
+
+This is a necessary ordered subsequence bound, not exact grammar-coupled
+completion, token fit or useful generation. Versions through31 retain their
+original costs, selectors, masks and restoration. The new mode changes no
+numerical operation, dependency fact, gradient or source cap. Complete decoding,
+seeded initialization and original-source fork keep the version31 semantic owner
+and encoding; no new Python parser or keyword selects this reservation.
+
+For a version4 through version32 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

@@ -1,6 +1,7 @@
 //! Contextual wire restrictions and shared resource admission before token choice.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use xlog_ir::tensor::{
     TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
+    TensorValueIdentity,
 };
 use xlog_logic::ast::FuncDef;
 
@@ -52,6 +54,8 @@ const EXPRESSION_ANCESTOR_LANGUAGE: &str = "xlog-contextual-acquisition-v27";
 const PARTIAL_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v28";
 const EXPRESSION_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v29";
 const EXPRESSION_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v30";
+const VALUE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v31";
+const TYPED_COLLECTION_LANGUAGE: &str = "xlog-contextual-acquisition-v32";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -61,6 +65,7 @@ pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCOD
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
+pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -79,7 +84,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=30) {
+    if !matches!(version, 1..=32) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -319,6 +324,18 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 31 {
+                schema["description"] = json!(format!(
+                    "{} The explicit value-aware dependency contract propagates canonical SSA/formal identities and proven positive zeros through copy operations and calls. Select with identical proven branches carries branch dependencies without its condition; a proven zero condition selects the negative branch. Unknown arithmetic and parameter values stay unknown. These same facts govern prospective choices, existing-value references, callee summaries and final native admission without rewriting operations or proving general nonconstancy or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version >= 32 {
+                schema["description"] = json!(format!(
+                    "{} Selected literal numeric arrays also reserve their proven minimum remaining coordinates, separators and unfinished decimal tail in the same ordered suffix bound. The shared canonical partial shape owner derives widths at both context lengths; unknown relations stay optimistic. A consumed comma requires another element even without a stronger typed width. Original-source form, existing ancestor closures, future entry and paid EOS share one projection, without double-charging active elements or imposing literal syntax on unselected descriptors. This necessary subsequence coverage is not an exact grammar-coupled token-fit or usefulness witness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -404,6 +421,8 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                32 => TYPED_COLLECTION_LANGUAGE,
+                31 => VALUE_DEPENDENCY_LANGUAGE,
                 30 => EXPRESSION_REFERENCE_LANGUAGE,
                 29 => EXPRESSION_NODE_LANGUAGE,
                 28 => PARTIAL_EXPRESSION_LANGUAGE,
@@ -436,7 +455,9 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: if version >= 30 {
+            token_cost_contract: if version >= 32 {
+                Some(rows::budget::COLLECTION_CONTRACT)
+            } else if version >= 30 {
                 Some(rows::budget::REFERENCE_CONTRACT)
             } else if version >= 25 {
                 Some(rows::budget::EXPRESSION_CONTRACT)
@@ -559,6 +580,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     partial_expressions: bool,
     expression_node_obligations: bool,
     value_references: bool,
+    typed_collections: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -584,7 +606,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE;
+        let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE;
+        let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE || typed_collections;
+        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities;
         let expression_node_obligations =
             language["id"] == EXPRESSION_NODE_LANGUAGE || value_references;
         let partial_expressions =
@@ -611,7 +635,9 @@ impl PyNativeAcquisitionMask {
         let self_delimited =
             language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        let cost_contract = if value_references {
+        let cost_contract = if typed_collections {
+            rows::budget::COLLECTION_CONTRACT
+        } else if value_references {
             rows::budget::REFERENCE_CONTRACT
         } else if expressions {
             rows::budget::EXPRESSION_CONTRACT
@@ -651,8 +677,21 @@ impl PyNativeAcquisitionMask {
             && language["id"] != INTENT_LANGUAGE
             && language["id"] != ENTRY_BUDGET_LANGUAGE
             && !output_dependencies)
-            || context["version"] != if output_dependencies { 2 } else { 1 }
-            || (output_dependencies && context["dependency_contract"] != "output-dependencies-v1")
+            || context["version"]
+                != if value_identities {
+                    3
+                } else if output_dependencies {
+                    2
+                } else {
+                    1
+                }
+            || (output_dependencies
+                && context["dependency_contract"]
+                    != if value_identities {
+                        "output-dependencies-v2"
+                    } else {
+                        "output-dependencies-v1"
+                    })
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
                 "nodes": ACQUIRED_NODES, "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
@@ -718,14 +757,42 @@ impl PyNativeAcquisitionMask {
                     .output(max_context, token_bytes.len())
                     .map_err(value_error)?;
                 if output_dependencies {
+                    let record = &callee["output_dependencies"];
+                    if record.as_object().is_none_or(|record| {
+                        record.len() != if value_identities { 5 } else { 4 }
+                            || ["arguments", "tokens", "definitions", "parameters"]
+                                .iter()
+                                .any(|key| !record.contains_key(*key))
+                            || (value_identities && !record.contains_key("value_identity"))
+                    }) {
+                        return Err(value_error("retained output dependency fields differ"));
+                    }
                     let dependencies: TensorOutputDependencies =
                         serde_json::from_value(callee["output_dependencies"].clone())
                             .map_err(value_error)?;
                     let arguments = signature.arguments(1).map_err(value_error)?.len();
-                    if dependencies
-                        .arguments
-                        .iter()
-                        .any(|&argument| argument >= arguments)
+                    let identity_valid = match &dependencies.value_identity {
+                        None => !value_identities,
+                        Some(TensorValueIdentity::Unknown) => value_identities,
+                        Some(TensorValueIdentity::Zero) => {
+                            value_identities
+                                && !dependencies.has_input()
+                                && dependencies.parameters.is_empty()
+                        }
+                        Some(TensorValueIdentity::Argument(argument)) => {
+                            value_identities
+                                && *argument < arguments
+                                && dependencies.arguments == BTreeSet::from([*argument])
+                                && !dependencies.tokens
+                                && dependencies.parameters.is_empty()
+                        }
+                        Some(TensorValueIdentity::Operation(_)) => false,
+                    };
+                    if !identity_valid
+                        || dependencies
+                            .arguments
+                            .iter()
+                            .any(|&argument| argument >= arguments)
                         || !dependencies.definitions.contains(name)
                         || dependencies
                             .definitions
@@ -767,6 +834,7 @@ impl PyNativeAcquisitionMask {
             partial_expressions,
             expression_node_obligations,
             value_references,
+            typed_collections,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -834,6 +902,7 @@ impl PyNativeAcquisitionMask {
                                     state: &canonical.budget,
                                     remaining: remaining_tokens.unwrap(),
                                     eos: false,
+                                    typed_collections: self.typed_collections,
                                 });
                         let next = self
                             .resources(&canonical, checkpoint.as_ref(), true, budget)
@@ -870,6 +939,7 @@ impl PyNativeAcquisitionMask {
                         state: &canonical.budget,
                         remaining: remaining_tokens.unwrap() - 1,
                         eos: spelling.is_empty(),
+                        typed_collections: self.typed_collections,
                     });
                 if self
                     .resources(&canonical, checkpoint.as_ref(), false, budget)
@@ -922,6 +992,14 @@ impl PyNativeAcquisitionMask {
             self.value_references,
         )
         .map_err(value_error)?;
+        if self.typed_context.as_ref().unwrap()["version"] == 3 {
+            // Complete-source elaboration precedes seeded parameter creation.
+            // Reuse the live prefix owner so decode cannot admit a value that
+            // the same captured semantic contract rejects during token choice.
+            let canonical = self.canonical_prefix(source_bytes).map_err(value_error)?;
+            self.resources(&canonical, None, false, None)
+                .map_err(value_error)?;
+        }
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
             .map_err(value_error)
     }
@@ -1221,6 +1299,7 @@ struct Resources<'a> {
     capture_prefix: bool,
     parsed_prefix: Option<ParsedOperations>,
     token_budget: Option<rows::budget::Bound<'a>>,
+    pending_collection: Cell<Option<rows::budget::Collection>>,
     token_row_capacity: bool,
     source_expression: Option<(&'a [rows::expressions::Parent], usize)>,
     partial_expressions: bool,
@@ -1350,6 +1429,7 @@ fn resource_prefix<'a>(
         capture_prefix,
         parsed_prefix: None,
         token_budget,
+        pending_collection: Cell::new(None),
         token_row_capacity,
         source_expression,
         partial_expressions,
@@ -1728,7 +1808,11 @@ impl Resources<'_> {
         if self.self_delimited && !bound.permits_unplaced_rows(self.unplaced_producer_rows()) {
             return false;
         }
-        bound.permits(count, self.token_obligations(bound.state))
+        bound.permits_collection(
+            count,
+            self.token_obligations(bound.state),
+            self.pending_collection.get(),
+        )
     }
 
     fn token_obligations(&self, state: &rows::budget::State) -> rows::budget::Obligations {
@@ -2181,6 +2265,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                     self.resources.dependencies.clone(),
                                     self.resources.frontier_completion,
                                     self.resources.completion_cache.cloned(),
+                                    context["version"] == 3,
                                 );
                         }
                         self.resources.program_definition_index = self.resources.definition_index;
@@ -2527,6 +2612,11 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                         continuation: continuation.as_ref().map(|continuation| {
                             continuation.borrow(self.resources.operation_fields.unwrap())
                         }),
+                        pending_collection: self
+                            .resources
+                            .token_budget
+                            .filter(|bound| bound.typed_collections && bound.state.literal_array)
+                            .map(|_| &self.resources.pending_collection),
                     })?;
                     if let (Some(program), Some(operation)) =
                         (&mut self.resources.program.typed, parsed.operation)
@@ -2714,6 +2804,7 @@ struct Operation<'a> {
     capture_prefix: bool,
     source_fields: Option<&'a serde_json::Map<String, Value>>,
     continuation: Option<typed::Continuation<'a>>,
+    pending_collection: Option<&'a Cell<Option<rows::budget::Collection>>>,
 }
 
 struct ParsedOperation {
@@ -2877,27 +2968,50 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     }
                     Value::from(choice.value)
                 } else if key == "arguments" || key == "indices" {
-                    serde_json::to_value(map.next_value_seed(TypedIndices {
-                        program,
-                        material: &material,
-                        field: &key,
-                        signatures: self.signatures,
-                        bytes: self.bytes,
-                        continuation: self.continuation,
-                    })?)
+                    serde_json::to_value(
+                        map.next_value_seed(TypedIndices {
+                            program,
+                            material: &material,
+                            field: &key,
+                            signatures: self.signatures,
+                            bytes: self.bytes,
+                            continuation: self.continuation,
+                            collection: self
+                                .pending_collection
+                                .filter(|_| key == "indices")
+                                .map(|pending| {
+                                    program
+                                        .array_minimum(&material, &key, self.continuation)
+                                        .map(|minimum| NumericCollection { pending, minimum })
+                                })
+                                .transpose()
+                                .map_err(A::Error::custom)?,
+                        })?,
+                    )
                     .map_err(A::Error::custom)?
                 } else if key == "token_ids" {
-                    serde_json::to_value(map.next_value_seed(TokenIds {
-                        alphabet: self.raw_tokens,
-                        bytes: self.bytes,
-                        required_length: program.output_columns(),
-                        typed_completion: program.searches_completion().then_some((
-                            program,
-                            &material,
-                            self.signatures,
-                            self.continuation,
-                        )),
-                    })?)
+                    serde_json::to_value(
+                        map.next_value_seed(TokenIds {
+                            alphabet: self.raw_tokens,
+                            bytes: self.bytes,
+                            required_length: program.output_columns(),
+                            typed_completion: program.searches_completion().then_some((
+                                program,
+                                &material,
+                                self.signatures,
+                                self.continuation,
+                            )),
+                            collection: self
+                                .pending_collection
+                                .map(|pending| {
+                                    program
+                                        .array_minimum(&material, &key, self.continuation)
+                                        .map(|minimum| NumericCollection { pending, minimum })
+                                })
+                                .transpose()
+                                .map_err(A::Error::custom)?,
+                        })?,
+                    )
                     .map_err(A::Error::custom)?
                 } else if key == "function" {
                     let tail = after_key.unwrap();
@@ -2937,6 +3051,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     bytes: self.bytes,
                     required_length: None,
                     typed_completion: None,
+                    collection: None,
                 })?;
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -2989,6 +3104,7 @@ impl<'de> Visitor<'de> for Operation<'_> {
 struct ChosenNumber {
     value: usize,
     end: usize,
+    decimal_tail: usize,
 }
 struct NumberChoice<'a, F> {
     values: Range<usize>,
@@ -2998,6 +3114,10 @@ struct NumberChoice<'a, F> {
 }
 impl<F: Fn(usize) -> bool> NumberChoice<'_, F> {
     fn permits_prefix(&self, spelling: &str) -> bool {
+        self.prefix_choice(spelling).is_some()
+    }
+
+    fn prefix_choice(&self, spelling: &str) -> Option<usize> {
         let accepts = |id: usize| {
             self.values.contains(&id) && id.to_string().starts_with(spelling) && (self.accepts)(id)
         };
@@ -3009,9 +3129,9 @@ impl<F: Fn(usize) -> bool> NumberChoice<'_, F> {
                 .iter()
                 .copied()
                 .chain(spelling.parse::<usize>())
-                .any(accepts)
+                .find(|&value| accepts(value))
         } else {
-            self.values.clone().any(accepts)
+            self.values.clone().find(|&value| accepts(value))
         }
     }
 }
@@ -3022,18 +3142,50 @@ impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
         let spelling = raw.get();
         let end = spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
-        let viable = if end == self.bytes.len() {
+        let extension = if end == self.bytes.len() {
             // Only unfinished decimals need a search for compatible extensions.
-            self.permits_prefix(spelling)
+            self.prefix_choice(spelling)
         } else {
-            self.values.contains(&value) && (self.accepts)(value)
+            (self.values.contains(&value) && (self.accepts)(value)).then_some(value)
         };
-        if !viable {
-            return Err(D::Error::custom(
-                "reference has no compatible decimal continuation",
-            ));
-        }
-        Ok(ChosenNumber { value, end })
+        let extension = extension
+            .ok_or_else(|| D::Error::custom("reference has no compatible decimal continuation"))?;
+        Ok(ChosenNumber {
+            value,
+            end,
+            decimal_tail: extension.to_string().len().saturating_sub(spelling.len()),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NumericCollection<'a> {
+    pending: &'a Cell<Option<rows::budget::Collection>>,
+    minimum: usize,
+}
+
+impl NumericCollection<'_> {
+    fn start(self) {
+        self.pending.set(Some(rows::budget::Collection {
+            minimum: self.minimum,
+            present: 0,
+            leading_comma: false,
+            decimal_tail: 0,
+        }));
+    }
+
+    fn number(self, present: usize, tail: &[u8], decimal_tail: usize) {
+        let comma = tail.trim_ascii_start().starts_with(b",");
+        self.pending.set(Some(rows::budget::Collection {
+            minimum: self.minimum.max(present + usize::from(comma)),
+            present,
+            leading_comma: !comma,
+            decimal_tail,
+        }));
+    }
+
+    fn finish(self) {
+        self.pending.set(None);
     }
 }
 
@@ -3044,6 +3196,7 @@ struct TypedIndices<'a> {
     signatures: &'a typed::Signatures,
     bytes: &'a [u8],
     continuation: Option<typed::Continuation<'a>>,
+    collection: Option<NumericCollection<'a>>,
 }
 impl<'de> DeserializeSeed<'de> for TypedIndices<'_> {
     type Value = Vec<usize>;
@@ -3058,6 +3211,9 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
+        if let Some(collection) = self.collection {
+            collection.start();
+        }
         loop {
             let Some(value) = sequence.next_element_seed(NumberChoice {
                 extensions: None,
@@ -3078,6 +3234,9 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                 break;
             };
             values.push(value.value);
+            if let Some(collection) = self.collection {
+                collection.number(values.len(), &self.bytes[value.end..], value.decimal_tail);
+            }
             // Once all slots are filled, a comma cannot be accepted merely
             // because its next element has not arrived in this byte token yet.
             if self.bytes[value.end..].trim_ascii_start().starts_with(b",")
@@ -3111,6 +3270,9 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                 "operand array cannot complete this operation",
             ));
         }
+        if let Some(collection) = self.collection {
+            collection.finish();
+        }
         Ok(values)
     }
 }
@@ -3123,6 +3285,7 @@ struct TokenIds<'a> {
     alphabet: &'a BTreeSet<u32>,
     bytes: &'a [u8],
     required_length: Option<usize>,
+    collection: Option<NumericCollection<'a>>,
     typed_completion: Option<(
         &'a typed::Program,
         &'a serde_json::Map<String, Value>,
@@ -3155,6 +3318,9 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = BTreeSet::new();
         let mut values = Vec::new();
+        if let Some(collection) = self.collection {
+            collection.start();
+        }
         if !self.permits_prefix(&values) {
             return Err(A::Error::custom("raw-token array has no typed completion"));
         }
@@ -3170,20 +3336,30 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
             // a decimal may still extend across BPE tokens (e.g. "1" -> "15").
             // Once a delimiter follows it, membership/uniqueness are final.
             if spelling.as_bytes().as_ptr_range().end == self.bytes.as_ptr_range().end {
-                if !self.alphabet.iter().any(|id| {
-                    if seen.contains(id) || !id.to_string().starts_with(spelling) {
-                        return false;
-                    }
-                    if self.typed_completion.is_none() {
-                        return true;
-                    }
-                    let mut next = values.clone();
-                    next.push(*id);
-                    self.permits_prefix(&next)
-                }) {
-                    return Err(A::Error::custom(
-                        "no unused raw-token ID extends this decimal prefix",
-                    ));
+                let extension = self
+                    .alphabet
+                    .iter()
+                    .copied()
+                    .find(|id| {
+                        if seen.contains(id) || !id.to_string().starts_with(spelling) {
+                            return false;
+                        }
+                        if self.typed_completion.is_none() {
+                            return true;
+                        }
+                        let mut next = values.clone();
+                        next.push(*id);
+                        self.permits_prefix(&next)
+                    })
+                    .ok_or_else(|| {
+                        A::Error::custom("no unused raw-token ID extends this decimal prefix")
+                    })?;
+                if let Some(collection) = self.collection {
+                    collection.number(
+                        values.len() + 1,
+                        &[],
+                        extension.to_string().len().saturating_sub(spelling.len()),
+                    );
                 }
                 continue;
             }
@@ -3199,6 +3375,9 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
             }
             let end =
                 spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
+            if let Some(collection) = self.collection {
+                collection.number(values.len(), &self.bytes[end..], 0);
+            }
             if self.typed_completion.is_some()
                 && self.bytes[end..].trim_ascii_start().starts_with(b",")
                 && !self
@@ -3224,6 +3403,9 @@ impl<'de> Visitor<'de> for TokenIds<'_> {
             .is_some_and(|length| values.len() != length)
         {
             return Err(A::Error::custom("token array must match the output width"));
+        }
+        if let Some(collection) = self.collection {
+            collection.finish();
         }
         Ok(values)
     }

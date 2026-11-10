@@ -8,6 +8,7 @@ use super::super::{is_value_reference, ACQUIRED_SOURCE_BYTES};
 pub(crate) const CONTRACT: &str = "ordered-structural-subsequence-v1";
 pub(crate) const EXPRESSION_CONTRACT: &str = "ordered-structural-subsequence-v2";
 pub(crate) const REFERENCE_CONTRACT: &str = "ordered-structural-subsequence-v3";
+pub(crate) const COLLECTION_CONTRACT: &str = "ordered-structural-subsequence-v4";
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Atom {
@@ -154,6 +155,7 @@ pub(crate) struct State {
     enabled: bool,
     frames: Vec<Vec<Unit>>,
     pending: Vec<Atom>,
+    pub literal_array: bool,
     pub definition: usize,
     pub entry: bool,
     pub entry_pending: bool,
@@ -226,6 +228,7 @@ impl State {
         self.frames.truncate(frame + 1);
         self.frames[frame] = units();
         self.pending.clear();
+        self.literal_array = false;
     }
 
     pub(crate) fn leave(&mut self, frame: usize) {
@@ -240,6 +243,7 @@ impl State {
             return;
         }
         self.pending = Atom::of(byte).into_iter().collect();
+        self.literal_array = false;
     }
 
     /// Only unfinished delimiters of this RawValue are retained. Its variable
@@ -248,6 +252,7 @@ impl State {
         if !self.enabled {
             return;
         }
+        self.literal_array = bytes.trim_ascii_start().starts_with(b"[");
         let mut closing = Vec::new();
         let mut quoted = false;
         let mut escaped = false;
@@ -354,6 +359,16 @@ pub(crate) struct Obligations {
     pub minimum_rows: usize,
 }
 
+/// Slots belong to the selected literal array, not an expanded descriptor.
+/// An unfinished decimal occupies one slot but can still require more digits.
+#[derive(Clone, Copy)]
+pub(crate) struct Collection {
+    pub minimum: usize,
+    pub present: usize,
+    pub leading_comma: bool,
+    pub decimal_tail: usize,
+}
+
 #[derive(Default)]
 struct Costs {
     values: BTreeMap<Vec<Atom>, Coverage>,
@@ -453,6 +468,7 @@ pub(crate) struct Bound<'a> {
     /// The hypothetical next original ID is already subtracted, never inferred.
     pub remaining: usize,
     pub eos: bool,
+    pub typed_collections: bool,
 }
 
 impl Bound<'_> {
@@ -534,12 +550,39 @@ impl Bound<'_> {
     }
 
     pub(crate) fn permits(&self, count: Option<usize>, parameters: Obligations) -> bool {
+        self.permits_collection(count, parameters, None)
+    }
+
+    pub(crate) fn permits_collection(
+        &self,
+        count: Option<usize>,
+        parameters: Obligations,
+        collection: Option<Collection>,
+    ) -> bool {
         if self.eos {
             return self.state.complete;
         }
         self.remaining.checked_sub(1).is_some_and(|allowance| {
-            self.alphabet
-                .covers(self.state.pattern(count, parameters), allowance)
+            let mut pattern = Vec::new();
+            if let Some(collection) =
+                collection.filter(|_| self.typed_collections && self.state.literal_array)
+            {
+                // Even one digit per coordinate cannot fit this literal in
+                // the existing source-byte cap. Bound projection allocation
+                // before materializing obligations from an external context.
+                if collection.minimum > ACQUIRED_SOURCE_BYTES / 2 {
+                    return false;
+                }
+                pattern.extend(std::iter::repeat_n(Atom::Digit, collection.decimal_tail));
+                for index in 0..collection.minimum.saturating_sub(collection.present) {
+                    if collection.leading_comma || index != 0 {
+                        pattern.push(Atom::Byte(b','));
+                    }
+                    pattern.push(Atom::Digit);
+                }
+            }
+            pattern.extend(self.state.pattern(count, parameters));
+            self.alphabet.covers(pattern, allowance)
         })
     }
 }
