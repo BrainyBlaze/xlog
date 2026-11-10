@@ -1016,7 +1016,8 @@ tags and scalar/index decimal prefixes. The same bounded reader carries each
 selected tag, scalar, closed child operand and exact active child slot. Canonical
 prospective operation admission and push/rollback infer shapes at one and maximum
 context length. The chain proceeds only while every other child of an ancestor
-is known. At an unknown sibling it stops optimistically; no preceding value,
+and its required scalar/array fields are known. At an unknown field it stops
+optimistically; no preceding value,
 default operand or invented shape fills that hole. If the known chain reaches the
 root, the current helper or entry definition's existing output shape, usage and
 dependency contract applies.

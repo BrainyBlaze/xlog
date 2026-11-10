@@ -292,7 +292,7 @@ pub(super) fn language(
             }
             if version >= 27 {
                 schema["description"] = json!(format!(
-                    "{} Prospective expression operations also pass the existing canonical typed admission through source-selected ancestors whose other child operands are known. The exact active child slot receives the trial result; unknown sibling expressions stop this local check optimistically. A fully known chain reaches the current definition's existing output shape, usage and dependency contract. Checks precede partial tags, scalar/index decimals and generic completion-cache answers, without inserting source operations or charging already-open parents twice. This is a necessary local constraint, not a whole-tree witness or a usefulness guarantee.",
+                    "{} Prospective expression operations also pass the existing canonical typed admission through source-selected ancestors whose other child operands and required scalar/array fields are known. The exact active child slot receives the trial result; unknown sibling expressions or scalar/array tails stop this local check optimistically. A fully known chain reaches the current definition's existing output shape, usage and dependency contract. Checks precede partial tags, scalar/index decimals and generic completion-cache answers, without inserting source operations or charging already-open parents twice. This is a necessary local constraint, not a whole-tree witness or a usefulness guarantee.",
                     schema["description"].as_str().unwrap()
                 ));
             }
@@ -1346,12 +1346,16 @@ impl Resources<'_> {
         for parent in parents[..parents.len() - 1].iter().rev() {
             let required =
                 &self.operation_fields.unwrap()[parent.selected["operation"].as_str().unwrap()];
-            let Some(operand) = parent
-                .operand
-                .as_ref()
-                .filter(|_| self.expression_children_known(parent, required))
-            else {
-                // No chosen or preceding value stands in for a future sibling.
+            let Some(operand) = parent.operand.as_ref().filter(|_| {
+                self.expression_children_known(parent, required)
+                    && required.iter().all(|field| {
+                        is_value_reference(field)
+                            || field == "arguments"
+                            || parent.selected.contains_key(field)
+                    })
+            }) else {
+                // Future siblings and scalar/array tails are unknown. No
+                // prospective default stands in for their source selection.
                 root = false;
                 break;
             };
