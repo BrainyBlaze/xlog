@@ -9,6 +9,7 @@ pub(crate) const CONTRACT: &str = "ordered-structural-subsequence-v1";
 pub(crate) const EXPRESSION_CONTRACT: &str = "ordered-structural-subsequence-v2";
 pub(crate) const REFERENCE_CONTRACT: &str = "ordered-structural-subsequence-v3";
 pub(crate) const COLLECTION_CONTRACT: &str = "ordered-structural-subsequence-v4";
+pub(crate) const COLLECTION_CHOICE_CONTRACT: &str = "ordered-structural-subsequence-v5";
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Atom {
@@ -38,6 +39,16 @@ impl Atom {
 
 pub(crate) enum Unit {
     Bytes(Vec<Atom>),
+    Field {
+        parent: usize,
+        name: String,
+    },
+    Tail {
+        parent: usize,
+        first: usize,
+        leading_comma: bool,
+        fallback: Vec<Atom>,
+    },
     Rows {
         definition: usize,
         count: Option<usize>,
@@ -48,6 +59,22 @@ pub(crate) enum Unit {
         active: bool,
         leading_comma: bool,
     },
+}
+
+pub(crate) fn tail(parent: usize, first: usize, leading_comma: bool, fallback: Vec<Unit>) -> Unit {
+    let fallback = fallback
+        .into_iter()
+        .flat_map(|unit| match unit {
+            Unit::Bytes(atoms) => atoms,
+            _ => unreachable!(),
+        })
+        .collect();
+    Unit::Tail {
+        parent,
+        first,
+        leading_comma,
+        fallback,
+    }
 }
 
 pub(crate) fn text(bytes: &str) -> Unit {
@@ -80,7 +107,13 @@ pub(crate) fn expression_value(references: bool) -> Unit {
     }
 }
 
-pub(crate) fn expression_field(name: &str, references: bool) -> Unit {
+pub(crate) fn expression_field(name: &str, references: bool, parent: Option<usize>) -> Unit {
+    if let Some(parent) = parent {
+        return Unit::Field {
+            parent,
+            name: name.into(),
+        };
+    }
     if is_value_reference(name) {
         expression_value(references)
     } else {
@@ -156,6 +189,7 @@ pub(crate) struct State {
     frames: Vec<Vec<Unit>>,
     pending: Vec<Atom>,
     pub literal_array: bool,
+    pub collection_choices: bool,
     pub definition: usize,
     pub entry: bool,
     pub entry_pending: bool,
@@ -194,9 +228,11 @@ impl State {
         fields: &BTreeMap<String, Vec<String>>,
         parameter_references: bool,
         expressions: bool,
+        collection_choices: bool,
     ) -> Self {
         Self {
             enabled,
+            collection_choices,
             parameter_references,
             expressions,
             row_commas: if enabled {
@@ -285,6 +321,19 @@ impl State {
     }
 
     fn pattern(&self, count: Option<usize>, parameters: Obligations) -> Vec<Atom> {
+        self.sections(count, parameters, |_| None)
+            .into_iter()
+            .flat_map(|section| section.alternatives.into_iter().next().unwrap_or_default())
+            .collect()
+    }
+
+    fn sections(
+        &self,
+        count: Option<usize>,
+        parameters: Obligations,
+        mut fields: impl FnMut(&Unit) -> Option<Vec<Section>>,
+    ) -> Vec<Section> {
+        let mut sections = Vec::new();
         let mut result = self.pending.clone();
         if let (Some(count), Some(prefix)) = (count, &self.count_prefix) {
             if let Some(tail) = count.to_string().as_bytes().strip_prefix(prefix.as_slice()) {
@@ -293,7 +342,22 @@ impl State {
         }
         for frame in self.frames.iter().rev() {
             for unit in frame {
+                if let Some(resolved) = fields(unit) {
+                    if !result.is_empty() {
+                        sections.push(Section::one(std::mem::take(&mut result)));
+                    }
+                    sections.extend(resolved);
+                    continue;
+                }
                 match unit {
+                    Unit::Field { name, .. } => {
+                        if let Unit::Bytes(atoms) = expression_field(name, true, None) {
+                            result.extend(atoms);
+                        }
+                    }
+                    // Other, independent bounds may retain this weaker suffix.
+                    // The common token check resolves every available tail.
+                    Unit::Tail { fallback, .. } => result.extend(fallback),
                     Unit::Bytes(atoms) => result.extend(atoms),
                     Unit::Rows {
                         definition,
@@ -347,7 +411,69 @@ impl State {
                 }
             }
         }
-        result
+        if !result.is_empty() {
+            sections.push(Section::one(result));
+        }
+        sections
+    }
+}
+
+/// Alternatives share the following section. Coverage retains each branch's
+/// farthest reachable prefix until any branch reaches that shared suffix.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct Section {
+    pub alternatives: Vec<Vec<Atom>>,
+}
+
+impl Section {
+    pub(crate) fn one(atoms: Vec<Atom>) -> Self {
+        Self {
+            alternatives: vec![atoms],
+        }
+    }
+
+    pub(crate) fn text(value: &str) -> Self {
+        let Unit::Bytes(atoms) = text(value) else {
+            unreachable!()
+        };
+        Self::one(atoms)
+    }
+
+    pub(crate) fn collection(minimum: usize, descriptor: bool, capacity: usize) -> Self {
+        let mut alternatives = Vec::new();
+        if minimum <= ACQUIRED_SOURCE_BYTES / 2
+            && minimum.saturating_mul(2).saturating_add(1) <= capacity
+        {
+            let mut literal = vec![Atom::Byte(b'[')];
+            for index in 0..minimum {
+                if index != 0 {
+                    literal.push(Atom::Byte(b','));
+                }
+                literal.push(Atom::Digit);
+            }
+            literal.push(Atom::Byte(b']'));
+            alternatives.push(literal);
+        }
+        if descriptor {
+            let mut pattern = vec![Atom::Byte(b'{')];
+            for (index, name) in super::indices::FIELDS.into_iter().enumerate() {
+                if index != 0 {
+                    pattern.push(Atom::Byte(b','));
+                }
+                if let Unit::Bytes(atoms) = text(&format!("\"{name}\":")) {
+                    pattern.extend(atoms);
+                }
+                let digits = if index == 0 {
+                    minimum.max(1).ilog10() as usize + 1
+                } else {
+                    1
+                };
+                pattern.extend(std::iter::repeat_n(Atom::Digit, digits));
+            }
+            pattern.push(Atom::Byte(b'}'));
+            alternatives.push(pattern);
+        }
+        Self { alternatives }
     }
 }
 
@@ -372,6 +498,7 @@ pub(crate) struct Collection {
 #[derive(Default)]
 struct Costs {
     values: BTreeMap<Vec<Atom>, Coverage>,
+    choices: BTreeMap<Vec<Section>, ChoiceCoverage>,
     bytes: usize,
 }
 
@@ -381,8 +508,74 @@ struct Coverage {
     tokens: usize,
 }
 
+#[derive(Clone, Default)]
+struct ChoiceCoverage {
+    section: usize,
+    positions: Vec<usize>,
+    tokens: usize,
+}
+
+impl ChoiceCoverage {
+    fn start(sections: &[Section]) -> Self {
+        let mut value = Self::default();
+        value.normalize(sections);
+        value
+    }
+
+    fn normalize(&mut self, sections: &[Section]) {
+        while let Some(section) = sections.get(self.section) {
+            if section.alternatives.is_empty() {
+                self.positions.clear();
+                return;
+            }
+            if self.positions.len() != section.alternatives.len() {
+                self.positions.clear();
+                self.positions.resize(section.alternatives.len(), 0);
+            }
+            if section
+                .alternatives
+                .iter()
+                .zip(&self.positions)
+                .any(|(atoms, position)| *position == atoms.len())
+            {
+                self.section += 1;
+                self.positions.clear();
+            } else {
+                return;
+            }
+        }
+        self.positions.clear();
+    }
+
+    fn extend(&mut self, sections: &[Section], spelling: &[Atom]) {
+        for &atom in spelling {
+            let Some(section) = sections.get(self.section) else {
+                return;
+            };
+            for (atoms, position) in section.alternatives.iter().zip(&mut self.positions) {
+                if atoms.get(*position).is_some_and(|next| next.matches(atom)) {
+                    *position += 1;
+                }
+            }
+            self.normalize(sections);
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        if other.section > self.section {
+            self.section = other.section;
+            self.positions.clone_from(&other.positions);
+        } else if other.section == self.section {
+            for (position, next) in self.positions.iter_mut().zip(&other.positions) {
+                *position = (*position).max(*next);
+            }
+        }
+    }
+}
+
 pub(crate) struct Alphabet {
     spellings: Vec<Vec<Atom>>,
+    maximum_spelling: usize,
     costs: Mutex<Costs>,
 }
 
@@ -408,7 +601,7 @@ impl Alphabet {
         // every obligation covered by the shorter one at the same one-ID cost.
         // Lexical neighbours find these in linear time after sorting; do not
         // run a vocabulary-squared subsequence search at decoder construction.
-        let maximal = spellings
+        let maximal: Vec<Vec<Atom>> = spellings
             .iter()
             .enumerate()
             .filter(|(index, spelling)| {
@@ -419,9 +612,72 @@ impl Alphabet {
             .map(|(_, spelling)| spelling.clone())
             .collect();
         Self {
+            maximum_spelling: maximal.iter().map(Vec::len).max().unwrap_or(0),
             spellings: maximal,
             costs: Mutex::new(Costs::default()),
         }
+    }
+
+    fn covers_sections(&self, sections: Vec<Section>, allowance: usize) -> bool {
+        if sections
+            .iter()
+            .all(|section| section.alternatives.len() == 1)
+        {
+            return self.covers(
+                sections
+                    .into_iter()
+                    .flat_map(|section| section.alternatives.into_iter().next().unwrap())
+                    .collect(),
+                allowance,
+            );
+        }
+        let mut costs = self.costs.lock().unwrap();
+        let mut coverage = costs
+            .choices
+            .get(&sections)
+            .cloned()
+            .unwrap_or_else(|| ChoiceCoverage::start(&sections));
+        while coverage.section < sections.len() && coverage.tokens < allowance {
+            let mut next = coverage.clone();
+            let mut candidate = coverage.clone();
+            for spelling in &self.spellings {
+                candidate.section = coverage.section;
+                candidate.positions.clone_from(&coverage.positions);
+                candidate.extend(&sections, spelling);
+                next.merge(&candidate);
+            }
+            if next.section == coverage.section && next.positions == coverage.positions {
+                coverage.tokens = usize::MAX;
+                break;
+            }
+            next.tokens = coverage.tokens + 1;
+            coverage = next;
+        }
+        let covered = coverage.section == sections.len() && coverage.tokens <= allowance;
+        let bytes = sections
+            .iter()
+            .map(|section| {
+                std::mem::size_of::<Section>()
+                    + section.alternatives.len() * std::mem::size_of::<Vec<Atom>>()
+                    + section
+                        .alternatives
+                        .iter()
+                        .map(|atoms| atoms.len() * std::mem::size_of::<Atom>())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+            + coverage.positions.len() * std::mem::size_of::<usize>()
+            + std::mem::size_of::<(Vec<Section>, ChoiceCoverage)>();
+        if bytes <= ACQUIRED_SOURCE_BYTES {
+            if !costs.choices.contains_key(&sections) {
+                if costs.bytes + bytes > ACQUIRED_SOURCE_BYTES {
+                    *costs = Costs::default();
+                }
+                costs.bytes += bytes;
+            }
+            costs.choices.insert(sections, coverage);
+        }
+        covered
     }
 
     fn covers(&self, pattern: Vec<Atom>, allowance: usize) -> bool {
@@ -472,6 +728,12 @@ pub(crate) struct Bound<'a> {
 }
 
 impl Bound<'_> {
+    pub(crate) fn atom_capacity(&self) -> usize {
+        self.remaining
+            .saturating_sub(1)
+            .saturating_mul(self.alphabet.maximum_spelling)
+    }
+
     /// Decimal references use the same alphabet and suffix obligations. A
     /// viable longer ID must cover its still-unconsumed digits and paid EOS.
     pub(crate) fn permits_decimal(
@@ -559,6 +821,16 @@ impl Bound<'_> {
         parameters: Obligations,
         collection: Option<Collection>,
     ) -> bool {
+        self.permits_fields(count, parameters, collection, |_| None)
+    }
+
+    pub(crate) fn permits_fields(
+        &self,
+        count: Option<usize>,
+        parameters: Obligations,
+        collection: Option<Collection>,
+        fields: impl FnMut(&Unit) -> Option<Vec<Section>>,
+    ) -> bool {
         if self.eos {
             return self.state.complete;
         }
@@ -581,8 +853,9 @@ impl Bound<'_> {
                     pattern.push(Atom::Digit);
                 }
             }
-            pattern.extend(self.state.pattern(count, parameters));
-            self.alphabet.covers(pattern, allowance)
+            let mut sections = vec![Section::one(pattern)];
+            sections.extend(self.state.sections(count, parameters, fields));
+            self.alphabet.covers_sections(sections, allowance)
         })
     }
 }

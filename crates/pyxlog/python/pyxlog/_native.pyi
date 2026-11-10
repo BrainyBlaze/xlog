@@ -105,6 +105,9 @@ class NativeCausalModel:
         V32 keeps that syntax/context and selects original-ID cost v4: selected
         literal numeric arrays reserve canonically required missing coordinates,
         separators and unfinished decimal tails before the same suffix and EOS.
+        V33 uses cost v5: future literal/descriptor collection alternatives share
+        the complete suffix, including uniquely known partial tags, separators,
+        remaining fields and paid EOS. Each parent keeps its own typed minimum.
         """
         ...
     def fork_acquired(
@@ -150,7 +153,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–32 require positive remaining original IDs including this choice and paid EOS.
+        """V21–33 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -158,13 +161,15 @@ class NativeAcquisitionMask:
         V30–31 require v3 for integer-or-tuple child values and decimal extensions.
         V32 requires v4 with typed literal-array obligations; other array forms
         and unknown cardinalities retain their conservative existing bounds.
+        V33 requires v5 for future collection unions through the same full suffix;
+        selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–32 prefix facts as JSON; no token selection or final admission."""
+        """Version4–33 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–32 source with its captured context; v31–32 also apply
+        """Elaborate complete v7–33 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         """
 

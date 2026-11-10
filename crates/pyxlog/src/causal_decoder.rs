@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 31..=32) {
+        let context = if matches!(language_version, 31..=33) {
             self.inner
                 .acquisition_context_with_value_dependencies(insertion_layer)
         } else if matches!(language_version, 12..=30) {
