@@ -108,6 +108,11 @@ class NativeCausalModel:
         V33 uses cost v5: future literal/descriptor collection alternatives share
         the complete suffix, including uniquely known partial tags, separators,
         remaining fields and paid EOS. Each parent keeps its own typed minimum.
+        V34 selects numerical-expressions-v4/context3/output-dependencies-v3.
+        A separate local signed-zero-or-NaN proof makes a Select condition >0
+        provably false without replacing arithmetic or equating its values.
+        Prefix trials, memo keys, complete decoding and original-source fork
+        use the same transfer; callee JSON remains the existing five fields.
         """
         ...
     def fork_acquired(
@@ -153,7 +158,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–33 require positive remaining original IDs including this choice and paid EOS.
+        """V21–34 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -162,15 +167,17 @@ class NativeAcquisitionMask:
         V32 requires v4 with typed literal-array obligations; other array forms
         and unknown cardinalities retain their conservative existing bounds.
         V33 requires v5 for future collection unions through the same full suffix;
+        V34 retains v5 and adds explicit predicate-aware dependency admission.
         selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–33 prefix facts as JSON; no token selection or final admission."""
+        """Version4–34 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–33 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–34 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
+        V34 explicitly uses predicate-aware v3 admission instead.
         """
 
 class _LogitSelection(TypedDict):

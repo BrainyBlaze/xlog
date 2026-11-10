@@ -1259,7 +1259,31 @@ Call argument arity, source/node/scalar limits and paid EOS remain unchanged.
 This is necessary structural subsequence coverage, not exact grammar-coupled
 completion, token fit, nonconstancy or useful generation.
 
-For a version4 through version33 packet,
+Version34 (`xlog-contextual-acquisition-v34`) explicitly selects
+`numerical-expressions-v4` and context3/`output-dependencies-v3`. Authored tuples,
+body-local references and cost-v5 keep the version33 owners. A separate local
+proof tracks elements in `{−0,+0,NaN}`: proven zeros enter it; multiplication
+preserves it when either operand has the proof, addition when both do, and Tanh,
+Broadcast, Gather and Row preserve it. Stack needs the proof for every input.
+Undetermined values stay unknown. This proof never equates two values, makes
+`0*x` a positive-zero identity, or removes its arithmetic input dependencies.
+
+When a Select condition has this proof, the executable strict `condition>0`
+predicate is always false, including NaN, so only its negative operand contributes
+output facts. Unknown conditions retain the existing identity rules. The canonical
+IR transfer serves prefix trials, explicit references, complete decoding and the
+original UTF-8 `fork_acquired(source_encoding="numerical-expressions-v4")` path.
+Private facts survive trial restoration and participate in completion keys and
+operand grouping; a prospective union retains a proof only for all alternatives.
+The context still has exactly five fields per callee dependency record. A Call
+can reuse a proven Zero or returned formal's actual proof; an opaque callee
+exports no private predicate fact. Scan retains its original initial/empty-span
+semantics. Kernels, gradients, graph execution and initialization are unchanged.
+Historical contexts, `expressions-v3` and versions through33 keep their original
+semantics. This necessary analysis does not establish general nonconstancy,
+completion, useful generation or scientific acceptance.
+
+For a version4 through version34 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

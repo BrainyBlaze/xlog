@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use xlog_core::XlogError;
 use xlog_ir::tensor::{
     TensorOperation as Op, TensorOutputDependencies, TensorProgram, TensorShapeConstraint,
-    TensorSignature, TensorValueIdentity, TensorValueShape,
+    TensorSignature, TensorValueFacts, TensorValueIdentity, TensorValueShape,
 };
 
 pub(super) type Signatures = BTreeMap<String, TensorSignature>;
@@ -151,9 +151,11 @@ pub(super) struct EntryRequirements {
 struct OutputDependencies {
     callees: BTreeMap<String, TensorOutputDependencies>,
     values: Vec<TensorOutputDependencies>,
+    predicates: Vec<bool>,
     reserve_frontier: bool,
     completion_cache: Option<Arc<CompletionCache>>,
     value_identities: bool,
+    predicate_values: bool,
 }
 
 impl EntryRequirements {
@@ -182,11 +184,15 @@ impl OutputDependencies {
         &self,
         body: &TensorProgram,
         operation: &Op,
-    ) -> Result<TensorOutputDependencies, XlogError> {
+    ) -> Result<TensorValueFacts, XlogError> {
         self.operation_with(body, operation, &|id| {
             self.values
                 .get(id)
                 .cloned()
+                .map(|dependencies| TensorValueFacts {
+                    dependencies,
+                    zero_or_nan: self.predicates[id],
+                })
                 .ok_or_else(|| XlogError::Compilation("dependency value is not preceding".into()))
         })
     }
@@ -195,18 +201,39 @@ impl OutputDependencies {
         &self,
         body: &TensorProgram,
         operation: &Op,
-        value: &dyn Fn(usize) -> Result<TensorOutputDependencies, XlogError>,
-    ) -> Result<TensorOutputDependencies, XlogError> {
+        value: &dyn Fn(usize) -> Result<TensorValueFacts, XlogError>,
+    ) -> Result<TensorValueFacts, XlogError> {
         let mut resolve = |name: &str| {
             self.callees.get(name).cloned().ok_or_else(|| {
                 XlogError::Compilation("callee output dependencies are absent".into())
             })
         };
-        if self.value_identities {
-            body.operation_value_dependencies(operation, self.values.len(), value, &mut resolve)
-        } else {
-            body.operation_output_dependencies(operation, value, &mut resolve)
+        if self.predicate_values {
+            return body.operation_predicate_dependencies(
+                operation,
+                self.values.len(),
+                value,
+                &mut resolve,
+            );
         }
+        let dependencies = if self.value_identities {
+            body.operation_value_dependencies(
+                operation,
+                self.values.len(),
+                &|id| Ok(value(id)?.dependencies),
+                &mut resolve,
+            )
+        } else {
+            body.operation_output_dependencies(
+                operation,
+                &|id| Ok(value(id)?.dependencies),
+                &mut resolve,
+            )
+        }?;
+        Ok(TensorValueFacts {
+            dependencies,
+            zero_or_nan: false,
+        })
     }
 }
 
@@ -433,13 +460,16 @@ impl Program {
         reserve_frontier: bool,
         completion_cache: Option<Arc<CompletionCache>>,
         value_identities: bool,
+        predicate_values: bool,
     ) {
         self.dependencies = Some(OutputDependencies {
             callees,
             values: Vec::new(),
+            predicates: Vec::new(),
             reserve_frontier,
             completion_cache,
             value_identities,
+            predicate_values,
         });
     }
 
@@ -484,7 +514,7 @@ impl Program {
         &mut self,
         operation: Op,
         signatures: &Signatures,
-        prospective: Option<&TensorOutputDependencies>,
+        prospective: Option<&TensorValueFacts>,
     ) -> Result<(), String> {
         if self
             .row_allowance
@@ -531,7 +561,9 @@ impl Program {
         self.shapes[0].push(first);
         self.shapes[1].push(last);
         if let Some(facts) = &mut self.dependencies {
-            facts.values.push(dependencies.unwrap());
+            let dependencies = dependencies.unwrap();
+            facts.predicates.push(dependencies.zero_or_nan);
+            facts.values.push(dependencies.dependencies);
         }
         Ok(())
     }
@@ -551,7 +583,7 @@ impl Program {
         &mut self,
         operation: Op,
         signatures: &Signatures,
-        prospective: Option<&TensorOutputDependencies>,
+        prospective: Option<&TensorValueFacts>,
         accept: impl FnOnce(&Self) -> bool,
     ) -> bool {
         let count = self.body.operations.len();
@@ -565,6 +597,7 @@ impl Program {
         }
         if let Some(facts) = &mut self.dependencies {
             facts.values.truncate(count);
+            facts.predicates.truncate(count);
         }
         accepted
     }
@@ -674,7 +707,7 @@ impl Program {
         &self,
         operation: Op,
         signatures: &Signatures,
-        dependencies: Option<&TensorOutputDependencies>,
+        dependencies: Option<&TensorValueFacts>,
     ) -> bool {
         if self
             .row_allowance
@@ -731,7 +764,7 @@ impl Program {
         body: &TensorProgram,
         output: usize,
         signatures: &Signatures,
-        dependencies: Option<&TensorOutputDependencies>,
+        dependencies: Option<&TensorValueFacts>,
     ) -> bool {
         if let Some(facts) = &self.dependencies {
             return self.dependency_completion_possible(
@@ -806,7 +839,7 @@ impl Program {
         output: usize,
         signatures: &Signatures,
         facts: &OutputDependencies,
-        prospective: Option<&TensorOutputDependencies>,
+        prospective: Option<&TensorValueFacts>,
     ) -> bool {
         let Some(remaining) = (output + 1).checked_sub(body.operations.len()) else {
             return false;
@@ -830,7 +863,12 @@ impl Program {
         } else {
             None
         };
-        let values = || facts.values.iter().chain(next);
+        let values = || {
+            facts
+                .values
+                .iter()
+                .chain(next.map(|facts| &facts.dependencies))
+        };
         if remaining == 0 {
             return values()
                 .nth(output)
@@ -939,7 +977,7 @@ impl Program {
             }
         }
         if let Some(cache) = &facts.completion_cache {
-            return completion::possible(self, body, output, signatures, cache);
+            return completion::possible(self, body, output, signatures, cache, prospective);
         }
         if needed == 0 || remaining > needed {
             return true;
@@ -1077,7 +1115,7 @@ impl Program {
         function: &str,
         signature: &TensorSignature,
         mut arguments: Vec<usize>,
-        check: &mut impl FnMut(Op, Option<TensorOutputDependencies>) -> bool,
+        check: &mut impl FnMut(Op, Option<TensorValueFacts>) -> bool,
     ) -> bool {
         let [Ok(first), Ok(last)] = [
             signature.arguments(1),
@@ -1120,6 +1158,7 @@ impl Program {
                 // preceding values, not an authored replacement argument.
                 // Once the array is complete, every argument is exact.
                 let mut dependencies = TensorOutputDependencies::default();
+                let zero_or_nan = choices.iter().all(|&id| facts.predicates[id]);
                 let identity = facts.values[id].value_identity.clone();
                 let same_identity = choices
                     .iter()
@@ -1136,7 +1175,13 @@ impl Program {
                 }
                 let id = count + slot;
                 abstract_arguments.push(id);
-                abstract_values.insert(id, dependencies);
+                abstract_values.insert(
+                    id,
+                    TensorValueFacts {
+                        dependencies,
+                        zero_or_nan,
+                    },
+                );
             }
         }
         let operation = Op::Call {
@@ -1159,8 +1204,17 @@ impl Program {
             &|id| {
                 abstract_values
                     .get(&id)
-                    .or_else(|| facts.values.get(id))
                     .cloned()
+                    .or_else(|| {
+                        facts
+                            .values
+                            .get(id)
+                            .cloned()
+                            .map(|dependencies| TensorValueFacts {
+                                dependencies,
+                                zero_or_nan: facts.predicates[id],
+                            })
+                    })
                     .ok_or_else(|| XlogError::Compilation("dependency value is absent".into()))
             },
         );
@@ -1418,7 +1472,7 @@ impl Program {
             trial.row_allowance = None;
             trial
         });
-        let mut check = |operation: Op, dependencies: Option<TensorOutputDependencies>| {
+        let mut check = |operation: Op, dependencies: Option<TensorValueFacts>| {
             if let Some(continuation) = continuation {
                 let prospective = dependencies.as_ref().filter(|_| {
                     self.dependencies
