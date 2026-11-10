@@ -4632,9 +4632,13 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
     for(uint32_t query=0;query<view.queries;++query) {
         const auto query_fact=semantic_program::bank_fact(bank.program,query);
         const uint32_t fact_index=semantic_program::find_fact(output,closure.fact_count,query_fact,&inspected_supports,UINT64_MAX);
-        const uint64_t truth=fact_index==closure.fact_count ? 0 : support.truth[fact_index];
         const uint32_t pro=fact_index==closure.fact_count ? 0 : uint32_t(world.read(support.events,uint64_t(fact_index)*2));
         const uint32_t contra=fact_index==closure.fact_count ? 0 : uint32_t(world.read(support.events,uint64_t(fact_index)*2+1));
+        // Materialization retains every possible support for joint evaluation.
+        // Assignment consumers observe only the original authored assignment.
+        const uint64_t truth=world.query_kind(query)==0 ?
+            uint64_t(world.assignment(pro))|(uint64_t(world.assignment(contra))<<1) :
+            fact_index==closure.fact_count ? 0 : support.truth[fact_index];
         for(uint32_t outcome=0;outcome<4;++outcome) {
             const uint32_t event=world.query_event(query,pro,contra,outcome);
             if(!world.charge())return measure_failure();world.query_roots[uint64_t(query)*4+outcome]=event;
@@ -4718,6 +4722,10 @@ __device__ TaskProgramQueryOutcome task_program_queries(const Descriptor& descri
         }
         if(!world.charge())return measure_failure();world.attainment_roots[query]=event;
         if(world.status!=semantic_world::MeasureStatus::Ok)return measure_failure();
+        if(world.query_kind(query)==0) {
+            record.attained=uint64_t(world.assignment(event));
+            if(world.status!=semantic_world::MeasureStatus::Ok)return measure_failure();
+        }
         semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::TableSlot,inspected);
         facts.g+=record.attained;
     }
