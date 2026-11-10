@@ -44,12 +44,14 @@ const RETAINED_REFERENCE_LANGUAGE: &str = "xlog-contextual-acquisition-v20";
 const TOKEN_BUDGET_LANGUAGE: &str = "xlog-contextual-acquisition-v21";
 const SELF_DELIMITED_LANGUAGE: &str = "xlog-contextual-acquisition-v22";
 const TOKEN_ROW_CAPACITY_LANGUAGE: &str = "xlog-contextual-acquisition-v23";
+const NAMED_BODY_LANGUAGE: &str = "xlog-contextual-acquisition-v24";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
 pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENCODING;
 pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
+pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -68,7 +70,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=23) {
+    if !matches!(version, 1..=24) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -273,7 +275,7 @@ pub(super) fn language(
         if version >= 7 {
             rows::schema(&mut schema, version >= 8, version >= 10, version >= 18);
             if version >= 19 {
-                rows::metadata::schema(&mut schema, &context, version >= 22);
+                rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
         }
         if version >= 9 {
@@ -360,6 +362,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                24 => NAMED_BODY_LANGUAGE,
                 23 => TOKEN_ROW_CAPACITY_LANGUAGE,
                 22 => SELF_DELIMITED_LANGUAGE,
                 21 => TOKEN_BUDGET_LANGUAGE,
@@ -495,6 +498,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     compact_metadata: bool,
     retained_reference_prefix: bool,
     self_delimited: bool,
+    named_body: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -516,7 +520,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE;
+        let named_body = language["id"] == NAMED_BODY_LANGUAGE;
+        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || named_body;
         let self_delimited = language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
         if token_budget && language["token_cost_contract"] != rows::budget::CONTRACT {
@@ -661,6 +666,7 @@ impl PyNativeAcquisitionMask {
             compact_metadata,
             retained_reference_prefix,
             self_delimited,
+            named_body,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -811,6 +817,7 @@ impl PyNativeAcquisitionMask {
             self.compact_indices,
             self.compact_metadata,
             self.self_delimited,
+            self.named_body,
         )
         .map_err(value_error)?;
         serde_json::to_string(&json!({"entrypoint": entrypoint, "definitions": definitions}))
@@ -959,6 +966,7 @@ impl PyNativeAcquisitionMask {
                 self.compact_indices,
                 self.compact_metadata,
                 self.self_delimited,
+                self.named_body,
                 self.token_budget.is_some(),
             )
             .map(|prefix| CanonicalPrefix {
@@ -1023,6 +1031,7 @@ pub(super) fn decode_numerical_rows(
     compact_indices: bool,
     compact_metadata: bool,
     self_delimited: bool,
+    named_body: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1033,6 +1042,7 @@ pub(super) fn decode_numerical_rows(
         compact_indices,
         compact_metadata,
         self_delimited,
+        named_body,
     )
     .map_err(value_error)
 }

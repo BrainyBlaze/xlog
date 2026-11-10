@@ -85,7 +85,7 @@ fn reference(names: Vec<Value>) -> Value {
     }
 }
 
-pub(crate) fn schema(schema: &mut Value, context: &Value, self_delimited: bool) {
+pub(crate) fn schema(schema: &mut Value, context: &Value, self_delimited: bool, named_body: bool) {
     let defs = &mut schema["$defs"];
     defs["Callee"] = reference(
         retained_names(context, true)
@@ -128,11 +128,22 @@ pub(crate) fn schema(schema: &mut Value, context: &Value, self_delimited: bool) 
     let count = helper["operation_count"].clone();
     let operations = helper["operations"].clone();
     let entry_operations = defs["EntryFuncDef"]["properties"]["operations"].clone();
-    let mut helper = vec![
-        local(),
-        json!({"$ref": "#/$defs/TensorSignature"}),
-        parameters.clone(),
-    ];
+    let mut helper = vec![local(), json!({"$ref": "#/$defs/TensorSignature"})];
+    if named_body {
+        let body = |operations: Value| {
+            json!({"type": "object", "additionalProperties": false,
+                "required": ["weights", "ops"],
+                "properties": {"weights": parameters, "ops": operations}})
+        };
+        helper.push(body(operations));
+        defs["FuncDef"] = tuple(helper);
+        defs["EntryFuncDef"] = body(entry_operations);
+        schema["description"] = json!(
+            "Compact numerical-rows-v7 acquisition. Root fields are intent,helpers,entry. Entry is a body with exactly the ordered keys weights,ops. Helpers use [local_name,signature,body] with the same named body. Weights is the possibly empty table of physical FP32 storage; ops is the nonempty table of built-in operation rows, with its last actual row as output. Built-in operations need no registration, and opaque storage names do not confer operation semantics, including names equal to operation tags. Signatures use [kind,input_width_or_widths,output_width]. Weights use [symbol,shape] to declare or check storage, or [symbol] to reference an existing physical declaration. Local and retained symbols, operation rows and canonical inference are unchanged. Input values come from the signature's arguments, not weight declarations. Typed continuation and actual last-row closure retain both context lengths, causality and output dependencies. Original-ID suffix coverage includes the named keys and delimiters but remains a necessary relaxation, not a completion or usefulness guarantee."
+        );
+        return;
+    }
+    helper.push(parameters.clone());
     let mut entry = vec![parameters];
     if !self_delimited {
         helper.push(count.clone());
