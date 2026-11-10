@@ -7450,10 +7450,18 @@ impl ColdValue {
         }
     }
 
+    #[track_caller]
     fn fields(&self, count: usize) -> PyResult<&[Self]> {
         let items = self.sequence()?;
         if items.len() != count {
-            return Err(invalid("cold record has an incorrect field count"));
+            let caller = std::panic::Location::caller();
+            return Err(invalid(format!(
+                "cold record at {}:{}:{} has {} fields; expected {count}",
+                caller.file(),
+                caller.line(),
+                caller.column(),
+                items.len(),
+            )));
         }
         Ok(items)
     }
@@ -9329,12 +9337,17 @@ enum ReplayAnchorGroup {
 
 /// Lossless projection of the data owner's sealed manifest set and LoaderConfig.
 /// No roster or denominator is selected by this cold transport.
+#[track_caller]
+fn training_domain_records(value: &ColdValue) -> PyResult<(&[ColdValue], &[ColdValue])> {
+    let fields = value.fields(2)?;
+    Ok((fields[0].sequence()?, fields[1].fields(8)?))
+}
+
 fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDomain>> {
     if *value == ColdValue::None {
         return Ok(None);
     }
-    let fields = value.fields(2)?;
-    let manifest_values = fields[0].sequence()?;
+    let (manifest_values, loader) = training_domain_records(value)?;
     let mut manifests = Vec::with_capacity(manifest_values.len());
     for manifest in manifest_values {
         let manifest = manifest.fields(2)?;
@@ -9343,7 +9356,6 @@ fn read_training_domain(value: &ColdValue) -> PyResult<Option<SemanticTrainingDo
             caps: unsigned_array(&manifest[1])?,
         });
     }
-    let loader = fields[1].fields(8)?;
     let batch = unsigned_array::<4>(&loader[0])?;
     let ColdValue::Integer(training_seed) = &loader[3] else {
         return Err(invalid(
@@ -11310,17 +11322,15 @@ fn task_evaluation_spec_core(
             };
             extent = extent.checked_add(source.len()).ok_or_else(overflow)?;
             if training_domain != &ColdValue::None {
-                let domain = training_domain.fields(2)?;
+                let (manifests, loader) = training_domain_records(training_domain)?;
                 extent = extent
                     .checked_add(
-                        domain[0]
-                            .sequence()?
+                        manifests
                             .len()
                             .checked_mul(std::mem::size_of::<SemanticTrainingManifest>())
                             .ok_or_else(overflow)?,
                     )
                     .ok_or_else(overflow)?;
-                let loader = domain[1].fields(5)?;
                 let ColdValue::Integer(seed) = &loader[3] else {
                     return Err(invalid(
                         "training domain seed requires an exact nonnegative integer",
