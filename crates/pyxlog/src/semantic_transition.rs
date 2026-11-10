@@ -7455,7 +7455,7 @@ impl ColdValue {
         let items = self.sequence()?;
         if items.len() != count {
             let caller = std::panic::Location::caller();
-            return Err(invalid(format!(
+            return Err(invalid(&format!(
                 "cold record at {}:{}:{} has {} fields; expected {count}",
                 caller.file(),
                 caller.line(),
