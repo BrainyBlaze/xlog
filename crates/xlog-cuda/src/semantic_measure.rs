@@ -1987,7 +1987,13 @@ pub fn semantic_measure_capacity_requirements(
     let edit_roots = add(rule_effect_roots, mul(largest_leaf_events, 2)?)?;
     let append_nodes = mul(mutations, edit_roots)?;
     let initial_nodes = add(add(event_nodes.len() as u64, roots)?, syntax_nodes)?;
-    let literal_nodes = mul(add(initial_rule_cells, selectors)?, 2)?;
+    // Both polarities of base variables and potential selectors participate in
+    // authored complements, assignment restrictions and conditional guards.
+    // The assignment's conjunction prefixes also live in this same arena.
+    let literal_nodes = add(
+        mul(add(add(base_variables, initial_rule_cells)?, selectors)?, 2)?,
+        mul(base_variables, 2)?,
+    )?;
     let nodes = add(add(initial_nodes, literal_nodes)?, append_nodes)?.max(2);
     let unique_slots = add(mul(nodes, 2)?, 1)?
         .checked_next_power_of_two()

@@ -350,6 +350,7 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
     }
     let generation = generation.expect("catalogue generation");
     assert_eq!(fields.len() as u64, constants["FIELD_COUNT"]);
+    assert_eq!(fields[1].2, constants["SEMANTIC_OPCODE_CARDINALITY"]);
     let mut rust = format!("const CATALOGUE_ENCODING: &[u8] = {encoding:?}.as_bytes();\nconst CATALOGUE_DIGEST: [u8;32] = {digest:?};\nconst CATALOGUE_GENERATION: u64 = {generation};\n");
     let mut cuda = format!("#pragma once\n#include <stdint.h>\nstatic constexpr uint64_t CATALOGUE_GENERATION = {generation};\n__device__ __constant__ uint8_t CATALOGUE_DIGEST[32] = {{ {} }};\n",
         digest.iter().map(u8::to_string).collect::<Vec<_>>().join(","));
@@ -362,6 +363,7 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
         "COMPONENT_COUNT",
         "COMPONENT_KIND_TEXT",
         "COMPONENT_KIND_EDIT",
+        "SEMANTIC_OPCODE_CARDINALITY",
         "NULL_CATEGORY",
         "NO_EDIT_ACTIVE_MASK",
         "NO_EDIT_NULL_MASK",
@@ -375,6 +377,8 @@ fn write_semantic_transition_catalogue(out_dir: &Path) {
         "REPLACE_LEAF_NULL_MASK",
         "REPLACE_ROOT_ACTIVE_MASK",
         "REPLACE_ROOT_NULL_MASK",
+        "REPLACE_WEIGHT_ACTIVE_MASK",
+        "REPLACE_WEIGHT_NULL_MASK",
         "SEMANTIC_CATEGORY_CAPACITY",
     ] {
         if name != "NULL_CATEGORY" {

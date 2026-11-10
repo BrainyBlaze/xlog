@@ -41,6 +41,20 @@ pub struct SemanticWorldContext {
     ordinal: u32,
 }
 
+/// Original invocation scratch, derived from the full immutable world and the
+/// actual program/observation geometry. It carries no selected semantic state.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MeasureGeometry {
+    pub words: usize,
+    pub queries: usize,
+    pub factors: usize,
+    pub masses: usize,
+    pub factor_gradients: usize,
+    pub log_potentials: usize,
+}
+
+pub(super) const MEASURE_HEADER_WORDS: usize = 32;
+
 fn invalid_world(detail: &str) -> SemanticTransitionError {
     publication_input_error(detail)
 }
@@ -297,6 +311,7 @@ impl SemanticWorldSource {
             if birth == 0
                 || birth >= next_birth
                 || word(bytes, begin + 4) == 0
+                || word(bytes, begin + 4) > word(bytes, 10)
                 || !births.insert(birth)
                 || !targets.insert((context, rule))
                 || !(1..=32769).contains(&word(bytes, begin + 5))
@@ -320,6 +335,87 @@ impl SemanticWorldSource {
 }
 
 impl SemanticWorldContext {
+    pub(super) fn measure_geometry(
+        &self,
+        layout: task_ground::TaskGroundLayout,
+    ) -> Result<MeasureGeometry, SemanticTransitionError> {
+        if layout.image.facts == 0 {
+            return Ok(MeasureGeometry {
+                words: 0,
+                queries: 0,
+                factors: 0,
+                masses: 0,
+                factor_gradients: 0,
+                log_potentials: 0,
+            });
+        }
+        let declaration = &self.source.declaration;
+        let cap = declaration.capacities;
+        let lineage_events = layout
+            .support_binding_capacity()
+            .checked_mul(2)
+            .filter(|count| *count <= u32::MAX as usize)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        if cap.variables == u32::MAX {
+            return Err(SemanticTransitionError::GenerationExhausted);
+        }
+        let rules = self.source.programs[self.ordinal as usize]
+            .initial_rules
+            .len()
+            .checked_add(layout.image.mutations)
+            .and_then(|count| count.checked_add(layout.library_count))
+            .filter(|count| *count <= u32::MAX as usize)
+            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let mut words = MEASURE_HEADER_WORDS;
+        for (count, width) in [
+            (cap.nodes as usize, 4),
+            (cap.unique_slots as usize, 1),
+            (cap.apply_entries as usize, 4),
+            (cap.frontier_entries as usize, 8),
+            (declaration.event_nodes.len(), 1),
+            (layout.image.facts, 10),
+            (layout.image.nodes, 3),
+            (
+                layout.image.facts,
+                lineage_events
+                    .checked_mul(10)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?,
+            ),
+            (layout.image.nodes, lineage_events),
+            (cap.nodes as usize, 2),
+            (cap.variables as usize + 1, 6),
+        ] {
+            words = count
+                .checked_mul(width)
+                .and_then(|count| words.checked_add(count))
+                .filter(|words| *words <= usize::MAX / 8)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        }
+        let mut take = |count: usize, width: usize| -> Result<usize, SemanticTransitionError> {
+            let begin = words;
+            words = count
+                .checked_mul(width)
+                .and_then(|count| words.checked_add(count))
+                .filter(|words| *words <= usize::MAX / 8)
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            Ok(begin)
+        };
+        let factors = declaration.measure_factors.len();
+        let masses = take(layout.queries, 12)?;
+        take(layout.queries, 5)?;
+        let factor_gradients = take(factors, 6)?;
+        let log_potentials = take(factors, 2)?;
+        take(rules, 1)?;
+        Ok(MeasureGeometry {
+            words,
+            queries: layout.queries,
+            factors,
+            masses,
+            factor_gradients,
+            log_potentials,
+        })
+    }
+
     pub(super) fn validate_queries(&self, count: usize) -> Result<(), SemanticTransitionError> {
         if self.source.declaration.contexts[self.ordinal as usize]
             .queries
@@ -335,6 +431,10 @@ impl SemanticWorldContext {
 
     pub(super) fn initial_records(&self) -> [SemanticStateRecord; 2] {
         self.source.initial_records(self.ordinal)
+    }
+
+    pub(super) fn rule_cell_capacity(&self) -> u64 {
+        self.source.cell_capacity as u64
     }
 
     fn validate_source<B: PublicationByteStorage>(

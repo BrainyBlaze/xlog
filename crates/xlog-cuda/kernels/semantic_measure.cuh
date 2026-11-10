@@ -89,6 +89,15 @@ __device__ __forceinline__ double logsumexp_children(
     return maxv + log(sum);
 }
 
+template<class Values>
+__device__ __forceinline__ double forward_decision(
+    uint32_t variable, uint32_t child_false, uint32_t child_true,
+    const double* var_log_true, const double* var_log_false, const Values& values
+) {
+    return logsumexp2(var_log_false[variable] + values[child_false],
+                      var_log_true[variable] + values[child_true]);
+}
+
 // The caller establishes topological order and validates its acquired node view.
 // Evaluation reads the topology, weights and values of that same representation.
 template<class Circuit, class Values>
@@ -130,10 +139,8 @@ __device__ __forceinline__ double forward_node(
             uint32_t variable = circuit.decision_variable(node);
             uint32_t child_false = circuit.false_child(node);
             uint32_t child_true = circuit.true_child(node);
-            double true_weight = var_log_true[variable];
-            double false_weight = var_log_false[variable];
-            value = logsumexp2(false_weight + values[child_false],
-                              true_weight + values[child_true]);
+            value = forward_decision(variable, child_false, child_true,
+                                     var_log_true, var_log_false, values);
             break;
         }
         default:
@@ -164,6 +171,60 @@ struct AtomicWeightGradients {
         atomicAdd(false_values + variable, value);
     }
 };
+
+template<class Values, class Adjoints>
+__device__ __forceinline__ void propagate_decision_adjoint(
+    uint32_t variable, uint32_t child_false, uint32_t child_true,
+    double parent, double adjoint,
+    const double* var_log_true, const double* var_log_false,
+    const Values& values, const Adjoints& output
+) {
+    if (adjoint == 0.0 || (isinf(parent) && parent < 0.0)) {
+        return;
+    }
+    double false_value = values[child_false];
+    double true_value = values[child_true];
+    if (!(isinf(false_value) && false_value < 0.0)) {
+        double ratio = exp((var_log_false[variable] + false_value) - parent);
+        if (ratio != 0.0) {
+            output.add(child_false, adjoint * ratio);
+        }
+    }
+    if (!(isinf(true_value) && true_value < 0.0)) {
+        double ratio = exp((var_log_true[variable] + true_value) - parent);
+        if (ratio != 0.0) {
+            output.add(child_true, adjoint * ratio);
+        }
+    }
+}
+
+template<class Values, class Gradients>
+__device__ __forceinline__ void accumulate_decision_weight_gradients(
+    uint32_t variable, uint32_t child_false, uint32_t child_true,
+    double parent, double adjoint,
+    const double* var_log_true, const double* var_log_false,
+    const Values& values, const Gradients& output
+) {
+    if (adjoint == 0.0 || (isinf(parent) && parent < 0.0)) {
+        return;
+    }
+    double false_value = values[child_false];
+    double true_value = values[child_true];
+    double false_probability = 0.0;
+    double true_probability = 0.0;
+    if (!(isinf(false_value) && false_value < 0.0)) {
+        false_probability = exp((var_log_false[variable] + false_value) - parent);
+    }
+    if (!(isinf(true_value) && true_value < 0.0)) {
+        true_probability = exp((var_log_true[variable] + true_value) - parent);
+    }
+    if (false_probability != 0.0) {
+        output.add_false(variable, adjoint * false_probability);
+    }
+    if (true_probability != 0.0) {
+        output.add_true(variable, adjoint * true_probability);
+    }
+}
 
 // Pull back the supplied node cotangent through the same log-space operation
 // used by forward_node. The caller owns reverse topological order, seeding and
@@ -207,29 +268,9 @@ __device__ __forceinline__ void propagate_node_adjoint(
             break;
         }
         case XGCF_DECISION: {
-            double parent = values[node];
-            if (isinf(parent) && parent < 0.0) {
-                return;
-            }
-            uint32_t variable = circuit.decision_variable(node);
-            uint32_t child_false = circuit.false_child(node);
-            uint32_t child_true = circuit.true_child(node);
-            double false_weight = var_log_false[variable];
-            double true_weight = var_log_true[variable];
-            double false_value = values[child_false];
-            double true_value = values[child_true];
-            if (!(isinf(false_value) && false_value < 0.0)) {
-                double ratio = exp((false_weight + false_value) - parent);
-                if (ratio != 0.0) {
-                    output.add(child_false, adjoint * ratio);
-                }
-            }
-            if (!(isinf(true_value) && true_value < 0.0)) {
-                double ratio = exp((true_weight + true_value) - parent);
-                if (ratio != 0.0) {
-                    output.add(child_true, adjoint * ratio);
-                }
-            }
+            propagate_decision_adjoint(circuit.decision_variable(node),
+                circuit.false_child(node), circuit.true_child(node), values[node],
+                adjoint, var_log_true, var_log_false, values, output);
             break;
         }
         default:
@@ -250,31 +291,9 @@ __device__ __forceinline__ void accumulate_node_weight_gradients(
         return;
     }
     if (circuit.type(node) == XGCF_DECISION) {
-        double parent = values[node];
-        if (isinf(parent) && parent < 0.0) {
-            return;
-        }
-        uint32_t variable = circuit.decision_variable(node);
-        uint32_t child_false = circuit.false_child(node);
-        uint32_t child_true = circuit.true_child(node);
-        double false_weight = var_log_false[variable];
-        double true_weight = var_log_true[variable];
-        double false_value = values[child_false];
-        double true_value = values[child_true];
-        double false_probability = 0.0;
-        double true_probability = 0.0;
-        if (!(isinf(false_value) && false_value < 0.0)) {
-            false_probability = exp((false_weight + false_value) - parent);
-        }
-        if (!(isinf(true_value) && true_value < 0.0)) {
-            true_probability = exp((true_weight + true_value) - parent);
-        }
-        if (false_probability != 0.0) {
-            output.add_false(variable, adjoint * false_probability);
-        }
-        if (true_probability != 0.0) {
-            output.add_true(variable, adjoint * true_probability);
-        }
+        accumulate_decision_weight_gradients(circuit.decision_variable(node),
+            circuit.false_child(node), circuit.true_child(node), values[node],
+            adjoint, var_log_true, var_log_false, values, output);
     } else if (circuit.type(node) == XGCF_LIT) {
         int32_t literal = circuit.literal(node);
         uint32_t variable = literal > 0

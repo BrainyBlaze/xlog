@@ -20944,6 +20944,12 @@ fn descriptor_meaning_object(
         SemanticActionDescriptor::ProgramLeaf { effect } => {
             ("program_leaf", *effect).into_pyobject(py)?.into_any()
         }
+        SemanticActionDescriptor::RuleCell { rule } => {
+            ("rule_cell", *rule).into_pyobject(py)?.into_any()
+        }
+        SemanticActionDescriptor::RuleCoefficient { code } => {
+            ("rule_coefficient", *code).into_pyobject(py)?.into_any()
+        }
     };
     Ok(value.unbind())
 }
@@ -22037,6 +22043,40 @@ impl PySemanticTransitionTaskUse {
             }
         }
         .map_err(xlog_err)?;
+        drop(owner);
+        let capsules = tensors
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
+    /// Borrow five original device outputs: header, joint query masses,
+    /// expected G/P/V, their factor VJP and the original factor log-potentials.
+    /// No language loss or continuous rule-cell producer is inferred here.
+    #[cfg(feature = "semantic-policy")]
+    fn world_measure_values(
+        &self,
+        py: Python<'_>,
+        step: PyRef<'_, PySemanticPreparedStep>,
+        bank: usize,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.session.borrow(py).require_creator()?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let session = self.session.borrow(py);
+        let mut owner = session.owner()?;
+        self.require_identity(&owner)?;
+        step.require_task(py, self)?;
+        step.content_binding_with_owner(py, &owner)?;
+        step.require_recording_stream(&owner, stream)?;
+        let tensors = owner
+            .prepared_world_measure_values(&step.inner, bank, stream)
+            .map_err(xlog_err)?;
         drop(owner);
         let capsules = tensors
             .into_iter()

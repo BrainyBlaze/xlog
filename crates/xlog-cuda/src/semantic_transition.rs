@@ -1722,7 +1722,7 @@ impl SemanticActionCatalogue {
         SCRATCH_BYTES
     }
     /// Active and forced-NULL masks in canonical opcode order.
-    pub const fn field_masks(&self) -> [(u32, u32); 6] {
+    pub const fn field_masks(&self) -> [(u32, u32); SEMANTIC_OPCODE_CARDINALITY] {
         [
             (NO_EDIT_ACTIVE_MASK as u32, NO_EDIT_NULL_MASK as u32),
             (
@@ -1741,6 +1741,10 @@ impl SemanticActionCatalogue {
             (
                 REPLACE_ROOT_ACTIVE_MASK as u32,
                 REPLACE_ROOT_NULL_MASK as u32,
+            ),
+            (
+                REPLACE_WEIGHT_ACTIVE_MASK as u32,
+                REPLACE_WEIGHT_NULL_MASK as u32,
             ),
         ]
     }
@@ -1904,6 +1908,12 @@ pub enum SemanticActionDescriptor {
     ProgramLeaf {
         effect: u32,
     },
+    RuleCell {
+        rule: u32,
+    },
+    RuleCoefficient {
+        code: u32,
+    },
 }
 
 #[cfg(feature = "semantic-policy")]
@@ -1927,6 +1937,7 @@ struct SemanticDecodedProgramEdit {
     children: [u32; 4],
     effect: u32,
     block: u32,
+    coefficient: u32,
     rule: Option<crate::SemanticProgramRule>,
     bytes: Vec<u8>,
 }
@@ -2189,7 +2200,7 @@ impl ActionCodebooks {
         }
         let opcode = choices[1];
         let (_, nulls) = semantic_opcode_masks(opcode).ok_or_else(mismatch)?;
-        if !(2..=5).contains(&opcode)
+        if !(2..=6).contains(&opcode)
             || choices
                 .iter()
                 .enumerate()
@@ -2204,6 +2215,7 @@ impl ActionCodebooks {
             children: [0; 4],
             effect: 0,
             block: 0,
+            coefficient: 0,
             rule: None,
             bytes: Vec::new(),
         };
@@ -2233,6 +2245,29 @@ impl ActionCodebooks {
             edit.rule = Some(value.rule);
             edit.block = value.block;
             edit.effect = self.program_leaf_effect(program, choices[17], true)?.0;
+        } else if opcode == 6 {
+            edit.target = match self
+                .local_category(2, choices[2])
+                .and_then(|index| self.targets.get(index))
+            {
+                Some(SemanticActionDescriptor::RuleCell { rule })
+                    if (*rule as usize)
+                        < program.initial_rules.len()
+                            + program.image.mutation_capacity as usize =>
+                {
+                    *rule
+                }
+                _ => return Err(mismatch()),
+            };
+            edit.coefficient = match self
+                .local_category(3, choices[3])
+                .and_then(|index| self.operands.get(index))
+            {
+                Some(SemanticActionDescriptor::RuleCoefficient {
+                    code: code @ (1 | 32769),
+                }) => *code,
+                _ => return Err(mismatch()),
+            };
         } else {
             let target = self
                 .local_category(2, choices[2])
@@ -2265,7 +2300,7 @@ impl ActionCodebooks {
             }
         }
         edit.bytes.extend_from_slice(b"XLOG-DECODED-PROGRAM-EDIT\0");
-        material_u64(&mut edit.bytes, 1);
+        material_u64(&mut edit.bytes, 2);
         edit.bytes.extend_from_slice(self.binding.digest.as_bytes());
         edit.bytes
             .extend_from_slice(Self::program_binding(program).as_bytes());
@@ -2278,6 +2313,7 @@ impl ActionCodebooks {
             edit.guard,
             edit.effect,
             edit.block,
+            edit.coefficient,
         ]
         .into_iter()
         .chain(edit.children)
@@ -2551,6 +2587,8 @@ impl ActionCodebooks {
                 program.predicate_count as usize
                     + program.image.nodes.len()
                     + program.image.roots.len()
+                    + program.initial_rules.len()
+                    + program.image.mutation_capacity as usize
             })
             .unwrap_or(0);
         let additional_operands = program
@@ -2559,6 +2597,7 @@ impl ActionCodebooks {
                     + 4
                     + program.image.guards.len()
                     + program.image.nodes.len()
+                    + 2
             })
             .unwrap_or(0);
         if [
@@ -2603,6 +2642,10 @@ impl ActionCodebooks {
                 });
             }
             words[53] = target_views.len() as u64 + 1;
+            for rule in 0..program.initial_rules.len() + program.image.mutation_capacity as usize {
+                words.extend([rule as u64, u64::MAX - 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+                target_views.push(SemanticActionDescriptor::RuleCell { rule: rule as u32 });
+            }
             for predicate in 0..program.predicate_count {
                 let arity = program.predicate_arities[predicate as usize];
                 words.extend([
@@ -2664,6 +2707,10 @@ impl ActionCodebooks {
             for index in 0..4 {
                 words.extend([0, 0, 0, 2, u64::from(index), 0]);
                 operand_views.push(SemanticActionDescriptor::RuleVariable { index });
+            }
+            for code in [1, 32769] {
+                words.extend([0, 0, 0, 5, u64::from(code), 0]);
+                operand_views.push(SemanticActionDescriptor::RuleCoefficient { code });
             }
         }
         if words[55] == 0 {
@@ -9615,14 +9662,35 @@ fn validated_program_edit_receipt(
             } else {
                 decoded.target
             })
-        || receipt[32] != u64::from(decoded.guard)
-        || receipt[33..37] != decoded.children.map(u64::from)
+        || (decoded.opcode != 6
+            && (receipt[32] != u64::from(decoded.guard)
+                || receipt[33..37] != decoded.children.map(u64::from)))
         || receipt[41] != control
         || (receipt[40] != 0 && receipt[26] != u64::MAX)
     {
         return Err(mismatch());
     }
-    if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
+    if decoded.opcode == 6 {
+        if control != SemanticEvaluationIntervention::Structural as u64
+            || !matches!(receipt[32], 1 | 32769)
+            || receipt[33] != u64::from(decoded.coefficient)
+            || receipt[32] == receipt[33]
+            || (receipt[34] | receipt[35]) == 0
+            || receipt[36] == 0
+            || receipt[36] == u64::MAX
+            || receipt[39] < receipt[36]
+            || receipt[39] == u64::MAX
+        {
+            return Err(mismatch());
+        }
+        if let Some(previous) =
+            previous_choices.filter(|choices| choices[0] == 1 && choices[1] == 6)
+        {
+            if codebooks.decoded_program_edit(program, previous)?.target == decoded.target {
+                return Err(mismatch());
+            }
+        }
+    } else if intervention == Some(SemanticEvaluationIntervention::FixedRuleActivation) {
         let library = library.ok_or_else(mismatch)?;
         let rule = decoded.rule.ok_or_else(mismatch)?;
         let index = library
@@ -9703,8 +9771,16 @@ fn completed_theory_delta_for_slot(
         for word in &hard_decode[12..] {
             material_u64(&mut delta_bytes, *word);
         }
-        let delta =
-            completed_action_child_material(owner, b"program-image-delta", ordinal, &delta_bytes);
+        let delta = completed_action_child_material(
+            owner,
+            if decoded.opcode == 6 {
+                b"rule-coefficient-delta"
+            } else {
+                b"program-image-delta"
+            },
+            ordinal,
+            &delta_bytes,
+        );
         let mut payload = Vec::new();
         payload.extend_from_slice(predecessor_semantic_root_digest.as_bytes());
         payload.extend_from_slice(task_identity.as_bytes());
@@ -9721,7 +9797,11 @@ fn completed_theory_delta_for_slot(
         }
         let evidence = completed_action_child_material(
             owner,
-            b"program-image-delta-evidence",
+            if decoded.opcode == 6 {
+                b"rule-coefficient-delta-evidence"
+            } else {
+                b"program-image-delta-evidence"
+            },
             ordinal,
             &payload,
         );
@@ -18537,6 +18617,8 @@ struct Descriptor {
     task_support_truths: u64,
     task_support_lineage: u64,
     task_support_lineage_words: u64,
+    task_measure: u64,
+    task_measure_words: u64,
     publication: PublicationCommand,
     text: TextBinding,
     model_work: ModelWorkInput,
@@ -20122,13 +20204,13 @@ const _: () = assert!(std::mem::offset_of!(PolicyUniformDescriptor, transferred)
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 296);
-const _: () = assert!(size_of::<Descriptor>() == 1472);
+const _: () = assert!(size_of::<Descriptor>() == 1488);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, work) == 176);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, baseline_snapshot) == 184);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, score_cotangent_snapshot) == 192);
 const _: () = assert!(std::mem::offset_of!(PolicyBackward, numerical) == 200);
-const _: () = assert!(std::mem::offset_of!(Descriptor, policy_work) == 1456);
-const _: () = assert!(std::mem::offset_of!(Descriptor, policy_score) == 1464);
+const _: () = assert!(std::mem::offset_of!(Descriptor, policy_work) == 1472);
+const _: () = assert!(std::mem::offset_of!(Descriptor, policy_score) == 1480);
 const OBSERVATION_BYTES: usize =
     size_of::<DeviceState>() + COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>();
 
@@ -20171,7 +20253,7 @@ mod task_state_contract {
     #[test]
     fn task_state_bank_includes_actual_query_receipts() {
         assert_eq!(size_of::<DeviceState>(), 7568);
-        assert_eq!(size_of::<Descriptor>(), 1472);
+        assert_eq!(size_of::<Descriptor>(), 1488);
     }
 
     #[test]
@@ -25438,9 +25520,14 @@ impl SemanticTransitionSession {
             .and_then(|n| n.checked_mul(2))
             .and_then(|n| n.checked_add(block_bytes))
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
-        let ground_layout = self.task_ground.as_ref().map(|ground| ground.layout);
+        let ground_layout = self
+            .task_ground
+            .as_ref()
+            .map(|ground| (ground.layout, ground.measure_geometry));
         let ground_bytes = ground_layout
-            .map(task_ground::TaskGroundStorage::allocation_bytes)
+            .map(|(layout, measure)| {
+                task_ground::TaskGroundStorage::allocation_bytes(layout, measure)
+            })
             .transpose()?
             .unwrap_or(0)
             .checked_mul(2)
@@ -25889,8 +25976,12 @@ impl SemanticTransitionSession {
                 let branches = [
                     PreparedBranchStorage {
                         task_ground: ground_layout
-                            .map(|layout| {
-                                task_ground::TaskGroundStorage::allocate(layout, &mut reservation)
+                            .map(|(layout, measure)| {
+                                task_ground::TaskGroundStorage::allocate(
+                                    layout,
+                                    measure,
+                                    &mut reservation,
+                                )
                             })
                             .transpose()?,
                         model_update: model_update_zero,
@@ -25913,8 +26004,12 @@ impl SemanticTransitionSession {
                     },
                     PreparedBranchStorage {
                         task_ground: ground_layout
-                            .map(|layout| {
-                                task_ground::TaskGroundStorage::allocate(layout, &mut reservation)
+                            .map(|(layout, measure)| {
+                                task_ground::TaskGroundStorage::allocate(
+                                    layout,
+                                    measure,
+                                    &mut reservation,
+                                )
                             })
                             .transpose()?,
                         model_update: model_update_one,
@@ -25948,6 +26043,14 @@ impl SemanticTransitionSession {
                         &self.stream,
                         &storage,
                         &inputs,
+                        std::array::from_fn(|bank| {
+                            branches[bank].task_ground.as_ref().map(|ground| {
+                                ground
+                                    .measure
+                                    .view()
+                                    .slice(0..world_state::MEASURE_HEADER_WORDS)
+                            })
+                        }),
                         self.graph.transition_arena_view().len(),
                         &mut reservation,
                         &self.learning_phases,
@@ -41103,7 +41206,12 @@ impl SemanticTransitionSession {
         if let Some(program) = binding.spec.program.editable_program() {
             ground_layout.require_program_workspace(program)?;
         }
-        let ground_bytes = task_ground::TaskGroundStorage::allocation_bytes(ground_layout)?;
+        let measure_geometry = binding
+            .spec
+            .semantic_context
+            .measure_geometry(ground_layout)?;
+        let ground_bytes =
+            task_ground::TaskGroundStorage::allocation_bytes(ground_layout, measure_geometry)?;
         let task_bytes = words
             .len()
             .checked_mul(size_of::<u64>())
@@ -41117,7 +41225,11 @@ impl SemanticTransitionSession {
         let device = reservation
             .alloc::<u64>(words.len())
             .map_err(|error| runtime_error("private task allocation", error))?;
-        let ground = task_ground::TaskGroundStorage::allocate(ground_layout, &mut reservation)?;
+        let ground = task_ground::TaskGroundStorage::allocate(
+            ground_layout,
+            measure_geometry,
+            &mut reservation,
+        )?;
         // Retain the new owner before the first may-enqueue boundary. A failed
         // upload/adoption poisons reuse and keeps its storage until Session drop.
         self.captured = None;
@@ -41664,6 +41776,56 @@ impl SemanticTransitionSession {
         let tensors = export_policy_uniform_domains(
             buffers,
             self.codebooks.input_cells,
+            self.provider.device().ordinal() as i32,
+            Arc::clone(&original.aliases),
+            Arc::clone(
+                self.publication
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?,
+            ),
+        )?;
+        self.steps
+            .get_mut(&step.token)
+            .expect("checked original step")
+            .consumer_streams
+            .insert(consumer_stream);
+        self.order_content_consumers(consumer_stream)?;
+        Ok(tensors)
+    }
+
+    /// Original native joint query masses, expected task values and their
+    /// log-potential VJP. These are derived outputs of this Proposal invocation,
+    /// not a continuous model producer or permission to mutate rule cells.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_world_measure_values(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        consumer_stream: u64,
+    ) -> Result<[DlpackManagedTensor; 5], SemanticTransitionError> {
+        self.check_prepared_content_stream(step, consumer_stream)?;
+        if bank > 1 || self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "world measure values require their original Proposal bank",
+            ));
+        }
+        let original = &self.steps[&step.token];
+        let prepared = original.prepared.as_ref().expect("checked original step");
+        if prepared.transition_recorded & (1 << bank) == 0 {
+            return Err(publication_input_error(
+                "world measure consumer must follow its original native Proposal",
+            ));
+        }
+        let ground = prepared.branches[bank]
+            .task_ground
+            .as_ref()
+            .ok_or_else(|| publication_input_error("original world measure storage is absent"))?;
+        if ground.measure.is_empty() {
+            return Err(publication_input_error(
+                "world measure values require the original compiled native program",
+            ));
+        }
+        let tensors = ground.export_measure(
             self.provider.device().ordinal() as i32,
             Arc::clone(&original.aliases),
             Arc::clone(
@@ -42966,7 +43128,10 @@ impl SemanticTransitionSession {
             .task_ground
             .as_ref()
             .map(|ground| {
-                let bytes = task_ground::TaskGroundStorage::allocation_bytes(ground.layout)?;
+                let bytes = task_ground::TaskGroundStorage::allocation_bytes(
+                    ground.layout,
+                    ground.measure_geometry,
+                )?;
                 let mut reservation = self
                     .provider
                     .memory()
@@ -42975,7 +43140,11 @@ impl SemanticTransitionSession {
                             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
                     )
                     .map_err(|error| runtime_error("original policy ground reservation", error))?;
-                task_ground::TaskGroundStorage::allocate(ground.layout, &mut reservation)
+                task_ground::TaskGroundStorage::allocate(
+                    ground.layout,
+                    ground.measure_geometry,
+                    &mut reservation,
+                )
             })
             .transpose()?;
         let replacement = PolicyReplacement {
@@ -46816,6 +46985,16 @@ impl SemanticTransitionSession {
             task_support_lineage_words: io
                 .task_ground
                 .map_or(0, |ground| ground.support_lineage.len() as u64),
+            task_measure: io.task_ground.map_or(0, |ground| {
+                if ground.measure.is_empty() {
+                    0
+                } else {
+                    ground.measure.device_ptr_value()
+                }
+            }),
+            task_measure_words: io
+                .task_ground
+                .map_or(0, |ground| ground.measure.len() as u64),
             publication: PublicationCommand {
                 control: self
                     .publication
@@ -46931,6 +47110,12 @@ impl SemanticTransitionSession {
                 ranges.push((
                     ground.support_lineage.device_ptr_value(),
                     (ground.support_lineage.len() * 8) as u64,
+                ));
+            }
+            if !ground.measure.is_empty() {
+                ranges.push((
+                    ground.measure.device_ptr_value(),
+                    (ground.measure.len() * 8) as u64,
                 ));
             }
         }

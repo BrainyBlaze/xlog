@@ -613,7 +613,9 @@ impl ActionCodebooks {
                     | SemanticActionDescriptor::ProgramRoot { .. }
                     | SemanticActionDescriptor::ProgramGuard { .. }
                     | SemanticActionDescriptor::ProgramChild { .. }
-                    | SemanticActionDescriptor::ProgramLeaf { .. } => Some(0),
+                    | SemanticActionDescriptor::ProgramLeaf { .. }
+                    | SemanticActionDescriptor::RuleCell { .. }
+                    | SemanticActionDescriptor::RuleCoefficient { .. } => Some(0),
                 }
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
                 bytes = bytes

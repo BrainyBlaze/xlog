@@ -1180,6 +1180,26 @@ class SemanticTransitionTaskUse:
         """
         ...
 
+    def world_measure_values(
+        self, step: SemanticPreparedStep, bank: int, consumer_stream: int,
+    ) -> tuple[Any, Any, Any, Any, Any]:
+        """Borrow this native Proposal's five owner-bearing DLPack outputs.
+
+        Header uint64[32]; masses float64[3,Q,4] in 00/10/01/11 order;
+        expected G/P/V float64[3,3] (metric, candidate); task-value VJP
+        float64[3,F,2]; original log-potentials float64[F,2] (false, true).
+        Header[0] must be 1. Header[8:11] is per-candidate availability: 0
+        unexecuted, 1 available, otherwise 1 + native failure reason (invalid
+        source, node/apply/frontier capacity, fuel, undefined condition,
+        coefficient law, numerics, certificate, scope, fact/rule capacity,
+        invalid program). Header[31] records whether any original query uses
+        the common measure; an assignment context may contain measure queries.
+        Assignment queries remain point-truth at their original realization.
+        Structural numerical values are not certificates. Static factors grant
+        no model learning destination. The actor return remains stop-gradient.
+        """
+        ...
+
     @property
     def proposal_expense(self) -> tuple[int, int]:
         """Original whole-task capacity and irreversible nominal places spent.

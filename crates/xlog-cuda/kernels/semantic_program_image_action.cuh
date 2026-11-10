@@ -116,6 +116,78 @@ __device__ bool prefix_completes(const uint64_t* books,const Component* componen
     }
     return false;
 }
+template<class Component,class Charge>
+__device__ bool weight_prefix_completes(const uint64_t* books,const Component* components,
+        const uint8_t* support,uint32_t start,const uint32_t choices[18],uint32_t field,
+        uint32_t category,const semantic_program_image::Prefix& frame,
+        const semantic_rule_cells::View& cells,Charge charge) {
+    if(!cells.data || cells.generation==UINT64_MAX || !frame.base.header ||
+       frame.mutations()>=frame.geometry.mutations ||
+       frame.mutations()-frame.inherited_mutations()>=frame.geometry.local_mutations ||
+       frame.generation()==UINT64_MAX)return false;
+    auto admitted=[&](uint32_t position,uint32_t value) {
+        charge(semantic_rule_action::PrefixWorkEvent::Category);
+        const auto& component=components[start+position];
+        return value<component.cardinality &&
+            semantic_rule_action::context_category(books,position,value,charge) &&
+            support[component.offset+value] &&
+            (position>field || value==(position==field ? category : choices[position]));
+    };
+    for(uint32_t position=4;position<18;++position)if(!admitted(position,0))return false;
+    bool zero=false,unit=false;
+    const uint32_t code_begin=field>=3 ? (field==3 ? category : choices[3]) : 1;
+    const uint32_t code_end=field>=3 ? code_begin+uint32_t(code_begin<books[3]) : uint32_t(books[3]);
+    for(uint32_t value=code_begin;value<code_end;++value) {
+        uint32_t code=0;
+        if(admitted(3,value) && operand(books,3,value,semantic_rule_cells::kCoefficientSort,
+                0,32770,&code,charge)) {
+            zero|=code==1;unit|=code==32769;
+        }
+    }
+    if(!zero && !unit)return false;
+    auto read=[&](const uint64_t* row,uint64_t index) {
+        charge(semantic_rule_action::PrefixWorkEvent::TableSlot);return row[index];
+    };
+    const uint32_t begin=field>=2 ? (field==2 ? category : choices[2]) : 1;
+    const uint32_t end=field>=2 ? begin+uint32_t(begin<books[1]) : uint32_t(books[1]);
+    for(uint32_t value=begin;value<end;++value) {
+        uint32_t rule=0;semantic_rule_cells::Handle cell{};
+        if(!admitted(2,value) || !target(books,value,semantic_rule_cells::kTargetTag,
+                0,UINT32_MAX,&rule,charge) ||
+           (frame.has_prior && frame.prior.opcode==semantic_rule_cells::kReplaceWeight &&
+                frame.prior.target==rule) ||
+           !semantic_rule_cells::lookup(cells,rule,&cell,read) || cell.generation==UINT64_MAX)continue;
+        if((zero && cell.code==32769) || (unit && cell.code==1))return true;
+    }
+    return false;
+}
+
+template<class Charge>
+__device__ bool decode_weight(const uint64_t* books,const uint32_t choices[18],
+        const semantic_program_image::Prefix& frame,const semantic_rule_cells::View& cells,
+        semantic_program_image::DecodedEdit* output,Charge charge) {
+    if(!output || !choices || !books || choices[0]!=1 ||
+       choices[1]!=semantic_rule_cells::kReplaceWeight || !frame.base.header ||
+       frame.mutations()>=frame.geometry.mutations ||
+       frame.mutations()-frame.inherited_mutations()>=frame.geometry.local_mutations ||
+       frame.generation()==UINT64_MAX || !cells.data || cells.generation==UINT64_MAX)return false;
+    for(uint32_t field=4;field<18;++field)if(choices[field])return false;
+    semantic_program_image::DecodedEdit edit{};
+    edit.opcode=semantic_rule_cells::kReplaceWeight;edit.library_index=UINT32_MAX;
+    if(!target(books,choices[2],semantic_rule_cells::kTargetTag,0,UINT32_MAX,&edit.target,charge) ||
+       !operand(books,3,choices[3],semantic_rule_cells::kCoefficientSort,0,32770,&edit.coefficient,charge) ||
+       !semantic_rule_cells::endpoint(edit.coefficient) ||
+       (frame.has_prior && frame.prior.opcode==semantic_rule_cells::kReplaceWeight &&
+            frame.prior.target==edit.target))return false;
+    auto read=[&](const uint64_t* row,uint64_t index) {
+        charge(semantic_rule_action::PrefixWorkEvent::TableSlot);return row[index];
+    };
+    if(!semantic_rule_cells::lookup(cells,edit.target,&edit.cell,read) ||
+       edit.cell.generation==UINT64_MAX || !semantic_rule_cells::endpoint(edit.cell.code) ||
+       edit.cell.code==edit.coefficient)return false;
+    *output=edit;return true;
+}
+
 template<class Charge>
 __device__ bool decode(const uint64_t* books,const uint32_t choices[18],
         const semantic_program::Bank& bank,const semantic_program_image::Prefix& image,
