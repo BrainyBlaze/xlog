@@ -1203,18 +1203,22 @@ impl Reader<'_> {
             .get(&tag)
             .ok_or_else(|| Stop::Invalid("unknown numerical operation tag".into()))?;
         let mut input = None;
+        let mut selected = self
+            .budget
+            .collection_choices
+            .then(|| serde_json::Map::from_iter([("operation".into(), json!(tag))]));
         for (position, field) in fields.iter().enumerate().skip(1) {
             let following = || {
                 let mut units = Vec::new();
                 for field in fields.iter().skip(position + 1) {
                     units.push(budget::text(","));
-                    units.push(budget::field(field));
+                    units.push(budget::row_field(field, selected.as_ref()));
                 }
                 units.push(budget::text("]"));
                 units
             };
             self.budget.set(frame, || {
-                let mut units = vec![budget::field(field)];
+                let mut units = vec![budget::row_field(field, selected.as_ref())];
                 units.extend(following());
                 units
             });
@@ -1222,7 +1226,16 @@ impl Reader<'_> {
             self.output.push(b',')?;
             self.output.json(field)?;
             self.output.push(b':')?;
+            if selected.is_some() && self.source[self.offset..].trim_ascii_start().is_empty() {
+                self.budget.set(frame, || {
+                    let mut units = vec![budget::row_field(field, selected.as_ref())];
+                    units.extend(following());
+                    units
+                });
+                return Err(Stop::Incomplete);
+            }
             self.budget.set(frame, following);
+            let value_start = self.output.bytes.len();
             if self.compact_metadata && field == "function" {
                 self.symbol(true)?;
             } else if self.compact_indices && tag == "gather_columns" && field == "input" {
@@ -1235,6 +1248,14 @@ impl Reader<'_> {
                 self.structured_indices(index, input.unwrap())?;
             } else {
                 self.raw(true)?;
+            }
+            if let Some(selected) = &mut selected {
+                // Reuse the canonical value emitted by this reader, including
+                // retained symbols and compact Gather descriptors.
+                selected.insert(
+                    field.clone(),
+                    serde_json::from_slice(&self.output.bytes[value_start..])?,
+                );
             }
         }
         self.budget.set(frame, || vec![]);

@@ -1400,7 +1400,8 @@ encoding, token-cost contract and admission predicates. Its
 result has no allowed token, it retains errors actually returned by canonical
 source projection or resource admission during that call. A nonempty result
 returns `None`. The ordinary `filter` API and historical packet behavior remain
-unchanged; `filter_with_rejections` rejects packets other than version40.
+unchanged; `filter_with_rejections` supports versions40–44 and rejects earlier
+packets.
 
 The JSON record has exactly the following fields:
 
@@ -1433,7 +1434,41 @@ Invalid API arguments still raise errors instead of manufacturing a report.
 Completion, feature usefulness and successful model correction remain separate
 runtime outcomes.
 
-For a version4 through version40 packet,
+Version44 (`xlog-contextual-acquisition-v44`) selects` numerical-rows-v8`.
+It reuses the existing named-body reader: root fields are `intent,helpers,entry`,
+helpers are `[name,signature,body]`, and each body has` weights,ops`. The model
+writes a nonempty flat list of canonical operation tuples. Value operands refer
+only to earlier completed rows of that body; its actual last row is the result.
+Weights, aliases, signatures, operation fields, Gather descriptors and numerical
+execution retain their existing owners. There is no preselected operation count,
+nested value expression, automatic CSE, supplied operand or generated graph.
+
+This mode binds context3, `output-dependencies-v3`, canonical numeric identities
+and predicate proofs, and the entry's `possible-finite-nonzero-v1` requirement.
+Both context lengths, physical/callee dependencies, numeric argument use, raw or
+hidden input flow and causality remain required. Open bodies use the existing
+necessary producer, dependency-frontier, row and shape bounds, with original-ID
+row capacity; they do not invoke hypothetical continuation graph search.
+Expression-only ancestor and child-reference obligations do not apply to rows.
+
+The token contract is `ordered-structural-subsequence-v5`. The same row reader
+retains already selected fields for future `indices`/`token_ids` costs; the
+shared typed array minimum and literal-or-Gather-descriptor alternatives join
+the complete mandatory suffix with one separately paid EOS. An unopened selected
+field remains owed, while a started literal or descriptor retains its existing
+cursor owner. Unknown shape facts remain optimistic. These necessary bounds can
+admit a prefix that later fails; they do not promise token fit or usefulness.
+
+The four-field packet, completion API and captured rejection report are shared.
+`decode_definition` and
+`fork_acquired(source_encoding="numerical-rows-v8")` use the same original-source
+reader and canonical dependency/feature admission before initialization and
+execution. The source encoding enforces these requirements even if the legacy
+`require_output_dependencies` keyword is false. Historical languages1–43,
+encodings, masks, original IDs and paid checkpoints retain their literal
+contracts; kernels, gradients and optimizer behavior are unchanged.
+
+For a version4 through version44 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
