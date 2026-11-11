@@ -1400,7 +1400,7 @@ encoding, token-cost contract and admission predicates. Its
 result has no allowed token, it retains errors actually returned by canonical
 source projection or resource admission during that call. A nonempty result
 returns `None`. The ordinary `filter` API and historical packet behavior remain
-unchanged; `filter_with_rejections` supports versions40–44 and rejects earlier
+unchanged; `filter_with_rejections` supports versions40–45 and rejects earlier
 packets.
 
 The JSON record has exactly the following fields:
@@ -1468,7 +1468,27 @@ execution. The source encoding enforces these requirements even if the legacy
 encodings, masks, original IDs and paid checkpoints retain their literal
 contracts; kernels, gradients and optimizer behavior are unchanged.
 
-For a version4 through version44 packet,
+Version45 (`xlog-contextual-acquisition-v45`, `numerical-rows-v9`) extends the
+same flat reader with `ordered-structural-subsequence-v6`. Before a row's tag
+closes, the reader retains the unconsumed name and every mandatory field of
+each compatible canonical operation. The shared tag-prefix matcher handles
+partial byte spellings and JSON Unicode escapes. Current typed admission and
+the entire suffix cost refer to the same operation alternative; the bound
+cannot combine one operation's cheap fields with another operation's types.
+Gather keeps both literal and descriptor forms through the existing typed
+array minimum. Outer closures and one paid EOS remain in the same coverage.
+
+The local domain uses the current body's already available values. It does
+not exclude a distant future operation because an intermediate value has yet
+to be created, and it performs no multi-operation completion search. The
+independent monotone row-capacity upper bound retains its former projection;
+the new typed suffix check runs after current facts have been parsed/restored.
+No cached allowance is enlarged. Full decoding and original-source admission
+reuse the same canonical flat path. V1–V44 contracts remain unchanged. This
+stronger necessary bound can still admit a dead end and does not establish
+token fit, useful acquisition, numerical improvement or successful training.
+
+For a version4 through version45 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

@@ -10,6 +10,7 @@ pub(crate) const EXPRESSION_CONTRACT: &str = "ordered-structural-subsequence-v2"
 pub(crate) const REFERENCE_CONTRACT: &str = "ordered-structural-subsequence-v3";
 pub(crate) const COLLECTION_CONTRACT: &str = "ordered-structural-subsequence-v4";
 pub(crate) const COLLECTION_CHOICE_CONTRACT: &str = "ordered-structural-subsequence-v5";
+pub(crate) const OPEN_ROW_CONTRACT: &str = "ordered-structural-subsequence-v6";
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Atom {
@@ -39,6 +40,11 @@ impl Atom {
 
 pub(crate) enum Unit {
     Bytes(Vec<Atom>),
+    RowTag {
+        prefix: Vec<u8>,
+        opening: bool,
+        fallback: Vec<Atom>,
+    },
     RowField {
         selected: serde_json::Map<String, serde_json::Value>,
         name: String,
@@ -228,6 +234,7 @@ pub(crate) struct State {
     pending: Vec<Atom>,
     pub literal_array: bool,
     pub collection_choices: bool,
+    open_row_suffix: bool,
     pub definition: usize,
     pub entry: bool,
     pub entry_pending: bool,
@@ -267,10 +274,12 @@ impl State {
         parameter_references: bool,
         expressions: bool,
         collection_choices: bool,
+        open_row_suffix: bool,
     ) -> Self {
         Self {
             enabled,
             collection_choices,
+            open_row_suffix,
             parameter_references,
             expressions,
             row_commas: if enabled {
@@ -310,6 +319,29 @@ impl State {
             return;
         }
         self.frames.truncate(frame);
+    }
+
+    /// The incomplete tag owns its whole row tail. Keep the former delimiter
+    /// projection for the independent monotone row-capacity bound; the common
+    /// suffix check resolves typed alternatives only after parsing current facts.
+    pub(crate) fn open_row(&mut self, frame: usize, prefix: &[u8], opening: bool) {
+        if !self.enabled || !self.open_row_suffix {
+            return;
+        }
+        let mut fallback = self.pending.clone();
+        for unit in &self.frames[frame] {
+            let Unit::Bytes(atoms) = unit else {
+                unreachable!()
+            };
+            fallback.extend(atoms);
+        }
+        self.set(frame, || {
+            vec![Unit::RowTag {
+                prefix: prefix.to_vec(),
+                opening,
+                fallback,
+            }]
+        });
     }
 
     pub(crate) fn expect(&mut self, byte: u8) {
@@ -400,7 +432,9 @@ impl State {
                     }
                     // Other, independent bounds may retain this weaker suffix.
                     // The common token check resolves every available tail.
-                    Unit::Tail { fallback, .. } => result.extend(fallback),
+                    Unit::Tail { fallback, .. } | Unit::RowTag { fallback, .. } => {
+                        result.extend(fallback)
+                    }
                     Unit::Bytes(atoms) => result.extend(atoms),
                     Unit::Rows {
                         definition,

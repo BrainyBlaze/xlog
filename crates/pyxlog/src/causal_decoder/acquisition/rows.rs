@@ -269,6 +269,7 @@ pub(super) fn prefix<'a>(
     track_token_budget: bool,
     collection_choices: bool,
     counted_expressions: bool,
+    open_row_suffix: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -314,6 +315,7 @@ pub(super) fn prefix<'a>(
             self_delimited,
             expressions,
             collection_choices,
+            open_row_suffix,
         ),
     };
     let complete = match reader.document() {
@@ -401,6 +403,7 @@ pub(super) fn definitions(
         false,
         false,
         counted_expressions,
+        false,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -1194,10 +1197,23 @@ impl Reader<'_> {
         self.budget.operation_open = true;
         let frame = self.budget.enter();
         self.budget.set(frame, || vec![budget::text("\"\"]")]);
-        self.take(b'[')?;
+        if let Err(error) = self.take(b'[') {
+            if matches!(error, Stop::Incomplete) {
+                self.budget.open_row(frame, &[], true);
+            }
+            return Err(error);
+        }
         self.output.extend_from_slice(b"{\"operation\":")?;
         self.budget.set(frame, || vec![budget::text("]")]);
-        let tag: String = self.value()?;
+        let start = self.offset;
+        let tag: String = match self.value() {
+            Ok(tag) => tag,
+            Err(Stop::Incomplete) => {
+                self.budget.open_row(frame, &self.source[start..], false);
+                return Err(Stop::Incomplete);
+            }
+            Err(error) => return Err(error),
+        };
         let fields = self
             .fields
             .get(&tag)
