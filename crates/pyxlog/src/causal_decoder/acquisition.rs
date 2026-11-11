@@ -66,6 +66,7 @@ const SCALAR_RESOURCE_LANGUAGE: &str = "xlog-contextual-acquisition-v37";
 const SOURCE_ROOT_OWNER_LANGUAGE: &str = "xlog-contextual-acquisition-v38";
 const NECESSARY_CONTINUATION_LANGUAGE: &str = "xlog-contextual-acquisition-v39";
 const REJECTION_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v40";
+const SELF_DELIMITED_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v41";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -97,7 +98,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=40) {
+    if !matches!(version, 1..=41) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -309,7 +310,7 @@ pub(super) fn language(
                     &mut schema,
                     &operation_fields()?,
                     version >= 30,
-                    version >= 36,
+                    (36..=40).contains(&version),
                 );
             }
             if version >= 26 {
@@ -372,21 +373,27 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 37 {
+            if (37..=40).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Numerical-expressions-v6 retains the model-authored exact lowered count. Before committing a Linear parent or scalar weight choice, canonical partial inference intersects its input/result constraints with actual closed physical matrix declarations. A vector remains a valid Parameter source but cannot serve as a Linear matrix. Unknown weight alternatives retain only shared necessary constraints; no weight, activation shape, SSA value or child expression is supplied. The same source-local owner serves partial tags, ancestors, references and scalar choices. Historical modes remain unchanged; this necessary domain check does not guarantee completion or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 38 {
+            if (38..=40).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} The pending source root carries its actual definition index. Its early exact-count source reservation applies only while reading that definition's output, not while rereading a closed helper. Cumulative source usage, other pending roots, exact counts and original-ID/EOS obligations remain unchanged. This owner correction does not guarantee entry admission or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 39 {
+            if (39..=40).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Prefix continuation uses the existing necessary producer, dependency-frontier, row and shape bounds without constructing hypothetical future graphs. Source-selected tags, scalars, ancestors, references and exact counts retain their checks. A prefix may still reach a dead end; the actual completed graph must satisfy all canonical output, dependency and feature requirements. Historical prefix modes retain their original completion search.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
+            if version == 41 {
+                schema["description"] = json!(format!(
+                    "{} Bodies contain weights then return, with no preselected operation_count. The model selects and closes its own expression; the existing numerical-expressions-v5 codec derives the canonical output from actual postorder operations. The source-root owner remains definition-local. Canonical partial inference retains closed physical Linear matrix domains, and continuation uses necessary producer, dependency-frontier, row and shape bounds without hypothetical future graphs. Global source and lowered-operation caps, original-ID/EOS obligations, completed output/dependency/feature admission and captured-native-rejections-v1 remain. No count, operand or graph is supplied. A prefix can still reach a dead end; this mode does not guarantee token fit, completion or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
@@ -475,6 +482,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                41 => SELF_DELIMITED_FEEDBACK_LANGUAGE,
                 40 => REJECTION_FEEDBACK_LANGUAGE,
                 39 => NECESSARY_CONTINUATION_LANGUAGE,
                 38 => SOURCE_ROOT_OWNER_LANGUAGE,
@@ -709,7 +717,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE)
+        let self_delimited_feedback = language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE;
+        let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE
+            || self_delimited_feedback)
             .then(|| sha256_hex(language_json.as_bytes()));
         let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE
             || rejection_language_sha256.is_some();
@@ -717,9 +727,11 @@ impl PyNativeAcquisitionMask {
             language["id"] == SOURCE_ROOT_OWNER_LANGUAGE || necessary_continuations;
         let scalar_resource_domains =
             language["id"] == SCALAR_RESOURCE_LANGUAGE || source_root_ownership;
-        let counted_expressions =
-            language["id"] == COUNTED_EXPRESSION_LANGUAGE || scalar_resource_domains;
-        let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE || counted_expressions;
+        let counted_expressions = !self_delimited_feedback
+            && (language["id"] == COUNTED_EXPRESSION_LANGUAGE || scalar_resource_domains);
+        let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE
+            || counted_expressions
+            || self_delimited_feedback;
         let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE || feature_output;
         let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
         let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
@@ -1008,7 +1020,7 @@ impl PyNativeAcquisitionMask {
     ) -> PyResult<(Py<PyBytes>, Option<String>)> {
         if self.rejection_language_sha256.is_none() {
             return Err(value_error(
-                "rejection capture requires acquisition language version 40",
+                "rejection capture requires acquisition language version 40 or 41",
             ));
         }
         let (mask, report) =
