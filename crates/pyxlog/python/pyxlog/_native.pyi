@@ -217,8 +217,10 @@ class NativeAcquisitionMask:
         feature contract through the same canonical original-source fork.
         numerical-expressions-v6 also checks the model's exact per-body count
         before the same initializer and feature fork, retaining original UTF-8.
-        Complete source validates its actual canonical graph without searching
-        for another hypothetical graph; final output/dependency checks remain.
+        The shared complete-source reader validates the actual canonical graph
+        without another hypothetical graph. V39 uses necessary bounds through
+        the entire packet decode; legacy packets also run their captured prefix
+        mode, which retains its search. Final output/dependency checks remain.
         """
 
 class _LogitSelection(TypedDict):
