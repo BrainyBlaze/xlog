@@ -230,6 +230,8 @@ struct Reader<'a> {
     named_body: bool,
     expressions: bool,
     value_references: bool,
+    counted_expressions: bool,
+    expression_count: Option<usize>,
     parent_prerequisites: bool,
     ancestor_typing: bool,
     expression_parents: Vec<expressions::Parent>,
@@ -266,6 +268,7 @@ pub(super) fn prefix<'a>(
     ancestor_typing: bool,
     track_token_budget: bool,
     collection_choices: bool,
+    counted_expressions: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -288,8 +291,10 @@ pub(super) fn prefix<'a>(
         named_body,
         expressions,
         value_references,
-        parent_prerequisites,
-        ancestor_typing,
+        counted_expressions,
+        expression_count: None,
+        parent_prerequisites: parent_prerequisites || counted_expressions,
+        ancestor_typing: ancestor_typing || counted_expressions,
         expression_parents: Vec::new(),
         expression_nodes: 0,
         expression_roots: usize::from(expressions),
@@ -376,6 +381,7 @@ pub(super) fn definitions(
     expressions: bool,
     value_references: bool,
     feature_output: bool,
+    counted_expressions: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -393,6 +399,7 @@ pub(super) fn definitions(
         false,
         false,
         false,
+        counted_expressions,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -445,7 +452,7 @@ pub(super) fn definitions(
             &raw_tokens,
             Some(fields),
             Some(context),
-            false,
+            counted_expressions,
             true,
             true,
             true,
@@ -606,6 +613,21 @@ impl Reader<'_> {
         Ok(())
     }
 
+    /// Shared source count projection. An EOF decimal remains a prefix until
+    /// the delimiter proves the model has selected this exact integer.
+    fn operation_count(&mut self) -> Result<usize, Stop> {
+        self.output.extend_from_slice(b"\"output\":")?;
+        self.pending_operation_count = Some(self.offset);
+        let count: usize = serde_json::from_str(self.raw(false)?.get())?;
+        if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
+            return Err(Stop::Invalid("invalid numerical operation count".into()));
+        }
+        self.pending_operation_count = None;
+        self.output
+            .extend_from_slice((count - 1).to_string().as_bytes())?;
+        Ok(count)
+    }
+
     fn document(&mut self) -> Result<(), Stop> {
         if self.context_entry {
             return self.context_entry_document();
@@ -644,9 +666,15 @@ impl Reader<'_> {
         let self_delimited = self.self_delimited;
         let named_body = self.named_body;
         let expressions = self.expressions;
+        let counted_expressions = self.counted_expressions;
         let helpers = || {
             let mut units = vec![budget::text("\"helpers\":[]")];
-            units.extend(budget::entry(self_delimited, named_body, expressions));
+            units.extend(budget::entry(
+                self_delimited,
+                named_body,
+                expressions,
+                counted_expressions,
+            ));
             units
         };
         self.budget.set(frame, || helpers());
@@ -678,6 +706,7 @@ impl Reader<'_> {
                 self.self_delimited,
                 self.named_body,
                 self.expressions,
+                self.counted_expressions,
             ));
             following
         });
@@ -691,6 +720,7 @@ impl Reader<'_> {
                 self.self_delimited,
                 self.named_body,
                 self.expressions,
+                self.counted_expressions,
             ));
             following
         });
@@ -707,7 +737,12 @@ impl Reader<'_> {
             }
         }
         self.budget.set(frame, || {
-            budget::entry(self.self_delimited, self.named_body, self.expressions)
+            budget::entry(
+                self.self_delimited,
+                self.named_body,
+                self.expressions,
+                self.counted_expressions,
+            )
         });
         self.take(b']')?;
         self.budget.entry_pending = true;
@@ -717,14 +752,19 @@ impl Reader<'_> {
                 self.self_delimited,
                 self.named_body,
                 self.expressions,
+                self.counted_expressions,
             ));
             following.push(budget::text("}"));
             following
         });
         self.take(b',')?;
         self.budget.set(frame, || {
-            let mut following =
-                budget::entry_body(self.self_delimited, self.named_body, self.expressions);
+            let mut following = budget::entry_body(
+                self.self_delimited,
+                self.named_body,
+                self.expressions,
+                self.counted_expressions,
+            );
             following.push(budget::text("}"));
             following
         });
@@ -747,7 +787,13 @@ impl Reader<'_> {
 
     fn definition(&mut self, entry: bool) -> Result<(), Stop> {
         let frame = self.budget.enter();
-        let body_start = if self.expressions {
+        if self.counted_expressions {
+            self.expression_count = None;
+            self.expression_operations = 0;
+        }
+        let body_start = if self.counted_expressions {
+            "{\"weights\":[],\"operation_count\":1,\"return\":"
+        } else if self.expressions {
             "{\"weights\":[],\"return\":"
         } else if self.named_body {
             "{\"weights\":[],\"ops\":["
@@ -756,7 +802,9 @@ impl Reader<'_> {
         } else {
             "[],1,["
         };
-        let after_parameters = if self.expressions {
+        let after_parameters = if self.counted_expressions {
+            ",\"operation_count\":1,\"return\":"
+        } else if self.expressions {
             ",\"return\":"
         } else if self.named_body {
             ",\"ops\":["
@@ -794,7 +842,9 @@ impl Reader<'_> {
                         active: false,
                         leading_comma: false,
                     },
-                    budget::text(if self.expressions {
+                    budget::text(if self.counted_expressions {
+                        "],\"operation_count\":1,\"return\":"
+                    } else if self.expressions {
                         "],\"return\":"
                     } else if self.named_body {
                         "],\"ops\":["
@@ -889,7 +939,9 @@ impl Reader<'_> {
             if !entry {
                 self.budget.set(frame, || {
                     vec![
-                        budget::text(if self.expressions {
+                        budget::text(if self.counted_expressions {
+                            "\"weights\":[],\"operation_count\":1,\"return\":"
+                        } else if self.expressions {
                             "\"weights\":[],\"return\":"
                         } else {
                             "\"weights\":[],\"ops\":["
@@ -907,7 +959,9 @@ impl Reader<'_> {
                         active: false,
                         leading_comma: false,
                     },
-                    budget::text(if self.expressions {
+                    budget::text(if self.counted_expressions {
+                        "],\"operation_count\":1,\"return\":"
+                    } else if self.expressions {
                         "],\"return\":"
                     } else {
                         "],\"ops\":["
@@ -934,7 +988,9 @@ impl Reader<'_> {
         }
         self.budget.set(frame, || {
             vec![
-                budget::text(if self.expressions {
+                budget::text(if self.counted_expressions {
+                    "\"operation_count\":1,\"return\":"
+                } else if self.expressions {
                     "\"return\":"
                 } else if self.named_body {
                     "\"ops\":["
@@ -949,6 +1005,18 @@ impl Reader<'_> {
         });
         self.punctuation(b',', b',')?;
         if self.expressions {
+            if self.counted_expressions {
+                self.key("operation_count")?;
+                self.budget.set(frame, || {
+                    vec![
+                        budget::text(",\"return\":"),
+                        budget::expression(),
+                        budget::text(ending),
+                    ]
+                });
+                self.expression_count = Some(self.operation_count()?);
+                self.punctuation(b',', b',')?;
+            }
             self.return_expression(frame, ending)?;
         } else {
             let operation_count = if self.self_delimited {
@@ -957,7 +1025,6 @@ impl Reader<'_> {
                 if !self.compact_metadata {
                     self.key("operation_count")?;
                 }
-                self.output.extend_from_slice(b"\"output\":")?;
                 self.budget.set(frame, || {
                     vec![
                         budget::text(",["),
@@ -965,19 +1032,7 @@ impl Reader<'_> {
                         budget::text(ending),
                     ]
                 });
-                // Retain the original decimal until its canonical output index can
-                // be projected. Subtraction does not preserve decimal prefixes.
-                self.pending_operation_count = Some(self.offset);
-                let count: usize = serde_json::from_str(self.raw(false)?.get())?;
-                // A prefix such as `1` may still become `10`. Do not project its
-                // canonical output index until the number is visibly delimited.
-                if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
-                    return Err(Stop::Invalid("invalid numerical operation count".into()));
-                }
-                self.pending_operation_count = None;
-                self.output
-                    .extend_from_slice((count - 1).to_string().as_bytes())?;
-                Some(count)
+                Some(self.operation_count()?)
             } else {
                 self.field("output")?;
                 self.value::<usize>()?;

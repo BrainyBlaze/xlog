@@ -135,21 +135,40 @@ pub(crate) fn result(
     }
 }
 
-pub(crate) fn entry(self_delimited: bool, named_body: bool, expressions: bool) -> Vec<Unit> {
+pub(crate) fn entry(
+    self_delimited: bool,
+    named_body: bool,
+    expressions: bool,
+    counted_expressions: bool,
+) -> Vec<Unit> {
     let mut units = vec![text(",\"entry\":")];
-    units.extend(entry_body(self_delimited, named_body, expressions));
+    units.extend(entry_body(
+        self_delimited,
+        named_body,
+        expressions,
+        counted_expressions,
+    ));
     units.push(text("}"));
     units
 }
 
-pub(crate) fn entry_body(self_delimited: bool, named_body: bool, expressions: bool) -> Vec<Unit> {
+pub(crate) fn entry_body(
+    self_delimited: bool,
+    named_body: bool,
+    expressions: bool,
+    counted_expressions: bool,
+) -> Vec<Unit> {
     vec![
         text(if named_body { "{\"weights\":[" } else { "[[" }),
         Unit::Parameters {
             active: false,
             leading_comma: false,
         },
-        text(if expressions {
+        text(if counted_expressions {
+            // text() maps the minimum one-digit count to Atom::Digit; no
+            // concrete future count is selected or emitted by this bound.
+            "],\"operation_count\":1,\"return\":"
+        } else if expressions {
             "],\"return\":"
         } else if named_body {
             "],\"ops\":["

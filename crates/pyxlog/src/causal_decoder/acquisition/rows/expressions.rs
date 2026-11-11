@@ -31,7 +31,12 @@ pub(crate) struct Parent {
     pub projected: bool,
 }
 
-pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>, references: bool) {
+pub(crate) fn schema(
+    schema: &mut Value,
+    fields: &BTreeMap<String, Vec<String>>,
+    references: bool,
+    counted: bool,
+) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
         let value = format!("{name}Value");
@@ -66,7 +71,12 @@ pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>,
             .remove("ops")
             .unwrap();
         body["properties"]["return"] = operations["items"].clone();
-        body["required"] = json!(["weights", "return"]);
+        body["required"] = if counted {
+            body["properties"]["operation_count"] = integer(1, ACQUIRED_NODES);
+            json!(["weights", "operation_count", "return"])
+        } else {
+            json!(["weights", "return"])
+        };
     }
     schema["description"] = json!(
         "Numerical-expressions-v1 acquisition. Root fields are intent,helpers,entry. Entry has exactly the ordered keys weights,return; helpers use [local_name,signature,body] with the same body. Weights retain the physical FP32 declaration/reference table. Return is one model-authored operation tuple from the canonical catalogue: value operands contain child expressions, and Call arguments contain an array of expressions. Other scalar indices, widths, symbols, token arrays and Gather indices keep their existing positions and domains. The shared native reader lowers each source node once in deterministic left-to-right postorder, without CSE, chosen operands or a supplied graph. The root is the last canonical operation. All source nodes, including duplicates and unfinished ancestors, share the existing 64-node limit; source and projected bytes remain bounded. Canonical shape, causality, physical dependencies, initialization and execution are unchanged. Ordered-structural-subsequence-v2 reserves mandatory selected syntax and ancestor closings plus future entry and paid EOS. Unknown tree structure is relaxed, never projected as a flat row sequence or assigned a token-derived row capacity. This necessary bound does not prove whole-grammar completion, original-ID fit, semantic nonconstancy or usefulness."
@@ -74,6 +84,11 @@ pub(crate) fn schema(schema: &mut Value, fields: &BTreeMap<String, Vec<String>>,
     if references {
         schema["description"] = json!(
             "Numerical-expressions-v2 acquisition. Root fields are intent,helpers,entry; each ordered body has weights,return. Return is a canonical operation tuple. Only value child operands and Call argument elements may instead contain a model-selected nonnegative integer identifying an already closed canonical operation of this body. Native assigns IDs only to emitted operations in left-to-right postorder; a reference reuses exactly that value without an operation, new ID, automatic CSE or chosen graph. Root integers, future or open-ancestor IDs and cross-definition references are invalid; IDs reset in each body. Other scalar indices, widths, arrays, descriptors and symbols keep their existing meanings. Every operation tuple and integer reference occurrence, including duplicate or unfinished occurrences, counts toward the same 64 source-construct/depth limit. Lowered operations separately retain their 64-node limit. Source/projected bytes, scalar limits, FP32 physical aliases, shape/causal/dependency inference, initialization, execution and gradients keep their canonical owners. Ordered-structural-subsequence-v3 uses the actual original-ID remainder and paid EOS, selected syntax and ancestor closures, future entry and the integer-or-tuple alternative for unknown child values. This necessary relaxation is neither exact grammar-coupled completion nor an original-ID fit or usefulness witness."
+        );
+    }
+    if counted {
+        schema["description"] = json!(
+            "Numerical-expressions-v6 acquisition. Every ordered helper/entry body contains weights,operation_count,return. The model selects a positive operation_count N before its return tree; N is exactly the number of emitted canonical operations of that definition and its root is output N-1. Only a visibly delimited source count projects this output before operations. Integer child references reuse already closed body values without emitting an operation, but still cost one source occurrence. Closed plus open operation tuples cannot exceed N, and a known root continuation must finish exactly at N. The same reader, canonical type/dependency/entry-feature admission, original-source decode and fork own this mode. Shared source64/lowered64, depth, scalars and byte budgets remain separate. Count syntax, ancestor closures, future entry and paid EOS use the existing structural subsequence owner; a nested count is never projected as a flat row list. No count, operand, graph or source node is supplied by native. This necessary count/type analysis does not guarantee whole-grammar completion, original-ID fit or usefulness."
         );
     }
 }
@@ -87,8 +102,17 @@ impl Reader<'_> {
         self.expression_operations = 0;
         self.budget.set(frame, || vec![budget::text(ending)]);
         let output = self.expression()?;
-        self.output.extend_from_slice(b"],\"output\":")?;
-        self.output.json(&output)?;
+        if let Some(count) = self.expression_count {
+            if self.expression_operations != count || output + 1 != count {
+                return Err(Stop::Invalid(
+                    "expression operation count differs from emitted operations".into(),
+                ));
+            }
+            self.output.push(b']')?;
+        } else {
+            self.output.extend_from_slice(b"],\"output\":")?;
+            self.output.json(&output)?;
+        }
         Ok(())
     }
 
@@ -175,6 +199,13 @@ impl Reader<'_> {
         self.budget.set(frame, || vec![budget::text("\"\",]")]);
         self.take(b'[')?;
         self.open_expression_node()?;
+        if self.expression_count.is_some_and(|count| {
+            self.expression_operations + self.expression_parents.len() + 1 > count
+        }) {
+            return Err(Stop::Invalid(
+                "expression exceeds the selected lowered operation count".into(),
+            ));
+        }
         if self.expression_root_pending {
             self.expression_roots -= 1;
             self.expression_root_pending = false;

@@ -60,6 +60,7 @@ const TYPED_COLLECTION_LANGUAGE: &str = "xlog-contextual-acquisition-v32";
 const COLLECTION_CHOICE_LANGUAGE: &str = "xlog-contextual-acquisition-v33";
 const PREDICATE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v34";
 const FINITE_FEATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v35";
+const COUNTED_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v36";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -72,6 +73,7 @@ pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFER
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
 pub(super) const PREDICATE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v4";
 pub(super) const FINITE_FEATURE_ENCODING: &str = "numerical-expressions-v5";
+pub(super) const COUNTED_EXPRESSION_ENCODING: &str = "numerical-expressions-v6";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
 
 fn integer(minimum: usize, maximum: usize) -> Value {
@@ -90,7 +92,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=35) {
+    if !matches!(version, 1..=36) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -298,7 +300,12 @@ pub(super) fn language(
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
             if version >= 25 {
-                rows::expressions::schema(&mut schema, &operation_fields()?, version >= 30);
+                rows::expressions::schema(
+                    &mut schema,
+                    &operation_fields()?,
+                    version >= 30,
+                    version >= 36,
+                );
             }
             if version >= 26 {
                 schema["description"] = json!(format!(
@@ -445,6 +452,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                36 => COUNTED_EXPRESSION_LANGUAGE,
                 35 => FINITE_FEATURE_LANGUAGE,
                 34 => PREDICATE_DEPENDENCY_LANGUAGE,
                 33 => COLLECTION_CHOICE_LANGUAGE,
@@ -595,6 +603,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     entry_budget: bool,
     output_dependencies: bool,
     feature_output: bool,
+    counted_expressions: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -637,7 +646,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE;
+        let counted_expressions = language["id"] == COUNTED_EXPRESSION_LANGUAGE;
+        let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE || counted_expressions;
         let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE || feature_output;
         let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
         let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
@@ -689,7 +699,7 @@ impl PyNativeAcquisitionMask {
             language["id"] == COMPACT_METADATA_LANGUAGE || retained_reference_prefix;
         let compact_indices = language["id"] == COMPACT_INDICES_LANGUAGE || compact_metadata;
         let count_features = language["id"] == COUNT_PREFIX_LANGUAGE || compact_indices;
-        let operation_count_prefix = count_features && !self_delimited;
+        let operation_count_prefix = counted_expressions || (count_features && !self_delimited);
         let required_parameter_names =
             language["id"] == REQUIRED_PARAMETER_LANGUAGE || count_features;
         let entry_parameter_coverage =
@@ -753,8 +763,8 @@ impl PyNativeAcquisitionMask {
             language["id"] == CONTEXT_ENTRY_ROWS_LANGUAGE || canonical_entry_formals;
         let numerical_rows = language["id"] == NUMERICAL_ROWS_LANGUAGE || context_entry_rows;
         let check_single_operation = language["id"] == SINGLE_OPERATION_LANGUAGE || numerical_rows;
-        let planned_output =
-            !self_delimited && (language["id"] == PLANNED_LANGUAGE || check_single_operation);
+        let planned_output = counted_expressions
+            || (!self_delimited && (language["id"] == PLANNED_LANGUAGE || check_single_operation));
         let typed = language["id"] == TYPED_LANGUAGE || planned_output || self_delimited;
         let raw_tokens = if ordered {
             let tokens = serde_json::from_value::<Vec<u32>>(context["raw_token_ids"].clone())
@@ -861,6 +871,7 @@ impl PyNativeAcquisitionMask {
             entry_budget,
             output_dependencies,
             feature_output,
+            counted_expressions,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -1034,6 +1045,7 @@ impl PyNativeAcquisitionMask {
             self.expressions,
             self.value_references,
             self.feature_output,
+            self.counted_expressions,
         )
         .map_err(value_error)?;
         if self.typed_context.as_ref().unwrap()["version"] == 3 {
@@ -1222,6 +1234,7 @@ impl PyNativeAcquisitionMask {
                 self.ancestor_typing,
                 self.token_budget.is_some(),
                 self.collection_choices,
+                self.counted_expressions,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -1297,6 +1310,7 @@ pub(super) fn decode_numerical_rows(
     expressions: bool,
     value_references: bool,
     feature_output: bool,
+    counted_expressions: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1311,6 +1325,7 @@ pub(super) fn decode_numerical_rows(
         expressions,
         value_references,
         feature_output,
+        counted_expressions,
     )
     .map_err(value_error)
 }
@@ -1360,6 +1375,7 @@ struct ExpressionContinuation {
     ancestors: Vec<typed::Ancestor>,
     root: bool,
     partial: Option<Vec<typed::Ancestor>>,
+    operation_count: Option<usize>,
 }
 
 impl ExpressionContinuation {
@@ -1372,6 +1388,7 @@ impl ExpressionContinuation {
                 .as_ref()
                 .map(|ancestors| typed::PartialConstraints { ancestors, fields }),
             expected: None,
+            operation_count: self.operation_count,
         }
     }
 }
@@ -1591,6 +1608,14 @@ impl Resources<'_> {
             ancestors,
             root,
             partial,
+            operation_count: if self.planned_output {
+                self.program
+                    .typed
+                    .as_ref()
+                    .and_then(|program| program.planned_output.map(|output| output + 1))
+            } else {
+                None
+            },
         }
     }
 
@@ -2010,6 +2035,20 @@ impl Resources<'_> {
     }
 
     fn permits_output_plan(&self, output: usize) -> bool {
+        if self.planned_output && self.source_expression.is_some() {
+            if let Some(nodes) = self
+                .expression_nodes
+                .filter(|nodes| nodes.current_root_pending)
+            {
+                // Before this body starts, its declared lowered operations
+                // each need a source occurrence. Other pending roots retain
+                // their independent reservation; do not charge this root twice.
+                let future = nodes.pending_roots.saturating_sub(1);
+                if output + 1 > ACQUIRED_NODES.saturating_sub(nodes.spent + future) {
+                    return false;
+                }
+            }
+        }
         if !self.permits_token_budget(Some(output + 1)) {
             return false;
         }
@@ -2494,7 +2533,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                     })?;
                 }
                 (Level::Program, "output") if self.resources.ordered => {
-                    if self.resources.self_delimited {
+                    if self.resources.self_delimited && !self.resources.planned_output {
                         let output = self
                             .resources
                             .program
@@ -2660,7 +2699,7 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
             ));
         }
         if matches!(self.kind, Items::Operations) {
-            if self.resources.self_delimited {
+            if self.resources.self_delimited && !self.resources.planned_output {
                 let output = self
                     .resources
                     .program

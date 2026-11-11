@@ -1307,7 +1307,35 @@ VJP, initialization, optimizer state or charged work, and claims neither bitwise
 model equivalence nor sufficient usefulness. Historical versions through34 and
 source encodings through `numerical-expressions-v4` retain their behavior.
 
-For a version4 through version35 packet,
+Version36 (`xlog-contextual-acquisition-v36`) explicitly selects
+`numerical-expressions-v6`. Each helper/entry body has ordered keys
+`weights,operation_count,return`. The model selects an exact positive count N of
+emitted canonical operations before its expression tree; the root is output
+N−1. A child reference emits no operation and still costs one source occurrence.
+Shared source64/lowered64, depth, scalar and byte limits remain independent.
+
+The existing count reader retains an unfinished decimal until its delimiter is
+visible: an EOF `1` can still become `10` and cannot yet project output0. The
+canonical output precedes operations in this mode. Closed plus open operations
+cannot exceed N, and source-local continuation with a known root must finish
+exactly at N. Unknown siblings retain only proven count bounds. Local
+leaf/reference/ancestor trials keep their canonical shape/feature checks and
+rollback without running generic successor search for every parent. Count and
+parent conditions are rechecked after parsed-prefix reuse; generic completion
+memoization keeps its existing context, remaining-count and frontier keys.
+
+Count syntax, delimiters, future entry and paid EOS use the same original-ID
+subsequence owner. An unknown count contributes a required digit abstraction,
+not a native-selected source value. A nested count never becomes N flat row
+tuples. Complete decode checks the emitted count and root before the same
+initializer and original UTF-8 feature fork. Context3/dependency-v3, the explicit
+entry feature contract, four packet fields, five-field callees and cost-v5
+remain. Historical modes through35 and encodings through expressions-v5 keep
+their original paths. This necessary count/type condition changes no graph,
+kernel, VJP, initialization, optimizer or charged work and guarantees neither
+whole-grammar completion nor usefulness.
+
+For a version4 through version36 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

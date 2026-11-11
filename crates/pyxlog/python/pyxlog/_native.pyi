@@ -120,6 +120,11 @@ class NativeCausalModel:
         follows all selected parents through unknown sibling/scalar/index
         fields, including completion shortcuts and original-source admission.
         Historical modes, graph/VJP, initialization and charged work are retained.
+        V36 selects numerical-expressions-v6. Each ordered body contains weights,
+        operation_count,return; the model's delimited count is exactly its emitted
+        canonical operations, with root N-1. References cost source nodes but
+        emit no operation. Counted prefix/root/decode/fork share the same owner;
+        nested counts do not project flat row syntax or guarantee completion.
         """
         ...
     def fork_acquired(
@@ -165,7 +170,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–35 require positive remaining original IDs including this choice and paid EOS.
+        """V21–36 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -176,18 +181,22 @@ class NativeAcquisitionMask:
         V33 requires v5 for future collection unions through the same full suffix;
         V34 retains v5 and adds explicit predicate-aware dependency admission.
         V35 retains v5 and adds its explicit fresh-entry feature eligibility.
+        V36 retains v5 and adds the model-authored exact lowered count before
+        the tree, through the existing count/typed/source-ancestor owners.
         selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–35 prefix facts as JSON; no token selection or final admission."""
+        """Version4–36 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–35 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–36 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
         feature contract through the same canonical original-source fork.
+        numerical-expressions-v6 also checks the model's exact per-body count
+        before the same initializer and feature fork, retaining original UTF-8.
         """
 
 class _LogitSelection(TypedDict):

@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if language_version == 35 {
+        let context = if matches!(language_version, 35..=36) {
             self.inner
                 .acquisition_context_with_feature_output(insertion_layer)
         } else if language_version == 34 {
@@ -184,8 +184,12 @@ impl PyNativeCausalModel {
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
             | acquisition::PREDICATE_DEPENDENCIES_ENCODING
-            | acquisition::FINITE_FEATURE_ENCODING => {
-                let feature_output = source_encoding == acquisition::FINITE_FEATURE_ENCODING;
+            | acquisition::FINITE_FEATURE_ENCODING
+            | acquisition::COUNTED_EXPRESSION_ENCODING => {
+                let counted_expressions =
+                    source_encoding == acquisition::COUNTED_EXPRESSION_ENCODING;
+                let feature_output =
+                    source_encoding == acquisition::FINITE_FEATURE_ENCODING || counted_expressions;
                 let predicate_values = source_encoding
                     == acquisition::PREDICATE_DEPENDENCIES_ENCODING
                     || feature_output;
@@ -233,6 +237,7 @@ impl PyNativeCausalModel {
                     expressions,
                     value_references,
                     feature_output,
+                    counted_expressions,
                 )?;
                 if feature_output {
                     self.inner.fork_acquired_definitions_with_feature_output(
