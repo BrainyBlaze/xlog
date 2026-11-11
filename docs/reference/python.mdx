@@ -1393,7 +1393,47 @@ search path; the entire version39 decode uses necessary continuation bounds.
 Necessary prefix admission may reach a dead end; it guarantees neither
 whole-tree completion nor original-ID fit or usefulness.
 
-For a version4 through version39 packet,
+Version40 (`xlog-contextual-acquisition-v40`) keeps version39's schema, context,
+encoding, token-cost contract and admission predicates. Its
+`mask.filter_with_rejections(prefix, allowed_mask, remaining_tokens=n)` returns
+`(mask_bytes, rejection_json_or_none)`. It runs the same filter once. If the
+result has no allowed token, it retains errors actually returned by canonical
+source projection or resource admission during that call. A nonempty result
+returns `None`. The ordinary `filter` API and historical packet behavior remain
+unchanged; `filter_with_rejections` rejects packets other than version40.
+
+The JSON record has exactly the following fields:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Record version `1`. |
+| `language_sha256` | SHA-256 of the exact UTF-8 language JSON given to the constructor. |
+| `prefix_sha256` | SHA-256 of the supplied original prefix bytes. |
+| `grammar_mask_sha256` | SHA-256 of the supplied packed grammar mask. |
+| `remaining_tokens` | Supplied positive original-ID allowance, including the next choice and paid EOS. |
+| `grammar_candidates` | Number of input grammar-mask bits. |
+| `rejected_candidates` | Number of those candidates rejected; equal to `grammar_candidates` for this empty result. |
+| `samples` | First at most four rejected candidates, in ascending original token-ID order. |
+| `omitted_candidates` | `rejected_candidates - len(samples)`. |
+
+Each sample has exactly `token_id`, `phase`, `error`, and `error_truncated`.
+The phase is `canonical_prefix` or `resources`, identifying the owner that
+returned the error. Text preserves its first 256 Unicode scalars; the flag says
+whether any remaining scalars were omitted. Samples are actual candidate
+failures, not distinct or exhaustive root causes. A zero input grammar mask
+has zero candidates and no samples. Hashes bind this captured observation to
+its inputs; they do not independently prove that the admission rules are right.
+
+A consumer can retain the report with the original failed attempt and supply
+its bounded samples and counts to a subsequent model retry. Restoration can
+check those bindings against the saved prefix, packet and original grammar
+without replaying native filtering. No future expression, corrected operand,
+model forward, token refund, or hidden second admission pass is produced.
+Invalid API arguments still raise errors instead of manufacturing a report.
+Completion, feature usefulness and successful model correction remain separate
+runtime outcomes.
+
+For a version4 through version40 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

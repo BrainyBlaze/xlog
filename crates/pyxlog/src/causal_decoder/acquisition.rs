@@ -11,6 +11,7 @@ use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visito
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use xlog_ir::tensor::{
     TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
     TensorValueIdentity,
@@ -64,6 +65,7 @@ const COUNTED_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v36";
 const SCALAR_RESOURCE_LANGUAGE: &str = "xlog-contextual-acquisition-v37";
 const SOURCE_ROOT_OWNER_LANGUAGE: &str = "xlog-contextual-acquisition-v38";
 const NECESSARY_CONTINUATION_LANGUAGE: &str = "xlog-contextual-acquisition-v39";
+const REJECTION_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v40";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -95,7 +97,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=39) {
+    if !matches!(version, 1..=40) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -473,6 +475,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                40 => REJECTION_FEEDBACK_LANGUAGE,
                 39 => NECESSARY_CONTINUATION_LANGUAGE,
                 38 => SOURCE_ROOT_OWNER_LANGUAGE,
                 37 => SCALAR_RESOURCE_LANGUAGE,
@@ -608,6 +611,31 @@ fn raw_alphabet(tokens: &[u32], vocabulary: usize) -> PyResult<BTreeSet<u32>> {
     Ok(unique)
 }
 
+/// Keep only observed failures, in the filter's ascending original-token order.
+/// Samples are bounded; neither a representative nor its text repairs the source.
+fn record_rejection(
+    samples: &mut Vec<Value>,
+    token_id: usize,
+    phase: &str,
+    error: impl std::fmt::Display,
+) {
+    const MAX_SAMPLES: usize = 4;
+    const MAX_ERROR_SCALARS: usize = 256;
+    if samples.len() == MAX_SAMPLES {
+        return;
+    }
+    let error = error.to_string();
+    let mut characters = error.chars();
+    let message: String = characters.by_ref().take(MAX_ERROR_SCALARS).collect();
+    let truncated = characters.next().is_some();
+    samples.push(json!({
+        "token_id": token_id,
+        "phase": phase,
+        "error": message,
+        "error_truncated": truncated,
+    }));
+}
+
 /// Byte spellings are supplied by the pinned tokenizer, once per language.
 /// This is a prefix resource owner, not a second numerical compiler.
 #[pyclass(name = "NativeAcquisitionMask", module = "pyxlog._native")]
@@ -631,6 +659,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     scalar_resource_domains: bool,
     source_root_ownership: bool,
     necessary_continuations: bool,
+    rejection_language_sha256: Option<String>,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -673,7 +702,10 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE;
+        let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE)
+            .then(|| format!("{:x}", Sha256::digest(language_json.as_bytes())));
+        let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE
+            || rejection_language_sha256.is_some();
         let source_root_ownership =
             language["id"] == SOURCE_ROOT_OWNER_LANGUAGE || necessary_continuations;
         let scalar_resource_domains =
@@ -908,6 +940,7 @@ impl PyNativeAcquisitionMask {
             scalar_resource_domains,
             source_root_ownership,
             necessary_continuations,
+            rejection_language_sha256,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -953,97 +986,27 @@ impl PyNativeAcquisitionMask {
         allowed_mask: &[u8],
         remaining_tokens: Option<usize>,
     ) -> PyResult<Py<PyBytes>> {
-        if allowed_mask.len() != self.token_bytes.len().div_ceil(32) * 4 {
-            return Err(value_error("acquisition mask vocabulary differs"));
-        }
-        if self.token_budget.is_some() != remaining_tokens.is_some() || remaining_tokens == Some(0)
-        {
-            return Err(value_error(if self.self_delimited {
-                "positive remaining original IDs are required for this token-budgeted language"
-            } else {
-                "positive remaining original IDs must be supplied exactly for acquisition language 21"
-            }));
-        }
-        if let Some(cache) = &self.completion_cache {
-            cache.clear_search();
-        }
-        let mask = py.detach(|| {
-            let mut parsed = self
-                .parsed_prefix
-                .as_ref()
-                .map(|state| state.lock().unwrap());
-            let mut checkpoint = parsed.as_mut().and_then(|state| state.take());
-            if parsed.is_some() && allowed_mask.iter().any(|byte| *byte != 0) {
-                match self.canonical_prefix(prefix) {
-                    Ok(canonical) => {
-                        if checkpoint
-                            .as_ref()
-                            .is_some_and(|state| !canonical.bytes.starts_with(&state.bytes))
-                        {
-                            checkpoint = None;
-                        }
-                        // Only the actual input may advance the checkpoint.
-                        // Hypothetical spellings below always check their tail.
-                        let budget =
-                            self.token_budget
-                                .as_ref()
-                                .map(|alphabet| rows::budget::Bound {
-                                    alphabet,
-                                    state: &canonical.budget,
-                                    remaining: remaining_tokens.unwrap(),
-                                    eos: false,
-                                    typed_collections: self.typed_collections,
-                                });
-                        let next = self
-                            .resources(&canonical, checkpoint.as_ref(), true, budget)
-                            .ok()
-                            .and_then(|resources| resources.parsed_prefix);
-                        if next.is_some() {
-                            checkpoint = next;
-                        }
-                    }
-                    Err(_) => checkpoint = None,
-                }
-            }
-            let mut mask = allowed_mask.to_vec();
-            let mut bytes = prefix.to_vec();
-            for (id, spelling) in self.token_bytes.iter().enumerate() {
-                let bit = 1 << (id % 8);
-                if mask[id / 8] & bit == 0 {
-                    continue;
-                }
-                bytes.truncate(prefix.len());
-                bytes.extend_from_slice(spelling);
-                let canonical = match self.canonical_prefix(&bytes) {
-                    Ok(canonical) => canonical,
-                    Err(_) => {
-                        mask[id / 8] &= !bit;
-                        continue;
-                    }
-                };
-                let budget = self
-                    .token_budget
-                    .as_ref()
-                    .map(|alphabet| rows::budget::Bound {
-                        alphabet,
-                        state: &canonical.budget,
-                        remaining: remaining_tokens.unwrap() - 1,
-                        eos: spelling.is_empty(),
-                        typed_collections: self.typed_collections,
-                    });
-                if self
-                    .resources(&canonical, checkpoint.as_ref(), false, budget)
-                    .is_err()
-                {
-                    mask[id / 8] &= !bit;
-                }
-            }
-            if let Some(parsed) = &mut parsed {
-                **parsed = checkpoint;
-            }
-            mask
-        });
+        let (mask, _) = self.filter_inner(py, prefix, allowed_mask, remaining_tokens, false)?;
         Ok(PyBytes::new(py, &mask).unbind())
+    }
+
+    /// Capture actual rejected candidates in the same filtering traversal.
+    #[pyo3(signature = (prefix, allowed_mask, *, remaining_tokens))]
+    fn filter_with_rejections(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        allowed_mask: &[u8],
+        remaining_tokens: usize,
+    ) -> PyResult<(Py<PyBytes>, Option<String>)> {
+        if self.rejection_language_sha256.is_none() {
+            return Err(value_error(
+                "rejection capture requires acquisition language version 40",
+            ));
+        }
+        let (mask, report) =
+            self.filter_inner(py, prefix, allowed_mask, Some(remaining_tokens), true)?;
+        Ok((PyBytes::new(py, &mask).unbind(), report))
     }
 
     /// Describe completed prefix state without selecting tokens or changing it.
@@ -1098,6 +1061,133 @@ impl PyNativeAcquisitionMask {
 }
 
 impl PyNativeAcquisitionMask {
+    fn filter_inner(
+        &self,
+        py: Python<'_>,
+        prefix: &[u8],
+        allowed_mask: &[u8],
+        remaining_tokens: Option<usize>,
+        capture_rejections: bool,
+    ) -> PyResult<(Vec<u8>, Option<String>)> {
+        if allowed_mask.len() != self.token_bytes.len().div_ceil(32) * 4 {
+            return Err(value_error("acquisition mask vocabulary differs"));
+        }
+        if self.token_budget.is_some() != remaining_tokens.is_some() || remaining_tokens == Some(0)
+        {
+            return Err(value_error(if self.self_delimited {
+                "positive remaining original IDs are required for this token-budgeted language"
+            } else {
+                "positive remaining original IDs must be supplied exactly for acquisition language 21"
+            }));
+        }
+        if let Some(cache) = &self.completion_cache {
+            cache.clear_search();
+        }
+        let (mask, samples) = py.detach(|| {
+            let mut parsed = self
+                .parsed_prefix
+                .as_ref()
+                .map(|state| state.lock().unwrap());
+            let mut checkpoint = parsed.as_mut().and_then(|state| state.take());
+            if parsed.is_some() && allowed_mask.iter().any(|byte| *byte != 0) {
+                match self.canonical_prefix(prefix) {
+                    Ok(canonical) => {
+                        if checkpoint
+                            .as_ref()
+                            .is_some_and(|state| !canonical.bytes.starts_with(&state.bytes))
+                        {
+                            checkpoint = None;
+                        }
+                        // Only the actual input may advance the checkpoint.
+                        // Hypothetical spellings below always check their tail.
+                        let budget =
+                            self.token_budget
+                                .as_ref()
+                                .map(|alphabet| rows::budget::Bound {
+                                    alphabet,
+                                    state: &canonical.budget,
+                                    remaining: remaining_tokens.unwrap(),
+                                    eos: false,
+                                    typed_collections: self.typed_collections,
+                                });
+                        let next = self
+                            .resources(&canonical, checkpoint.as_ref(), true, budget)
+                            .ok()
+                            .and_then(|resources| resources.parsed_prefix);
+                        if next.is_some() {
+                            checkpoint = next;
+                        }
+                    }
+                    Err(_) => checkpoint = None,
+                }
+            }
+            let mut mask = allowed_mask.to_vec();
+            let mut samples = Vec::new();
+            let mut bytes = prefix.to_vec();
+            for (id, spelling) in self.token_bytes.iter().enumerate() {
+                let bit = 1 << (id % 8);
+                if mask[id / 8] & bit == 0 {
+                    continue;
+                }
+                bytes.truncate(prefix.len());
+                bytes.extend_from_slice(spelling);
+                let canonical = match self.canonical_prefix(&bytes) {
+                    Ok(canonical) => canonical,
+                    Err(error) => {
+                        if capture_rejections {
+                            record_rejection(&mut samples, id, "canonical_prefix", error);
+                        }
+                        mask[id / 8] &= !bit;
+                        continue;
+                    }
+                };
+                let budget = self
+                    .token_budget
+                    .as_ref()
+                    .map(|alphabet| rows::budget::Bound {
+                        alphabet,
+                        state: &canonical.budget,
+                        remaining: remaining_tokens.unwrap() - 1,
+                        eos: spelling.is_empty(),
+                        typed_collections: self.typed_collections,
+                    });
+                if let Err(error) = self.resources(&canonical, checkpoint.as_ref(), false, budget) {
+                    if capture_rejections {
+                        record_rejection(&mut samples, id, "resources", error);
+                    }
+                    mask[id / 8] &= !bit;
+                }
+            }
+            if let Some(parsed) = &mut parsed {
+                **parsed = checkpoint;
+            }
+            (mask, samples)
+        });
+        let report = if capture_rejections && mask.iter().all(|byte| *byte == 0) {
+            let candidates: usize = allowed_mask
+                .iter()
+                .map(|byte| byte.count_ones() as usize)
+                .sum();
+            Some(
+                serde_json::to_string(&json!({
+                    "version": 1,
+                    "language_sha256": self.rejection_language_sha256.as_ref().unwrap(),
+                    "prefix_sha256": format!("{:x}", Sha256::digest(prefix)),
+                    "grammar_mask_sha256": format!("{:x}", Sha256::digest(allowed_mask)),
+                    "remaining_tokens": remaining_tokens.unwrap(),
+                    "grammar_candidates": candidates,
+                    "rejected_candidates": candidates,
+                    "omitted_candidates": candidates - samples.len(),
+                    "samples": samples,
+                }))
+                .map_err(value_error)?,
+            )
+        } else {
+            None
+        };
+        Ok((mask, report))
+    }
+
     fn resources<'a>(
         &'a self,
         prefix: &'a CanonicalPrefix<'_>,
