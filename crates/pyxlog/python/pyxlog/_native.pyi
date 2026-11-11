@@ -150,6 +150,12 @@ class NativeCausalModel:
         available pure state/item-to-state signatures through the same ABI owner
         as concrete Scan inference. It supplies no cell, operands or graph.
         The prompt/codec and all final admission rules remain unchanged.
+        V43 also carries possible required helper/physical-parameter identities
+        through all source-selected parents, including unfinished scalar tails.
+        It joins closed value facts, canonical callee summaries and declared
+        physical domains. Unknown numerical children and used Call arguments
+        remain unrestricted. This necessary bound supplies no graph, does not
+        guarantee completion or usefulness, and preserves V1–V42 behavior.
         """
         ...
     def fork_acquired(
@@ -221,7 +227,7 @@ class NativeAcquisitionMask:
     def filter_with_rejections(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: int,
     ) -> tuple[bytes, Optional[str]]:
-        """V40–V42: the same mask, with captured JSON facts only when it is empty.
+        """V40–V43: the same mask, with captured JSON facts only when it is empty.
 
         One traversal retains up to four observed rejected token/error samples
         in original token-ID order. Error text is bounded to 256 Unicode scalars,
@@ -232,9 +238,9 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–42 prefix facts as JSON; no token selection or final admission."""
+        """Version4–43 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–42 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–43 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry

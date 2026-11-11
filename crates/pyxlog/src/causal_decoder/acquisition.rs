@@ -68,6 +68,7 @@ const NECESSARY_CONTINUATION_LANGUAGE: &str = "xlog-contextual-acquisition-v39";
 const REJECTION_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v40";
 const SELF_DELIMITED_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v41";
 const SCAN_SIGNATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v42";
+const PARTIAL_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v43";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -99,7 +100,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=42) {
+    if !matches!(version, 1..=43) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -465,15 +466,21 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if (41..=42).contains(&version) {
+        if (41..=43).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Bodies contain weights then return, with no preselected operation_count. The model selects and closes its own expression; the existing numerical-expressions-v5 codec derives the canonical output from actual postorder operations. The source-root owner remains definition-local. Canonical partial inference retains closed physical Linear matrix domains, and continuation uses necessary producer, dependency-frontier, row and shape bounds without hypothetical future graphs. Global source and lowered-operation caps, original-ID/EOS obligations, completed output/dependency/feature admission and captured-native-rejections-v1 remain. No count, operand or graph is supplied. A prefix can still reach a dead end; this mode does not guarantee token fit, completion or usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 42 {
+        if (42..=43).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Scan parent and callee-prefix domains additionally require an available pure cell whose two input widths are state,item and whose output width equals state. The shared TensorSignature ABI owner also serves concrete Scan inference. Only already closed real signatures constrain this scalar resource; no cell, child, activation or future graph is supplied. Other typing, causality, input/parameter usage, feature and original-ID bounds remain authoritative. Historical prefix modes are unchanged; an admitted prefix may still fail later checks.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 43 {
+            schema["description"] = json!(format!(
+                "{} Partial expression and reference choices also retain a conservative upper bound on output-reaching required helper and physical-parameter identities through every source-selected ancestor. The canonical field catalogue, closed value dependencies, physical aliases and callee output summaries own this bound. Unknown numerical children and used call arguments remain unrestricted; scalar indices and widths cannot introduce identities. All compatible closed weight and callee domains remain possible until selected. The bound can retain impossible continuations and does not prove input dependence, a feature, completion or usefulness. It supplies no value, scalar or graph, and complete canonical admission and historical languages remain unchanged.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -489,6 +496,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                43 => PARTIAL_DEPENDENCY_LANGUAGE,
                 42 => SCAN_SIGNATURE_LANGUAGE,
                 41 => SELF_DELIMITED_FEEDBACK_LANGUAGE,
                 40 => REJECTION_FEEDBACK_LANGUAGE,
@@ -683,6 +691,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     source_root_ownership: bool,
     necessary_continuations: bool,
     scan_signature_domains: bool,
+    partial_dependency_domains: bool,
     rejection_language_sha256: Option<String>,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
@@ -726,7 +735,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let scan_signature_domains = language["id"] == SCAN_SIGNATURE_LANGUAGE;
+        let partial_dependency_domains = language["id"] == PARTIAL_DEPENDENCY_LANGUAGE;
+        let scan_signature_domains =
+            language["id"] == SCAN_SIGNATURE_LANGUAGE || partial_dependency_domains;
         let self_delimited_feedback =
             language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE || scan_signature_domains;
         let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE
@@ -971,6 +982,7 @@ impl PyNativeAcquisitionMask {
             source_root_ownership,
             necessary_continuations,
             scan_signature_domains,
+            partial_dependency_domains,
             rejection_language_sha256,
             frontier_completion,
             entry_parameter_coverage,
@@ -1032,7 +1044,7 @@ impl PyNativeAcquisitionMask {
     ) -> PyResult<(Py<PyBytes>, Option<String>)> {
         if self.rejection_language_sha256.is_none() {
             return Err(value_error(
-                "rejection capture requires acquisition language version 40, 41 or 42",
+                "rejection capture requires acquisition language version 40 through 43",
             ));
         }
         let (mask, report) =
@@ -1260,6 +1272,7 @@ impl PyNativeAcquisitionMask {
             self.source_root_ownership,
             self.necessary_continuations,
             self.scan_signature_domains,
+            self.partial_dependency_domains,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1509,6 +1522,7 @@ struct Resources<'a> {
     source_root_ownership: bool,
     necessary_continuations: bool,
     scan_signature_domains: bool,
+    partial_dependency_domains: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1604,6 +1618,7 @@ fn resource_prefix<'a>(
     source_root_ownership: bool,
     necessary_continuations: bool,
     scan_signature_domains: bool,
+    partial_dependency_domains: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1623,6 +1638,7 @@ fn resource_prefix<'a>(
         source_root_ownership,
         necessary_continuations,
         scan_signature_domains,
+        partial_dependency_domains,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -2606,6 +2622,8 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         ));
                         let program = self.resources.program.typed.as_mut().unwrap();
                         program.scalar_resource_domains = self.resources.scalar_resource_domains;
+                        program.partial_dependency_domains =
+                            self.resources.partial_dependency_domains;
                         program.necessary_continuations = self.resources.necessary_continuations;
                         if self.resources.self_delimited {
                             // Every helper still leaves one real row for the

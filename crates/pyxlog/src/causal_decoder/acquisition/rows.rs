@@ -479,6 +479,7 @@ pub(super) fn definitions(
             true,
             // This versionless completed codec has no open expression parents.
             false,
+            false,
         )
         .map_err(|error| error.to_string())?;
     }
