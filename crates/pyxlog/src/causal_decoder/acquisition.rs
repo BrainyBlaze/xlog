@@ -10,7 +10,7 @@ use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use xlog_ir::tensor::{
     TensorOperation, TensorOutputDependencies, TensorParameter, TensorProgram, TensorSignature,
@@ -70,6 +70,7 @@ const SELF_DELIMITED_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v41"
 const SCAN_SIGNATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v42";
 const PARTIAL_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v43";
 const FEATURE_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v44";
+const OPEN_ROW_LANGUAGE: &str = "xlog-contextual-acquisition-v45";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -78,6 +79,7 @@ pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_E
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const FEATURE_ROWS_ENCODING: &str = "numerical-rows-v8";
+pub(super) const OPEN_ROW_ENCODING: &str = "numerical-rows-v9";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -102,7 +104,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=44) {
+    if !matches!(version, 1..=45) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -486,13 +488,22 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 44 {
+        if version >= 44 {
             schema["description"] = json!(format!(
                 "{} Numerical-rows-v8 reuses named weights/ops bodies with model-selected nonempty flat operation rows. Value operands reference preceding completed rows of the same body; the last actual row is the output. It selects context-v3/output-dependencies-v3, canonical value identities and predicate proofs, and possible-finite-nonzero-v1 for the entry. The shared typed owner enforces both context lengths, physical aliases, callee summaries, raw/hidden input flow and required output dependencies. Open bodies use necessary producer, dependency-frontier, row and shape bounds with original-ID row capacity, without searching for or supplying a future graph. Typed selected/future collection obligations use ordered-structural-subsequence-v5, including all mandatory suffix syntax and a separate paid EOS. The same reader, completed decoder and original-source constructor own this mode; no nested expressions, expression-reference obligations, preselected count, rewrite, new opcode or numerical implementation is added. Captured-native-rejections-v1 retains actual refused choices. Historical languages remain literal; necessary prefix bounds do not guarantee completion or usefulness.",
                 schema["description"]
                     .as_str()
                     .unwrap()
                     .replace("numerical-rows-v7", "numerical-rows-v8")
+            ));
+        }
+        if version == 45 {
+            schema["description"] = json!(format!(
+                "{} An unfinished flat operation tag retains the complete mandatory row tail before its closing quote. The shared tag-prefix and current typed operand domain own each alternative together with its original-ID suffix cost, including collection forms, outer closures and paid EOS. This local check uses only already available operands and never assigns a future row or graph. The independent monotone row-capacity projection and cumulative canonical admission remain unchanged. This stronger necessary bound does not prove token fit, completion or usefulness.",
+                schema["description"].as_str().unwrap()
+                    .replace("numerical-rows-v8", "numerical-rows-v9")
+                    .replace("Numerical-rows-v8", "Numerical-rows-v9")
+                    .replace("ordered-structural-subsequence-v5", "ordered-structural-subsequence-v6")
             ));
         }
         // Keep ordering local to this language. Enabling preserve_order for
@@ -507,6 +518,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                45 => OPEN_ROW_LANGUAGE,
                 44 => FEATURE_ROWS_LANGUAGE,
                 43 => PARTIAL_DEPENDENCY_LANGUAGE,
                 42 => SCAN_SIGNATURE_LANGUAGE,
@@ -553,7 +565,9 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: if version >= 33 {
+            token_cost_contract: if version == 45 {
+                Some(rows::budget::OPEN_ROW_CONTRACT)
+            } else if version >= 33 {
                 Some(rows::budget::COLLECTION_CHOICE_CONTRACT)
             } else if version >= 32 {
                 Some(rows::budget::COLLECTION_CONTRACT)
@@ -722,6 +736,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     value_references: bool,
     typed_collections: bool,
     collection_choices: bool,
+    open_row_suffix: bool,
     token_row_capacity: bool,
     token_budget: Option<rows::budget::Alphabet>,
     completion_cache: Option<Arc<typed::CompletionCache>>,
@@ -747,7 +762,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE;
+        let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE;
+        let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE || open_row_suffix;
         let partial_dependency_domains = language["id"] == PARTIAL_DEPENDENCY_LANGUAGE;
         let self_delimited_feedback = language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE
             || language["id"] == SCAN_SIGNATURE_LANGUAGE
@@ -804,7 +820,9 @@ impl PyNativeAcquisitionMask {
         let self_delimited =
             language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
-        let cost_contract = if collection_choices {
+        let cost_contract = if open_row_suffix {
+            rows::budget::OPEN_ROW_CONTRACT
+        } else if collection_choices {
             rows::budget::COLLECTION_CHOICE_CONTRACT
         } else if typed_collections {
             rows::budget::COLLECTION_CONTRACT
@@ -1020,6 +1038,7 @@ impl PyNativeAcquisitionMask {
             value_references,
             typed_collections,
             collection_choices,
+            open_row_suffix,
             token_row_capacity,
             token_budget: token_budget.then(|| rows::budget::Alphabet::new(&token_bytes)),
             parsed_prefix: completion_cache.as_ref().map(|_| Mutex::new(None)),
@@ -1063,7 +1082,7 @@ impl PyNativeAcquisitionMask {
     ) -> PyResult<(Py<PyBytes>, Option<String>)> {
         if self.rejection_language_sha256.is_none() {
             return Err(value_error(
-                "rejection capture requires acquisition language version 40 through 44",
+                "rejection capture requires acquisition language version 40 through 45",
             ));
         }
         let (mask, report) =
@@ -1428,6 +1447,7 @@ impl PyNativeAcquisitionMask {
                 self.token_budget.is_some(),
                 self.collection_choices,
                 self.counted_expressions,
+                self.open_row_suffix,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -2114,7 +2134,89 @@ impl Resources<'_> {
         &self,
         unit: &rows::budget::Unit,
     ) -> Option<Vec<rows::budget::Section>> {
-        use rows::budget::{Section, Unit};
+        use rows::budget::{Atom, Section, Unit};
+        let field = |material: &Map<String, Value>, name: &str, continuation, expressions: bool| {
+            if matches!(name, "indices" | "token_ids") {
+                return match self.program.typed.as_ref().unwrap().array_minimum(
+                    material,
+                    name,
+                    continuation,
+                ) {
+                    Ok(minimum) => Section::collection(
+                        minimum,
+                        name == "indices",
+                        self.token_budget.unwrap().atom_capacity(),
+                    ),
+                    Err(_) => Section {
+                        alternatives: Vec::new(),
+                    },
+                };
+            }
+            let minimum = if expressions {
+                rows::budget::expression_field(name, self.value_references, None)
+            } else {
+                rows::budget::field(name)
+            };
+            let Unit::Bytes(atoms) = minimum else {
+                unreachable!()
+            };
+            Section::one(atoms)
+        };
+        if let Unit::RowTag {
+            prefix, opening, ..
+        } = unit
+        {
+            let program = self.program.typed.as_ref()?;
+            let mut after_key = vec![b':'];
+            after_key.extend(prefix);
+            let mut alternatives = Vec::new();
+            for (name, required) in self.operation_fields? {
+                let Some(tail) = operation_tag_tail(&after_key, name) else {
+                    continue;
+                };
+                let material = Map::from_iter([("operation".into(), json!(name))]);
+                if required
+                    .iter()
+                    .any(|field| reference_extent(&self.program, field) == Some(0))
+                    || !program.possible(&material, None, &self.signatures, None)
+                {
+                    continue;
+                }
+                let mut atoms = Vec::new();
+                if *opening {
+                    atoms.push(Atom::Byte(b'['));
+                }
+                if tail.opening_quote {
+                    atoms.push(Atom::Byte(b'"'));
+                }
+                atoms.extend(std::iter::repeat_n(Atom::Letter, tail.letters));
+                if tail.closing_quote {
+                    atoms.push(Atom::Byte(b'"'));
+                }
+                let mut rows = vec![atoms];
+                for name in required.iter().skip(1) {
+                    let choices = field(&material, name, None, false);
+                    rows = rows
+                        .into_iter()
+                        .flat_map(|row| {
+                            choices.alternatives.iter().map(move |choice| {
+                                let mut row = row.clone();
+                                row.push(Atom::Byte(b','));
+                                row.extend(choice);
+                                row
+                            })
+                        })
+                        .collect();
+                }
+                // Keep each operation's typed domain and complete field tail
+                // in one branch. Coverage cannot splice different operations.
+                for mut row in rows {
+                    row.push(Atom::Byte(b']'));
+                    alternatives.push(row);
+                }
+            }
+            return Some(vec![Section { alternatives }]);
+        }
         let (material, continuation, required, expressions) = match unit {
             Unit::RowField { selected, .. } => (Cow::Borrowed(selected), None, None, false),
             Unit::Field { parent: index, .. } | Unit::Tail { parent: index, .. } => {
@@ -2148,33 +2250,7 @@ impl Resources<'_> {
         let continuation = continuation
             .as_ref()
             .map(|value| value.borrow(self.operation_fields.unwrap()));
-        let field = |name: &str| {
-            if matches!(name, "indices" | "token_ids") {
-                return match self.program.typed.as_ref().unwrap().array_minimum(
-                    &material,
-                    name,
-                    continuation,
-                ) {
-                    Ok(minimum) => Section::collection(
-                        minimum,
-                        name == "indices",
-                        self.token_budget.unwrap().atom_capacity(),
-                    ),
-                    Err(_) => Section {
-                        alternatives: Vec::new(),
-                    },
-                };
-            }
-            let minimum = if expressions {
-                rows::budget::expression_field(name, self.value_references, None)
-            } else {
-                rows::budget::field(name)
-            };
-            let Unit::Bytes(atoms) = minimum else {
-                unreachable!()
-            };
-            Section::one(atoms)
-        };
+        let field = |name: &str| field(&material, name, continuation, expressions);
         match unit {
             Unit::Field { name, .. } | Unit::RowField { name, .. } => Some(vec![field(name)]),
             Unit::Tail {
@@ -3252,42 +3328,60 @@ fn reference_extent(program: &Program, field: &str) -> Option<usize> {
 /// operation. Include unfinished BPE spellings and JSON Unicode escapes: waiting
 /// for the closing quote would merely move the empty-mask failure to that quote.
 fn operation_prefix(bytes: &[u8], name: &str) -> bool {
+    operation_tag_tail(bytes, name).is_some()
+}
+
+struct OperationTagTail {
+    opening_quote: bool,
+    letters: usize,
+    closing_quote: bool,
+}
+
+/// The same prefix relation also reports a necessary unconsumed name suffix.
+/// A partially emitted Unicode escape may finish with digits alone, so its
+/// current character is not charged as another future Letter.
+fn operation_tag_tail(bytes: &[u8], name: &str) -> Option<OperationTagTail> {
+    let tail = |opening_quote, letters, closing_quote| OperationTagTail {
+        opening_quote,
+        letters,
+        closing_quote,
+    };
     let bytes = bytes.trim_ascii_start();
     if bytes.is_empty() {
-        return true;
+        return Some(tail(true, name.len(), true));
     }
     let Some(bytes) = bytes.strip_prefix(b":") else {
-        return false;
+        return None;
     };
     let bytes = bytes.trim_ascii_start();
     if bytes.is_empty() {
-        return true;
+        return Some(tail(true, name.len(), true));
     }
     let Some(mut bytes) = bytes.strip_prefix(b"\"") else {
-        return false;
+        return None;
     };
-    for character in name.bytes() {
+    for (index, character) in name.bytes().enumerate() {
         if bytes.is_empty() {
-            return true;
+            return Some(tail(false, name.len() - index, true));
         }
         if bytes[0] == b'\\' {
             let escaped = format!("\\u{character:04x}");
             let count = bytes.len().min(escaped.len());
             if !bytes[..count].eq_ignore_ascii_case(&escaped.as_bytes()[..count]) {
-                return false;
+                return None;
             }
             if count < escaped.len() {
-                return true;
+                return Some(tail(false, name.len() - index - 1, true));
             }
             bytes = &bytes[count..];
         } else {
             if bytes[0] != character {
-                return false;
+                return None;
             }
             bytes = &bytes[1..];
         }
     }
-    bytes.is_empty() || bytes[0] == b'"'
+    (bytes.is_empty() || bytes[0] == b'"').then(|| tail(false, 0, bytes.is_empty()))
 }
 
 impl<'de> Visitor<'de> for Operation<'_> {

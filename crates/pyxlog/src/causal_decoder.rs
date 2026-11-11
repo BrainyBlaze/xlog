@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 35..=44) {
+        let context = if matches!(language_version, 35..=45) {
             self.inner
                 .acquisition_context_with_feature_output(insertion_layer)
         } else if language_version == 34 {
@@ -181,13 +181,17 @@ impl PyNativeCausalModel {
             | acquisition::SELF_DELIMITED_ROWS_ENCODING
             | acquisition::NAMED_BODY_ROWS_ENCODING
             | acquisition::FEATURE_ROWS_ENCODING
+            | acquisition::OPEN_ROW_ENCODING
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
             | acquisition::PREDICATE_DEPENDENCIES_ENCODING
             | acquisition::FINITE_FEATURE_ENCODING
             | acquisition::COUNTED_EXPRESSION_ENCODING => {
-                let feature_rows = source_encoding == acquisition::FEATURE_ROWS_ENCODING;
+                let feature_rows = matches!(
+                    source_encoding,
+                    acquisition::FEATURE_ROWS_ENCODING | acquisition::OPEN_ROW_ENCODING
+                );
                 let counted_expressions =
                     source_encoding == acquisition::COUNTED_EXPRESSION_ENCODING;
                 let feature_output = feature_rows

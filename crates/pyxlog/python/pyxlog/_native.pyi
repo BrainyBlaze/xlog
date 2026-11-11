@@ -164,6 +164,12 @@ class NativeCausalModel:
         nested source expressions, supplied graph or new numerical operation.
         Historical languages1–43 remain unchanged; useful acquisition requires
         actual completion, native admission, training and qualification.
+        V45/numerical-rows-v9 reserves unfinished flat tags and their whole
+        mandatory field tails through ordered-structural-subsequence-v6.
+        Each current typed operation alternative owns its own suffix cost,
+        including collection choices, outer closures and paid EOS. Generic
+        monotone row capacity and historical V1–V44 behavior are unchanged.
+        No future graph is searched or supplied; completion is not guaranteed.
         """
         ...
     def fork_acquired(
@@ -177,7 +183,7 @@ class NativeCausalModel:
         numerical-expressions-v3 requires value-aware dependency admission even
         when the legacy require_output_dependencies keyword is false. Older
         source encodings retain that keyword's original semantics.
-        numerical-rows-v8 uses the named flat codec with predicate-aware v3
+        numerical-rows-v8/v9 use the named flat codec with predicate-aware v3
         dependency and finite-feature entry admission regardless of that keyword.
         It forwards the original source through the shared native constructor.
         """
@@ -212,7 +218,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–44 require positive remaining original IDs including this choice and paid EOS.
+        """V21–45 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -236,12 +242,15 @@ class NativeAcquisitionMask:
         V44 applies the existing flat original-ID row capacity with collection
         cost-v5, necessary typed continuation and finite-feature entry admission.
         Preceding value operands and last-row output stay model-authored.
+        V45 retains each unfinished flat tag's mandatory suffix before its
+        closing quote, with the same current typed domain and cost-v6 coverage.
+        This check does not replace the monotone row-capacity upper bound.
         """
         ...
     def filter_with_rejections(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: int,
     ) -> tuple[bytes, Optional[str]]:
-        """V40–V44: the same mask, with captured JSON facts only when it is empty.
+        """V40–V45: the same mask, with captured JSON facts only when it is empty.
 
         One traversal retains up to four observed rejected token/error samples
         in original token-ID order. Error text is bounded to 256 Unicode scalars,
@@ -252,9 +261,9 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–44 prefix facts as JSON; no token selection or final admission."""
+        """Version4–45 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–44 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–45 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
@@ -268,6 +277,7 @@ class NativeAcquisitionMask:
         V44 elaborates numerical-rows-v8 through the same flat reader and
         validates its completed graph with the captured context3/dependency-v3
         and finite-feature entry contract before seeded initialization.
+        V45 uses that same completed flat-source path for numerical-rows-v9.
         """
 
 class _LogitSelection(TypedDict):
