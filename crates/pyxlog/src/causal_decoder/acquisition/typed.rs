@@ -383,6 +383,8 @@ pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
     pub(super) scalar_resource_domains: bool,
+    /// Bound future work without synthesizing a completion graph.
+    pub(super) necessary_continuations: bool,
     /// Maximum rows available to an open body, without selecting its output.
     pub(super) row_allowance: Option<usize>,
     pub(super) entry_requirements: Option<EntryRequirements>,
@@ -676,6 +678,7 @@ impl Program {
             },
             planned_output: None,
             scalar_resource_domains: false,
+            necessary_continuations: false,
             row_allowance: None,
             entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],
@@ -1218,8 +1221,10 @@ impl Program {
                 return false;
             }
         }
-        if let Some(cache) = &facts.completion_cache {
-            return completion::possible(self, body, output, signatures, cache, prospective);
+        if !self.necessary_continuations {
+            if let Some(cache) = &facts.completion_cache {
+                return completion::possible(self, body, output, signatures, cache, prospective);
+            }
         }
         if needed == 0 || remaining > needed {
             return true;

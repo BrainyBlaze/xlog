@@ -63,6 +63,7 @@ const FINITE_FEATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v35";
 const COUNTED_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v36";
 const SCALAR_RESOURCE_LANGUAGE: &str = "xlog-contextual-acquisition-v37";
 const SOURCE_ROOT_OWNER_LANGUAGE: &str = "xlog-contextual-acquisition-v38";
+const NECESSARY_CONTINUATION_LANGUAGE: &str = "xlog-contextual-acquisition-v39";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -94,7 +95,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=38) {
+    if !matches!(version, 1..=39) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -381,6 +382,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 39 {
+                schema["description"] = json!(format!(
+                    "{} Prefix continuation uses the existing necessary producer, dependency-frontier, row and shape bounds without constructing hypothetical future graphs. Source-selected tags, scalars, ancestors, references and exact counts retain their checks. A prefix may still reach a dead end; the actual completed graph must satisfy all canonical output, dependency and feature requirements. Historical prefix modes retain their original completion search.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -466,6 +473,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                39 => NECESSARY_CONTINUATION_LANGUAGE,
                 38 => SOURCE_ROOT_OWNER_LANGUAGE,
                 37 => SCALAR_RESOURCE_LANGUAGE,
                 36 => COUNTED_EXPRESSION_LANGUAGE,
@@ -622,6 +630,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     counted_expressions: bool,
     scalar_resource_domains: bool,
     source_root_ownership: bool,
+    necessary_continuations: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -664,7 +673,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let source_root_ownership = language["id"] == SOURCE_ROOT_OWNER_LANGUAGE;
+        let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE;
+        let source_root_ownership =
+            language["id"] == SOURCE_ROOT_OWNER_LANGUAGE || necessary_continuations;
         let scalar_resource_domains =
             language["id"] == SCALAR_RESOURCE_LANGUAGE || source_root_ownership;
         let counted_expressions =
@@ -896,6 +907,7 @@ impl PyNativeAcquisitionMask {
             counted_expressions,
             scalar_resource_domains,
             source_root_ownership,
+            necessary_continuations,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -1125,6 +1137,7 @@ impl PyNativeAcquisitionMask {
             self.feature_output,
             self.scalar_resource_domains,
             self.source_root_ownership,
+            self.necessary_continuations,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1372,6 +1385,7 @@ struct Resources<'a> {
     feature_output: bool,
     scalar_resource_domains: bool,
     source_root_ownership: bool,
+    necessary_continuations: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1465,6 +1479,7 @@ fn resource_prefix<'a>(
     feature_output: bool,
     scalar_resource_domains: bool,
     source_root_ownership: bool,
+    necessary_continuations: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1482,6 +1497,7 @@ fn resource_prefix<'a>(
         feature_output,
         scalar_resource_domains,
         source_root_ownership,
+        necessary_continuations,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -2459,12 +2475,9 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             self.resources.raw_tokens.iter().copied().collect(),
                             maximum_width(context),
                         ));
-                        self.resources
-                            .program
-                            .typed
-                            .as_mut()
-                            .unwrap()
-                            .scalar_resource_domains = self.resources.scalar_resource_domains;
+                        let program = self.resources.program.typed.as_mut().unwrap();
+                        program.scalar_resource_domains = self.resources.scalar_resource_domains;
+                        program.necessary_continuations = self.resources.necessary_continuations;
                         if self.resources.self_delimited {
                             // Every helper still leaves one real row for the
                             // required later entry. This is a capacity limit,

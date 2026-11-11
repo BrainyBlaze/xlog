@@ -135,6 +135,10 @@ class NativeCausalModel:
         does not reserve the next entry's root against that helper's count.
         Global source usage, other roots, exact N and original-ID/EOS bounds
         remain; historical masks through V37 retain their original behavior.
+        V39 keeps these source/typed guards and uses necessary producer,
+        dependency-frontier, row and shape bounds instead of searching for
+        hypothetical future graphs. Prefixes can still reach dead ends; the
+        actual completed graph must pass canonical output/dependency admission.
         """
         ...
     def fork_acquired(
@@ -180,7 +184,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–38 require positive remaining original IDs including this choice and paid EOS.
+        """V21–39 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -197,20 +201,24 @@ class NativeAcquisitionMask:
         matrix domain before source children and through partial ancestors.
         V38 scopes the pending source root's early count reservation to its
         actual definition, preserving cumulative usage and all other bounds.
+        V39 uses necessary continuation bounds without synthesizing future
+        graphs; cache-backed source/domain guards and exact counts remain.
         selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–38 prefix facts as JSON; no token selection or final admission."""
+        """Version4–39 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–38 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–39 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
         feature contract through the same canonical original-source fork.
         numerical-expressions-v6 also checks the model's exact per-body count
         before the same initializer and feature fork, retaining original UTF-8.
+        Complete source validates its actual canonical graph without searching
+        for another hypothetical graph; final output/dependency checks remain.
         """
 
 class _LogitSelection(TypedDict):
