@@ -62,6 +62,7 @@ const PREDICATE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v34";
 const FINITE_FEATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v35";
 const COUNTED_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v36";
 const SCALAR_RESOURCE_LANGUAGE: &str = "xlog-contextual-acquisition-v37";
+const SOURCE_ROOT_OWNER_LANGUAGE: &str = "xlog-contextual-acquisition-v38";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -93,7 +94,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=37) {
+    if !matches!(version, 1..=38) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -374,6 +375,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 38 {
+                schema["description"] = json!(format!(
+                    "{} The pending source root carries its actual definition index. Its early exact-count source reservation applies only while reading that definition's output, not while rereading a closed helper. Cumulative source usage, other pending roots, exact counts and original-ID/EOS obligations remain unchanged. This owner correction does not guarantee entry admission or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -459,6 +466,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                38 => SOURCE_ROOT_OWNER_LANGUAGE,
                 37 => SCALAR_RESOURCE_LANGUAGE,
                 36 => COUNTED_EXPRESSION_LANGUAGE,
                 35 => FINITE_FEATURE_LANGUAGE,
@@ -613,6 +621,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     feature_output: bool,
     counted_expressions: bool,
     scalar_resource_domains: bool,
+    source_root_ownership: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -655,7 +664,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let scalar_resource_domains = language["id"] == SCALAR_RESOURCE_LANGUAGE;
+        let source_root_ownership = language["id"] == SOURCE_ROOT_OWNER_LANGUAGE;
+        let scalar_resource_domains =
+            language["id"] == SCALAR_RESOURCE_LANGUAGE || source_root_ownership;
         let counted_expressions =
             language["id"] == COUNTED_EXPRESSION_LANGUAGE || scalar_resource_domains;
         let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE || counted_expressions;
@@ -884,6 +895,7 @@ impl PyNativeAcquisitionMask {
             feature_output,
             counted_expressions,
             scalar_resource_domains,
+            source_root_ownership,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -1112,6 +1124,7 @@ impl PyNativeAcquisitionMask {
             self.value_references,
             self.feature_output,
             self.scalar_resource_domains,
+            self.source_root_ownership,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1358,6 +1371,7 @@ struct Resources<'a> {
     output_dependencies: bool,
     feature_output: bool,
     scalar_resource_domains: bool,
+    source_root_ownership: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1450,6 +1464,7 @@ fn resource_prefix<'a>(
     value_references: bool,
     feature_output: bool,
     scalar_resource_domains: bool,
+    source_root_ownership: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1466,6 +1481,7 @@ fn resource_prefix<'a>(
         output_dependencies,
         feature_output,
         scalar_resource_domains,
+        source_root_ownership,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -2052,13 +2068,16 @@ impl Resources<'_> {
 
     fn permits_output_plan(&self, output: usize) -> bool {
         if self.planned_output && self.source_expression.is_some() {
-            if let Some(nodes) = self
-                .expression_nodes
-                .filter(|nodes| nodes.current_root_pending)
-            {
+            if let Some(nodes) = self.expression_nodes.filter(|nodes| {
+                nodes.current_root_pending
+                    && (!self.source_root_ownership
+                        || self.definition_index == Some(nodes.definition_index))
+            }) {
                 // Before this body starts, its declared lowered operations
                 // each need a source occurrence. Other pending roots retain
                 // their independent reservation; do not charge this root twice.
+                // The source cursor can already own the next definition while
+                // this parser rereads a closed helper's output.
                 let future = nodes.pending_roots.saturating_sub(1);
                 if output + 1 > ACQUIRED_NODES.saturating_sub(nodes.spent + future) {
                     return false;
