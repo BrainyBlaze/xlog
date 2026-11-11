@@ -126,7 +126,7 @@ impl Resources<'_> {
             let mut lowered_minimum = None;
             for (name, required) in self.operation_fields.unwrap() {
                 if !operation_prefix(&parent.tag_prefix, name)
-                    || !self.expression_parent_domains(parent, required)
+                    || !self.expression_parent_domains(parent, name, required)
                 {
                     continue;
                 }
