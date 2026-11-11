@@ -582,7 +582,10 @@ impl SemanticTransitionSession {
         memory_capacity_bytes: u64,
         other_external_cuda_bytes: u64,
     ) -> Result<SemanticColdModelWork, SemanticTransitionError> {
-        self.ensure_rebindable()?;
+        self.ensure_rebindable_with_prefill()?;
+        self.require_initial_model_origin(self.initial_model.as_ref().ok_or_else(|| {
+            publication_input_error("initial preparation requires its registered original model")
+        })?)?;
         self.require_completed_cold_model_work()?;
         if self.publication.is_some()
             || self.initial_prefill.is_some()

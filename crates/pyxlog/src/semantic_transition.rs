@@ -7717,6 +7717,18 @@ fn parse_model_views(
         .collect()
 }
 
+fn parse_model_contract_layout(value: &ColdValue) -> PyResult<SemanticModelContractLayout> {
+    let [schema_begin, schema_bytes, schema_digest_offset, generation_offset, identity_offset] =
+        unsigned_array::<5>(value)?;
+    Ok(SemanticModelContractLayout {
+        schema_begin,
+        schema_bytes,
+        schema_digest_offset,
+        generation_offset,
+        identity_offset,
+    })
+}
+
 fn parse_tensor_inputs(
     value: &Bound<'_, PyAny>,
     budget: &mut usize,
@@ -8129,19 +8141,11 @@ fn parse_parent(
     // the complete canonical contribution, and requires lossless cold restore
     // before admitting it; a payload hash is not reconstructible metadata.
     ColdValue::from_canonical_bytes(&model_numerical_mode)?;
-    let [schema_begin, schema_bytes, schema_digest_offset, generation_offset, identity_offset] =
-        unsigned_array::<5>(&metadata_value(
-            metadata,
-            "model_contract_layout",
-            &mut budget,
-        )?)?;
-    let model_contract_layout = SemanticModelContractLayout {
-        schema_begin,
-        schema_bytes,
-        schema_digest_offset,
-        generation_offset,
-        identity_offset,
-    };
+    let model_contract_layout = parse_model_contract_layout(&metadata_value(
+        metadata,
+        "model_contract_layout",
+        &mut budget,
+    )?)?;
     let nonterminal_intent = metadata
         .get_item("nonterminal_intent")?
         .map(|value| read_nonterminal_intent(&value, &mut budget))
@@ -14633,13 +14637,12 @@ impl TaskUseState {
         }
     }
 
-    fn begin_initial_prefill(&mut self) -> PyResult<Arc<()>> {
+    fn begin_initial_prefill(&mut self, scope: Arc<()>) -> PyResult<Arc<()>> {
         if !matches!(self.phase, TaskUsePhase::Imported) {
             return Err(invalid(
                 "initial prefill requires one imported task before parent binding",
             ));
         }
-        let scope = Arc::new(());
         self.phase = TaskUsePhase::InitialPrefill {
             scope: Arc::clone(&scope),
         };
@@ -15277,6 +15280,25 @@ impl InitialPrefillProducers {
 }
 
 impl PySemanticTransitionSession {
+    fn initial_model_scope(
+        &self,
+        task_use: &PySemanticTransitionTaskUse,
+    ) -> PyResult<Option<Arc<()>>> {
+        let retained = self
+            .initial_prefill_stage_producers
+            .lock()
+            .map_err(|_| invalid("initial model producer custody is poisoned"))?;
+        match retained.as_ref() {
+            Some(original) if original.issuance.same_as(&task_use.issuance) => {
+                Ok(Some(Arc::clone(&original.scope)))
+            }
+            Some(_) => Err(invalid(
+                "initial model producers belong to another original task",
+            )),
+            None => Ok(None),
+        }
+    }
+
     fn retain_initial_prefill_stage_producers(
         &self,
         task_use: &PySemanticTransitionTaskUse,
@@ -22019,7 +22041,12 @@ impl PySemanticTransitionTaskUse {
             provenance_capacity_records,
         )?;
         let parts = initial_source_parts(py, layout.clone())?;
-        let scope = issued.state()?.begin_initial_prefill()?;
+        let scope = issued
+            .session
+            .borrow(py)
+            .initial_model_scope(&issued)?
+            .ok_or_else(|| invalid("initial prefill requires its registered original model"))?;
+        let scope = issued.state()?.begin_initial_prefill(scope)?;
         drop(issued);
         issue_initial_prefill_stage(py, slf, scope, layout, parts, model_generation)
     }
@@ -34777,8 +34804,8 @@ else:
             phase: TaskUsePhase::Imported,
             snapshot,
         };
-        let scope = state.begin_initial_prefill().unwrap();
-        assert!(state.begin_initial_prefill().is_err());
+        let scope = state.begin_initial_prefill(Arc::new(())).unwrap();
+        assert!(state.begin_initial_prefill(Arc::new(())).is_err());
         assert!(state.require_public_use().is_err());
         assert!(state.begin_build().is_err());
         assert!(state.finish_initial_prefill(&Arc::new(())).is_err());
@@ -34790,7 +34817,7 @@ else:
         assert!(state.begin_build().is_err());
         state.commit_initial_prefill(&scope).unwrap();
         assert!(state.require_initial_prefill_ready(&scope).is_err());
-        assert!(state.begin_initial_prefill().is_err());
+        assert!(state.begin_initial_prefill(Arc::new(())).is_err());
         assert!(state.require_public_use().is_ok());
         assert!(state.begin_build().is_ok());
     }

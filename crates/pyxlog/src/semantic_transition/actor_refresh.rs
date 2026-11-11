@@ -1752,7 +1752,7 @@ impl ActorRefreshCustody {
                 _ => false,
             };
             if original.records != records
-                || original.parent.borrow(py).ne(&*parent.borrow(py))
+                || !original.parent.borrow(py).same_template(&parent.borrow(py))
                 || original.task_ground != *task_ground
                 || original.capacities != capacities
                 || original.limits != limits

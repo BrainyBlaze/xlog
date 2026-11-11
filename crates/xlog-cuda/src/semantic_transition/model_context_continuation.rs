@@ -16,6 +16,42 @@ pub struct SemanticModelContextContinuation {
     pub(super) inner: Arc<ModelContextContinuationOwner>,
 }
 
+impl SemanticModelContextContinuation {
+    /// Project the selected source model's coordinates for its original target
+    /// before target prefill and training-view selection. This creates no model
+    /// version and does not authorize activation of the future instruction.
+    pub fn model_parent_coordinates(
+        &self,
+        target: &SemanticTransitionSession,
+    ) -> Result<(u64, u64, u64, [u64; 4], SemanticRngBinding), SemanticTransitionError> {
+        let original = self
+            .inner
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if !Arc::ptr_eq(&target.publication_issuer, &self.inner.target_issuer)
+            || target
+                .model_context_continuation
+                .as_ref()
+                .is_none_or(|owner| !Arc::ptr_eq(owner, &self.inner))
+            || target.publication.is_some()
+            || original.parent.is_some()
+            || original.activating
+            || original.refused
+        {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let header = self.inner.source_header;
+        Ok((
+            header.model_generation,
+            header.neural_generation,
+            header.training_cursor,
+            header.training_rng,
+            header.rng_binding()?,
+        ))
+    }
+}
+
 pub(super) struct ModelContextContinuationOwner {
     pub(super) source_issuer: Arc<()>,
     pub(super) target_issuer: Arc<()>,
@@ -430,51 +466,32 @@ impl ModelContextContinuationOwner {
         Ok(activating)
     }
 
-    pub(super) fn require_parent_binding(
-        &self,
+    pub(super) fn require_prefill_model_roster(
+        self: &Arc<Self>,
         target: &SemanticTransitionSession,
-        parent: &SemanticParentBinding,
+        tensors: &[PreparedSemanticTensor],
+    ) -> Result<(), SemanticTransitionError> {
+        SemanticModelContextContinuation {
+            inner: Arc::clone(self),
+        }
+        .model_parent_coordinates(target)?;
+        let model_count = tensors
+            .iter()
+            .filter(|tensor| tensor.layout.role != 0)
+            .count();
+        let (tensors, allocations) = tensors.split_at(model_count);
+        let source = self.source_publication.model_memory.clone();
+        let memory = prepare_model_memory(allocations, source.storages, source.views, tensors)?;
+        self.require_model_content(&memory, tensors, allocations)
+    }
+
+    fn require_model_content(
+        &self,
         memory: &ModelMemoryGeometry,
         tensors: &[PreparedSemanticTensor],
         allocations: &[PreparedSemanticTensor],
     ) -> Result<(), SemanticTransitionError> {
-        let original = self
-            .original
-            .lock()
-            .map_err(|_| SemanticTransitionError::Poisoned)?;
-        if !Arc::ptr_eq(&target.publication_issuer, &self.target_issuer)
-            || target
-                .model_context_continuation
-                .as_ref()
-                .is_none_or(|owner| !std::ptr::eq(Arc::as_ptr(owner), self))
-            || original.parent.is_some()
-            || original.activating
-            || original.refused
-            || target.publication.is_some()
-            || *memory != self.source_publication.model_memory
-            || parent.model_generation != self.source_header.model_generation
-            || parent.neural_generation != self.source_header.neural_generation
-            || parent.training_cursor != self.source_header.training_cursor
-            || parent.training_rng != self.source_header.training_rng
-            || parent.rng != self.source_header.rng_binding()?
-            || parent.prefix_capacity != self.source_publication.contract_value.prefix_capacity
-            || parent.feedback_capacity != self.source_publication.contract_value.feedback_capacity
-            || parent.max_position != self.source_publication.contract_value.max_position
-            || parent.pad_token != self.source_publication.contract_value.pad_token
-            || parent.model_contract_layout
-                != self.source_publication.contract_value.model_contract_layout
-            || parent
-                .records
-                .iter()
-                .filter(|record| record.role == SemanticStateRole::ModelContract)
-                .count()
-                != 1
-            || !parent.records.iter().any(|record| {
-                record.role == SemanticStateRole::ModelContract
-                    && record.index == 0
-                    && record.bytes.as_slice()
-                        == self.source_publication.model_contract_record.as_ref()
-            })
+        if *memory != self.source_publication.model_memory
             || allocations.len() != self.models.len()
             || allocations
                 .iter()
@@ -507,10 +524,62 @@ impl ModelContextContinuationOwner {
                     .count()
         {
             return Err(publication_input_error(
-                "future context changed the original model owners or complete publication contract",
+                "future context changed its original source model owners",
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn require_parent_binding(
+        &self,
+        target: &SemanticTransitionSession,
+        parent: &SemanticParentBinding,
+        memory: &ModelMemoryGeometry,
+        tensors: &[PreparedSemanticTensor],
+        allocations: &[PreparedSemanticTensor],
+    ) -> Result<(), SemanticTransitionError> {
+        let original = self
+            .original
+            .lock()
+            .map_err(|_| SemanticTransitionError::Poisoned)?;
+        if !Arc::ptr_eq(&target.publication_issuer, &self.target_issuer)
+            || target
+                .model_context_continuation
+                .as_ref()
+                .is_none_or(|owner| !std::ptr::eq(Arc::as_ptr(owner), self))
+            || original.parent.is_some()
+            || original.activating
+            || original.refused
+            || target.publication.is_some()
+            || parent.model_generation != self.source_header.model_generation
+            || parent.neural_generation != self.source_header.neural_generation
+            || parent.training_cursor != self.source_header.training_cursor
+            || parent.training_rng != self.source_header.training_rng
+            || parent.rng != self.source_header.rng_binding()?
+            || parent.prefix_capacity != self.source_publication.contract_value.prefix_capacity
+            || parent.feedback_capacity != self.source_publication.contract_value.feedback_capacity
+            || parent.max_position != self.source_publication.contract_value.max_position
+            || parent.pad_token != self.source_publication.contract_value.pad_token
+            || parent.model_contract_layout
+                != self.source_publication.contract_value.model_contract_layout
+            || parent
+                .records
+                .iter()
+                .filter(|record| record.role == SemanticStateRole::ModelContract)
+                .count()
+                != 1
+            || !parent.records.iter().any(|record| {
+                record.role == SemanticStateRole::ModelContract
+                    && record.index == 0
+                    && record.bytes.as_slice()
+                        == self.source_publication.model_contract_record.as_ref()
+            })
+        {
+            return Err(publication_input_error(
+                "future context changed the original model owners or complete publication contract",
+            ));
+        }
+        self.require_model_content(memory, tensors, allocations)
     }
 
     pub(super) fn retain_dormant_parent(

@@ -205,6 +205,23 @@ struct SourceModelAlias {
 }
 
 impl PySemanticModelContextContinuation {
+    pub(super) fn parent_coordinates(
+        &self,
+        py: Python<'_>,
+        original: &cold_task::PySemanticTransitionFreshParent,
+    ) -> PyResult<(u64, u64, u64, [u64; 4], SemanticRngBinding)> {
+        let controller = self.target_controller.borrow(py);
+        let task = self.target_task.borrow(py);
+        self.require_target(py, &controller, &task)?;
+        let session = task.session.borrow(py);
+        original.require_original_session(&session)?;
+        let owner = session.owner()?;
+        task.require_identity(&owner)?;
+        self.inner
+            .model_parent_coordinates(&owner)
+            .map_err(xlog_err)
+    }
+
     pub(super) fn resource_interval_handle(
         &self,
     ) -> Option<Arc<segment_resource_observation::OriginalSegmentResourceInterval>> {
@@ -2040,7 +2057,7 @@ impl PySemanticModelContextContinuation {
                 return Err(error);
             }
         };
-        let scope = issued.state()?.begin_initial_prefill()?;
+        let scope = issued.state()?.begin_initial_prefill(Arc::new(()))?;
         self.state()?.prefill_lease = Some((lease, scope));
         self.project_prefill_stage(py)
     }
