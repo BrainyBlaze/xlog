@@ -598,6 +598,13 @@ fn value_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn raw_alphabet(tokens: &[u32], vocabulary: usize) -> PyResult<BTreeSet<u32>> {
     let unique: BTreeSet<_> = tokens.iter().copied().collect();
     if tokens.is_empty()
@@ -703,7 +710,7 @@ impl PyNativeAcquisitionMask {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
         let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE)
-            .then(|| format!("{:x}", Sha256::digest(language_json.as_bytes())));
+            .then(|| sha256_hex(language_json.as_bytes()));
         let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE
             || rejection_language_sha256.is_some();
         let source_root_ownership =
@@ -1172,8 +1179,8 @@ impl PyNativeAcquisitionMask {
                 serde_json::to_string(&json!({
                     "version": 1,
                     "language_sha256": self.rejection_language_sha256.as_ref().unwrap(),
-                    "prefix_sha256": format!("{:x}", Sha256::digest(prefix)),
-                    "grammar_mask_sha256": format!("{:x}", Sha256::digest(allowed_mask)),
+                    "prefix_sha256": sha256_hex(prefix),
+                    "grammar_mask_sha256": sha256_hex(allowed_mask),
                     "remaining_tokens": remaining_tokens.unwrap(),
                     "grammar_candidates": candidates,
                     "rejected_candidates": candidates,
