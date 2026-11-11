@@ -141,6 +141,11 @@ class NativeCausalModel:
         actual completed graph must pass canonical output/dependency admission.
         V40 retains V39 admission and exposes observed empty-mask rejections
         through filter_with_rejections, without another filtering traversal.
+        V41 keeps rejection feedback and necessary continuation bounds while
+        using weights/return bodies without a preselected operation_count.
+        Actual postorder determines the output through numerical-expressions-v5;
+        scalar-resource, dependency and finite-feature admission remain enabled.
+        Source/lowered caps and paid original-ID/EOS bounds still apply.
         """
         ...
     def fork_acquired(
@@ -212,7 +217,7 @@ class NativeAcquisitionMask:
     def filter_with_rejections(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: int,
     ) -> tuple[bytes, Optional[str]]:
-        """V40 only: the same mask, with captured JSON facts only when it is empty.
+        """V40/V41: the same mask, with captured JSON facts only when it is empty.
 
         One traversal retains up to four observed rejected token/error samples
         in original token-ID order. Error text is bounded to 256 Unicode scalars,
@@ -223,9 +228,9 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–40 prefix facts as JSON; no token selection or final admission."""
+        """Version4–41 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–40 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–41 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry

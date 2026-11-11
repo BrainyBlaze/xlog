@@ -391,12 +391,6 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version == 41 {
-                schema["description"] = json!(format!(
-                    "{} Bodies contain weights then return, with no preselected operation_count. The model selects and closes its own expression; the existing numerical-expressions-v5 codec derives the canonical output from actual postorder operations. The source-root owner remains definition-local. Canonical partial inference retains closed physical Linear matrix domains, and continuation uses necessary producer, dependency-frontier, row and shape bounds without hypothetical future graphs. Global source and lowered-operation caps, original-ID/EOS obligations, completed output/dependency/feature admission and captured-native-rejections-v1 remain. No count, operand or graph is supplied. A prefix can still reach a dead end; this mode does not guarantee token fit, completion or usefulness.",
-                    schema["description"].as_str().unwrap()
-                ));
-            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -467,6 +461,12 @@ pub(super) fn language(
         if (23..25).contains(&version) {
             schema["description"] = json!(format!(
                 "{} The open body's prospective row allowance also intersects the maximum current-body count whose shared ordered suffix projection fits the remaining original IDs and paid EOS. The same typed owner applies this capacity before partial tags and operands, including after parsed-prefix restoration. This inverse structural bound selects no count or graph and remains a necessary relaxation rather than a token-fit witness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 41 {
+            schema["description"] = json!(format!(
+                "{} Bodies contain weights then return, with no preselected operation_count. The model selects and closes its own expression; the existing numerical-expressions-v5 codec derives the canonical output from actual postorder operations. The source-root owner remains definition-local. Canonical partial inference retains closed physical Linear matrix domains, and continuation uses necessary producer, dependency-frontier, row and shape bounds without hypothetical future graphs. Global source and lowered-operation caps, original-ID/EOS obligations, completed output/dependency/feature admission and captured-native-rejections-v1 remain. No count, operand or graph is supplied. A prefix can still reach a dead end; this mode does not guarantee token fit, completion or usefulness.",
                 schema["description"].as_str().unwrap()
             ));
         }
