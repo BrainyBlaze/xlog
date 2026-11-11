@@ -477,6 +477,8 @@ pub(super) fn definitions(
             // The complete canonical graph was constructed above. Validate its
             // actual operations/output below, without finding a second graph.
             true,
+            // This versionless completed codec has no open expression parents.
+            false,
         )
         .map_err(|error| error.to_string())?;
     }
