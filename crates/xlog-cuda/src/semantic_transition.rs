@@ -35533,12 +35533,36 @@ impl SemanticTransitionSession {
             .release_events
             .last()
             .expect("retained content guard event");
+        self.record_content_guard_event(event, consumer_stream)
+    }
+
+    fn record_content_guard_event(
+        &self,
+        event: &cudarc::driver::CudaEvent,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
         // SAFETY: record follows the guard on the admitted native stream. The
         // consumer must enqueue all dependent reads after this method returns.
         // CUDA events provide the dependency without a host synchronization.
         unsafe {
             cudarc::driver::result::event::record(event.cu_event(), self.stream.cu_stream())
                 .map_err(|e| runtime_error("content guard event record", e))?;
+        }
+        self.wait_content_guard_event(event, consumer_stream)
+    }
+
+    fn wait_content_guard_event(
+        &self,
+        event: &cudarc::driver::CudaEvent,
+        consumer_stream: u64,
+    ) -> Result<(), SemanticTransitionError> {
+        self.stream
+            .context()
+            .bind_to_thread()
+            .map_err(|error| runtime_error("content guard consumer context", error))?;
+        // SAFETY: the event and the admitted same-context consumer remain
+        // retained by the original Session until known consumer retirement.
+        unsafe {
             sys::cuStreamWaitEvent(
                 dlpack_consumer_stream(consumer_stream)?,
                 event.cu_event(),
