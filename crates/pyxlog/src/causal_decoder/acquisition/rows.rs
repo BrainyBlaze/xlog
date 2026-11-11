@@ -474,6 +474,9 @@ pub(super) fn definitions(
             feature_output,
             false,
             false,
+            // The complete canonical graph was constructed above. Validate its
+            // actual operations/output below, without finding a second graph.
+            true,
         )
         .map_err(|error| error.to_string())?;
     }
