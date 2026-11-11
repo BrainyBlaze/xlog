@@ -1006,6 +1006,15 @@ impl Reader<'_> {
         self.punctuation(b',', b',')?;
         if self.expressions {
             if self.counted_expressions {
+                // key() owns its unconsumed spelling and colon. This outer
+                // frame owns only the count and the following return tree.
+                self.budget.set(frame, || {
+                    vec![
+                        budget::text("1,\"return\":"),
+                        budget::expression(),
+                        budget::text(ending),
+                    ]
+                });
                 self.key("operation_count")?;
                 self.budget.set(frame, || {
                     vec![
