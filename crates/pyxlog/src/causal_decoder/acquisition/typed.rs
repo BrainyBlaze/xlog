@@ -93,6 +93,7 @@ pub(super) struct Continuation<'a> {
     pub(super) root: bool,
     pub(super) partial: Option<PartialConstraints<'a>>,
     pub(super) expected: Option<[TensorShapeConstraint; 2]>,
+    pub(super) operation_count: Option<usize>,
 }
 
 impl Continuation<'_> {
@@ -116,7 +117,11 @@ impl Continuation<'_> {
             return false;
         }
         let Some((ancestor, rest)) = self.ancestors.split_first() else {
-            return !self.root || program.outputs().contains(&id);
+            return !self.root
+                || (self
+                    .operation_count
+                    .is_none_or(|count| program.body.operations.len() == count)
+                    && program.outputs().contains(&id));
         };
         let mut fields = ancestor.fields.clone();
         match &ancestor.operand {
@@ -143,6 +148,7 @@ impl Continuation<'_> {
                 // not each subsequent concrete ancestor or generic successor.
                 partial: None,
                 expected: None,
+                operation_count: self.operation_count,
             }),
         )
     }
@@ -1473,6 +1479,7 @@ impl Program {
                     root: false,
                     partial: None,
                     expected: Some(expected),
+                    operation_count: None,
                 }),
             )
         })
