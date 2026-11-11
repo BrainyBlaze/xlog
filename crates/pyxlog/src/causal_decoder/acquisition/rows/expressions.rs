@@ -7,6 +7,7 @@ pub(crate) const REFERENCE_ENCODING: &str = "numerical-expressions-v2";
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Nodes {
+    pub definition_index: usize,
     pub spent: usize,
     pub pending_roots: usize,
     pub current_root_pending: bool,

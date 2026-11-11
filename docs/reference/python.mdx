@@ -1358,7 +1358,20 @@ encoding, context marker, byte budget or cost contract is introduced. This
 necessary domain condition does not establish whole-tree or original-ID fit,
 completion or usefulness.
 
-For a version4 through version37 packet,
+Version38 (`xlog-contextual-acquisition-v38`) retains expressions-v6, exact
+counts, the canonical Linear domain and every existing resource budget. The
+source reader now carries the actual definition index with its pending root.
+The early count/source reservation applies only when the canonical resource
+parser is reading that definition's output. After closing a helper, rereading
+its output cannot reserve the pending entry root against the helper's count.
+The entry still faces its own bound with cumulative source usage and other
+pending roots; no usage is reset or refunded. The owner is independent of the
+optional original-ID bound, so filter, prefix facts and complete decoding share
+the same rule. Historical masks through37 retain their original behavior.
+Neither this correction nor a closed helper proves whole-entry admission,
+original-ID fit, usefulness or scientific benefit.
+
+For a version4 through version38 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

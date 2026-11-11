@@ -350,6 +350,7 @@ pub(super) fn prefix<'a>(
         expression_parents: reader.expression_parents,
         expression_operation: reader.expression_operations,
         expression_nodes: expressions::Nodes {
+            definition_index: reader.definition_index,
             spent: reader.expression_nodes,
             pending_roots: reader.expression_roots,
             current_root_pending: reader.expression_root_pending,
@@ -471,6 +472,7 @@ pub(super) fn definitions(
             None,
             value_references,
             feature_output,
+            false,
             false,
         )
         .map_err(|error| error.to_string())?;

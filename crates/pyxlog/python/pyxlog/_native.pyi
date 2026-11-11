@@ -130,6 +130,11 @@ class NativeCausalModel:
         table. One index must work at both lengths; alternatives retain only
         shared facts. Vectors remain valid Parameter values. No index, shape
         or source expression is supplied, and completion is not guaranteed.
+        V38 binds the pending source root to its actual definition before
+        applying the early count/source reservation. Rereading a closed helper
+        does not reserve the next entry's root against that helper's count.
+        Global source usage, other roots, exact N and original-ID/EOS bounds
+        remain; historical masks through V37 retain their original behavior.
         """
         ...
     def fork_acquired(
@@ -175,7 +180,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–37 require positive remaining original IDs including this choice and paid EOS.
+        """V21–38 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -190,14 +195,16 @@ class NativeAcquisitionMask:
         the tree, through the existing count/typed/source-ancestor owners.
         V37 retains v5/expressions-v6 and adds the canonical closed Linear
         matrix domain before source children and through partial ancestors.
+        V38 scopes the pending source root's early count reservation to its
+        actual definition, preserving cumulative usage and all other bounds.
         selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–37 prefix facts as JSON; no token selection or final admission."""
+        """Version4–38 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–37 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–38 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
