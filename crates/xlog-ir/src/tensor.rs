@@ -45,6 +45,15 @@ pub struct TensorParameter {
 }
 
 impl TensorParameter {
+    /// Canonical physical matrix domain of a Linear weight, including when
+    /// its source-selected activation is not yet known.
+    pub fn linear_dimensions(&self) -> Result<[usize; 2]> {
+        let &[columns, inner] = self.shape.as_slice() else {
+            return Err(invalid("linear weight must be a matrix"));
+        };
+        Ok([columns, inner])
+    }
+
     /// Checked byte extent in this physical parameter's declared storage type.
     pub fn bytes(&self) -> Result<usize> {
         if self.shape.is_empty() {
@@ -416,23 +425,18 @@ impl TensorProgram {
                 }
             }
             TensorOperation::Linear { input: id, weight } => {
-                let &[columns, inner] = parameter(weight)? else {
-                    return Err(invalid("linear weight must be a matrix"));
-                };
-                let source = value(id)?;
-                if source.float32
-                    != self
-                        .parameters
-                        .get(weight)
-                        .ok_or_else(|| invalid("unknown parameter"))?
-                        .float32
-                {
-                    return Err(invalid("linear parameter and activation types differ"));
-                }
-                if inner != source.columns {
-                    return Err(invalid("linear input and parameter dimensions differ"));
-                }
-                TensorValueShape { columns, ..source }
+                let parameter = self
+                    .parameters
+                    .get(weight)
+                    .ok_or_else(|| invalid("unknown numerical parameter"))?;
+                // Preserve physical-role rejection before requesting input.
+                parameter.linear_dimensions()?;
+                let mut input = value(id)?.into();
+                let mut output = TensorShapeConstraint::default();
+                TensorOperation::constrain_linear_shapes(parameter, &mut input, &mut output)?;
+                output
+                    .concrete()
+                    .ok_or_else(|| invalid("linear output shape is unresolved"))?
             }
             TensorOperation::RmsNorm {
                 input: id,
