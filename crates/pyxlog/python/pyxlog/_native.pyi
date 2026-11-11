@@ -139,6 +139,8 @@ class NativeCausalModel:
         dependency-frontier, row and shape bounds instead of searching for
         hypothetical future graphs. Prefixes can still reach dead ends; the
         actual completed graph must pass canonical output/dependency admission.
+        V40 retains V39 admission and exposes observed empty-mask rejections
+        through filter_with_rejections, without another filtering traversal.
         """
         ...
     def fork_acquired(
@@ -184,7 +186,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–39 require positive remaining original IDs including this choice and paid EOS.
+        """V21–40 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -207,10 +209,23 @@ class NativeAcquisitionMask:
         Expression bounds do not infer flat row capacity or prove completion.
         """
         ...
+    def filter_with_rejections(
+        self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: int,
+    ) -> tuple[bytes, Optional[str]]:
+        """V40 only: the same mask, with captured JSON facts only when it is empty.
+
+        One traversal retains up to four observed rejected token/error samples
+        in original token-ID order. Error text is bounded to 256 Unicode scalars,
+        with explicit truncation and omitted-candidate counts. The report binds
+        the exact language, prefix, grammar mask and remaining original IDs.
+        It neither retries admission nor selects or repairs a graph. An empty
+        input mask has zero candidates and samples. A nonempty result has None.
+        """
+        ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–39 prefix facts as JSON; no token selection or final admission."""
+        """Version4–40 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–39 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–40 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
