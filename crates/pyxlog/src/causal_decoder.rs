@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 35..=43) {
+        let context = if matches!(language_version, 35..=44) {
             self.inner
                 .acquisition_context_with_feature_output(insertion_layer)
         } else if language_version == 34 {
@@ -180,28 +180,32 @@ impl PyNativeCausalModel {
             | acquisition::COMPACT_METADATA_ROWS_ENCODING
             | acquisition::SELF_DELIMITED_ROWS_ENCODING
             | acquisition::NAMED_BODY_ROWS_ENCODING
+            | acquisition::FEATURE_ROWS_ENCODING
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
             | acquisition::PREDICATE_DEPENDENCIES_ENCODING
             | acquisition::FINITE_FEATURE_ENCODING
             | acquisition::COUNTED_EXPRESSION_ENCODING => {
+                let feature_rows = source_encoding == acquisition::FEATURE_ROWS_ENCODING;
                 let counted_expressions =
                     source_encoding == acquisition::COUNTED_EXPRESSION_ENCODING;
-                let feature_output =
-                    source_encoding == acquisition::FINITE_FEATURE_ENCODING || counted_expressions;
+                let feature_output = feature_rows
+                    || source_encoding == acquisition::FINITE_FEATURE_ENCODING
+                    || counted_expressions;
                 let predicate_values = source_encoding
                     == acquisition::PREDICATE_DEPENDENCIES_ENCODING
                     || feature_output;
                 let value_identities =
                     source_encoding == acquisition::VALUE_DEPENDENCIES_ENCODING || predicate_values;
-                let value_references = source_encoding
-                    == acquisition::EXPRESSION_REFERENCES_ENCODING
-                    || value_identities;
+                let value_references = !feature_rows
+                    && (source_encoding == acquisition::EXPRESSION_REFERENCES_ENCODING
+                        || value_identities);
                 let expressions = source_encoding == acquisition::NUMERICAL_EXPRESSIONS_ENCODING
                     || value_references;
-                let named_body =
-                    source_encoding == acquisition::NAMED_BODY_ROWS_ENCODING || expressions;
+                let named_body = source_encoding == acquisition::NAMED_BODY_ROWS_ENCODING
+                    || expressions
+                    || feature_rows;
                 let self_delimited =
                     source_encoding == acquisition::SELF_DELIMITED_ROWS_ENCODING || named_body;
                 let compact_metadata = source_encoding

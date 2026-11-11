@@ -156,6 +156,14 @@ class NativeCausalModel:
         physical domains. Unknown numerical children and used Call arguments
         remain unrestricted. This necessary bound supplies no graph, does not
         guarantee completion or usefulness, and preserves V1–V42 behavior.
+        V44 uses numerical-rows-v8: the existing named weights/ops flat codec
+        with preceding-row value operands and actual-last-row output. It keeps
+        context3/dependency-v3, predicate/value proofs, entry finite-feature
+        eligibility, current necessary continuation and collection cost-v5,
+        original-ID row capacity and captured empty-mask rejections. It adds no
+        nested source expressions, supplied graph or new numerical operation.
+        Historical languages1–43 remain unchanged; useful acquisition requires
+        actual completion, native admission, training and qualification.
         """
         ...
     def fork_acquired(
@@ -169,6 +177,9 @@ class NativeCausalModel:
         numerical-expressions-v3 requires value-aware dependency admission even
         when the legacy require_output_dependencies keyword is false. Older
         source encodings retain that keyword's original semantics.
+        numerical-rows-v8 uses the named flat codec with predicate-aware v3
+        dependency and finite-feature entry admission regardless of that keyword.
+        It forwards the original source through the shared native constructor.
         """
         ...
     @property
@@ -201,7 +212,7 @@ class NativeAcquisitionMask:
     def filter(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
     ) -> bytes:
-        """V21–40 require positive remaining original IDs including this choice and paid EOS.
+        """V21–44 require positive remaining original IDs including this choice and paid EOS.
 
         Earlier languages omit the argument. The ordered structural lower bound
         is necessary; completed acquisition and native admission remain required.
@@ -222,12 +233,15 @@ class NativeAcquisitionMask:
         graphs; cache-backed source/domain guards and exact counts remain.
         selected arrays and descriptors retain their existing cursor owners.
         Expression bounds do not infer flat row capacity or prove completion.
+        V44 applies the existing flat original-ID row capacity with collection
+        cost-v5, necessary typed continuation and finite-feature entry admission.
+        Preceding value operands and last-row output stay model-authored.
         """
         ...
     def filter_with_rejections(
         self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: int,
     ) -> tuple[bytes, Optional[str]]:
-        """V40–V43: the same mask, with captured JSON facts only when it is empty.
+        """V40–V44: the same mask, with captured JSON facts only when it is empty.
 
         One traversal retains up to four observed rejected token/error samples
         in original token-ID order. Error text is bounded to 256 Unicode scalars,
@@ -238,9 +252,9 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–43 prefix facts as JSON; no token selection or final admission."""
+        """Version4–44 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–43 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–44 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
@@ -251,6 +265,9 @@ class NativeAcquisitionMask:
         without another hypothetical graph. V39 uses necessary bounds through
         the entire packet decode; legacy packets also run their captured prefix
         mode, which retains its search. Final output/dependency checks remain.
+        V44 elaborates numerical-rows-v8 through the same flat reader and
+        validates its completed graph with the captured context3/dependency-v3
+        and finite-feature entry contract before seeded initialization.
         """
 
 class _LogitSelection(TypedDict):

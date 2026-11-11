@@ -39,6 +39,10 @@ impl Atom {
 
 pub(crate) enum Unit {
     Bytes(Vec<Atom>),
+    RowField {
+        selected: serde_json::Map<String, serde_json::Value>,
+        name: String,
+    },
     Field {
         parent: usize,
         name: String,
@@ -90,6 +94,21 @@ pub(crate) fn field(name: &str) -> Unit {
         "indices" => "",
         _ => "1",
     })
+}
+
+/// Flat fields use the same collection bound with facts already read from the
+/// current row. Older row languages retain their literal structural suffix.
+pub(crate) fn row_field(
+    name: &str,
+    selected: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Unit {
+    match selected {
+        Some(selected) if matches!(name, "indices" | "token_ids") => Unit::RowField {
+            selected: selected.clone(),
+            name: name.into(),
+        },
+        _ => field(name),
+    }
 }
 
 /// Unknown trees retain only mandatory root syntax, never a flattened row list.
@@ -369,6 +388,11 @@ impl State {
                     continue;
                 }
                 match unit {
+                    Unit::RowField { name, .. } => {
+                        if let Unit::Bytes(atoms) = field(name) {
+                            result.extend(atoms);
+                        }
+                    }
                     Unit::Field { name, .. } => {
                         if let Unit::Bytes(atoms) = expression_field(name, true, None) {
                             result.extend(atoms);

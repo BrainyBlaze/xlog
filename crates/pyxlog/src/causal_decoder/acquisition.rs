@@ -69,6 +69,7 @@ const REJECTION_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v40";
 const SELF_DELIMITED_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v41";
 const SCAN_SIGNATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v42";
 const PARTIAL_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v43";
+const FEATURE_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v44";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -76,6 +77,7 @@ pub(super) const COMPACT_INDICES_ROWS_ENCODING: &str = rows::COMPACT_INDICES_ENC
 pub(super) const COMPACT_METADATA_ROWS_ENCODING: &str = rows::COMPACT_METADATA_ENCODING;
 pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCODING;
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
+pub(super) const FEATURE_ROWS_ENCODING: &str = "numerical-rows-v8";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -100,7 +102,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=43) {
+    if !matches!(version, 1..=44) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -307,7 +309,7 @@ pub(super) fn language(
             if version >= 19 {
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
-            if version >= 25 {
+            if (25..=43).contains(&version) {
                 rows::expressions::schema(
                     &mut schema,
                     &operation_fields()?,
@@ -315,61 +317,61 @@ pub(super) fn language(
                     (36..=40).contains(&version),
                 );
             }
-            if version >= 26 {
+            if (26..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Before committing even an unfinished parent tag, its canonical required fields must have nonempty already-known function, formal-argument, closed physical-parameter and raw-token domains. The same canonical tag-prefix matcher intersects the existing catalogue with these resource facts and any selected function-symbol prefix. Child-value operands and Call arguments remain unknown future expressions, never missing preceding SSA values. Closed children and selected scalar tails retain the existing canonical typed owner; this prerequisite check does not infer child shapes or prove whole-tree completion or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 27 {
+            if (27..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Prospective expression operations also pass the existing canonical typed admission through source-selected ancestors whose other child operands and required scalar/array fields are known. The exact active child slot receives the trial result; unknown sibling expressions or scalar/array tails stop this local check optimistically. A fully known chain reaches the current definition's existing output shape, usage and dependency contract. Checks precede partial tags, scalar/index decimals and generic completion-cache answers, without inserting source operations or charging already-open parents twice. This is a necessary local constraint, not a whole-tree witness or a usefulness guarantee.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 28 {
+            if (28..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Canonical partial shape constraints additionally propagate through selected ancestors with unknown sibling expressions and scalar tails. Elementwise/Select equal extents, Tanh/Finite preservation, Broadcast one-row input and Gather row preservation share the concrete IR inference owner. Unknown slots stay free; only contradictory known facts reject a tag, operand or decimal extension. Unrepresented relations remain conservative, with existing prerequisites and concrete typed continuation unchanged. No future SSA value, scalar default, source node, graph search or completion witness is supplied.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 29 {
+            if (29..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} The shared source reader also reserves every mandatory unopened child occurrence, remaining source-compatible Call argument and future entry root against the global 64-node allowance. Closed children and an active child already represented by an open frame are not charged twice. Partial tags and callee prefixes retain only compatible catalogue domains within this necessary bound. A future hole needs at least two nodes only when canonical candidate inference at both context lengths proves that no zero-child source operation can match its partial type; otherwise its lower bound is one. This reservation selects no node, operand or graph, grants no CSE discount, and does not prove a complete or useful tree.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 30 {
+            if (30..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Only child value slots admit explicit model-selected references to preceding closed operations in the current body. Both context lengths and the same partial/known ancestor continuation constrain the decimal domain. Unfinished reference occurrences are charged once even without an operation frame. Future reference-capable holes keep a conservative one-source-node minimum: an earlier unfinished sibling may still supply their referenced value. A missing matching value now does not exclude a later reference. No future ID or value is supplied, and root operations retain the last-postorder output contract.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 31 {
+            if (31..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} The explicit value-aware dependency contract propagates canonical SSA/formal identities and proven positive zeros through copy operations and calls. Select with identical proven branches carries branch dependencies without its condition; a proven zero condition selects the negative branch. Unknown arithmetic and parameter values stay unknown. These same facts govern prospective choices, existing-value references, callee summaries and final native admission without rewriting operations or proving general nonconstancy or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 32 {
+            if (32..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Selected literal numeric arrays also reserve their proven minimum remaining coordinates, separators and unfinished decimal tail in the same ordered suffix bound. The shared canonical partial shape owner derives widths at both context lengths; unknown relations stay optimistic. A consumed comma requires another element even without a stronger typed width. Original-source form, existing ancestor closures, future entry and paid EOS share one projection, without double-charging active elements or imposing literal syntax on unselected descriptors. This necessary subsequence coverage is not an exact grammar-coupled token-fit or usefulness witness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 33 {
+            if (33..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Future numeric collection fields also reserve their literal-or-descriptor alternatives through the same complete ordered suffix. The shared tag-prefix/domain matcher applies these obligations once a tag is uniquely known, even before its closing quote, separator or child commitment. Each parent uses its own selected fields and the canonical partial shape continuation at both lengths; ambiguous domains and unknown relations retain optimistic bounds. Branch frontiers preserve token spellings crossing field and ancestor boundaries, with a single paid EOS. Selected forms keep their existing cursor and descriptor owners without double charging. This finite structural relaxation selects no source or graph and does not prove grammar-coupled fit or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 34 {
+            if (34..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Numerical-expressions-v4 explicitly selects output-dependencies-v3 with the same authored tuples and references. A separate query-local proof tracks values restricted to signed zero or NaN through zero products, addition, Tanh and copying. Such a Select condition can never satisfy the executable strict >0 predicate, so only its negative branch contributes output dependencies. Arithmetic dependencies and numeric identities remain unchanged; equal predicate proofs never establish equal values. Prefix trials, completion memo keys, complete decoding and original-source fork share this mode. The proof is not exported in the unchanged five-field callee records; opaque callees remain unknown. Historical modes, kernels and gradients are unchanged. This necessary analysis does not prove general nonconstancy or usefulness.",
                     schema["description"].as_str().unwrap()
                 ));
             }
-            if version >= 35 {
+            if (35..=43).contains(&version) {
                 schema["description"] = json!(format!(
                     "{} Numerical-expressions-v5 explicitly selects entry_output_contract=possible-finite-nonzero-v1. In addition to the existing entry requirements, the returned entry must not be proven entirely signed zero or NaN: finite output and a freshly zero-initialized projection cannot learn a nonzero feature contribution from that class. Unknown proofs and zero-valued children or helpers remain admissible. The same canonical proof-only transfer follows every selected parent through unknown sibling, scalar and index fields, then serves typed trials, references, completion shortcuts, complete decoding and original-source fork. The private entry rule is scoped in completion memoization and is not exported in callee records. Historical modes, source budgets, kernels, gradients, initialization and charged work are unchanged. This necessary condition does not prove usefulness or bitwise model equivalence.",
                     schema["description"].as_str().unwrap()
@@ -418,7 +420,7 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version >= 14 {
+        if (14..=43).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Entry plans and prospective choices must also admit a joint typed structural completion within the remaining rows. Search states retain canonical shape pairs, output dependencies and numeric-argument reads; every searched transition uses the same acquired-body admission as a model-authored operation. The search supplies no source or operands and does not prove token-budget completion, semantic nonconstancy or usefulness.",
                 schema["description"].as_str().unwrap()
@@ -484,6 +486,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
+        if version == 44 {
+            schema["description"] = json!(format!(
+                "{} Numerical-rows-v8 reuses named weights/ops bodies with model-selected nonempty flat operation rows. Value operands reference preceding completed rows of the same body; the last actual row is the output. It selects context-v3/output-dependencies-v3, canonical value identities and predicate proofs, and possible-finite-nonzero-v1 for the entry. The shared typed owner enforces both context lengths, physical aliases, callee summaries, raw/hidden input flow and required output dependencies. Open bodies use necessary producer, dependency-frontier, row and shape bounds with original-ID row capacity, without searching for or supplying a future graph. Typed selected/future collection obligations use ordered-structural-subsequence-v5, including all mandatory suffix syntax and a separate paid EOS. The same reader, completed decoder and original-source constructor own this mode; no nested expressions, expression-reference obligations, preselected count, rewrite, new opcode or numerical implementation is added. Captured-native-rejections-v1 retains actual refused choices. Historical languages remain literal; necessary prefix bounds do not guarantee completion or usefulness.",
+                schema["description"]
+                    .as_str()
+                    .unwrap()
+                    .replace("numerical-rows-v7", "numerical-rows-v8")
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -496,6 +507,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                44 => FEATURE_ROWS_LANGUAGE,
                 43 => PARTIAL_DEPENDENCY_LANGUAGE,
                 42 => SCAN_SIGNATURE_LANGUAGE,
                 41 => SELF_DELIMITED_FEEDBACK_LANGUAGE,
@@ -735,13 +747,16 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
+        let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE;
         let partial_dependency_domains = language["id"] == PARTIAL_DEPENDENCY_LANGUAGE;
+        let self_delimited_feedback = language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE
+            || language["id"] == SCAN_SIGNATURE_LANGUAGE
+            || partial_dependency_domains;
         let scan_signature_domains =
-            language["id"] == SCAN_SIGNATURE_LANGUAGE || partial_dependency_domains;
-        let self_delimited_feedback =
-            language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE || scan_signature_domains;
+            language["id"] == SCAN_SIGNATURE_LANGUAGE || partial_dependency_domains || feature_rows;
         let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE
-            || self_delimited_feedback)
+            || self_delimited_feedback
+            || feature_rows)
             .then(|| sha256_hex(language_json.as_bytes()));
         let necessary_continuations = language["id"] == NECESSARY_CONTINUATION_LANGUAGE
             || rejection_language_sha256.is_some();
@@ -750,15 +765,18 @@ impl PyNativeAcquisitionMask {
         let scalar_resource_domains =
             language["id"] == SCALAR_RESOURCE_LANGUAGE || source_root_ownership;
         let counted_expressions = !self_delimited_feedback
+            && !feature_rows
             && (language["id"] == COUNTED_EXPRESSION_LANGUAGE || scalar_resource_domains);
         let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE
             || counted_expressions
-            || self_delimited_feedback;
+            || self_delimited_feedback
+            || feature_rows;
         let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE || feature_output;
         let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
         let typed_collections = language["id"] == TYPED_COLLECTION_LANGUAGE || collection_choices;
         let value_identities = language["id"] == VALUE_DEPENDENCY_LANGUAGE || typed_collections;
-        let value_references = language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities;
+        let value_references =
+            !feature_rows && (language["id"] == EXPRESSION_REFERENCE_LANGUAGE || value_identities);
         let expression_node_obligations =
             language["id"] == EXPRESSION_NODE_LANGUAGE || value_references;
         let partial_expressions =
@@ -767,7 +785,7 @@ impl PyNativeAcquisitionMask {
         let parent_prerequisites =
             language["id"] == EXPRESSION_PREREQUISITE_LANGUAGE || ancestor_typing;
         let expressions = language["id"] == EXPRESSION_LANGUAGE || parent_prerequisites;
-        if expressions
+        if (expressions || feature_rows)
             && language.as_object().is_none_or(|packet| {
                 packet.len() != 4
                     || ["id", "context", "schema", "token_cost_contract"]
@@ -779,9 +797,10 @@ impl PyNativeAcquisitionMask {
                 "native acquisition language packet fields differ",
             ));
         }
-        let named_body = language["id"] == NAMED_BODY_LANGUAGE || expressions;
-        let token_row_capacity =
-            language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE || language["id"] == NAMED_BODY_LANGUAGE;
+        let named_body = language["id"] == NAMED_BODY_LANGUAGE || expressions || feature_rows;
+        let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE
+            || language["id"] == NAMED_BODY_LANGUAGE
+            || feature_rows;
         let self_delimited =
             language["id"] == SELF_DELIMITED_LANGUAGE || token_row_capacity || expressions;
         let token_budget = language["id"] == TOKEN_BUDGET_LANGUAGE || self_delimited;
@@ -1044,7 +1063,7 @@ impl PyNativeAcquisitionMask {
     ) -> PyResult<(Py<PyBytes>, Option<String>)> {
         if self.rejection_language_sha256.is_none() {
             return Err(value_error(
-                "rejection capture requires acquisition language version 40 through 43",
+                "rejection capture requires acquisition language version 40 through 44",
             ));
         }
         let (mask, report) =
@@ -2096,36 +2115,45 @@ impl Resources<'_> {
         unit: &rows::budget::Unit,
     ) -> Option<Vec<rows::budget::Section>> {
         use rows::budget::{Section, Unit};
-        let index = match unit {
-            Unit::Field { parent, .. } | Unit::Tail { parent, .. } => *parent,
+        let (material, continuation, required, expressions) = match unit {
+            Unit::RowField { selected, .. } => (Cow::Borrowed(selected), None, None, false),
+            Unit::Field { parent: index, .. } | Unit::Tail { parent: index, .. } => {
+                let (parents, _) = self.source_expression?;
+                let parent = parents.get(*index)?;
+                let mut candidates =
+                    self.operation_fields
+                        .unwrap()
+                        .iter()
+                        .filter(|(name, fields)| {
+                            operation_prefix(&parent.tag_prefix, name)
+                                && self.expression_parent_domains(parent, name, fields)
+                        });
+                let (name, required) = candidates.next()?;
+                // Unselected catalogue alternatives keep the previous optimistic
+                // suffix. A unique domain applies before the tag's closing quote too.
+                if candidates.next().is_some() {
+                    return None;
+                }
+                let mut material = parent.selected.clone();
+                material.insert("operation".into(), json!(name));
+                (
+                    Cow::Owned(material),
+                    Some(self.expression_ancestors_continuation(&parents[..*index])),
+                    Some(required),
+                    true,
+                )
+            }
             _ => return None,
         };
-        let (parents, _) = self.source_expression?;
-        let parent = parents.get(index)?;
-        let mut candidates = self
-            .operation_fields
-            .unwrap()
-            .iter()
-            .filter(|(name, fields)| {
-                operation_prefix(&parent.tag_prefix, name)
-                    && self.expression_parent_domains(parent, name, fields)
-            });
-        let (name, required) = candidates.next()?;
-        // Unselected catalogue alternatives keep the previous optimistic
-        // suffix. A unique domain applies before the tag's closing quote too.
-        if candidates.next().is_some() {
-            return None;
-        }
-        let mut material = parent.selected.clone();
-        material.insert("operation".into(), json!(name));
-        let continuation = self.expression_ancestors_continuation(&parents[..index]);
-        let continuation = continuation.borrow(self.operation_fields.unwrap());
+        let continuation = continuation
+            .as_ref()
+            .map(|value| value.borrow(self.operation_fields.unwrap()));
         let field = |name: &str| {
             if matches!(name, "indices" | "token_ids") {
                 return match self.program.typed.as_ref().unwrap().array_minimum(
                     &material,
                     name,
-                    Some(continuation),
+                    continuation,
                 ) {
                     Ok(minimum) => Section::collection(
                         minimum,
@@ -2137,22 +2165,25 @@ impl Resources<'_> {
                     },
                 };
             }
-            let Unit::Bytes(atoms) =
+            let minimum = if expressions {
                 rows::budget::expression_field(name, self.value_references, None)
-            else {
+            } else {
+                rows::budget::field(name)
+            };
+            let Unit::Bytes(atoms) = minimum else {
                 unreachable!()
             };
             Section::one(atoms)
         };
         match unit {
-            Unit::Field { name, .. } => Some(vec![field(name)]),
+            Unit::Field { name, .. } | Unit::RowField { name, .. } => Some(vec![field(name)]),
             Unit::Tail {
                 first,
                 leading_comma,
                 ..
             } => {
                 let mut sections = Vec::new();
-                for (position, name) in required.iter().enumerate().skip(*first) {
+                for (position, name) in required.unwrap().iter().enumerate().skip(*first) {
                     if *leading_comma || position != *first {
                         sections.push(Section::text(","));
                     }
