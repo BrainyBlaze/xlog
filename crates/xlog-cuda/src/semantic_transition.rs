@@ -55,6 +55,7 @@ pub use model_context_continuation::{
     SemanticModelContextCheckpointAttachment, SemanticModelContextContinuation,
     SemanticModelContextPrefillRestoreDeclaration, SemanticRestoredModelContextPrefill,
 };
+mod initial_model;
 mod model_contract;
 use late_replay::{PendingReplayDelivery, ReplayAuthentication};
 #[cfg(feature = "semantic-policy")]
@@ -21294,6 +21295,7 @@ pub struct SemanticTransitionSession {
     cold_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     training_canary_source: Option<Arc<crate::SemanticTrainingCanarySource>>,
     initial_prefill: Option<InitialPrefillStage>,
+    initial_model: Option<initial_model::InitialModelContent>,
     #[cfg(feature = "semantic-policy")]
     initial_cold_model_work: Option<cold_model_work::InitialPrefillColdWork>,
     retained_initial_prefill: Option<RetainedInitialPrefillContent>,
@@ -23627,6 +23629,7 @@ struct UnreleasedPublicationOwners {
     _readers: BTreeMap<u64, PublishedReader>,
     _steps: BTreeMap<u64, StepContentStorage>,
     _initial_prefill: Option<InitialPrefillStage>,
+    _initial_model: Option<initial_model::InitialModelContent>,
     #[cfg(feature = "semantic-policy")]
     _initial_cold_model_work: Option<cold_model_work::InitialPrefillColdWork>,
     _initial_prefill_content: Option<RetainedInitialPrefillContent>,
@@ -23871,6 +23874,7 @@ impl Drop for SemanticTransitionSession {
                     _events: std::mem::take(&mut self.release_events),
                     _steps: std::mem::take(&mut self.steps),
                     _initial_prefill: self.initial_prefill.take(),
+                    _initial_model: self.initial_model.take(),
                     #[cfg(feature = "semantic-policy")]
                     _initial_cold_model_work: self.initial_cold_model_work.take(),
                     _initial_prefill_content: self.retained_initial_prefill.take(),
@@ -32674,6 +32678,9 @@ impl SemanticTransitionSession {
                 #[cfg(feature = "semantic-policy")]
                 initial.output.tensors.clear();
             }
+            // Empty-prefix registration has no prefill stage, but holds the
+            // same original model aliases until this known retirement.
+            self.initial_model = None;
         }
         let resources = std::mem::take(&mut self.prepared_resources);
         // An original catalogue retired without a result does not establish
@@ -32836,6 +32843,7 @@ impl SemanticTransitionSession {
                 "initial prefill requires a model generation and nonempty committed prefix",
             ));
         }
+        self.require_initial_model_generation(model_generation)?;
         if layout.prefill_tokens.len() != layout.prefix.len()
             || layout.prefix.iter().enumerate().any(|(position, row)| {
                 row.token != layout.prefill_tokens[position]
@@ -33005,11 +33013,30 @@ impl SemanticTransitionSession {
                 .map(|tensor| (tensor.layout.role, tensor.layout.index)),
             private_prefix,
         )?;
+        let owner = if model && self.initial_model.is_some() {
+            self.take_initial_model_for_prefill(&tensors, consumer_stream)?
+        } else {
+            #[cfg(feature = "semantic-policy")]
+            if model {
+                self.model_context_continuation
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error("prefill requires its original model continuation")
+                    })?
+                    .require_prefill_model_roster(self, &tensors)?;
+            }
+            #[cfg(not(feature = "semantic-policy"))]
+            if model {
+                return Err(publication_input_error(
+                    "prefill requires its registered original model owners",
+                ));
+            }
+            InitialPrefillTensorOwners { tensors }
+        };
         let stage = self
             .initial_prefill
             .as_mut()
             .expect("retained prefill stage");
-        let owner = InitialPrefillTensorOwners { tensors };
         if model {
             stage.model_content = Some(owner);
         } else {
@@ -33132,16 +33159,14 @@ impl SemanticTransitionSession {
             std::mem::take(&mut parent.model_memory.views),
             &tensors,
         )?;
-        #[cfg(feature = "semantic-policy")]
-        if let Some(original) = continuation {
-            original.inner.require_parent_binding(
-                self,
-                &parent,
-                &model_memory,
-                &tensors,
-                &allocations,
-            )?;
-        }
+        self.join_initial_model_parent(
+            &parent,
+            &model_memory,
+            &tensors,
+            &allocations,
+            #[cfg(feature = "semantic-policy")]
+            continuation,
+        )?;
         self.join_initial_prefill_parent(&parent, &tensors, &allocations)?;
         #[cfg(feature = "semantic-policy")]
         self.require_completed_cold_model_work()?;
@@ -40370,6 +40395,7 @@ impl SemanticTransitionSession {
             cold_canary_source: None,
             training_canary_source: None,
             initial_prefill: None,
+            initial_model: None,
             #[cfg(feature = "semantic-policy")]
             initial_cold_model_work: None,
             retained_initial_prefill: None,
@@ -40894,6 +40920,7 @@ impl SemanticTransitionSession {
                     || self.continuation_base.is_some()
                     || (kind != TaskReleaseKind::Aborted
                         && (self.initial_prefill.is_some()
+                            || self.initial_model.is_some()
                             || !self.model_owners.is_empty()
                             || self.text_binding.is_some()))
                 {

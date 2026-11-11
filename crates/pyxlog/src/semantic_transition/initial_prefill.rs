@@ -28,13 +28,12 @@ pub(super) struct InitialPrefillPreparation {
 }
 
 impl TaskUseState {
-    fn begin_initial_prefill_preparation(&mut self) -> PyResult<Arc<()>> {
+    fn begin_initial_prefill_preparation(&mut self, scope: Arc<()>) -> PyResult<Arc<()>> {
         if !matches!(self.phase, TaskUsePhase::Imported) {
             return Err(invalid(
                 "initial preparation requires its original imported task",
             ));
         }
-        let scope = Arc::new(());
         self.phase = TaskUsePhase::InitialPrefillPreparing {
             scope: Arc::clone(&scope),
         };
@@ -209,7 +208,10 @@ impl PySemanticTransitionTaskUse {
                     "initial preparation was entered during source admission",
                 ));
             }
-            let scope = issued.state()?.begin_initial_prefill_preparation()?;
+            let scope = session.initial_model_scope(&issued)?.ok_or_else(|| {
+                invalid("initial preparation requires its registered original model")
+            })?;
+            let scope = issued.state()?.begin_initial_prefill_preparation(scope)?;
             let retained = Arc::new(Mutex::new(InitialPrefillPreparation {
                 task_use: slf.clone_ref(py),
                 scope,

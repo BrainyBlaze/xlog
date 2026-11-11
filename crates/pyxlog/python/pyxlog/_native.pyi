@@ -994,6 +994,34 @@ class SemanticContextSource:
     @property
     def context_index(self) -> int: ...
 
+class SemanticTransitionFreshParent:
+    """Native task inputs and projections tied to their original Session."""
+
+    @property
+    def metadata(self) -> dict[str, Any]: ...
+    @property
+    def source(self) -> tuple[tuple[int, ...], ...]: ...
+    @property
+    def prefix(self) -> tuple: ...
+    @property
+    def records(self) -> tuple[tuple[int, int, int, bytes], ...]: ...
+    @property
+    def tensors(self) -> tuple: ...
+    def parts(self) -> tuple[dict[str, Any], tuple, tuple, tuple, tuple]: ...
+    def bind_initial_model(
+        self, task_use: SemanticTransitionTaskUse, *,
+        model_record: tuple[int, int, int, bytes],
+        model_contract_layout: tuple[int, int, int, int, int],
+        tensors: tuple, model_allocations: tuple,
+        model_storages: tuple[tuple[int, int, int], ...],
+        model_views: tuple[tuple[int, int, int, int], ...], consumer_stream: int,
+    ) -> SemanticTransitionFreshParent:
+        """Retain the real model owners and issue their initial native version."""
+        ...
+    def for_model_context(self, continuation: Any) -> SemanticTransitionFreshParent:
+        """Project the original continuation's source model, training and RNG state."""
+        ...
+
 class SemanticTransitionColdTask:
     """Original admitted statement roster and its explicit ordered query selection."""
 
@@ -1034,6 +1062,8 @@ class SemanticTransitionColdTask:
         actor_refresh_bank: Optional[int] = None,
     ) -> None: ...
 
+    @property
+    def parent(self) -> SemanticTransitionFreshParent: ...
     @property
     def task_content(self) -> tuple[bytes, bytes, bytes, tuple[int, ...]]: ...
     @property

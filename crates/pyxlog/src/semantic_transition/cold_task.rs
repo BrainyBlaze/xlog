@@ -1,7 +1,7 @@
 //! Canonical creator-thread construction for one fresh semantic task parent.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::ThreadId;
 
 use pyo3::prelude::*;
@@ -19,6 +19,8 @@ use super::{
 };
 
 const MAX_POSITION: u64 = 262_144;
+
+mod initial_model;
 
 pub(super) struct EditableTaskSource {
     pub program: Arc<xlog_cuda::SemanticProgramAdmission>,
@@ -694,20 +696,23 @@ struct FreshRecord {
     bytes: Vec<u8>,
 }
 
-/// One immutable, XLOG-produced set of non-model arguments for a fresh parent.
+/// One immutable, XLOG-produced set of task arguments for a fresh parent.
 ///
-/// The model Runtime adds its cache, model-contract and selected training-view
-/// owners before forwarding these exact values to ``bind_parent``. The prefix
-/// and tensor collections are always empty; no Python consumer encodes native
+/// Its original Session admits the numerical model before prefill and projects
+/// consistent version and control records here. The model Runtime adds cache,
+/// model-contract and selected training-view owners for ``bind_parent``. The
+/// prefix and tensor collections stay empty; Python does not encode native
 /// state roles or private record bytes.
 #[pyclass(
     name = "SemanticTransitionFreshParent",
     module = "pyxlog._native",
     frozen
 )]
-#[derive(PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct PySemanticTransitionFreshParent {
     owner_thread: ThreadId,
+    original_session: Arc<OnceLock<Weak<Mutex<Option<xlog_cuda::SemanticTransitionSession>>>>>,
+    task_digest: [u8; 32],
     provenance_capacity_records: u64,
     prefix_capacity: u64,
     feedback_capacity: u64,
@@ -735,7 +740,48 @@ impl PySemanticTransitionFreshParent {
         super::require_creator_thread(self.owner_thread)
     }
 
-    /// Return the exact pre-model metadata dictionary accepted by Runtime.
+    /// Join the actual initial model before choosing either prefill or an empty prefix.
+    #[pyo3(signature = (task_use, *, model_record, model_contract_layout, tensors, model_allocations, model_storages, model_views, consumer_stream))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the original model retains its complete typed owner contract"
+    )]
+    fn bind_initial_model(
+        &self,
+        py: Python<'_>,
+        task_use: &super::PySemanticTransitionTaskUse,
+        model_record: &Bound<'_, PyAny>,
+        model_contract_layout: &Bound<'_, PyAny>,
+        tensors: &Bound<'_, PyAny>,
+        model_allocations: &Bound<'_, PyAny>,
+        model_storages: &Bound<'_, PyAny>,
+        model_views: &Bound<'_, PyAny>,
+        consumer_stream: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        self.bind_initial_model_owner(
+            py,
+            task_use,
+            model_record,
+            model_contract_layout,
+            tensors,
+            model_allocations,
+            model_storages,
+            model_views,
+            consumer_stream,
+        )
+    }
+
+    /// Project the retained source model and training coordinates into this target task.
+    #[cfg(feature = "semantic-policy")]
+    fn for_model_context(
+        &self,
+        py: Python<'_>,
+        continuation: &super::model_context_continuation::PySemanticModelContextContinuation,
+    ) -> PyResult<Self> {
+        self.project_model_context(py, continuation)
+    }
+
+    /// Return the exact task and projected model metadata accepted by Runtime.
     #[getter]
     fn metadata(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         self.require_creator()?;
@@ -1590,6 +1636,8 @@ impl PySemanticTransitionColdTask {
             py,
             PySemanticTransitionFreshParent {
                 owner_thread: std::thread::current().id(),
+                original_session: Arc::new(OnceLock::new()),
+                task_digest,
                 provenance_capacity_records,
                 prefix_capacity,
                 feedback_capacity,
@@ -1682,6 +1730,9 @@ impl PySemanticTransitionColdTask {
                 (Py::new(py, native_session)?, parent)
             }
         };
+        parent
+            .borrow(py)
+            .bind_original_session(&session.borrow(py))?;
         session
             .borrow(py)
             .bind_semantic_context(Arc::clone(&semantic_context))?;
@@ -2374,6 +2425,36 @@ fn append_u64s<const N: usize>(bytes: &mut Vec<u8>, values: [u64; N]) {
     }
 }
 
+fn fresh_model_records(
+    task_digest: [u8; 32],
+    generations: (u64, u64, u64, u64),
+    training_cursor: u64,
+    training_rng: [u64; 4],
+    rng: (u64, u8, u32),
+) -> [FreshRecord; 2] {
+    let mut rng_detail = Vec::new();
+    append_u64s(&mut rng_detail, training_rng);
+    append_u64s(
+        &mut rng_detail,
+        [generations.0, rng.0, u64::from(rng.1), u64::from(rng.2)],
+    );
+    let mut generation_detail = Vec::new();
+    append_u64s(
+        &mut generation_detail,
+        [
+            generations.0,
+            generations.1,
+            generations.2,
+            generations.3,
+            training_cursor,
+        ],
+    );
+    [
+        fresh_record(26, "rng", task_digest, &rng_detail),
+        fresh_record(34, "task-goal", task_digest, &generation_detail),
+    ]
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the environment record binds every independent cold resource budget"
@@ -2394,12 +2475,8 @@ fn fresh_records(
     fuel: u64,
     rng: (u64, u8, u32),
 ) -> Vec<FreshRecord> {
-    let mut rng_detail = Vec::new();
-    append_u64s(&mut rng_detail, training_rng);
-    append_u64s(
-        &mut rng_detail,
-        [generations.0, rng.0, u64::from(rng.1), u64::from(rng.2)],
-    );
+    let [rng_record, goal_record] =
+        fresh_model_records(task_digest, generations, training_cursor, training_rng, rng);
     let mut environment = Vec::new();
     append_u64s(
         &mut environment,
@@ -2424,22 +2501,11 @@ fn fresh_records(
     for token in terminal_tokens {
         token_contract.extend_from_slice(&token.to_le_bytes());
     }
-    let mut generation_detail = Vec::new();
-    append_u64s(
-        &mut generation_detail,
-        [
-            generations.0,
-            generations.1,
-            generations.2,
-            generations.3,
-            training_cursor,
-        ],
-    );
     vec![
-        fresh_record(26, "rng", task_digest, &rng_detail),
+        rng_record,
         fresh_record(27, "empty-replay-index", task_digest, &[]),
         fresh_record(28, "empty-replay-payload", task_digest, &[]),
-        fresh_record(34, "task-goal", task_digest, &generation_detail),
+        goal_record,
         fresh_record(35, "fresh-world-root", task_digest, &[]),
         fresh_record(36, "empty-edit-journal", task_digest, &[]),
         fresh_record(37, "runtime-environment", task_digest, &environment),
