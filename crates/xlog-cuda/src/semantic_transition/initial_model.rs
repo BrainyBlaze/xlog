@@ -10,7 +10,8 @@ pub(super) struct InitialModelContent {
     layout: SemanticModelContractLayout,
     memory: ModelMemoryGeometry,
     model: Option<InitialPrefillTensorOwners>,
-    stream: u64,
+    producer_stream: u64,
+    ready_event: cudarc::driver::CudaEvent,
 }
 
 fn same_roster<'a>(
@@ -101,7 +102,7 @@ impl SemanticTransitionSession {
                 || original.record.capacity_bytes != record.capacity_bytes
                 || original.layout != layout
                 || original.memory != geometry
-                || original.stream != consumer_stream
+                || original.producer_stream != consumer_stream
                 || owners.is_none_or(|owners| !same_roster(owners, prepared.iter()))
             {
                 return Err(publication_input_error(
@@ -116,6 +117,11 @@ impl SemanticTransitionSession {
             ));
         }
         let generation = 1;
+        let ready_event = self
+            .stream
+            .context()
+            .new_event(None)
+            .map_err(|error| runtime_error("initial model ready event", error))?;
         self.initial_model = Some(InitialModelContent {
             task_identity,
             task_epoch: self.task_epoch,
@@ -124,11 +130,15 @@ impl SemanticTransitionSession {
             layout,
             memory: geometry,
             model: Some(InitialPrefillTensorOwners { tensors: prepared }),
-            stream: consumer_stream,
+            producer_stream: consumer_stream,
+            ready_event,
         });
         let result = self
             .order_tensor_producer_inputs(consumer_stream)
-            .and_then(|()| self.order_content_consumers(consumer_stream));
+            .and_then(|()| {
+                let original = self.initial_model.as_ref().expect("original model");
+                self.record_content_guard_event(&original.ready_event, consumer_stream)
+            });
         if result.is_err() {
             self.poisoned = true;
         }
@@ -187,15 +197,21 @@ impl SemanticTransitionSession {
             ));
         };
         self.require_initial_model_origin(original)?;
-        if original.stream != consumer_stream
-            || original
-                .model
-                .as_ref()
-                .is_none_or(|model| !same_roster(model, actual.iter()))
+        if original
+            .model
+            .as_ref()
+            .is_none_or(|model| !same_roster(model, actual.iter()))
         {
             return Err(publication_input_error(
-                "prefill changed its original model stream or tensor owners",
+                "prefill changed its original model tensor owners",
             ));
+        }
+        // Registration precedes allocation of the prefill execution domain.
+        // Join its fixed producer-ready event on that actual consumer stream;
+        // recording the producer again could include unrelated later writes.
+        if let Err(error) = self.wait_content_guard_event(&original.ready_event, consumer_stream) {
+            self.poisoned = true;
+            return Err(error);
         }
         self.initial_model
             .as_mut()
