@@ -56,6 +56,21 @@ fn related_shape<const N: usize>(
 }
 
 impl TensorSignature {
+    /// State and item widths of an available pure, state-preserving scan cell.
+    /// This is the same ABI domain used by concrete Scan inference; it supplies
+    /// no activation, initial state or source operation.
+    pub fn scan_widths(&self) -> Option<[usize; 2]> {
+        match self {
+            Self::Pure {
+                input_widths,
+                output_width,
+            } if input_widths.len() == 2 && input_widths[0] == *output_width => {
+                Some([input_widths[0], input_widths[1]])
+            }
+            _ => None,
+        }
+    }
+
     /// Actual numeric argument extents, excluding the explicit causal token boundary.
     pub fn arguments(&self, tokens: usize) -> Result<Vec<TensorValueShape>> {
         match self {
@@ -417,11 +432,7 @@ impl TensorProgram {
                     || state.rows != 1
                     || *max_steps == 0
                     || *max_steps > self.max_context
-                    || resolve(function)?
-                        != (TensorSignature::Pure {
-                            input_widths: vec![state.columns, source.columns],
-                            output_width: state.columns,
-                        })
+                    || resolve(function)?.scan_widths() != Some([state.columns, source.columns])
                 {
                     return Err(invalid(
                         "scan cell signature, initial state or complete-prefix bound differs",

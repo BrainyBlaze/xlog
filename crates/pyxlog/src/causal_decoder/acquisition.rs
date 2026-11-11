@@ -67,6 +67,7 @@ const SOURCE_ROOT_OWNER_LANGUAGE: &str = "xlog-contextual-acquisition-v38";
 const NECESSARY_CONTINUATION_LANGUAGE: &str = "xlog-contextual-acquisition-v39";
 const REJECTION_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v40";
 const SELF_DELIMITED_FEEDBACK_LANGUAGE: &str = "xlog-contextual-acquisition-v41";
+const SCAN_SIGNATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v42";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -98,7 +99,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=41) {
+    if !matches!(version, 1..=42) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -464,9 +465,15 @@ pub(super) fn language(
                 schema["description"].as_str().unwrap()
             ));
         }
-        if version == 41 {
+        if (41..=42).contains(&version) {
             schema["description"] = json!(format!(
                 "{} Bodies contain weights then return, with no preselected operation_count. The model selects and closes its own expression; the existing numerical-expressions-v5 codec derives the canonical output from actual postorder operations. The source-root owner remains definition-local. Canonical partial inference retains closed physical Linear matrix domains, and continuation uses necessary producer, dependency-frontier, row and shape bounds without hypothetical future graphs. Global source and lowered-operation caps, original-ID/EOS obligations, completed output/dependency/feature admission and captured-native-rejections-v1 remain. No count, operand or graph is supplied. A prefix can still reach a dead end; this mode does not guarantee token fit, completion or usefulness.",
+                schema["description"].as_str().unwrap()
+            ));
+        }
+        if version == 42 {
+            schema["description"] = json!(format!(
+                "{} Scan parent and callee-prefix domains additionally require an available pure cell whose two input widths are state,item and whose output width equals state. The shared TensorSignature ABI owner also serves concrete Scan inference. Only already closed real signatures constrain this scalar resource; no cell, child, activation or future graph is supplied. Other typing, causality, input/parameter usage, feature and original-ID bounds remain authoritative. Historical prefix modes are unchanged; an admitted prefix may still fail later checks.",
                 schema["description"].as_str().unwrap()
             ));
         }
@@ -482,6 +489,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                42 => SCAN_SIGNATURE_LANGUAGE,
                 41 => SELF_DELIMITED_FEEDBACK_LANGUAGE,
                 40 => REJECTION_FEEDBACK_LANGUAGE,
                 39 => NECESSARY_CONTINUATION_LANGUAGE,
@@ -674,6 +682,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     scalar_resource_domains: bool,
     source_root_ownership: bool,
     necessary_continuations: bool,
+    scan_signature_domains: bool,
     rejection_language_sha256: Option<String>,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
@@ -717,7 +726,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let self_delimited_feedback = language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE;
+        let scan_signature_domains = language["id"] == SCAN_SIGNATURE_LANGUAGE;
+        let self_delimited_feedback =
+            language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE || scan_signature_domains;
         let rejection_language_sha256 = (language["id"] == REJECTION_FEEDBACK_LANGUAGE
             || self_delimited_feedback)
             .then(|| sha256_hex(language_json.as_bytes()));
@@ -959,6 +970,7 @@ impl PyNativeAcquisitionMask {
             scalar_resource_domains,
             source_root_ownership,
             necessary_continuations,
+            scan_signature_domains,
             rejection_language_sha256,
             frontier_completion,
             entry_parameter_coverage,
@@ -1020,7 +1032,7 @@ impl PyNativeAcquisitionMask {
     ) -> PyResult<(Py<PyBytes>, Option<String>)> {
         if self.rejection_language_sha256.is_none() {
             return Err(value_error(
-                "rejection capture requires acquisition language version 40 or 41",
+                "rejection capture requires acquisition language version 40, 41 or 42",
             ));
         }
         let (mask, report) =
@@ -1247,6 +1259,7 @@ impl PyNativeAcquisitionMask {
             self.scalar_resource_domains,
             self.source_root_ownership,
             self.necessary_continuations,
+            self.scan_signature_domains,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1495,6 +1508,7 @@ struct Resources<'a> {
     scalar_resource_domains: bool,
     source_root_ownership: bool,
     necessary_continuations: bool,
+    scan_signature_domains: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1589,6 +1603,7 @@ fn resource_prefix<'a>(
     scalar_resource_domains: bool,
     source_root_ownership: bool,
     necessary_continuations: bool,
+    scan_signature_domains: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1607,6 +1622,7 @@ fn resource_prefix<'a>(
         scalar_resource_domains,
         source_root_ownership,
         necessary_continuations,
+        scan_signature_domains,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -1901,7 +1917,7 @@ impl Resources<'_> {
             .iter()
             .any(|(name, required)| {
                 operation_prefix(&parent.tag_prefix, name)
-                    && self.expression_parent_domains(parent, required)
+                    && self.expression_parent_domains(parent, name, required)
             });
         if !viable {
             return Err(serde_json::Error::custom(
@@ -1914,6 +1930,7 @@ impl Resources<'_> {
     fn expression_parent_domains(
         &self,
         parent: &rows::expressions::Parent,
+        tag: &str,
         required: &[String],
     ) -> bool {
         required.iter().all(|field| {
@@ -1923,11 +1940,14 @@ impl Resources<'_> {
                 return true;
             }
             match field.as_str() {
-                "function" => self.signatures.keys().any(|name| {
-                    parent
-                        .function_prefix
-                        .as_ref()
-                        .is_none_or(|prefix| operation_prefix(prefix, name))
+                "function" => self.signatures.iter().any(|(name, signature)| {
+                    (!self.scan_signature_domains
+                        || tag != "scan"
+                        || signature.scan_widths().is_some())
+                        && parent
+                            .function_prefix
+                            .as_ref()
+                            .is_none_or(|prefix| operation_prefix(prefix, name))
                 }),
                 "token_ids" => !self.raw_tokens.is_empty(),
                 _ => reference_extent(&self.program, field) != Some(0),
@@ -2072,7 +2092,7 @@ impl Resources<'_> {
             .iter()
             .filter(|(name, fields)| {
                 operation_prefix(&parent.tag_prefix, name)
-                    && self.expression_parent_domains(parent, fields)
+                    && self.expression_parent_domains(parent, name, fields)
             });
         let (name, required) = candidates.next()?;
         // Unselected catalogue alternatives keep the previous optimistic
