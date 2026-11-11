@@ -61,6 +61,15 @@ impl PartialConstraints<'_> {
     }
 
     pub(super) fn permits(self, program: &Program, fields: &Map<String, Value>) -> bool {
+        if program.partial_dependency_domains
+            && !program.dependency_continuation_possible(
+                program.partial_dependencies(fields, None, self.fields),
+                self.ancestors,
+                self.fields,
+            )
+        {
+            return false;
+        }
         if program.scalar_resource_domains {
             return program.partial_feature_possible(fields, self.ancestors)
                 && self
@@ -81,6 +90,19 @@ impl PartialConstraints<'_> {
     }
 
     fn allows(self, program: &Program, id: usize) -> bool {
+        if program.partial_dependency_domains
+            && !program.dependency_continuation_possible(
+                program
+                    .dependencies
+                    .as_ref()
+                    .and_then(|facts| facts.values.get(id))
+                    .cloned(),
+                self.ancestors,
+                self.fields,
+            )
+        {
+            return false;
+        }
         if program.scalar_resource_domains {
             return program.feature_continuation_possible(
                 program
@@ -383,6 +405,7 @@ pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
     pub(super) scalar_resource_domains: bool,
+    pub(super) partial_dependency_domains: bool,
     /// Bound future work without synthesizing a completion graph.
     pub(super) necessary_continuations: bool,
     /// Maximum rows available to an open body, without selecting its output.
@@ -395,6 +418,94 @@ pub(super) struct Program {
 }
 
 impl Program {
+    /// An upper bound on output-reaching identities, not a completion graph.
+    /// Unknown value slots remain unbounded. Scalar tails cannot introduce
+    /// identities, except the actual physical-weight and callee domains.
+    /// Joining all operands is optimistic: canonical value/predicate transfer
+    /// may discard dependencies, but cannot create another physical alias or call.
+    fn partial_dependencies(
+        &self,
+        fields: &Map<String, Value>,
+        active: Option<(&Operand, &TensorOutputDependencies)>,
+        catalogue: &BTreeMap<String, Vec<String>>,
+    ) -> Option<TensorOutputDependencies> {
+        let facts = self.dependencies.as_ref()?;
+        let required = catalogue.get(fields.get("operation")?.as_str()?)?;
+        let value = |value: &Value| facts.values.get(value.as_u64()? as usize);
+        let mut result = TensorOutputDependencies::default();
+        for field in required {
+            if super::is_value_reference(field) {
+                let dependency = match active {
+                    Some((Operand::Value(name), dependency)) if name == field => dependency,
+                    _ => value(fields.get(field)?)?,
+                };
+                result.merge(dependency);
+            } else if field == "inputs" {
+                // Unlike Call's expression array, this scalar array enters the
+                // selected fields only after its closing delimiter was read.
+                for input in fields.get(field)?.as_array()? {
+                    result.merge(value(input)?);
+                }
+            } else if field == "arguments" {
+                // The canonical callee summary owns which arguments can reach
+                // its output. A missing used argument is still unrestricted;
+                // unused future arguments cannot add output dependencies.
+                let function = fields.get("function")?.as_str()?;
+                let callee = facts.callees.get(function)?;
+                for slot in &callee.arguments {
+                    let dependency = match active {
+                        Some((Operand::Argument(index), dependency)) if index == slot => dependency,
+                        _ => value(fields.get(field)?.as_array()?.get(*slot)?)?,
+                    };
+                    result.merge(dependency);
+                }
+            } else if field == "weight" {
+                let selected = fields.get(field).and_then(Value::as_u64);
+                for (index, parameter) in self.body.parameters.iter().enumerate() {
+                    if selected.is_none_or(|selected| selected == index as u64) {
+                        result.parameters.insert(parameter.name.clone());
+                    }
+                }
+            } else if field == "function" {
+                let selected = fields.get(field).and_then(Value::as_str);
+                for (name, callee) in &facts.callees {
+                    if selected.is_none_or(|selected| selected == name) {
+                        result.merge(callee);
+                        result.definitions.insert(name.clone());
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
+    fn dependency_continuation_possible(
+        &self,
+        mut dependencies: Option<TensorOutputDependencies>,
+        ancestors: &[Ancestor],
+        catalogue: &BTreeMap<String, Vec<String>>,
+    ) -> bool {
+        let Some(required) = &self.entry_requirements else {
+            return true;
+        };
+        for parent in ancestors.iter().rev() {
+            let Some(current) = dependencies else {
+                return true;
+            };
+            dependencies = self.partial_dependencies(
+                &parent.fields,
+                Some((&parent.operand, &current)),
+                catalogue,
+            );
+        }
+        // This bound concerns only required identities. Numerical input,
+        // returned-value identity and feature predicates retain their owners.
+        dependencies.is_none_or(|possible| {
+            required.calls.is_subset(&possible.definitions)
+                && required.parameters.is_subset(&possible.parameters)
+        })
+    }
+
     fn partial_predicate(
         &self,
         fields: &Map<String, Value>,
@@ -678,6 +789,7 @@ impl Program {
             },
             planned_output: None,
             scalar_resource_domains: false,
+            partial_dependency_domains: false,
             necessary_continuations: false,
             row_allowance: None,
             entry_requirements: None,
