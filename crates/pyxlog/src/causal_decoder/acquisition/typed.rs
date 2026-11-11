@@ -39,6 +39,9 @@ impl PartialConstraints<'_> {
         program: &Program,
         length: usize,
     ) -> Result<TensorShapeConstraint, XlogError> {
+        if program.scalar_resource_domains {
+            return Ok(self.expected_pair(program)?[length]);
+        }
         let tokens = [1, program.body.max_context][length];
         let mut expected = program
             .body
@@ -58,6 +61,15 @@ impl PartialConstraints<'_> {
     }
 
     pub(super) fn permits(self, program: &Program, fields: &Map<String, Value>) -> bool {
+        if program.scalar_resource_domains {
+            return program.partial_feature_possible(fields, self.ancestors)
+                && self
+                    .expected_pair(program)
+                    .and_then(|expected| {
+                        program.partial_shapes(fields, None, expected, self.fields)
+                    })
+                    .is_ok();
+        }
         program.partial_feature_possible(fields, self.ancestors)
             && (0..2).all(|length| {
                 self.expected(program, length)
@@ -69,6 +81,19 @@ impl PartialConstraints<'_> {
     }
 
     fn allows(self, program: &Program, id: usize) -> bool {
+        if program.scalar_resource_domains {
+            return program.feature_continuation_possible(
+                program
+                    .dependencies
+                    .as_ref()
+                    .is_some_and(|facts| facts.predicates[id]),
+                self.ancestors,
+            ) && self.expected_pair(program).is_ok_and(|expected| {
+                expected.into_iter().enumerate().all(|(length, mut shape)| {
+                    shape.intersect(program.shapes[length][id].into()).is_ok()
+                })
+            });
+        }
         program.feature_continuation_possible(
             program
                 .dependencies
@@ -82,6 +107,26 @@ impl PartialConstraints<'_> {
                     .is_ok()
             })
         })
+    }
+
+    fn expected_pair(self, program: &Program) -> Result<[TensorShapeConstraint; 2], XlogError> {
+        let mut expected = [TensorShapeConstraint::default(); 2];
+        for (length, tokens) in [1, program.body.max_context].into_iter().enumerate() {
+            expected[length] = program
+                .body
+                .signature
+                .output(tokens, program.body.vocabulary)?
+                .into();
+        }
+        for ancestor in self.ancestors {
+            expected = program.partial_shapes(
+                &ancestor.fields,
+                Some(&ancestor.operand),
+                expected,
+                self.fields,
+            )?;
+        }
+        Ok(expected)
     }
 }
 
@@ -337,6 +382,7 @@ impl DependencyFrontier {
 pub(super) struct Program {
     pub(super) body: TensorProgram,
     pub(super) planned_output: Option<usize>,
+    pub(super) scalar_resource_domains: bool,
     /// Maximum rows available to an open body, without selecting its output.
     pub(super) row_allowance: Option<usize>,
     pub(super) entry_requirements: Option<EntryRequirements>,
@@ -492,6 +538,83 @@ impl Program {
         }
     }
 
+    fn partial_shapes(
+        &self,
+        fields: &Map<String, Value>,
+        active: Option<&Operand>,
+        output: [TensorShapeConstraint; 2],
+        catalogue: &BTreeMap<String, Vec<String>>,
+    ) -> Result<[TensorShapeConstraint; 2], XlogError> {
+        if fields["operation"].as_str() != Some("linear") {
+            return Ok([
+                self.partial_shape(fields, active, output[0], 0, catalogue)?,
+                self.partial_shape(fields, active, output[1], 1, catalogue)?,
+            ]);
+        }
+        let mut input = [TensorShapeConstraint::default(); 2];
+        if let Some(id) = fields.get("input").and_then(Value::as_u64) {
+            for (length, shape) in input.iter_mut().enumerate() {
+                *shape = self.shapes[length]
+                    .get(id as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        XlogError::Compilation("partial operand is not preceding".into())
+                    })?
+                    .into();
+            }
+        }
+        let selected = fields
+            .get("weight")
+            .map(|value| {
+                value.as_u64().ok_or_else(|| {
+                    XlogError::Compilation("linear weight must be a parameter index".into())
+                })
+            })
+            .transpose()?;
+        let mut admitted: Option<([TensorShapeConstraint; 2], [TensorShapeConstraint; 2])> = None;
+        for (index, parameter) in self.body.parameters.iter().enumerate() {
+            if selected.is_some_and(|selected| selected != index as u64) {
+                continue;
+            }
+            let mut candidate_input = input;
+            let mut candidate_output = output;
+            // One physical index must be admitted at both lengths. These are
+            // actual closed resources, not prospective activation choices.
+            if (0..2).any(|length| {
+                Op::constrain_linear_shapes(
+                    parameter,
+                    &mut candidate_input[length],
+                    &mut candidate_output[length],
+                )
+                .is_err()
+            }) {
+                continue;
+            }
+            admitted = Some(
+                admitted.map_or((candidate_input, candidate_output), |previous| {
+                    (
+                        std::array::from_fn(|length| {
+                            previous.0[length].common(candidate_input[length])
+                        }),
+                        std::array::from_fn(|length| {
+                            previous.1[length].common(candidate_output[length])
+                        }),
+                    )
+                }),
+            );
+        }
+        let Some((admitted_input, admitted_output)) = admitted else {
+            return Err(XlogError::Compilation(
+                "linear has no compatible declared matrix weight".into(),
+            ));
+        };
+        Ok(match active {
+            Some(Operand::Value(name)) if name == "input" => admitted_input,
+            Some(_) => [TensorShapeConstraint::default(); 2],
+            None => admitted_output,
+        })
+    }
+
     /// Bound retained prefix state without allocating a serialized copy. The
     /// shared completion cache is not copied into an operation checkpoint.
     pub(super) fn fits_prefix_cache(&self, limit: usize) -> bool {
@@ -552,6 +675,7 @@ impl Program {
                 max_context,
             },
             planned_output: None,
+            scalar_resource_domains: false,
             row_allowance: None,
             entry_requirements: None,
             shapes: [Vec::new(), Vec::new()],

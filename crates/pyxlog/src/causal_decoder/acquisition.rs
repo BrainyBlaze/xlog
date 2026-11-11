@@ -61,6 +61,7 @@ const COLLECTION_CHOICE_LANGUAGE: &str = "xlog-contextual-acquisition-v33";
 const PREDICATE_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v34";
 const FINITE_FEATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v35";
 const COUNTED_EXPRESSION_LANGUAGE: &str = "xlog-contextual-acquisition-v36";
+const SCALAR_RESOURCE_LANGUAGE: &str = "xlog-contextual-acquisition-v37";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -92,7 +93,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=36) {
+    if !matches!(version, 1..=37) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -367,6 +368,12 @@ pub(super) fn language(
                     schema["description"].as_str().unwrap()
                 ));
             }
+            if version >= 37 {
+                schema["description"] = json!(format!(
+                    "{} Numerical-expressions-v6 retains the model-authored exact lowered count. Before committing a Linear parent or scalar weight choice, canonical partial inference intersects its input/result constraints with actual closed physical matrix declarations. A vector remains a valid Parameter source but cannot serve as a Linear matrix. Unknown weight alternatives retain only shared necessary constraints; no weight, activation shape, SSA value or child expression is supplied. The same source-local owner serves partial tags, ancestors, references and scalar choices. Historical modes remain unchanged; this necessary domain check does not guarantee completion or usefulness.",
+                    schema["description"].as_str().unwrap()
+                ));
+            }
         }
         if version >= 9 {
             schema["description"] = json!(format!(
@@ -452,6 +459,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                37 => SCALAR_RESOURCE_LANGUAGE,
                 36 => COUNTED_EXPRESSION_LANGUAGE,
                 35 => FINITE_FEATURE_LANGUAGE,
                 34 => PREDICATE_DEPENDENCY_LANGUAGE,
@@ -604,6 +612,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     output_dependencies: bool,
     feature_output: bool,
     counted_expressions: bool,
+    scalar_resource_domains: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -646,7 +655,9 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let counted_expressions = language["id"] == COUNTED_EXPRESSION_LANGUAGE;
+        let scalar_resource_domains = language["id"] == SCALAR_RESOURCE_LANGUAGE;
+        let counted_expressions =
+            language["id"] == COUNTED_EXPRESSION_LANGUAGE || scalar_resource_domains;
         let feature_output = language["id"] == FINITE_FEATURE_LANGUAGE || counted_expressions;
         let predicate_values = language["id"] == PREDICATE_DEPENDENCY_LANGUAGE || feature_output;
         let collection_choices = language["id"] == COLLECTION_CHOICE_LANGUAGE || predicate_values;
@@ -872,6 +883,7 @@ impl PyNativeAcquisitionMask {
             output_dependencies,
             feature_output,
             counted_expressions,
+            scalar_resource_domains,
             frontier_completion,
             entry_parameter_coverage,
             required_parameter_names,
@@ -1099,6 +1111,7 @@ impl PyNativeAcquisitionMask {
                 .then_some(prefix.expression_nodes),
             self.value_references,
             self.feature_output,
+            self.scalar_resource_domains,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1344,6 +1357,7 @@ struct Resources<'a> {
     entry_budget: bool,
     output_dependencies: bool,
     feature_output: bool,
+    scalar_resource_domains: bool,
     frontier_completion: bool,
     entry_parameter_coverage: bool,
     required_parameter_names: bool,
@@ -1435,6 +1449,7 @@ fn resource_prefix<'a>(
     expression_nodes: Option<rows::expressions::Nodes>,
     value_references: bool,
     feature_output: bool,
+    scalar_resource_domains: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1450,6 +1465,7 @@ fn resource_prefix<'a>(
         entry_budget,
         output_dependencies,
         feature_output,
+        scalar_resource_domains,
         frontier_completion,
         entry_parameter_coverage,
         required_parameter_names,
@@ -2424,6 +2440,12 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             self.resources.raw_tokens.iter().copied().collect(),
                             maximum_width(context),
                         ));
+                        self.resources
+                            .program
+                            .typed
+                            .as_mut()
+                            .unwrap()
+                            .scalar_resource_domains = self.resources.scalar_resource_domains;
                         if self.resources.self_delimited {
                             // Every helper still leaves one real row for the
                             // required later entry. This is a capacity limit,

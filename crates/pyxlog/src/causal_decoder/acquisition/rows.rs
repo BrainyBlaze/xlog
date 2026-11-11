@@ -471,6 +471,7 @@ pub(super) fn definitions(
             None,
             value_references,
             feature_output,
+            false,
         )
         .map_err(|error| error.to_string())?;
     }

@@ -24,6 +24,16 @@ impl From<TensorValueShape> for TensorShapeConstraint {
 }
 
 impl TensorShapeConstraint {
+    /// Facts shared by alternative admitted domains. A differing or unknown
+    /// component stays unknown; no representative shape is selected.
+    pub fn common(self, other: Self) -> Self {
+        Self {
+            rows: self.rows.filter(|value| other.rows == Some(*value)),
+            columns: self.columns.filter(|value| other.columns == Some(*value)),
+            float32: self.float32.filter(|value| other.float32 == Some(*value)),
+        }
+    }
+
     /// Intersect known facts, refusing only contradictory selected components.
     pub fn intersect(&mut self, other: Self) -> Result<()> {
         fn component<T: Copy + Eq>(value: &mut Option<T>, other: Option<T>) -> Result<()> {
@@ -50,6 +60,40 @@ impl TensorShapeConstraint {
 }
 
 impl TensorOperation {
+    /// Intersect the known physical Linear weight with possibly unknown
+    /// activation/result slots. No representative activation or SSA value is
+    /// created; full inference uses the same physical matrix domain.
+    pub fn constrain_linear_shapes(
+        parameter: &TensorParameter,
+        input: &mut TensorShapeConstraint,
+        output: &mut TensorShapeConstraint,
+    ) -> Result<()> {
+        let [columns, inner] = parameter.linear_dimensions()?;
+        if input
+            .float32
+            .is_some_and(|float32| float32 != parameter.float32)
+        {
+            return Err(invalid("linear parameter and activation types differ"));
+        }
+        if input.columns.is_some_and(|columns| columns != inner) {
+            return Err(invalid("linear input and parameter dimensions differ"));
+        }
+        input.intersect(TensorShapeConstraint {
+            columns: Some(inner),
+            float32: Some(parameter.float32),
+            ..Default::default()
+        })?;
+        output.intersect(TensorShapeConstraint {
+            rows: input.rows,
+            columns: Some(columns),
+            float32: Some(parameter.float32),
+        })?;
+        input.intersect(TensorShapeConstraint {
+            rows: output.rows,
+            ..Default::default()
+        })
+    }
+
     /// Propagate canonical equal-extent, broadcast and gather relations through
     /// unknown operand slots in wire operand order. Unknown gather columns stay
     /// free. Other operations return false and leave all slots unchanged; their
