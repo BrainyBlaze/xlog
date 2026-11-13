@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 35..=46) {
+        let context = if matches!(language_version, 35..=47) {
             self.inner
                 .acquisition_context_with_feature_output(insertion_layer)
         } else if language_version == 34 {
@@ -183,6 +183,7 @@ impl PyNativeCausalModel {
             | acquisition::FEATURE_ROWS_ENCODING
             | acquisition::OPEN_ROW_ENCODING
             | acquisition::MATRIX_PRODUCT_ENCODING
+            | acquisition::FORMAL_INPUT_ENCODING
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
@@ -194,7 +195,9 @@ impl PyNativeCausalModel {
                     acquisition::FEATURE_ROWS_ENCODING
                         | acquisition::OPEN_ROW_ENCODING
                         | acquisition::MATRIX_PRODUCT_ENCODING
+                        | acquisition::FORMAL_INPUT_ENCODING
                 );
+                let formal_inputs = source_encoding == acquisition::FORMAL_INPUT_ENCODING;
                 let counted_expressions =
                     source_encoding == acquisition::COUNTED_EXPRESSION_ENCODING;
                 let feature_output = feature_rows
@@ -249,7 +252,8 @@ impl PyNativeCausalModel {
                     value_references,
                     feature_output,
                     counted_expressions,
-                    source_encoding == acquisition::MATRIX_PRODUCT_ENCODING,
+                    source_encoding == acquisition::MATRIX_PRODUCT_ENCODING || formal_inputs,
+                    formal_inputs,
                 )?;
                 if feature_output {
                     self.inner.fork_acquired_definitions_with_feature_output(

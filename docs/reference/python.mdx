@@ -290,8 +290,8 @@ internal; reading the resource requires no network access. It describes the
 canonical `FuncDef`, function types and dimensions, `Numerical` body, both `causal`
 and `pure` signatures, parameter declarations, and the 16 authored acquisition
 operations. Contextual languages1–45 and their original-source readers retain
-their previous 15-operation domain; `matmul` requires language46 and
-`numerical-rows-v10`. It contains no generated definition, selected graph,
+their previous 15-operation domain; `matmul` requires language46/47 and
+`numerical-rows-v10/v11`. It contains no generated definition, selected graph,
 parameter values, or default program. Fields with Rust `Option` types retain their optional/null
 wire form; numerical admission still requires their exact concrete types. Integer
 indices and extents describe the native 64-bit unsigned representation; token IDs
@@ -1523,7 +1523,47 @@ The context3/dependency-v3 and possible-finite-nonzero entry contracts, source,
 node and scalar caps, and original-ID/EOS accounting remain unchanged. Prefix
 admission still does not guarantee a completed or useful graph.
 
-For a version4 through version46 packet,
+Version47 (`xlog-contextual-acquisition-v47`, `numerical-rows-v11`) makes the
+supplied numerical formals available before the first authored row. For each
+body, let `a = TensorSignature::arguments(1).len()`. A causal body has one such
+input, `H[T,input_width]`; the raw-token boundary is separate and does not add a
+numerical formal. A pure body has one `[1,width]` input per `input_widths` entry.
+Values `0..a-1` name these inputs, and authored row `i` produces value `a+i`.
+Operands can reference the formals or earlier authored rows. A body with `R`
+authored rows returns `a+R-1`; `R` must be positive.
+
+The shared source reader emits one canonical `Argument` binding per formal
+before the authored rows. These bindings pass through the existing typed visitor
+once, including cached prefix restoration, structured Gather operands and full
+original-source construction. Explicit authored `Argument` rows remain ordinary
+paid rows. The codec supplies no weights, projection or graph. Existing Call
+lowering maps each binding to the supplied value; allocation, gradients and cold
+restoration use the canonical program unchanged.
+
+Across all new definitions, `sum(R) <= 64` and `sum(a+R) <= 64`. Every formal
+binding counts toward the canonical node limit even when unused. A helper leaves
+room for the later entry's one binding and at least one authored row. The token
+suffix owner counts authored rows, and the typed owner translates that allowance
+to canonical nodes. Original IDs and paid EOS charge only actual source bytes;
+they do not charge the serialized prelude. Original and projected source still
+each fit 1MiB, and new physical scalars total at most 65536. These acquired-body
+limits are separate from the existing expanded decoder operation limit.
+
+Output dependency rules remain unchanged: every new helper and physical constant
+must reach the entry output, which must possibly depend on raw tokens **or** a
+numerical input. Merely binding an input does not prove output use. Calls
+substitute only output-used formals; the conservative restriction on Scan through
+hidden-dependent values remains. Shape inference at both context lengths and the
+finite-feature entry rule still govern completed admission.
+
+Version47 keeps the same five packet keys, canonical IR schema bytes,
+`ordered-structural-subsequence-v6`, context3/dependency-v3 and captured rejection
+contract. Its descriptor explicitly describes the formal namespace and both
+counts. Historical languages1–46, source encodings and saved programs retain
+their original meanings without migration. This representation change is not
+evidence of runtime success or useful acquisition.
+
+For a version4 through version47 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1550,6 +1590,11 @@ For versions25–30, `last_value` can describe a completed child while its paren
 expression remains unfinished; it becomes the root only after that node closes.
 In version30, referencing an existing value does not add a completed operation or
 change `last_value` by itself.
+In version47, the record still has version 1 and these same seven fields.
+`last_value` and `compatible_outputs` include the available canonical formal
+bindings; neither field proves a nonempty authored body or output use of an
+input. `entry_completed` requires authored rows, closure and complete admission,
+and cannot become true from a prelude alone.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the
 exact saved packet and prefix during restoration. Getter errors must remain

@@ -72,6 +72,7 @@ const PARTIAL_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v43";
 const FEATURE_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v44";
 const OPEN_ROW_LANGUAGE: &str = "xlog-contextual-acquisition-v45";
 const MATRIX_PRODUCT_LANGUAGE: &str = "xlog-contextual-acquisition-v46";
+const FORMAL_INPUT_LANGUAGE: &str = "xlog-contextual-acquisition-v47";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -82,6 +83,7 @@ pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const FEATURE_ROWS_ENCODING: &str = "numerical-rows-v8";
 pub(super) const OPEN_ROW_ENCODING: &str = "numerical-rows-v9";
 pub(super) const MATRIX_PRODUCT_ENCODING: &str = "numerical-rows-v10";
+pub(super) const FORMAL_INPUT_ENCODING: &str = "numerical-rows-v11";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -117,7 +119,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=46) {
+    if !matches!(version, 1..=47) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -528,6 +530,24 @@ pub(super) fn language(
                     .replace("new opcode or numerical implementation", "alternative numerical implementation")
             ));
         }
+        if version == 47 {
+            schema["description"] = json!(concat!(
+                "Compact numerical-rows-v11 acquisition. Root fields are intent,helpers,entry. ",
+                "Intent contains 1..256 descriptive Unicode scalar values. Helpers precede callers and use [local_name,signature,body]; entry is last and its name/signature come from context. ",
+                "Signatures use [kind,input_width_or_widths,output_width]. Each body has ordered weights,ops keys; ops contains nonempty model-authored flat operation rows with canonical tags and operand order. ",
+                "Weights declare/check physical FP32 storage with [symbol,shape], or reference existing storage with [symbol]. Local names expand in captured namespaces; retained symbols use [\"retained\",full_name]. Required physical aliases precede optional entry declarations. ",
+                "For each body, a is TensorSignature::arguments(1).len(), excluding the separate raw-token boundary. Causal has one numerical formal H[T,input_width]; Pure has one [1,width] formal per input_widths entry. ",
+                "Values 0..a-1 are these supplied numerical formals. Source row i produces value a+i and can reference formals or preceding source rows only. For R>0 authored rows the output is a+R-1; empty ops is invalid. ",
+                "The sole reader emits canonical Argument(0)..Argument(a-1) once before authored rows, through the ordinary typed visitor. Explicit authored Argument rows remain available and count as authored rows. No weights, projection or output graph are supplied. ",
+                "Across all new definitions, authored rows sum(R)<=64 and canonical body nodes sum(a+R)<=64, including unused formal bindings. Each helper leaves the later entry's bindings and at least one authored row within this cap. Original and projected source each fit 1MiB, and new physical scalars total at most 65536; aliases count once. ",
+                "Original-ID suffix costs and paid EOS cover actual source rows and bytes only, never the implicit bindings. Row capacity translates between authored R and canonical a+R. Open tags retain every mandatory row field and collection tail through ordered-structural-subsequence-v6. ",
+                "Canonical inference at one and maximum context length owns shapes, references and causality. Gather indices also accept count,modulus,start,step, expanding indices[j]=(start+j*step)%modulus within the actual input width. ",
+                "Matmul accepts FP32 A[M,K],B[K,N] and yields [M,N] without transposition or broadcasting, retaining both dependencies and gradients. Parameter is an explicit storage read; Linear retains its physical [out,in] weight ABI. ",
+                "Context-v3/output-dependencies-v3 and possible-finite-nonzero-v1 remain authoritative: every new definition and constant must reach the entry output, which must possibly depend on raw tokens OR a numerical input. Available formals alone prove no output use. Calls substitute only output-used formals; conservative hidden-independent Scan checks remain. ",
+                "Necessary producer, dependency-frontier and shape bounds use available values without hypothetical graph search. The completion_state record retains version1 and its seven fields: last_value and compatible_outputs include canonical bindings, while entry_completed requires authored rows and complete admission. Captured-native-rejections-v1 and the five packet keys are unchanged; canonical_schema_sha256 binds the same canonical IR resource. ",
+                "Historical languages and source encodings remain literal. Prefix admission does not guarantee completion, useful features or scientific acceptance."
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -542,6 +562,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                47 => FORMAL_INPUT_LANGUAGE,
                 46 => MATRIX_PRODUCT_LANGUAGE,
                 45 => OPEN_ROW_LANGUAGE,
                 44 => FEATURE_ROWS_LANGUAGE,
@@ -732,6 +753,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     operation_fields: Option<BTreeMap<String, Vec<String>>>,
     typed_context: Option<Value>,
     numerical_rows: bool,
+    formal_inputs: bool,
     context_entry_rows: bool,
     canonical_entry_formals: bool,
     has_intent: bool,
@@ -788,7 +810,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let matrix_product = language["id"] == MATRIX_PRODUCT_LANGUAGE;
+        let formal_inputs = language["id"] == FORMAL_INPUT_LANGUAGE;
+        let matrix_product = language["id"] == MATRIX_PRODUCT_LANGUAGE || formal_inputs;
         let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE || matrix_product;
         let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE || open_row_suffix;
         let partial_dependency_domains = language["id"] == PARTIAL_DEPENDENCY_LANGUAGE;
@@ -1038,6 +1061,7 @@ impl PyNativeAcquisitionMask {
         }
         Ok(Self {
             numerical_rows,
+            formal_inputs,
             context_entry_rows,
             canonical_entry_formals,
             has_intent,
@@ -1156,6 +1180,7 @@ impl PyNativeAcquisitionMask {
             self.value_references,
             self.feature_output,
             self.counted_expressions,
+            self.formal_inputs,
         )
         .map_err(value_error)?;
         if self.typed_context.as_ref().unwrap()["version"] == 3 {
@@ -1341,6 +1366,7 @@ impl PyNativeAcquisitionMask {
             self.necessary_continuations,
             self.scan_signature_domains,
             self.partial_dependency_domains,
+            self.formal_inputs,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1478,6 +1504,7 @@ impl PyNativeAcquisitionMask {
                 self.collection_choices,
                 self.counted_expressions,
                 self.open_row_suffix,
+                self.formal_inputs,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -1555,6 +1582,7 @@ pub(super) fn decode_numerical_rows(
     feature_output: bool,
     counted_expressions: bool,
     matrix_product: bool,
+    formal_inputs: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1570,6 +1598,7 @@ pub(super) fn decode_numerical_rows(
         value_references,
         feature_output,
         counted_expressions,
+        formal_inputs,
     )
     .map_err(value_error)
 }
@@ -1618,6 +1647,7 @@ struct Resources<'a> {
     partial_expressions: bool,
     expression_nodes: Option<rows::expressions::Nodes>,
     value_references: bool,
+    formal_inputs: bool,
 }
 
 struct ExpressionContinuation {
@@ -1689,6 +1719,7 @@ fn resource_prefix<'a>(
     necessary_continuations: bool,
     scan_signature_domains: bool,
     partial_dependency_domains: bool,
+    formal_inputs: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1762,6 +1793,7 @@ fn resource_prefix<'a>(
         partial_expressions,
         expression_nodes,
         value_references,
+        formal_inputs,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -2044,7 +2076,9 @@ impl Resources<'_> {
     fn unplaced_producer_rows(&self) -> usize {
         let mut read = BTreeSet::new();
         let mut called = BTreeSet::new();
-        let mut input = false;
+        // A supplied entry formal is already available without a source row.
+        // Actual output dependence is still checked by complete_entry.
+        let mut input = self.formal_inputs;
         let current = self
             .program
             .typed
@@ -2315,10 +2349,11 @@ impl Resources<'_> {
                 parameters.minimum_rows = producers.calls.len()
                     + producers.parameters.len()
                     + usize::from(
-                        !producers
-                            .calls
-                            .iter()
-                            .any(|name| self.dependencies[name].tokens),
+                        !self.formal_inputs
+                            && !producers
+                                .calls
+                                .iter()
+                                .any(|name| self.dependencies[name].tokens),
                     );
                 let mut missing = producers.parameters;
                 if state.entry && self.program_definition_index == Some(state.definition) {
@@ -2764,16 +2799,35 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             self.resources.partial_dependency_domains;
                         program.necessary_continuations = self.resources.necessary_continuations;
                         if self.resources.self_delimited {
-                            // Every helper still leaves one real row for the
-                            // required later entry. This is a capacity limit,
-                            // not a source-selected or canonical output.
+                            // Every helper leaves the later entry's bindings
+                            // and at least one authored row in the shared cap.
                             let entry = context["entrypoint"].as_str().unwrap();
-                            let reserve = usize::from(
-                                self.resources.definition_name.as_deref() != Some(entry),
-                            );
-                            self.resources.program.typed.as_mut().unwrap().row_allowance = Some(
-                                (ACQUIRED_NODES - self.resources.nodes).saturating_sub(reserve),
-                            );
+                            let reserve =
+                                if self.resources.definition_name.as_deref() != Some(entry) {
+                                    let bindings = if self.resources.formal_inputs {
+                                        serde_json::from_value::<TensorSignature>(
+                                            context["signature"].clone(),
+                                        )
+                                        .map_err(A::Error::custom)?
+                                        .arguments(1)
+                                        .map_err(A::Error::custom)?
+                                        .len()
+                                    } else {
+                                        0
+                                    };
+                                    bindings + 1
+                                } else {
+                                    0
+                                };
+                            let capacity =
+                                (ACQUIRED_NODES - self.resources.nodes).saturating_sub(reserve);
+                            if self.resources.formal_inputs && capacity <= arguments {
+                                return Err(A::Error::custom(
+                                    "formal bindings leave no acquired node for a source row",
+                                ));
+                            }
+                            self.resources.program.typed.as_mut().unwrap().row_allowance =
+                                Some(capacity);
                         }
                         if self.resources.output_dependencies {
                             let feature_output = self.resources.feature_output
@@ -2839,11 +2893,24 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             .unwrap()
                             .row_allowance
                             .unwrap();
-                        if let Some(rows) = bound
-                            .row_capacity(capacity, self.resources.token_obligations(bound.state))
-                        {
+                        // The suffix owner counts authored rows only; the
+                        // typed owner counts the canonical bindings as well.
+                        let bindings = if self.resources.formal_inputs {
+                            self.resources.program.arguments.unwrap()
+                        } else {
+                            0
+                        };
+                        if let Some(rows) = bound.row_capacity(
+                            capacity.saturating_sub(bindings),
+                            self.resources.token_obligations(bound.state),
+                        ) {
+                            if self.resources.formal_inputs && rows == 0 {
+                                return Err(A::Error::custom(
+                                    "remaining original IDs cannot cover a nonempty source body",
+                                ));
+                            }
                             self.resources.program.typed.as_mut().unwrap().row_allowance =
-                                Some(rows);
+                                Some(bindings + rows);
                         }
                     }
                 }
@@ -2988,6 +3055,8 @@ impl<'de> Visitor<'de> for Array<'_, '_> {
                 // These exact bytes, through a visible following comma, have
                 // already passed this visitor and canonical typed insertion.
                 // Consume their syntax; resume semantic checks at the tail.
+                // Canonical counts include the reader's formal prelude, so
+                // restoring this prefix neither seeds nor charges it again.
                 for _ in 0..state.program.operations {
                     sequence.next_element::<IgnoredAny>()?;
                 }

@@ -231,6 +231,7 @@ struct Reader<'a> {
     expressions: bool,
     value_references: bool,
     counted_expressions: bool,
+    formal_inputs: bool,
     expression_count: Option<usize>,
     parent_prerequisites: bool,
     ancestor_typing: bool,
@@ -270,6 +271,7 @@ pub(super) fn prefix<'a>(
     collection_choices: bool,
     counted_expressions: bool,
     open_row_suffix: bool,
+    formal_inputs: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -293,6 +295,7 @@ pub(super) fn prefix<'a>(
         expressions,
         value_references,
         counted_expressions,
+        formal_inputs,
         expression_count: None,
         parent_prerequisites: parent_prerequisites || counted_expressions,
         ancestor_typing: ancestor_typing || counted_expressions,
@@ -385,6 +388,7 @@ pub(super) fn definitions(
     value_references: bool,
     feature_output: bool,
     counted_expressions: bool,
+    formal_inputs: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -404,6 +408,7 @@ pub(super) fn definitions(
         false,
         counted_expressions,
         false,
+        formal_inputs,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -483,6 +488,7 @@ pub(super) fn definitions(
             // This versionless completed codec has no open expression parents.
             false,
             false,
+            formal_inputs,
         )
         .map_err(|error| error.to_string())?;
     }
@@ -1096,8 +1102,33 @@ impl Reader<'_> {
                 ]
             });
             self.punctuation(b'[', b'[')?;
+            let bindings = if self.formal_inputs {
+                signature
+                    .arguments(1)
+                    .map_err(|error| Stop::Invalid(error.to_string()))?
+                    .len()
+            } else {
+                0
+            };
+            if bindings >= ACQUIRED_NODES {
+                return Err(Stop::Invalid(
+                    "formal bindings leave no acquired node for a source row".into(),
+                ));
+            }
+            // Elaborate each supplied formal once. The ordinary canonical
+            // visitor owns its shape, dependencies and node accounting; source
+            // row counts and original-ID costs exclude these bindings.
+            for argument in 0..bindings {
+                if argument != 0 {
+                    self.output.push(b',')?;
+                }
+                self.output.json(&TensorOperation::Argument { argument })?;
+            }
             let mut operations = 0;
             if self.peek()? != b']' {
+                if bindings != 0 {
+                    self.output.push(b',')?;
+                }
                 loop {
                     self.budget.set(frame, || {
                         vec![
@@ -1111,7 +1142,7 @@ impl Reader<'_> {
                             budget::text(ending),
                         ]
                     });
-                    self.operation(operations)?;
+                    self.operation(bindings + operations)?;
                     operations += 1;
                     self.budget.set(frame, || {
                         vec![
@@ -1146,9 +1177,10 @@ impl Reader<'_> {
             self.budget.set(frame, || vec![budget::text(&ending[1..])]);
             self.punctuation(b']', b']')?;
             if self.self_delimited {
-                let output = operations
+                let last_row = operations
                     .checked_sub(1)
                     .ok_or_else(|| Stop::Invalid("numerical operations must be nonempty".into()))?;
+                let output = bindings + last_row;
                 self.output.extend_from_slice(b",\"output\":")?;
                 self.output.json(&output)?;
             }
