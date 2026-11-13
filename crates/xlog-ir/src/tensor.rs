@@ -115,6 +115,14 @@ pub enum TensorOperation {
         /// Second FP32 value with the same extent.
         right: usize,
     },
+    /// FP32 matrix product A[M,K] times B[K,N], without implicit transposition.
+    #[serde(rename = "matmul")]
+    MatMul {
+        /// First preceding FP32 matrix.
+        left: usize,
+        /// Second preceding FP32 matrix whose rows match the first's columns.
+        right: usize,
+    },
     /// FP32 elementwise subtraction.
     Subtract {
         /// Minuend value.

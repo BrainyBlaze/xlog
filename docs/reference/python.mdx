@@ -288,9 +288,11 @@ The schema uses JSON Schema draft 2020-12 and the language identifier
 `https://xlog.md/schemas/acquired-funcdef-wire/v1` in `$id`. All references are
 internal; reading the resource requires no network access. It describes the
 canonical `FuncDef`, function types and dimensions, `Numerical` body, both `causal`
-and `pure` signatures, parameter declarations, and the 15 authored acquisition
-operations. It contains no generated definition, selected graph, parameter values,
-or default program. Fields with Rust `Option` types retain their optional/null
+and `pure` signatures, parameter declarations, and the 16 authored acquisition
+operations. Contextual languages1–45 and their original-source readers retain
+their previous 15-operation domain; `matmul` requires language46 and
+`numerical-rows-v10`. It contains no generated definition, selected graph,
+parameter values, or default program. Fields with Rust `Option` types retain their optional/null
 wire form; numerical admission still requires their exact concrete types. Integer
 indices and extents describe the native 64-bit unsigned representation; token IDs
 use unsigned 32-bit integers.
@@ -1488,7 +1490,40 @@ reuse the same canonical flat path. V1–V44 contracts remain unchanged. This
 stronger necessary bound can still admit a dead end and does not establish
 token fit, useful acquisition, numerical improvement or successful training.
 
-For a version4 through version45 packet,
+Version46 (`xlog-contextual-acquisition-v46`, `numerical-rows-v10`) adds
+`["matmul", left, right]` to the same named flat-body codec. Both operands are
+preceding FP32 values: `A[M,K]` and `B[K,N]` produce `A * B` with shape `[M,N]`.
+There is no implicit transposition or broadcasting. A parameter must first be
+read with `Parameter`; `Linear` continues to read physical weights in its
+existing `[out,in]` layout. Shape inference at lengths1 and `max_context` keeps
+fixed column widths and prevents contracting the causal history dimension.
+Both operand dependencies reach the result. A factor proven zero-or-NaN keeps
+the product zero-or-NaN for the existing finite-feature admission rule.
+
+Forward execution and both reverse contributions use the existing FP32 GEMM
+owner: `dA = dC * B^T` and `dB = A^T * dC`. The ordinary SSA, call/Scan lowering,
+parameter-gradient accumulation and snapshot restoration paths carry the new
+operation. This source capability does not establish hardware qualification,
+numerical improvement or successful training.
+
+The descriptor retains `id`, `context`, `schema`, and `token_cost_contract`,
+and adds `canonical_schema_sha256`, the SHA256 of the wheel's original
+`acquired_funcdef_wire_v1.schema.json` bytes. The native mask requires this
+identity. A consumer must pin both that resource and the exact contextual
+descriptor with the producing source and wheel; mismatched historical material
+must be refused rather than reinterpreted. Languages1–45 retain their packet
+fields and operation catalogues, and `funcdef-json-v1` rejects `matmul` before
+registration. The complete `numerical-rows-v10` reader supplies canonical typed
+definitions to the existing registry and allocator.
+
+Version46 retains the necessary-continuations path and
+`ordered-structural-subsequence-v6`, including both mandatory operand fields in
+the open-row suffix. It does not enter the historical exact-completion search.
+The context3/dependency-v3 and possible-finite-nonzero entry contracts, source,
+node and scalar caps, and original-ID/EOS accounting remain unchanged. Prefix
+admission still does not guarantee a completed or useful graph.
+
+For a version4 through version46 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
