@@ -248,6 +248,16 @@
         {
           "type": "object",
           "properties": {
+            "operation": { "const": "matmul" },
+            "left": { "$ref": "#/$defs/Index" },
+            "right": { "$ref": "#/$defs/Index" }
+          },
+          "required": ["operation", "left", "right"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
             "operation": { "const": "subtract" },
             "left": { "$ref": "#/$defs/Index" },
             "right": { "$ref": "#/$defs/Index" }

@@ -1940,6 +1940,11 @@ impl Program {
                     .into_iter()
                     .any(|weight| check(Op::Linear { input, weight }, None))
             }),
+            "matmul" => refs("left").into_iter().any(|left| {
+                refs("right")
+                    .into_iter()
+                    .any(|right| check(Op::MatMul { left, right }, None))
+            }),
             "add" | "subtract" | "multiply" | "divide" => refs("left").into_iter().any(|left| {
                 refs("right").into_iter().any(|right| {
                     check(

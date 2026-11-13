@@ -71,6 +71,7 @@ const SCAN_SIGNATURE_LANGUAGE: &str = "xlog-contextual-acquisition-v42";
 const PARTIAL_DEPENDENCY_LANGUAGE: &str = "xlog-contextual-acquisition-v43";
 const FEATURE_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v44";
 const OPEN_ROW_LANGUAGE: &str = "xlog-contextual-acquisition-v45";
+const MATRIX_PRODUCT_LANGUAGE: &str = "xlog-contextual-acquisition-v46";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -80,6 +81,7 @@ pub(super) const SELF_DELIMITED_ROWS_ENCODING: &str = rows::SELF_DELIMITED_ENCOD
 pub(super) const NAMED_BODY_ROWS_ENCODING: &str = rows::NAMED_BODY_ENCODING;
 pub(super) const FEATURE_ROWS_ENCODING: &str = "numerical-rows-v8";
 pub(super) const OPEN_ROW_ENCODING: &str = "numerical-rows-v9";
+pub(super) const MATRIX_PRODUCT_ENCODING: &str = "numerical-rows-v10";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -87,6 +89,17 @@ pub(super) const PREDICATE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-
 pub(super) const FINITE_FEATURE_ENCODING: &str = "numerical-expressions-v5";
 pub(super) const COUNTED_EXPRESSION_ENCODING: &str = "numerical-expressions-v6";
 const WIRE: &str = include_str!("../../python/pyxlog/acquired_funcdef_wire_v1.schema.json");
+
+fn wire_schema(matrix_product: bool) -> PyResult<Value> {
+    let mut schema: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+    if !matrix_product {
+        schema["$defs"]["TensorOperation"]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|operation| operation["properties"]["operation"]["const"] != "matmul");
+    }
+    Ok(schema)
+}
 
 fn integer(minimum: usize, maximum: usize) -> Value {
     json!({"type": "integer", "minimum": minimum, "maximum": maximum})
@@ -104,12 +117,12 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=45) {
+    if !matches!(version, 1..=46) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
     }
-    let mut schema: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+    let mut schema = wire_schema(version >= 46)?;
     schema["$id"] = json!("https://xlog.md/schemas/acquired-funcdef-context/v1");
     schema["description"] = json!(
         "Contextual acquisition wire language. The native prefix mask additionally enforces cumulative new scalar/node/source budgets. Native compilation owns remaining shape, reference, reachability and causal checks."
@@ -314,7 +327,7 @@ pub(super) fn language(
             if (25..=43).contains(&version) {
                 rows::expressions::schema(
                     &mut schema,
-                    &operation_fields()?,
+                    &operation_fields(false)?,
                     version >= 30,
                     (36..=40).contains(&version),
                 );
@@ -497,13 +510,22 @@ pub(super) fn language(
                     .replace("numerical-rows-v7", "numerical-rows-v8")
             ));
         }
-        if version == 45 {
+        if version >= 45 {
             schema["description"] = json!(format!(
                 "{} An unfinished flat operation tag retains the complete mandatory row tail before its closing quote. The shared tag-prefix and current typed operand domain own each alternative together with its original-ID suffix cost, including collection forms, outer closures and paid EOS. This local check uses only already available operands and never assigns a future row or graph. The independent monotone row-capacity projection and cumulative canonical admission remain unchanged. This stronger necessary bound does not prove token fit, completion or usefulness.",
                 schema["description"].as_str().unwrap()
                     .replace("numerical-rows-v8", "numerical-rows-v9")
                     .replace("Numerical-rows-v8", "Numerical-rows-v9")
                     .replace("ordered-structural-subsequence-v5", "ordered-structural-subsequence-v6")
+            ));
+        }
+        if version >= 46 {
+            schema["description"] = json!(format!(
+                "{} Matmul takes two preceding FP32 values A[M,K] and B[K,N] and produces A times B with shape [M,N], without transposition or broadcasting. Both values retain their dependencies and reverse gradients; Parameter remains the explicit physical-storage read. Fixed column widths and inference at one and maximum context retain the causal row boundary. Linear keeps its output-by-input physical weight ABI. The same necessary-continuations and open-row owner applies, without the historical exact-completion search. The packet binds its canonical schema resource by SHA256. This capability does not guarantee completion or useful features.",
+                schema["description"].as_str().unwrap()
+                    .replace("numerical-rows-v9", "numerical-rows-v10")
+                    .replace("Numerical-rows-v9", "Numerical-rows-v10")
+                    .replace("new opcode or numerical implementation", "alternative numerical implementation")
             ));
         }
         // Keep ordering local to this language. Enabling preserve_order for
@@ -515,9 +537,12 @@ pub(super) fn language(
             schema: OrderedSchema<'a>,
             #[serde(skip_serializing_if = "Option::is_none")]
             token_cost_contract: Option<&'static str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            canonical_schema_sha256: Option<String>,
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                46 => MATRIX_PRODUCT_LANGUAGE,
                 45 => OPEN_ROW_LANGUAGE,
                 44 => FEATURE_ROWS_LANGUAGE,
                 43 => PARTIAL_DEPENDENCY_LANGUAGE,
@@ -565,7 +590,7 @@ pub(super) fn language(
             },
             context: &context,
             schema: OrderedSchema(&schema),
-            token_cost_contract: if version == 45 {
+            token_cost_contract: if version >= 45 {
                 Some(rows::budget::OPEN_ROW_CONTRACT)
             } else if version >= 33 {
                 Some(rows::budget::COLLECTION_CHOICE_CONTRACT)
@@ -578,6 +603,7 @@ pub(super) fn language(
             } else {
                 (version >= 21).then_some(rows::budget::CONTRACT)
             },
+            canonical_schema_sha256: (version >= 46).then(|| sha256_hex(WIRE.as_bytes())),
         })
         .map_err(value_error);
     }
@@ -762,7 +788,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE;
+        let matrix_product = language["id"] == MATRIX_PRODUCT_LANGUAGE;
+        let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE || matrix_product;
         let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE || open_row_suffix;
         let partial_dependency_domains = language["id"] == PARTIAL_DEPENDENCY_LANGUAGE;
         let self_delimited_feedback = language["id"] == SELF_DELIMITED_FEEDBACK_LANGUAGE
@@ -803,7 +830,7 @@ impl PyNativeAcquisitionMask {
         let expressions = language["id"] == EXPRESSION_LANGUAGE || parent_prerequisites;
         if (expressions || feature_rows)
             && language.as_object().is_none_or(|packet| {
-                packet.len() != 4
+                packet.len() != if matrix_product { 5 } else { 4 }
                     || ["id", "context", "schema", "token_cost_contract"]
                         .iter()
                         .any(|key| !packet.contains_key(*key))
@@ -812,6 +839,9 @@ impl PyNativeAcquisitionMask {
             return Err(value_error(
                 "native acquisition language packet fields differ",
             ));
+        }
+        if matrix_product && language["canonical_schema_sha256"] != sha256_hex(WIRE.as_bytes()) {
+            return Err(value_error("native canonical schema identity differs"));
         }
         let named_body = language["id"] == NAMED_BODY_LANGUAGE || expressions || feature_rows;
         let token_row_capacity = language["id"] == TOKEN_ROW_CAPACITY_LANGUAGE
@@ -919,7 +949,7 @@ impl PyNativeAcquisitionMask {
         // Required operand fields come from the same wire schema as the
         // compiler-facing packet, never from an authored operation sequence.
         let operation_fields = if language["id"] == OPERAND_LANGUAGE || typed {
-            Some(operation_fields()?)
+            Some(operation_fields(matrix_product)?)
         } else {
             None
         };
@@ -1488,8 +1518,8 @@ impl PyNativeAcquisitionMask {
     }
 }
 
-fn operation_fields() -> PyResult<BTreeMap<String, Vec<String>>> {
-    let wire: Value = serde_json::from_str(WIRE).map_err(value_error)?;
+fn operation_fields(matrix_product: bool) -> PyResult<BTreeMap<String, Vec<String>>> {
+    let wire = wire_schema(matrix_product)?;
     Ok(wire["$defs"]["TensorOperation"]["oneOf"]
         .as_array()
         .unwrap()
@@ -1524,11 +1554,12 @@ pub(super) fn decode_numerical_rows(
     value_references: bool,
     feature_output: bool,
     counted_expressions: bool,
+    matrix_product: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
         context,
-        &operation_fields()?,
+        &operation_fields(matrix_product)?,
         context_entry,
         has_intent,
         compact_indices,
@@ -3426,6 +3457,15 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     }
                 }
                 let tag = map.next_value::<String>()?;
+                if tag == "matmul"
+                    && self
+                        .operation_fields
+                        .is_none_or(|fields| !fields.contains_key(&tag))
+                {
+                    return Err(A::Error::custom(
+                        "matmul requires the matrix-product language",
+                    ));
+                }
                 if self.program.typed.is_some() {
                     material.insert(key, Value::String(tag));
                 }

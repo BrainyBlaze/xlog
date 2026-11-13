@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- *(tensor)* add FP32 matrix multiplication between two SSA values, with shared
+  shape constraints, output dependencies, GEMM forward execution and gradients
+  for both operands. Acquisition language46 exposes `matmul` in
+  `numerical-rows-v10` and binds its descriptor to the canonical schema digest;
+  earlier acquisition languages and source encodings keep their operation domain.
+
 ### Changed
 
 - Epistemic execution classifies modal dependencies before single-pass planning.

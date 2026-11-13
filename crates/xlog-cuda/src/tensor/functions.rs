@@ -100,6 +100,21 @@ impl TensorExecutor {
                     (source.pointer(), output.pointer(), count),
                 )
             }
+            Op::MatMul { left, right } => {
+                let (left, right) = (input(*left)?, input(*right)?);
+                // Row-major C=A*B is column-major C^T=B^T*A^T on the same bytes.
+                self.gemm(
+                    right,
+                    left,
+                    output,
+                    false,
+                    false,
+                    right.shape.columns,
+                    left.shape.rows,
+                    left.shape.columns,
+                    1,
+                )
+            }
             Op::Multiply { left, right }
             | Op::Subtract { left, right }
             | Op::Divide { left, right } => {
@@ -228,6 +243,34 @@ impl TensorExecutor {
                     ),
                 )?;
                 contributions.push((*source, dx));
+            }
+            Op::MatMul { left, right } => {
+                let (a, b) = (input(*left)?, input(*right)?);
+                let (da, db) = (self.float_shape(a.shape)?, self.float_shape(b.shape)?);
+                // dA=dC*B^T and dB=A^T*dC, using the forward row-major storage.
+                self.gemm(
+                    b,
+                    dy,
+                    &da,
+                    true,
+                    false,
+                    a.shape.columns,
+                    a.shape.rows,
+                    b.shape.columns,
+                    1,
+                )?;
+                self.gemm(
+                    dy,
+                    a,
+                    &db,
+                    false,
+                    true,
+                    b.shape.columns,
+                    a.shape.columns,
+                    a.shape.rows,
+                    1,
+                )?;
+                contributions.extend([(*left, da), (*right, db)]);
             }
             Op::Multiply { left, right }
             | Op::Subtract { left, right }

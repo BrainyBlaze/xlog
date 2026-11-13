@@ -94,7 +94,7 @@ impl TensorOperation {
         })
     }
 
-    /// Propagate canonical equal-extent, broadcast and gather relations through
+    /// Propagate canonical matrix, equal-extent, broadcast and gather relations through
     /// unknown operand slots in wire operand order. Unknown gather columns stay
     /// free. Other operations return false and leave all slots unchanged; their
     /// concrete inference and scalar/callee domains remain authoritative.
@@ -109,6 +109,7 @@ impl TensorOperation {
             "tanh" | "finite" => (1, true, true),
             "add" => (2, true, false),
             "multiply" | "subtract" | "divide" => (2, true, true),
+            "matmul" => (2, false, true),
             "select" => (3, true, true),
             "broadcast" | "gather_columns" => (1, false, true),
             _ => return Ok(false),
@@ -121,7 +122,28 @@ impl TensorOperation {
             ..Default::default()
         };
         output.intersect(precision)?;
-        if equal {
+        if tag == "matmul" {
+            // Columns remain source-fixed. The two-context acquired-body check
+            // cannot contract a causal T-row operand against a fixed K width.
+            let (mut left, mut right) = (inputs[0], inputs[1]);
+            left.intersect(TensorShapeConstraint {
+                rows: output.rows,
+                columns: right.rows,
+                ..precision
+            })?;
+            right.intersect(TensorShapeConstraint {
+                rows: left.columns,
+                columns: output.columns,
+                ..precision
+            })?;
+            output.intersect(TensorShapeConstraint {
+                rows: left.rows,
+                columns: right.columns,
+                ..precision
+            })?;
+            inputs[0] = left;
+            inputs[1] = right;
+        } else if equal {
             let mut shared = *output;
             for input in inputs.iter() {
                 shared.intersect(*input)?;

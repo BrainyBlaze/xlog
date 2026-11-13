@@ -346,6 +346,14 @@ impl NativeCausalModel {
         if !document.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
+        if definitions.iter().any(|definition| {
+            matches!(&definition.body, FuncBody::Numerical(body)
+                if body.operations.iter().any(|operation| matches!(operation, Op::MatMul { .. })))
+        }) {
+            return Err(invalid(
+                "funcdef-json-v1 does not admit matmul; use numerical-rows-v10",
+            ));
+        }
         self.fork_acquired_definitions_with_dependencies(
             entrypoint,
             definitions,

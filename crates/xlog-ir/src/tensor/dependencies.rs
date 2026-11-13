@@ -60,7 +60,7 @@ impl TensorValueFacts {
     ) -> bool {
         match operation {
             "zeros" => true,
-            "multiply" => operand("left") || operand("right"),
+            "multiply" | "matmul" => operand("left") || operand("right"),
             "add" => operand("left") && operand("right"),
             "tanh" | "broadcast" | "gather_columns" | "row" => operand("input"),
             "stack" => inputs.is_some_and(|inputs| !inputs.is_empty() && inputs.iter().all(|x| *x)),
@@ -154,13 +154,15 @@ impl TensorProgram {
         )?;
         let mut zero_or_nan = dependencies.value_identity == Some(TensorValueIdentity::Zero);
         zero_or_nan |= match operation {
-            TensorOperation::Multiply { left, right } | TensorOperation::Add { left, right } => {
+            TensorOperation::Multiply { left, right }
+            | TensorOperation::MatMul { left, right }
+            | TensorOperation::Add { left, right } => {
                 let left = value(*left)?.zero_or_nan;
                 let right = value(*right)?.zero_or_nan;
-                let tag = if matches!(operation, TensorOperation::Multiply { .. }) {
-                    "multiply"
-                } else {
-                    "add"
+                let tag = match operation {
+                    TensorOperation::Multiply { .. } => "multiply",
+                    TensorOperation::MatMul { .. } => "matmul",
+                    _ => "add",
                 };
                 TensorValueFacts::prove_zero_or_nan(
                     tag,

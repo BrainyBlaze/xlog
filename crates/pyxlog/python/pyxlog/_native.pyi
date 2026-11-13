@@ -170,6 +170,13 @@ class NativeCausalModel:
         including collection choices, outer closures and paid EOS. Generic
         monotone row capacity and historical V1–V44 behavior are unchanged.
         No future graph is searched or supplied; completion is not guaranteed.
+        V46/numerical-rows-v10 adds FP32 matmul(left,right): A[M,K] * B[K,N]
+        produces [M,N] without transposition or broadcasting. Parameter reads
+        remain explicit and Linear keeps its physical [out,in] weights.
+        The descriptor adds canonical_schema_sha256 for the wheel resource;
+        its identity is required by the native mask. Historical packets and
+        readers retain their original operation domain. Necessary continuations,
+        cost-v6 and completed dependency/feature admission remain authoritative.
         """
         ...
     def fork_acquired(
@@ -183,9 +190,11 @@ class NativeCausalModel:
         numerical-expressions-v3 requires value-aware dependency admission even
         when the legacy require_output_dependencies keyword is false. Older
         source encodings retain that keyword's original semantics.
-        numerical-rows-v8/v9 use the named flat codec with predicate-aware v3
+        numerical-rows-v8/v9/v10 use the named flat codec with predicate-aware v3
         dependency and finite-feature entry admission regardless of that keyword.
         It forwards the original source through the shared native constructor.
+        Only numerical-rows-v10 admits FP32 matmul between two preceding values.
+        Older encodings, including funcdef-json-v1, reject the operation.
         """
         ...
     @property
@@ -261,9 +270,9 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–45 prefix facts as JSON; no token selection or final admission."""
+        """Version4–46 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–45 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–46 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
@@ -278,6 +287,9 @@ class NativeAcquisitionMask:
         validates its completed graph with the captured context3/dependency-v3
         and finite-feature entry contract before seeded initialization.
         V45 uses that same completed flat-source path for numerical-rows-v9.
+        V46 admits two-value FP32 matmul through numerical-rows-v10, the same
+        canonical typed definitions, registry and physical parameter allocator.
+        Historical source encodings, including funcdef-json-v1, reject matmul.
         """
 
 class _LogitSelection(TypedDict):

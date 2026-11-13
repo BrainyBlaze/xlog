@@ -135,7 +135,10 @@ impl TensorOperation {
             | Bfloat16 { input }
             | Finite { input }
             | Row { input, .. } => vec![*input],
-            Multiply { left, right } | Subtract { left, right } | Divide { left, right } => {
+            Multiply { left, right }
+            | MatMul { left, right }
+            | Subtract { left, right }
+            | Divide { left, right } => {
                 vec![*left, *right]
             }
             Select {
@@ -198,6 +201,7 @@ impl TensorOperation {
             }
             Add { left, right }
             | Multiply { left, right }
+            | MatMul { left, right }
             | Subtract { left, right }
             | Divide { left, right } => {
                 *left = values[*left];
@@ -264,6 +268,7 @@ impl TensorProgram {
                     | Broadcast { .. }
                     | Tanh { .. }
                     | Multiply { .. }
+                    | MatMul { .. }
                     | Subtract { .. }
                     | Divide { .. }
                     | GatherColumns { .. }
@@ -362,6 +367,10 @@ impl TensorProgram {
                 float32: false,
                 ..float(*id)?
             },
+            MatMul { left, right } => {
+                let shape = related_shape("matmul", [float(*left)?, float(*right)?], tokens, None)?;
+                fp32(shape.rows, shape.columns)?
+            }
             Add { left, right }
             | Multiply { left, right }
             | Subtract { left, right }
