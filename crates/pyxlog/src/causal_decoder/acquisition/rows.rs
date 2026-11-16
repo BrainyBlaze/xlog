@@ -31,6 +31,7 @@ pub(super) fn schema(
     context_entry: bool,
     has_intent: bool,
     compact_indices: bool,
+    nodes: usize,
 ) {
     let defs = &mut schema["$defs"];
     for name in ["TensorOperation", "EntryTensorOperation"] {
@@ -77,7 +78,7 @@ pub(super) fn schema(
                 .as_object_mut()
                 .unwrap()
                 .remove("output");
-            definition["properties"]["operation_count"] = integer(1, ACQUIRED_NODES);
+            definition["properties"]["operation_count"] = integer(1, nodes);
             definition["required"] = json!([
                 "name",
                 "signature",
@@ -93,7 +94,7 @@ pub(super) fn schema(
         entry["required"] = json!(["parameters", "operation_count", "operations"]);
         schema["required"] = json!(["helpers", "entry"]);
         schema["properties"] = json!({
-            "helpers": {"type": "array", "minItems": 0, "maxItems": ACQUIRED_NODES - 1,
+            "helpers": {"type": "array", "minItems": 0, "maxItems": nodes - 1,
                 "items": {"$ref": "#/$defs/FuncDef"}},
             "entry": {"$ref": "#/$defs/EntryFuncDef"}
         });
@@ -220,6 +221,7 @@ struct Reader<'a> {
     offset: usize,
     output: Output,
     context: &'a Value,
+    node_limit: usize,
     fields: &'a BTreeMap<String, Vec<String>>,
     context_entry: bool,
     has_intent: bool,
@@ -286,6 +288,7 @@ pub(super) fn prefix<'a>(
             bounded: compact_indices,
         },
         context,
+        node_limit: node_limit(context),
         fields,
         context_entry,
         has_intent,
@@ -643,7 +646,7 @@ impl Reader<'_> {
         self.output.extend_from_slice(b"\"output\":")?;
         self.pending_operation_count = Some(self.offset);
         let count: usize = serde_json::from_str(self.raw(false)?.get())?;
-        if self.peek()? != b',' || !(1..=ACQUIRED_NODES).contains(&count) {
+        if self.peek()? != b',' || !(1..=self.node_limit).contains(&count) {
             return Err(Stop::Invalid("invalid numerical operation count".into()));
         }
         self.pending_operation_count = None;
@@ -1118,7 +1121,7 @@ impl Reader<'_> {
             };
             let parameters = if self.bound_parameters { parameters } else { 0 };
             let bindings = arguments + parameters;
-            if bindings >= ACQUIRED_NODES {
+            if bindings >= self.node_limit {
                 return Err(Stop::Invalid(
                     if self.bound_parameters {
                         "formal and parameter bindings leave no acquired node for a source row"
