@@ -36,11 +36,11 @@ XLOG_FEEDBACK_INLINE float numeric_coordinate(uint64_t bits,bool outward=false) 
     double value;
     memcpy(&value,&bits,sizeof(value));
 #ifdef __CUDA_ARCH__
-    const float rounded=__double2float_rn(value);
+    return outward ? __double2float_ru(value) : __double2float_rn(value);
 #else
     const float rounded=static_cast<float>(value);
-#endif
     return outward && double(rounded)<value ? nextafterf(rounded,INFINITY) : rounded;
+#endif
 }
 
 // Statement bytes are learned content. Native identities, generations, receipts

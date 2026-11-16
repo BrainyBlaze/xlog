@@ -57,6 +57,8 @@ struct Measure {
     double *values=nullptr,*adjoints=nullptr,*true_weights=nullptr,*false_weights=nullptr;
     double *true_gradients=nullptr,*false_gradients=nullptr,*partitions=nullptr;
     double *masses=nullptr,*factor_gradients=nullptr,*log_potentials=nullptr;
+    semantic_measure::MassInterval *probability_bounds=nullptr;
+    semantic_measure::MassInterval *true_probability_bounds=nullptr,*false_probability_bounds=nullptr;
     uint32_t count=2,variables=0,condition=1,view_condition=1,rule_capacity=0;
     uint32_t fact_capacity=0,image_nodes=0,lineage_events=0;
     bool has_measure=false,complete=false,hard=true;
@@ -116,6 +118,9 @@ struct Measure {
         factor_gradients=reinterpret_cast<double*>(take(uint64_t(source.factor_count)*6));
         log_potentials=reinterpret_cast<double*>(take(uint64_t(source.factor_count)*2));
         rule_ordinals=take(rules);
+        probability_bounds=reinterpret_cast<semantic_measure::MassInterval*>(take(uint64_t(source.nodes)*4));
+        true_probability_bounds=reinterpret_cast<semantic_measure::MassInterval*>(take((uint64_t(source.variables)+1)*4));
+        false_probability_bounds=reinterpret_cast<semantic_measure::MassInterval*>(take((uint64_t(source.variables)+1)*4));
         return cursor==words;
     }
     __device__ static uint64_t hash(uint64_t a,uint64_t b,uint64_t c) {
@@ -325,8 +330,10 @@ struct Measure {
             if(!charge())return false;memo[index*4+3]=0;
         }
         for(uint64_t index=0;index<=variables;++index) {
-            if(!charge(3))return false;
+            if(!charge(11))return false;
             true_weights[index]=0.0;false_weights[index]=0.0;assigned[index]=0;
+            true_probability_bounds[index]=semantic_measure::exact_mass_interval(0.5);
+            false_probability_bounds[index]=semantic_measure::exact_mass_interval(0.5);
         }
         if(context.kind==0)for(uint32_t index=0;index<context.assignments;++index) {
             const uint64_t bit=read(source.words,context.assignment_offset+index);
@@ -374,6 +381,20 @@ struct Measure {
             const double negative_weight=negative ? log(double(negative)/double(denominator)) : -INFINITY;
             if(!charge(2))break;
             true_weights[variable]=positive;false_weights[variable]=negative_weight;
+            if(!charge(8))break;
+            if(!numerator || (type==1 && numerator==denominator)) {
+                true_probability_bounds[variable]=semantic_measure::exact_mass_interval(numerator ? 1.0 : 0.0);
+                false_probability_bounds[variable]=semantic_measure::exact_mass_interval(numerator ? 0.0 : 1.0);
+            } else {
+                const double denominator_lower=type==1 ? __ull2double_rd(denominator) :
+                    __dadd_rd(__ull2double_rd(numerator),__ull2double_rd(denominator));
+                const double denominator_upper=type==1 ? __ull2double_ru(denominator) :
+                    __dadd_ru(__ull2double_ru(numerator),__ull2double_ru(denominator));
+                true_probability_bounds[variable]=semantic_measure::rational_mass_interval(
+                    numerator,denominator_lower,denominator_upper);
+                false_probability_bounds[variable]=semantic_measure::rational_mass_interval(
+                    negative,denominator_lower,denominator_upper);
+            }
             if(has_measure) {
                 if(!numerator)condition=intersection(condition,literal(variable,false));
                 if(!negative)condition=intersection(condition,literal(variable,true));
@@ -460,6 +481,11 @@ struct Measure {
         if(!isfinite(value) || value<0.0 || value>1.0)fail(MeasureStatus::InvalidNumerics);
         return value;
     }
+    __device__ bool probability_error_bound(uint32_t root,double probability,double* error) {
+        if(!charge(8))return false;
+        return semantic_measure::probability_error_bound(probability_bounds[root],
+            probability_bounds[condition],root==condition,probability,error);
+    }
     __device__ void seed_probability(uint32_t root,double probability,double coefficient) {
         const double cotangent=probability*coefficient;
         if(cotangent!=0.0) { seed(root,cotangent);seed(condition,-cotangent); }
@@ -479,15 +505,21 @@ struct Measure {
             const uint64_t declaration=context.query_offset+uint64_t(query)*2;
             const uint32_t kind=query_kind(query);
             const uint64_t certificate=read(source.words,declaration+1);
+            bool bounded=true;
             for(uint32_t truth=0;truth<4;++truth) {
-                const double value=probability(uint32_t(read(query_roots,uint64_t(query)*4+truth)),normalizer,kind);
+                const uint32_t root=uint32_t(read(query_roots,uint64_t(query)*4+truth));
+                const double value=probability(root,normalizer,kind);
                 if(!charge())return false;masses[(uint64_t(slot)*context.queries+query)*4+truth]=value;
+                if(certificate && kind==1) {
+                    double error=0.0;
+                    bounded &= probability_error_bound(root,value,&error);
+                }
             }
             const double attained=probability(uint32_t(read(attainment_roots,query)),normalizer,kind);
             correct=__dadd_rn(correct,attained);
             if(!charge(4))return false;
             observe(query,masses+(uint64_t(slot)*context.queries+query)*4,attained);
-            if(certificate && kind==1)fail(MeasureStatus::CertificateUnavailable);
+            if(certificate && kind==1 && !bounded)fail(MeasureStatus::CertificateUnavailable);
         }
         if(status!=MeasureStatus::Ok)return false;
         const double all_correct=probability(joint,normalizer,uint32_t(has_measure));
@@ -545,7 +577,15 @@ struct Measure {
             values[node]=node<2 ? (node==0 ? -INFINITY : 0.0) :
                 semantic_measure::forward_decision(variable(node),uint32_t(nodes[uint64_t(node)*4+1]),
                     uint32_t(nodes[uint64_t(node)*4+2]),true_weights,false_weights,GapValues{this,node});
-            if(isnan(values[node]) || values[node]==INFINITY)fail(MeasureStatus::InvalidNumerics);
+            if(isnan(values[node]) || values[node]==INFINITY) {
+                fail(MeasureStatus::InvalidNumerics);break;
+            }
+            if(!charge(node<2 ? 4 : 20))break;
+            probability_bounds[node]=node<2 ? semantic_measure::exact_mass_interval(double(node)) :
+                semantic_measure::decision_mass_interval(false_probability_bounds[variable(node)],
+                    probability_bounds[uint32_t(nodes[uint64_t(node)*4+1])],
+                    true_probability_bounds[variable(node)],
+                    probability_bounds[uint32_t(nodes[uint64_t(node)*4+2])]);
         }
         return status==MeasureStatus::Ok;
     }

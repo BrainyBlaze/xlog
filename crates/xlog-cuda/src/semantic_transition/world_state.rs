@@ -415,6 +415,9 @@ impl SemanticWorldContext {
         let factor_gradients = take(factors, 6)?;
         let log_potentials = take(factors, 2)?;
         take(rules, 1)?;
+        // Invocation-private scaled intervals follow the existing exported spans.
+        take(cap.nodes as usize, 4)?;
+        take(cap.variables as usize + 1, 8)?;
         Ok(MeasureGeometry {
             words,
             queries: layout.queries,
