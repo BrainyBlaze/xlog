@@ -110,8 +110,8 @@ __device__ __forceinline__ bool probability_error_bound(
         probability_endpoint(mass_quotient(numerator.upper,normalizer.lower,true),true);
     if(!(lower>=0.0 && lower<=upper && upper<=1.0))return false;
     const double projected=double(__double2float_rn(value));
-    *error=fmax(fmax(__dsub_ru(value,lower),__dsub_ru(upper,value)),
-                fmax(__dsub_ru(projected,lower),__dsub_ru(upper,projected)));
+    *error=fmax(fmax(__dadd_ru(value,-lower),__dadd_ru(upper,-value)),
+                fmax(__dadd_ru(projected,-lower),__dadd_ru(upper,-projected)));
     return isfinite(*error) && *error>=0.0;
 }
 
