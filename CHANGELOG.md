@@ -6,10 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(python)* distinguish an observed nonfinite causal-function result during
-  `NativeCausalModel.fit_binary` with `NativeFunctionResultNonFiniteError`, a
-  `RuntimeError` subclass. The original diagnostic and atomic update behavior
-  remain unchanged; other numerical and infrastructure errors keep their types.
 - Epistemic execution classifies modal dependencies before single-pass planning.
   Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
   ordinary founded least fixpoint; supported positive exact-tuple
