@@ -33,7 +33,12 @@ __device__ CoherentCotangent multiply64(CoherentCotangent input,DomainValue fact
     return model_policy::multiply_cotangent_labels(input,factor,cases,unit64);
 }
 __device__ CoherentCotangent add64(CoherentCotangent a,CoherentCotangent b) {
-    return model_policy::add_cotangent_labels(a,b,general64,unit64);
+    // Finite FP64 operands are integer multiples of 2^-1074. A subnormal
+    // exact sum has integer coefficient magnitude <2^52, so it (and zero)
+    // is exactly representable. PTX add.f64 preserves subnormals: both labels
+    // need only exact/normal cases. Existing operand underflow still propagates
+    // through the shared transfer; this does not narrow other operations.
+    return model_policy::add_cotangent_labels(a,b,normal64,unit64);
 }
 __device__ DomainValue sum64(DomainValue a,DomainValue b) {
     return model_policy::rounded_cotangent_label(

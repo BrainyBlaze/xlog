@@ -91,11 +91,26 @@ pub struct SemanticValueEstimator {
     pub sample_count_defined: bool,
     /// Whether the confidence scalar is meaningful.
     pub confidence_defined: bool,
-    /// Numerical error-certificate contract.
+    /// Numerical error-certificate contract. With `error_bound_defined = 1`,
+    /// each absolute probability radius covers both the receipt's FP64 mass and
+    /// its nearest-even FP32 learned projection relative to the same exact
+    /// rational, conditioned common measure. Availability covers all four masses
+    /// together; zero payloads with availability false are not error bounds.
+    /// This is neither a sampling-confidence nor an actor-gradient bias bound.
     pub error_bound_kind: &'static str,
 }
 
 /// Estimators currently implemented by the semantic-value producer.
+///
+/// The exact-structure estimator retains its log-space FP64 point evaluation.
+/// Its certificate uses normalized rational weights on that same decision DAG
+/// and outward FP64 intervals with scaled endpoints. Positive conditioning mass
+/// remains representable in the private proof scratch even when it is subnormal
+/// in ordinary FP64. The resulting radius also includes the actual FP32 mass
+/// projection before the radius itself is rounded outward. A requested
+/// certificate that cannot be established refuses; structural evaluation keeps
+/// explicit availability. Existing world, measure and numerical-law identities,
+/// receipt fields and archived unavailable records retain their meanings.
 pub const SEMANTIC_VALUE_ESTIMATORS: [SemanticValueEstimator; 1] = [SemanticValueEstimator {
     name: "exact_structure_f64",
     sample_count_defined: false,

@@ -58,15 +58,16 @@ static double __dmul_ru(double a, double b) {
     return host_rounded<double>(FE_UPWARD,[&]{return a*b;});
 }
 static double __ull2double_rn(uint64_t value) { return static_cast<double>(value); }
-#ifdef XLOG_SEMANTIC_POLICY
 static double __dadd_ru(double a,double b) { return host_rounded<double>(FE_UPWARD,[&]{return a+b;}); }
 static double __dadd_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a+b;}); }
 static double __dmul_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a*b;}); }
-static double __dsub_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a-b;}); }
 static double __ddiv_ru(double a,double b) { return host_rounded<double>(FE_UPWARD,[&]{return a/b;}); }
 static double __ddiv_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a/b;}); }
 static double __ull2double_ru(uint64_t value) { return host_rounded<double>(FE_UPWARD,[&]{return double(value);}); }
 static double __ull2double_rd(uint64_t value) { return host_rounded<double>(FE_DOWNWARD,[&]{return double(value);}); }
+static float __double2float_rn(double value) { return static_cast<float>(value); }
+#ifdef XLOG_SEMANTIC_POLICY
+static double __dsub_rd(double a,double b) { return host_rounded<double>(FE_DOWNWARD,[&]{return a-b;}); }
 static float __ull2float_ru(uint64_t value) { return host_rounded<float>(FE_UPWARD,[&]{return float(value);}); }
 static float __double2float_ru(double value) { return host_rounded<float>(FE_UPWARD,[&]{return float(value);}); }
 static float __double2float_rd(double value) { return host_rounded<float>(FE_DOWNWARD,[&]{return float(value);}); }
@@ -77,7 +78,6 @@ static float __fdiv_rd(float a,float b) { return host_rounded<float>(FE_DOWNWARD
 static double __ll2double_rn(long long value) { return static_cast<double>(value); }
 static float __ll2float_rn(long long value) { return static_cast<float>(value); }
 static float __ull2float_rn(uint64_t value) { return static_cast<float>(value); }
-static float __double2float_rn(double value) { return static_cast<float>(value); }
 static float __fsub_rn(float a, float b) { return a-b; }
 static float __fdiv_rn(float a, float b) { return a/b; }
 #endif
