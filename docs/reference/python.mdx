@@ -230,6 +230,18 @@ Individual Adam counters are reported separately by `optimizer_steps`. Prefixes 
 same pre-update weights; input lists must have equal nonzero length. The caller
 owns minibatch selection, replay, attempt limits and the overall compute budget.
 
+`fit_binary` raises `pyxlog.NativeFunctionResultNonFiniteError`, a subclass of
+`RuntimeError`, when the existing native finite check successfully observes
+nonfinite FP32 values in a causal function's result. The original message remains
+`Kernel error: native numerical execution: numerical execution produced nonfinite FP32 values in function result`.
+This happens before an update commits: parameters, optimizer state and completed
+update counters stay unchanged. The error identifies the function-result boundary;
+it does not identify a function name, coordinate or arithmetic operation that
+caused the value. It adds no numerical pass or repair. Allocation, launch, copy,
+cleanup and other numerical failures retain their ordinary error types. Other
+methods, including `forward` and `fit_tokens`, retain their ordinary error mapping.
+The caller owns any rejection, retry and accounting for an attempted update.
+
 Reverse execution follows the forward graph through frozen upper layers, including
 causal attention and grouped key/value accumulation. Cotangents and matrix
 products in the reverse pass are FP32, with TF32 disabled. BF16 casts and residual
