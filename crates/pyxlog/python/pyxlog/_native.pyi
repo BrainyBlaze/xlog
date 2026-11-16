@@ -188,6 +188,14 @@ class NativeCausalModel:
         helper/constant reaching it and the same finite-feature admission.
         No weight, projection or graph is supplied. The five packet fields,
         canonical schema resource, cost-v6 and historical languages are unchanged.
+        V48/numerical-rows-v12 also binds the body's p declared parameters:
+        values a..a+p-1 read weights 0..p-1; authored row i produces a+p+i,
+        and nonempty R returns a+p+R-1. The same reader emits ordinary Parameter
+        nodes after its Argument nodes, counting sum(a+p+R)<=64, including unused
+        bindings and each body's aliases. Explicit Parameter remains a paid row.
+        Shapes and declarations stay model-authored; physical aliases deduplicate
+        scalars, not binding nodes. Required source declarations and output use
+        remain mandatory. Available parameter values do not prove output use.
         """
         ...
     def fork_acquired(
@@ -201,13 +209,15 @@ class NativeCausalModel:
         numerical-expressions-v3 requires value-aware dependency admission even
         when the legacy require_output_dependencies keyword is false. Older
         source encodings retain that keyword's original semantics.
-        numerical-rows-v8/v9/v10/v11 use the named flat codec with predicate-aware v3
+        numerical-rows-v8/v9/v10/v11/v12 use the named flat codec with predicate-aware v3
         dependency and finite-feature entry admission regardless of that keyword.
         It forwards the original source through the shared native constructor.
-        numerical-rows-v10/v11 admit FP32 matmul between available values.
+        numerical-rows-v10/v11/v12 admit FP32 matmul between available values.
         Older encodings, including funcdef-json-v1, reject the operation.
         numerical-rows-v11 uses the same formal-value elaboration as packet 47,
         retaining nonempty authored bodies and counting every canonical binding.
+        numerical-rows-v12 adds ordinary Parameter bindings for the actual table
+        after the formals, through the same reader as packet 48.
         """
         ...
     @property
@@ -283,15 +293,17 @@ class NativeAcquisitionMask:
         """
         ...
     def completion_state(self, prefix: bytes) -> str:
-        """Version4–47 prefix facts as JSON; no token selection or final admission.
+        """Version4–48 prefix facts as JSON; no token selection or final admission.
 
         The seven fields and record version 1 are unchanged. In V47, last_value
         and compatible_outputs include bound canonical formals. They prove
         neither a nonempty authored body nor input use; entry_completed still
         requires authored rows and the complete admitted entry definition.
+        V48 includes bound Parameter values too. Its unread_constants counts
+        implicit reads but still makes no output reachability claim.
         """
     def decode_definition(self, source_bytes: bytes) -> str:
-        """Elaborate complete v7–47 source with its captured context; v31–33 also apply
+        """Elaborate complete v7–48 source with its captured context; v31–33 also apply
         the same value-aware admission before returning canonical initializer input.
         V34 explicitly uses predicate-aware v3 admission instead.
         numerical-expressions-v5 additionally enforces the explicit V35 entry
@@ -314,6 +326,9 @@ class NativeAcquisitionMask:
         Empty authored ops is invalid even when formals exist. Both source and
         canonical node accounting use the same reader as prefix filtering and
         original-source construction; registry/allocation/restoration are shared.
+        V48/numerical-rows-v12 emits the declared table's Parameter bindings
+        after the formals, then authored rows. All canonical nodes count toward
+        the shared cap; declarations and output-reaching dependencies stay checked.
         """
 
 class _LogitSelection(TypedDict):

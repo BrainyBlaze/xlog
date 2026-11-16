@@ -73,6 +73,7 @@ const FEATURE_ROWS_LANGUAGE: &str = "xlog-contextual-acquisition-v44";
 const OPEN_ROW_LANGUAGE: &str = "xlog-contextual-acquisition-v45";
 const MATRIX_PRODUCT_LANGUAGE: &str = "xlog-contextual-acquisition-v46";
 const FORMAL_INPUT_LANGUAGE: &str = "xlog-contextual-acquisition-v47";
+const PARAMETER_VALUE_LANGUAGE: &str = "xlog-contextual-acquisition-v48";
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -84,6 +85,7 @@ pub(super) const FEATURE_ROWS_ENCODING: &str = "numerical-rows-v8";
 pub(super) const OPEN_ROW_ENCODING: &str = "numerical-rows-v9";
 pub(super) const MATRIX_PRODUCT_ENCODING: &str = "numerical-rows-v10";
 pub(super) const FORMAL_INPUT_ENCODING: &str = "numerical-rows-v11";
+pub(super) const PARAMETER_VALUE_ENCODING: &str = "numerical-rows-v12";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -119,7 +121,7 @@ pub(super) fn language(
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=47) {
+    if !matches!(version, 1..=48) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
@@ -548,6 +550,24 @@ pub(super) fn language(
                 "Historical languages and source encodings remain literal. Prefix admission does not guarantee completion, useful features or scientific acceptance."
             ));
         }
+        if version == 48 {
+            schema["description"] = json!(concat!(
+                "Compact numerical-rows-v12 acquisition. Root fields are intent,helpers,entry. ",
+                "Intent contains 1..256 descriptive Unicode scalar values. Helpers precede callers and use [local_name,signature,body]; entry is last and its name/signature come from context. ",
+                "Signatures use [kind,input_width_or_widths,output_width]. Each body has ordered weights,ops keys; ops contains nonempty model-authored flat operation rows with canonical tags and operand order. ",
+                "Weights declare/check physical FP32 storage with [symbol,shape], or reference existing storage with [symbol]. Local names expand in captured namespaces; retained symbols use [\"retained\",full_name]. Required physical aliases precede optional entry declarations. ",
+                "For each body, a is TensorSignature::arguments(1).len(), excluding the separate raw-token boundary, and p is its actual canonical parameter table length. Causal has one numerical formal H[T,input_width]; Pure has one [1,width] formal per input_widths entry. ",
+                "Values 0..a-1 are supplied numerical formals; values a..a+p-1 read weights 0..p-1 in table order. A vector [n] has value shape [1,n], and a matrix [m,n] keeps [m,n]. Source row i produces value a+p+i and can reference only bindings or preceding rows. For R>0 authored rows the output is a+p+R-1; empty ops is invalid. ",
+                "The sole reader emits canonical Argument(0)..Argument(a-1), then Parameter(0)..Parameter(p-1), once through the ordinary typed visitor before authored rows. Explicit authored Argument and Parameter remain available and count as source rows. Storage declarations, shapes, orientation, operations and graph remain model-authored. ",
+                "Across all new definitions, authored rows sum(R)<=64 and canonical body nodes sum(a+p+R)<=64, including unused bindings. Each helper reserves the later entry's formals and at least one authored row; its still-unknown parameter count is not guessed. Once a table closes, its actual bindings and a nonempty source body must fit. Original and projected source each fit 1MiB, and new physical scalars total at most 65536. Physical aliases count once for scalars but have a binding node in every body that declares or references them. ",
+                "Original-ID suffix costs and paid EOS cover actual source bytes and rows only, never implicit bindings. Row capacity translates between authored R and canonical a+p+R. Bound parameters need no extra authored read row; required physical declarations and calls still retain their source costs. Open tags retain every mandatory row field and collection tail through ordered-structural-subsequence-v6. ",
+                "Canonical inference at one and maximum context length owns shapes, references and causality. Gather indices also accept count,modulus,start,step, expanding indices[j]=(start+j*step)%modulus within the actual input width. ",
+                "Matmul accepts FP32 A[M,K],B[K,N] and yields [M,N] without transposition or broadcasting, retaining both dependencies and gradients. Linear retains its physical [out,in] weight ABI. ",
+                "Context-v3/output-dependencies-v3 and possible-finite-nonzero-v1 remain authoritative: every new definition and constant must reach the entry output, which must possibly depend on raw tokens OR a numerical input. Available bindings prove no output use. Calls substitute only output-used formals; conservative hidden-independent Scan checks remain. ",
+                "Necessary producer, dependency-frontier and shape bounds use available values without hypothetical graph search. Completion_state retains version1 and its seven fields: last_value and compatible_outputs include canonical bindings; unread_constants counts reads, not output use; entry_completed requires authored rows and complete admission. Captured-native-rejections-v1 and the five packet keys are unchanged; canonical_schema_sha256 binds the same canonical IR resource. ",
+                "Historical languages and source encodings remain literal. Prefix admission does not guarantee completion, useful features or scientific acceptance."
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -562,6 +582,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                48 => PARAMETER_VALUE_LANGUAGE,
                 47 => FORMAL_INPUT_LANGUAGE,
                 46 => MATRIX_PRODUCT_LANGUAGE,
                 45 => OPEN_ROW_LANGUAGE,
@@ -754,6 +775,7 @@ pub(crate) struct PyNativeAcquisitionMask {
     typed_context: Option<Value>,
     numerical_rows: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
     context_entry_rows: bool,
     canonical_entry_formals: bool,
     has_intent: bool,
@@ -810,7 +832,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let formal_inputs = language["id"] == FORMAL_INPUT_LANGUAGE;
+        let bound_parameters = language["id"] == PARAMETER_VALUE_LANGUAGE;
+        let formal_inputs = language["id"] == FORMAL_INPUT_LANGUAGE || bound_parameters;
         let matrix_product = language["id"] == MATRIX_PRODUCT_LANGUAGE || formal_inputs;
         let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE || matrix_product;
         let feature_rows = language["id"] == FEATURE_ROWS_LANGUAGE || open_row_suffix;
@@ -1062,6 +1085,7 @@ impl PyNativeAcquisitionMask {
         Ok(Self {
             numerical_rows,
             formal_inputs,
+            bound_parameters,
             context_entry_rows,
             canonical_entry_formals,
             has_intent,
@@ -1181,6 +1205,7 @@ impl PyNativeAcquisitionMask {
             self.feature_output,
             self.counted_expressions,
             self.formal_inputs,
+            self.bound_parameters,
         )
         .map_err(value_error)?;
         if self.typed_context.as_ref().unwrap()["version"] == 3 {
@@ -1367,6 +1392,7 @@ impl PyNativeAcquisitionMask {
             self.scan_signature_domains,
             self.partial_dependency_domains,
             self.formal_inputs,
+            self.bound_parameters,
         )?;
         for parent in &prefix.expression_parents {
             resources.admit_expression_parent(parent)?;
@@ -1505,6 +1531,7 @@ impl PyNativeAcquisitionMask {
                 self.counted_expressions,
                 self.open_row_suffix,
                 self.formal_inputs,
+                self.bound_parameters,
             )
             .map(|prefix| CanonicalPrefix {
                 bytes: Cow::Owned(prefix.bytes),
@@ -1583,6 +1610,7 @@ pub(super) fn decode_numerical_rows(
     counted_expressions: bool,
     matrix_product: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
 ) -> PyResult<(String, Vec<FuncDef>)> {
     rows::definitions(
         source,
@@ -1599,6 +1627,7 @@ pub(super) fn decode_numerical_rows(
         feature_output,
         counted_expressions,
         formal_inputs,
+        bound_parameters,
     )
     .map_err(value_error)
 }
@@ -1648,6 +1677,7 @@ struct Resources<'a> {
     expression_nodes: Option<rows::expressions::Nodes>,
     value_references: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
 }
 
 struct ExpressionContinuation {
@@ -1720,6 +1750,7 @@ fn resource_prefix<'a>(
     scan_signature_domains: bool,
     partial_dependency_domains: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
 ) -> Result<Resources<'a>, serde_json::Error> {
     let mut resources = Resources {
         bytes,
@@ -1794,6 +1825,7 @@ fn resource_prefix<'a>(
         expression_nodes,
         value_references,
         formal_inputs,
+        bound_parameters,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     match (Object {
@@ -2108,14 +2140,17 @@ impl Resources<'_> {
                 );
             }
         }
-        // Reading a new physical name needs a Parameter or Linear somewhere;
-        // every not-yet-called new definition needs its own Call or Scan.
-        // These are global obligations: no declaration or placement is chosen.
-        let constants = self
-            .declarations
-            .keys()
-            .filter(|name| !self.retained.contains(*name) && !read.contains(name.as_str()))
-            .count();
+        // Bound declarations get their canonical reads from the reader, not
+        // authored rows. Otherwise each unread name needs Parameter or Linear.
+        // Every not-yet-called new definition still needs its own Call or Scan.
+        let constants = if self.bound_parameters {
+            0
+        } else {
+            self.declarations
+                .keys()
+                .filter(|name| !self.retained.contains(*name) && !read.contains(name.as_str()))
+                .count()
+        };
         let calls = self
             .definitions
             .keys()
@@ -2347,7 +2382,11 @@ impl Resources<'_> {
                 .and_then(|required| required.producers(&self.dependencies))
             {
                 parameters.minimum_rows = producers.calls.len()
-                    + producers.parameters.len()
+                    + if self.bound_parameters {
+                        0
+                    } else {
+                        producers.parameters.len()
+                    }
                     + usize::from(
                         !self.formal_inputs
                             && !producers
@@ -2879,6 +2918,29 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             ));
                         }
                     }
+                    let bindings = if self.resources.formal_inputs {
+                        self.resources.program.arguments.unwrap()
+                    } else {
+                        0
+                    } + if self.resources.bound_parameters {
+                        self.resources.program.parameters
+                    } else {
+                        0
+                    };
+                    if self.resources.bound_parameters
+                        && self
+                            .resources
+                            .program
+                            .typed
+                            .as_ref()
+                            .unwrap()
+                            .row_allowance
+                            .is_some_and(|capacity| capacity <= bindings)
+                    {
+                        return Err(A::Error::custom(
+                            "formal and parameter bindings leave no acquired node for a source row",
+                        ));
+                    }
                     if let Some(bound) = self.resources.token_budget.filter(|bound| {
                         self.resources.token_row_capacity
                             && self.resources.definition_index == Some(bound.state.definition)
@@ -2895,11 +2957,6 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                             .unwrap();
                         // The suffix owner counts authored rows only; the
                         // typed owner counts the canonical bindings as well.
-                        let bindings = if self.resources.formal_inputs {
-                            self.resources.program.arguments.unwrap()
-                        } else {
-                            0
-                        };
                         if let Some(rows) = bound.row_capacity(
                             capacity.saturating_sub(bindings),
                             self.resources.token_obligations(bound.state),

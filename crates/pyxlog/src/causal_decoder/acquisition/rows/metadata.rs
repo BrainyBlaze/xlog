@@ -287,7 +287,8 @@ impl Reader<'_> {
         Ok(signature)
     }
 
-    pub(super) fn compact_parameters(&mut self) -> Result<(), Stop> {
+    pub(super) fn compact_parameters(&mut self) -> Result<usize, Stop> {
+        let mut count = 0;
         let frame = self.budget.enter();
         self.budget.set(frame, || {
             vec![
@@ -358,6 +359,7 @@ impl Reader<'_> {
                         .map_err(Stop::Invalid)?;
                 }
                 self.output.extend_from_slice(b",\"float32\":true}")?;
+                count += 1;
                 self.budget.leave(parameter);
                 self.budget.set(frame, || {
                     vec![
@@ -377,6 +379,6 @@ impl Reader<'_> {
         self.budget.set(frame, || vec![]);
         self.punctuation(b']', b']')?;
         self.budget.leave(frame);
-        Ok(())
+        Ok(count)
     }
 }
