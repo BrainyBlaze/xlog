@@ -290,8 +290,8 @@ internal; reading the resource requires no network access. It describes the
 canonical `FuncDef`, function types and dimensions, `Numerical` body, both `causal`
 and `pure` signatures, parameter declarations, and the 16 authored acquisition
 operations. Contextual languages1–45 and their original-source readers retain
-their previous 15-operation domain; `matmul` requires language46/47 and
-`numerical-rows-v10/v11`. It contains no generated definition, selected graph,
+their previous 15-operation domain; `matmul` requires language46/47/48 and
+`numerical-rows-v10/v11/v12`. It contains no generated definition, selected graph,
 parameter values, or default program. Fields with Rust `Option` types retain their optional/null
 wire form; numerical admission still requires their exact concrete types. Integer
 indices and extents describe the native 64-bit unsigned representation; token IDs
@@ -1563,7 +1563,44 @@ counts. Historical languages1–46, source encodings and saved programs retain
 their original meanings without migration. This representation change is not
 evidence of runtime success or useful acquisition.
 
-For a version4 through version47 packet,
+Version48 (`xlog-contextual-acquisition-v48`, `numerical-rows-v12`) additionally
+binds each body's declared parameters as ordinary tensor values. Let `p` be the
+actual length of that body's canonical parameter table. Values `0..a-1` remain
+the numerical formals; values `a..a+p-1` read weights `0..p-1` in table order.
+A declared vector `[n]` has value shape `[1,n]`; a matrix `[m,n]` keeps that shape.
+Authored row `i` produces `a+p+i`, and the nonempty body returns `a+p+R-1`.
+
+The same reader appends canonical `Parameter` bindings after its `Argument`
+bindings, before authored rows. Explicit `Argument` and `Parameter` rows remain
+valid paid source rows. The model still chooses every declaration, shape,
+orientation and operation. The codec supplies no storage or projection. These
+ordinary nodes use the existing typed visitor, registry, physical allocator,
+gradient path and snapshot restoration.
+
+Across new definitions, `sum(R) <= 64` and `sum(a+p+R) <= 64`. Unused bindings
+count too. An alias occupies a binding node in every body that references it;
+physical scalar storage remains deduplicated. Before the entry table is known,
+helpers reserve `a_entry+1` nodes, a necessary lower bound that does not guess
+future declarations. Once a table closes, its actual `a+p` bindings must leave
+room for a source row. The token suffix owner receives canonical capacity minus
+`a+p`, and its authored-row allowance becomes `a+p+R` for typed admission.
+Cached canonical prefixes preserve that current allowance without inserting or
+charging the bindings again. Original and projected source retain their separate
+1MiB limits, and new physical scalars retain the 65536 limit.
+
+Original-ID/EOS accounting still charges actual source bytes. Bound parameters
+need no additional authored read row; required physical aliases, source
+declarations and calls retain their obligations. Every new constant and helper
+must still reach the entry output, alongside raw-token or numerical-input use
+and the existing finite-feature rule. A bound weight does not establish that
+dependency. Call substitution and the hidden-independent Scan boundary are
+unchanged. The packet retains five keys, the same canonical schema resource,
+cost6/context3/dependency3/feature1/capture1 contracts and completion-v1 fields.
+Historical languages1–47, original source and saved programs remain literal.
+This makes declared storage available as values; it does not guarantee completed
+or useful acquisition.
+
+For a version4 through version48 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without
@@ -1595,6 +1632,9 @@ In version47, the record still has version 1 and these same seven fields.
 bindings; neither field proves a nonempty authored body or output use of an
 input. `entry_completed` requires authored rows, closure and complete admission,
 and cannot become true from a prelude alone.
+Version48 includes bound parameter values in those same facts. In particular,
+`unread_constants` can become zero after implicit reads even when those values
+do not reach the entry output; it is not an admission or usefulness result.
 Callers can retain it after a token-limit failure while preserving the original
 bytes, chosen IDs and error, then compare it with a fresh getter result from the
 exact saved packet and prefix during restoration. Getter errors must remain

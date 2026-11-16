@@ -232,6 +232,7 @@ struct Reader<'a> {
     value_references: bool,
     counted_expressions: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
     expression_count: Option<usize>,
     parent_prerequisites: bool,
     ancestor_typing: bool,
@@ -272,6 +273,7 @@ pub(super) fn prefix<'a>(
     counted_expressions: bool,
     open_row_suffix: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
 ) -> Result<Prefix<'a>, String> {
     if source.len() > ACQUIRED_SOURCE_BYTES {
         return Err("acquisition source byte budget exceeded".into());
@@ -296,6 +298,7 @@ pub(super) fn prefix<'a>(
         value_references,
         counted_expressions,
         formal_inputs,
+        bound_parameters,
         expression_count: None,
         parent_prerequisites: parent_prerequisites || counted_expressions,
         ancestor_typing: ancestor_typing || counted_expressions,
@@ -389,6 +392,7 @@ pub(super) fn definitions(
     feature_output: bool,
     counted_expressions: bool,
     formal_inputs: bool,
+    bound_parameters: bool,
 ) -> Result<(String, Vec<FuncDef>), String> {
     let decoded = prefix(
         source,
@@ -409,6 +413,7 @@ pub(super) fn definitions(
         counted_expressions,
         false,
         formal_inputs,
+        bound_parameters,
     )?;
     if !decoded.complete {
         return Err("incomplete numerical rows source".into());
@@ -489,6 +494,7 @@ pub(super) fn definitions(
             false,
             false,
             formal_inputs,
+            bound_parameters,
         )
         .map_err(|error| error.to_string())?;
     }
@@ -990,7 +996,7 @@ impl Reader<'_> {
             });
             self.key("weights")?;
         }
-        if self.compact_metadata {
+        let parameters = if self.compact_metadata {
             self.budget.set(frame, || {
                 vec![
                     budget::text(after_parameters),
@@ -999,11 +1005,11 @@ impl Reader<'_> {
                 ]
             });
             self.output.extend_from_slice(b"\"parameters\":")?;
-            self.compact_parameters()?;
+            self.compact_parameters()?
         } else {
             self.field("parameters")?;
-            self.value::<Vec<TensorParameter>>()?;
-        }
+            self.value::<Vec<TensorParameter>>()?.len()
+        };
         self.budget.set(frame, || {
             vec![
                 budget::text(if self.counted_expressions {
@@ -1102,7 +1108,7 @@ impl Reader<'_> {
                 ]
             });
             self.punctuation(b'[', b'[')?;
-            let bindings = if self.formal_inputs {
+            let arguments = if self.formal_inputs {
                 signature
                     .arguments(1)
                     .map_err(|error| Stop::Invalid(error.to_string()))?
@@ -1110,19 +1116,33 @@ impl Reader<'_> {
             } else {
                 0
             };
+            let parameters = if self.bound_parameters { parameters } else { 0 };
+            let bindings = arguments + parameters;
             if bindings >= ACQUIRED_NODES {
                 return Err(Stop::Invalid(
-                    "formal bindings leave no acquired node for a source row".into(),
+                    if self.bound_parameters {
+                        "formal and parameter bindings leave no acquired node for a source row"
+                    } else {
+                        "formal bindings leave no acquired node for a source row"
+                    }
+                    .into(),
                 ));
             }
-            // Elaborate each supplied formal once. The ordinary canonical
-            // visitor owns its shape, dependencies and node accounting; source
-            // row counts and original-ID costs exclude these bindings.
-            for argument in 0..bindings {
-                if argument != 0 {
+            // Elaborate each supplied formal and bound parameter once. The
+            // ordinary visitor owns shape, dependencies and node accounting;
+            // source row counts and original-ID costs exclude these bindings.
+            for binding in 0..bindings {
+                if binding != 0 {
                     self.output.push(b',')?;
                 }
-                self.output.json(&TensorOperation::Argument { argument })?;
+                let operation = if binding < arguments {
+                    TensorOperation::Argument { argument: binding }
+                } else {
+                    TensorOperation::Parameter {
+                        weight: binding - arguments,
+                    }
+                };
+                self.output.json(&operation)?;
             }
             let mut operations = 0;
             if self.peek()? != b']' {
