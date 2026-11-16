@@ -8278,9 +8278,8 @@ __device__ bool publication_feedback_value(uint64_t* value,
     value[r::estimator_kind]=0; // The declared exact-structure evaluator.
     value[r::assignment_defined]=uint64_t(kind==0);
     value[r::mass_defined]=uint64_t(kind==1);
-    // Exact event structure does not certify transcendental WMC arithmetic.
-    // Undefined bounds/sampling fields remain zero with explicit availability.
-    value[r::error_bound_defined]=0;
+    bool bounded=false;
+    double errors[4]={0.0,0.0,0.0,0.0};
     if(kind==1) {
         uint32_t roots[4];
         for(uint32_t truth=0;truth<4;++truth)roots[truth]=world.query_event(query,pro,contra,truth);
@@ -8288,12 +8287,22 @@ __device__ bool publication_feedback_value(uint64_t* value,
         const double normalizer=world.root_value(world.condition);
         if(!isfinite(normalizer))return false;
         value[r::log_normalizer_f64_bits]=__double_as_longlong(normalizer);
+        bounded=true;
         for(uint32_t truth=0;truth<4;++truth) {
             const double probability=world.probability(roots[truth],normalizer,kind);
             if(!isfinite(probability) || probability<0.0 || probability>1.0)return false;
             value[r::joint_mass_00_f64_bits+truth]=__double_as_longlong(probability);
+            bounded &= world.probability_error_bound(roots[truth],probability,&errors[truth]);
+        }
+        if(value[r::proof_kind] && !bounded) {
+            world.fail(semantic_world::MeasureStatus::CertificateUnavailable);return false;
         }
     }
+    // Availability is atomic across all four masses. Archived unavailable
+    // receipts remain archived data; these bounds belong to this fresh query.
+    value[r::error_bound_defined]=uint64_t(bounded);
+    for(uint32_t truth=0;truth<4;++truth)
+        value[r::error_bound_00_f64_bits+truth]=bounded ? __double_as_longlong(errors[truth]) : 0;
     semantic_graph::copy_identity(value+r::parent_instance_0,bank.header.instance,work);
     value[r::publication_word]=bank.header.publication_word;
     semantic_graph::copy_identity(value+r::parent_logical_digest_0,bank.header.logical_digest,work);
