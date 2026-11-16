@@ -130,7 +130,7 @@ impl PyNativeCausalModel {
         language_version: usize,
         raw_token_ids: Option<Vec<u32>>,
     ) -> PyResult<String> {
-        let context = if matches!(language_version, 35..=48) {
+        let context = if matches!(language_version, 35..=49) {
             self.inner
                 .acquisition_context_with_feature_output(insertion_layer)
         } else if language_version == 34 {
@@ -185,6 +185,7 @@ impl PyNativeCausalModel {
             | acquisition::MATRIX_PRODUCT_ENCODING
             | acquisition::FORMAL_INPUT_ENCODING
             | acquisition::PARAMETER_VALUE_ENCODING
+            | acquisition::BOUNDED_NODE_ENCODING
             | acquisition::NUMERICAL_EXPRESSIONS_ENCODING
             | acquisition::EXPRESSION_REFERENCES_ENCODING
             | acquisition::VALUE_DEPENDENCIES_ENCODING
@@ -198,8 +199,11 @@ impl PyNativeCausalModel {
                         | acquisition::MATRIX_PRODUCT_ENCODING
                         | acquisition::FORMAL_INPUT_ENCODING
                         | acquisition::PARAMETER_VALUE_ENCODING
+                        | acquisition::BOUNDED_NODE_ENCODING
                 );
-                let bound_parameters = source_encoding == acquisition::PARAMETER_VALUE_ENCODING;
+                let bounded_nodes = source_encoding == acquisition::BOUNDED_NODE_ENCODING;
+                let bound_parameters =
+                    source_encoding == acquisition::PARAMETER_VALUE_ENCODING || bounded_nodes;
                 let formal_inputs =
                     source_encoding == acquisition::FORMAL_INPUT_ENCODING || bound_parameters;
                 let counted_expressions =
@@ -227,7 +231,7 @@ impl PyNativeCausalModel {
                     || self_delimited;
                 let compact_indices = source_encoding == acquisition::COMPACT_INDICES_ROWS_ENCODING
                     || compact_metadata;
-                let context = if feature_output {
+                let mut context = if feature_output {
                     self.inner
                         .acquisition_context_with_feature_output(insertion_layer)
                 } else if predicate_values {
@@ -243,6 +247,9 @@ impl PyNativeCausalModel {
                     self.inner.acquisition_context(insertion_layer)
                 }
                 .map_err(xlog_err)?;
+                if bounded_nodes {
+                    acquisition::bound_acquisition_nodes(&mut context);
+                }
                 let (entrypoint, definitions) = acquisition::decode_numerical_rows(
                     definition_json.as_bytes(),
                     &context,
