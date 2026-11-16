@@ -1600,7 +1600,28 @@ Historical languages1–47, original source and saved programs remain literal.
 This makes declared storage available as values; it does not guarantee completed
 or useful acquisition.
 
-For a version4 through version48 packet,
+Version49 (`xlog-contextual-acquisition-v49`, `numerical-rows-v13`) keeps the
+same flat rows, formal and parameter bindings, and original-ID costs with a
+fixed `context.limits.nodes = 32` for newly acquired definitions. Across those
+bodies, `sum(R) <= 32` and `sum(a+p+R) <= 32`, including unused bindings and each
+body's parameter aliases. A causal entry without parameters can therefore author
+at most 31 rows. Helpers still reserve the later entry's `a_entry+1` nodes until
+its actual parameter table is known. The model chooses the program within this
+bound; no operation, projection or repair is inserted.
+
+The producer uses this same bound in its source schema, cumulative resource
+counter, typed final-slot constraints, token-derived row allowance, source reader
+and complete `decode_definition` admission. Explicit
+`source_encoding="numerical-rows-v13"` selects it again when `fork_acquired`
+reads the full original source, before native allocation or compilation. A
+prompt-only limit or a modified packet cannot substitute for that source
+contract. The canonical IR schema and runtime's outer 64-node limit remain
+unchanged. Retained functions do not consume this new-definition budget, and
+historical languages, codecs and saved programs keep their existing semantics.
+The five packet keys and cost6/context3/dependency3/feature1/capture1/completion1
+contracts remain. A smaller search space does not prove completion or usefulness.
+
+For a version4 through version49 packet,
 `mask.completion_state(original_prefix_bytes)` returns a JSON string describing
 the completed parts of that exact prefix. It uses the
 same native resource parser and canonical shape inference as `filter`, without

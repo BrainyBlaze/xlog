@@ -196,6 +196,11 @@ class NativeCausalModel:
         Shapes and declarations stay model-authored; physical aliases deduplicate
         scalars, not binding nodes. Required source declarations and output use
         remain mandatory. Available parameter values do not prove output use.
+        V49/numerical-rows-v13 retains that grammar and binding semantics with
+        limits.nodes=32 for new definitions: sum(R)<=32 and sum(a+p+R)<=32.
+        The same bound governs schema, prefix masks and full original-source
+        admission. Unused bindings and aliases count; retained functions and
+        historical languages keep their original node limits.
         """
         ...
     def fork_acquired(
@@ -218,6 +223,9 @@ class NativeCausalModel:
         retaining nonempty authored bodies and counting every canonical binding.
         numerical-rows-v12 adds ordinary Parameter bindings for the actual table
         after the formals, through the same reader as packet 48.
+        numerical-rows-v13 selects the same reader with the 32-node contract of
+        packet 49 before native allocation or compilation. Canonical IR and
+        previously saved functions retain their existing limits and semantics.
         """
         ...
     @property
@@ -329,6 +337,9 @@ class NativeAcquisitionMask:
         V48/numerical-rows-v12 emits the declared table's Parameter bindings
         after the formals, then authored rows. All canonical nodes count toward
         the shared cap; declarations and output-reaching dependencies stay checked.
+        V49/numerical-rows-v13 applies its context's 32-node limit to both source
+        rows and canonical bindings across new bodies, through this same reader
+        and resource visitor. Existing functions are not charged to that bound.
         """
 
 class _LogitSelection(TypedDict):

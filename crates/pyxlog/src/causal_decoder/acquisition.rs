@@ -74,6 +74,8 @@ const OPEN_ROW_LANGUAGE: &str = "xlog-contextual-acquisition-v45";
 const MATRIX_PRODUCT_LANGUAGE: &str = "xlog-contextual-acquisition-v46";
 const FORMAL_INPUT_LANGUAGE: &str = "xlog-contextual-acquisition-v47";
 const PARAMETER_VALUE_LANGUAGE: &str = "xlog-contextual-acquisition-v48";
+const BOUNDED_NODE_LANGUAGE: &str = "xlog-contextual-acquisition-v49";
+const BOUNDED_ACQUISITION_NODES: usize = 32;
 pub(super) const NUMERICAL_ROWS_ENCODING: &str = rows::ENCODING;
 pub(super) const CONTEXT_ENTRY_ROWS_ENCODING: &str = rows::CONTEXT_ENTRY_ENCODING;
 pub(super) const INTENT_ROWS_ENCODING: &str = rows::INTENT_ENCODING;
@@ -86,6 +88,7 @@ pub(super) const OPEN_ROW_ENCODING: &str = "numerical-rows-v9";
 pub(super) const MATRIX_PRODUCT_ENCODING: &str = "numerical-rows-v10";
 pub(super) const FORMAL_INPUT_ENCODING: &str = "numerical-rows-v11";
 pub(super) const PARAMETER_VALUE_ENCODING: &str = "numerical-rows-v12";
+pub(super) const BOUNDED_NODE_ENCODING: &str = "numerical-rows-v13";
 pub(super) const NUMERICAL_EXPRESSIONS_ENCODING: &str = rows::expressions::ENCODING;
 pub(super) const EXPRESSION_REFERENCES_ENCODING: &str = rows::expressions::REFERENCE_ENCODING;
 pub(super) const VALUE_DEPENDENCIES_ENCODING: &str = "numerical-expressions-v3";
@@ -115,17 +118,30 @@ fn maximum_width(context: &Value) -> usize {
         .max(ACQUIRED_SCALARS)
 }
 
+/// The bounded source contract narrows only newly acquired definitions.
+pub(super) fn bound_acquisition_nodes(context: &mut Value) {
+    context["limits"]["nodes"] = json!(BOUNDED_ACQUISITION_NODES);
+}
+
+fn node_limit(context: &Value) -> usize {
+    context["limits"]["nodes"].as_u64().unwrap() as usize
+}
+
 /// Specialize the sole wire schema with the native model's actual ABI/registry.
 pub(super) fn language(
     mut context: Value,
     version: usize,
     raw_token_ids: Option<Vec<u32>>,
 ) -> PyResult<String> {
-    if !matches!(version, 1..=48) {
+    if !matches!(version, 1..=49) {
         return Err(value_error(
             "unsupported native acquisition language version",
         ));
     }
+    if version == 49 {
+        bound_acquisition_nodes(&mut context);
+    }
+    let nodes = node_limit(&context);
     let mut schema = wire_schema(version >= 46)?;
     schema["$id"] = json!("https://xlog.md/schemas/acquired-funcdef-context/v1");
     schema["description"] = json!(
@@ -151,19 +167,19 @@ pub(super) fn language(
         "^{}[a-zA-Z_][a-zA-Z0-9_]{{0,63}}$", context["parameter_prefix"].as_str().unwrap())});
     schema["properties"]["entrypoint"] = json!({"const": context["entrypoint"]});
     schema["properties"]["definitions"] = json!({
-        "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
+        "type": "array", "minItems": 1, "maxItems": nodes,
         "prefixItems": [{"$ref": "#/$defs/EntryFuncDef"}], "items": {"$ref": "#/$defs/FuncDef"},
     });
     if version >= 4 {
         // Helper names extend the entry's function namespace, so they cannot
         // match the entry's exact name. This union is disjoint without oneOf.
         schema["properties"]["definitions"] = json!({
-            "type": "array", "minItems": 1, "maxItems": ACQUIRED_NODES,
+            "type": "array", "minItems": 1, "maxItems": nodes,
             "items": {"anyOf": [{"$ref": "#/$defs/FuncDef"}, {"$ref": "#/$defs/EntryFuncDef"}]},
         });
     }
     let defs = &mut schema["$defs"];
-    defs["Index"] = integer(0, ACQUIRED_NODES - 1);
+    defs["Index"] = integer(0, nodes - 1);
     defs["Width"] = integer(1, maximum_width);
     defs["TokenId"] = integer(0, vocabulary - 1);
     if version >= 2 {
@@ -182,7 +198,7 @@ pub(super) fn language(
     defs["FuncParam"]["properties"]["name"]["minLength"] = json!(1);
     defs["FuncParam"]["properties"]["name"]["maxLength"] = json!(64);
     defs["FuncDef"]["properties"]["name"] = function_name.clone();
-    defs["FuncDef"]["properties"]["params"]["maxItems"] = json!(ACQUIRED_NODES + 1);
+    defs["FuncDef"]["properties"]["params"]["maxItems"] = json!(nodes + 1);
     defs["FuncDef"]["properties"]["is_private"] = json!({"const": false});
     defs["FuncDef"]["required"] = if version >= 4 {
         json!(["name", "body", "params", "return_type", "is_private"])
@@ -196,7 +212,7 @@ pub(super) fn language(
             properties["input_width"] = json!({"$ref": "#/$defs/Width"});
         } else {
             properties["input_widths"]["items"] = json!({"$ref": "#/$defs/Width"});
-            properties["input_widths"]["maxItems"] = json!(ACQUIRED_NODES);
+            properties["input_widths"]["maxItems"] = json!(nodes);
         }
     }
     let mut parameter = defs["TensorParameter"].clone();
@@ -245,6 +261,7 @@ pub(super) fn language(
                 if properties.get("max_steps").is_some() {
                     properties["max_steps"] = integer(1, max_context);
                 } else {
+                    // Retained callees keep their arity; references emit no nodes.
                     properties["arguments"]["maxItems"] = json!(ACQUIRED_NODES);
                 }
             }
@@ -254,9 +271,9 @@ pub(super) fn language(
     let program = &mut defs["TensorProgram"]["properties"];
     program["vocabulary"] = json!({"const": vocabulary});
     program["max_context"] = json!({"const": max_context});
-    program["parameters"]["maxItems"] = json!(ACQUIRED_NODES);
+    program["parameters"]["maxItems"] = json!(nodes);
     program["operations"]["minItems"] = json!(1);
-    program["operations"]["maxItems"] = json!(ACQUIRED_NODES);
+    program["operations"]["maxItems"] = json!(nodes);
     if version >= 5 {
         defs["TensorProgram"]["required"] = json!([
             "signature",
@@ -324,7 +341,13 @@ pub(super) fn language(
             ));
         }
         if version >= 7 {
-            rows::schema(&mut schema, version >= 8, version >= 10, version >= 18);
+            rows::schema(
+                &mut schema,
+                version >= 8,
+                version >= 10,
+                version >= 18,
+                nodes,
+            );
             if version >= 19 {
                 rows::metadata::schema(&mut schema, &context, version >= 22, version >= 24);
             }
@@ -550,7 +573,7 @@ pub(super) fn language(
                 "Historical languages and source encodings remain literal. Prefix admission does not guarantee completion, useful features or scientific acceptance."
             ));
         }
-        if version == 48 {
+        if version >= 48 {
             schema["description"] = json!(concat!(
                 "Compact numerical-rows-v12 acquisition. Root fields are intent,helpers,entry. ",
                 "Intent contains 1..256 descriptive Unicode scalar values. Helpers precede callers and use [local_name,signature,body]; entry is last and its name/signature come from context. ",
@@ -568,6 +591,14 @@ pub(super) fn language(
                 "Historical languages and source encodings remain literal. Prefix admission does not guarantee completion, useful features or scientific acceptance."
             ));
         }
+        if version == 49 {
+            schema["description"] = json!(format!(
+                "{} This source contract limits only newly acquired definitions; retained functions, canonical IR and historical source limits remain unchanged.",
+                schema["description"].as_str().unwrap()
+                    .replace(PARAMETER_VALUE_ENCODING, BOUNDED_NODE_ENCODING)
+                    .replace("<=64", &format!("<={nodes}"))
+            ));
+        }
         // Keep ordering local to this language. Enabling preserve_order for
         // serde_json workspace-wide would change unrelated durable contracts.
         #[derive(Serialize)]
@@ -582,6 +613,7 @@ pub(super) fn language(
         }
         return serde_json::to_string(&Packet {
             id: match version {
+                49 => BOUNDED_NODE_LANGUAGE,
                 48 => PARAMETER_VALUE_LANGUAGE,
                 47 => FORMAL_INPUT_LANGUAGE,
                 46 => MATRIX_PRODUCT_LANGUAGE,
@@ -832,7 +864,8 @@ impl PyNativeAcquisitionMask {
     fn new(language_json: &str, token_bytes: Vec<Vec<u8>>) -> PyResult<Self> {
         let language: Value = serde_json::from_str(language_json).map_err(value_error)?;
         let context = &language["context"];
-        let bound_parameters = language["id"] == PARAMETER_VALUE_LANGUAGE;
+        let bounded_nodes = language["id"] == BOUNDED_NODE_LANGUAGE;
+        let bound_parameters = language["id"] == PARAMETER_VALUE_LANGUAGE || bounded_nodes;
         let formal_inputs = language["id"] == FORMAL_INPUT_LANGUAGE || bound_parameters;
         let matrix_product = language["id"] == MATRIX_PRODUCT_LANGUAGE || formal_inputs;
         let open_row_suffix = language["id"] == OPEN_ROW_LANGUAGE || matrix_product;
@@ -961,7 +994,8 @@ impl PyNativeAcquisitionMask {
                     })
             || context["limits"]
                 != json!({"source_bytes": ACQUIRED_SOURCE_BYTES,
-                "nodes": ACQUIRED_NODES, "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
+                "nodes": if bounded_nodes { BOUNDED_ACQUISITION_NODES } else { ACQUIRED_NODES },
+                "new_scalars": ACQUIRED_SCALARS, "output_width": ACQUIRED_WIDTH})
             || context["vocabulary"].as_u64() != Some(token_bytes.len() as u64)
         {
             return Err(value_error("native acquisition language contract differs"));
@@ -1638,6 +1672,7 @@ struct Resources<'a> {
     parameters: BTreeMap<String, usize>,
     scalars: usize,
     nodes: usize,
+    node_limit: usize,
     ordered: bool,
     planned_output: bool,
     self_delimited: bool,
@@ -1758,6 +1793,7 @@ fn resource_prefix<'a>(
         parameters: BTreeMap::new(),
         scalars: 0,
         nodes: 0,
+        node_limit: typed_context.map_or(ACQUIRED_NODES, node_limit),
         ordered,
         planned_output,
         self_delimited,
@@ -2452,7 +2488,7 @@ impl Resources<'_> {
                 // The source cursor can already own the next definition while
                 // this parser rereads a closed helper's output.
                 let future = nodes.pending_roots.saturating_sub(1);
-                if output + 1 > ACQUIRED_NODES.saturating_sub(nodes.spent + future) {
+                if output + 1 > self.node_limit.saturating_sub(nodes.spent + future) {
                     return false;
                 }
             }
@@ -2479,7 +2515,7 @@ impl Resources<'_> {
 
     fn permits_operation_count_prefix(&self, bytes: &[u8]) -> Result<(), serde_json::Error> {
         let choice = NumberChoice {
-            values: 1..ACQUIRED_NODES - self.nodes + 1,
+            values: 1..self.node_limit - self.nodes + 1,
             extensions: None,
             accepts: |count| self.permits_output_plan(count - 1),
             bytes,
@@ -2858,8 +2894,8 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                                 } else {
                                     0
                                 };
-                            let capacity =
-                                (ACQUIRED_NODES - self.resources.nodes).saturating_sub(reserve);
+                            let capacity = (self.resources.node_limit - self.resources.nodes)
+                                .saturating_sub(reserve);
                             if self.resources.formal_inputs && capacity <= arguments {
                                 return Err(A::Error::custom(
                                     "formal bindings leave no acquired node for a source row",
@@ -3023,7 +3059,7 @@ impl<'de> Visitor<'de> for Object<'_, '_> {
                         }
                         let choice = map.next_value_seed(NumberChoice {
                             extensions: None,
-                            values: 0..ACQUIRED_NODES - self.resources.nodes,
+                            values: 0..self.resources.node_limit - self.resources.nodes,
                             accepts: |output| self.resources.permits_output_plan(output),
                             bytes: self.resources.bytes,
                         })?;
@@ -3220,7 +3256,7 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                 }) {
                     return Err(D::Error::custom("entry must be the last definition"));
                 }
-                if self.resources.nodes >= ACQUIRED_NODES {
+                if self.resources.nodes >= self.resources.node_limit {
                     return Err(D::Error::custom("no nodes remain for another definition"));
                 }
                 Object {
@@ -3243,7 +3279,7 @@ impl<'de> DeserializeSeed<'de> for Item<'_, '_> {
                     return Err(D::Error::custom("operations exceed the chosen output slot"));
                 }
                 self.resources.nodes += 1;
-                if self.resources.nodes > ACQUIRED_NODES {
+                if self.resources.nodes > self.resources.node_limit {
                     return Err(D::Error::custom("acquired node budget exceeded"));
                 }
                 let mut prefix_end = None;
