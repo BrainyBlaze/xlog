@@ -674,7 +674,7 @@ impl TensorExecutor {
         Ok(values)
     }
 
-    fn require_finite(&self, tensor: &NativeTensor, role: &str) -> Result<()> {
+    fn is_finite(&self, tensor: &NativeTensor) -> Result<bool> {
         let mut invalid = self.provider.memory().alloc::<u32>(1)?;
         self.provider
             .htod_sync_copy_into_tracked(&[0u32], &mut invalid)?;
@@ -694,7 +694,11 @@ impl TensorExecutor {
         let mut flag = [0u32];
         self.provider
             .dtoh_sync_copy_into_tracked(&invalid, &mut flag)?;
-        if flag[0] != 0 {
+        Ok(flag[0] == 0)
+    }
+
+    fn require_finite(&self, tensor: &NativeTensor, role: &str) -> Result<()> {
+        if !self.is_finite(tensor)? {
             return Err(failure(format!(
                 "numerical execution produced nonfinite FP32 values in {role}"
             )));

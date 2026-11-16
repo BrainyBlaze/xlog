@@ -1257,6 +1257,11 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Program>()?;
     m.add_class::<causal_decoder::PyNativeCausalModel>()?;
+    m.add(
+        "NativeFunctionResultNonFiniteError",
+        m.py()
+            .get_type::<causal_decoder::NativeFunctionResultNonFiniteError>(),
+    )?;
     m.add_class::<causal_decoder::PyNativeAcquisitionMask>()?;
     m.add_class::<causal_decoder::PyNativeLogits>()?;
     m.add_class::<CompiledProgram>()?;

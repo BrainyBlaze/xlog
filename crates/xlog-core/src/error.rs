@@ -171,6 +171,13 @@ pub enum XlogError {
     #[error("Kernel error: {0}")]
     Kernel(String),
 
+    /// A causal function's result contains nonfinite FP32 values, as observed
+    /// by a successfully completed native finite check and flag read.
+    #[error(
+        "Kernel error: native numerical execution: numerical execution produced nonfinite FP32 values in function result"
+    )]
+    FunctionResultNonFinite,
+
     /// Type checking or inference error.
     #[error("Type error: {0}")]
     Type(String),

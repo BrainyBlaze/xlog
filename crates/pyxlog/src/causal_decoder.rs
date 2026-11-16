@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 #[cfg(feature = "host-io")]
 use pyo3::types::{PyBytes, PyDict};
@@ -12,6 +12,13 @@ use super::{dlpack_capsule_from_tensor, types::xlog_err};
 
 mod acquisition;
 pub(crate) use acquisition::PyNativeAcquisitionMask;
+
+pyo3::create_exception!(
+    pyxlog,
+    NativeFunctionResultNonFiniteError,
+    PyRuntimeError,
+    "A native finite check observed a nonfinite causal-function result during fit_binary, before committing an update."
+);
 
 /// Native BF16 causal decoder imported from a local SafeTensors checkpoint.
 #[pyclass(name = "NativeCausalModel", module = "pyxlog._native")]
@@ -325,6 +332,7 @@ impl PyNativeCausalModel {
     }
 
     /// One binary NLL minibatch update. Returns (mean_loss, gradient_norm, step).
+    /// A nonfinite causal-function result raises NativeFunctionResultNonFiniteError.
     #[cfg(feature = "host-io")]
     #[pyo3(signature = (token_ids, *, prediction_positions, outcomes, negative_token_id, positive_token_id, history_spans=None))]
     fn fit_binary(
@@ -348,7 +356,16 @@ impl PyNativeCausalModel {
             )
         })
         .map(|result| (result.mean_loss, result.gradient_norm, result.step))
-        .map_err(xlog_err)
+        .map_err(|error| {
+            if matches!(
+                error.unowned(),
+                xlog_core::XlogError::FunctionResultNonFinite
+            ) {
+                NativeFunctionResultNonFiniteError::new_err(error.to_string())
+            } else {
+                xlog_err(error)
+            }
+        })
     }
 
     /// One complete-vocabulary CE update. Returns (mean_loss, gradient_norm, step).

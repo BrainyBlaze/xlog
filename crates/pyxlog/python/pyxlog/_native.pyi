@@ -55,6 +55,9 @@ def resource_observer_device_certificate(device_ordinal: int) -> _ResourceDevice
 
 _Path = Union[str, PathLike[str]]
 
+class NativeFunctionResultNonFiniteError(RuntimeError):
+    """Observed nonfinite causal-function result in fit_binary before update commit."""
+
 class NativeCausalModel:
     """Native decoder with canonical acquired definitions and atomic candidate training."""
 
@@ -236,7 +239,13 @@ class NativeCausalModel:
         self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
         outcomes: Sequence[bool], negative_token_id: int, positive_token_id: int,
         history_spans: Optional[Sequence[tuple[int, int]]] = None,
-    ) -> tuple[float, float, int]: ...
+    ) -> tuple[float, float, int]:
+        """Raise NativeFunctionResultNonFiniteError for an observed nonfinite function result.
+
+        Parameters, optimizer state and completed updates remain unchanged.
+        Other numerical or infrastructure failures remain ordinary errors.
+        """
+        ...
     def fit_tokens(
         self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
         target_ids: Sequence[int],
