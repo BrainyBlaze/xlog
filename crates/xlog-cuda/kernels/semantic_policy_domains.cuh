@@ -2,20 +2,33 @@
 
 // Private pre-draw storage, reserved with the original policy owner. Nothing
 // here selects an action, reads a receipt, or evaluates another model tape.
+struct PolicyUniformGroupDescriptor {
+    uint64_t outputs[3],roots[3];
+    uint64_t status,kind,actor_rows,edit_rows,demonstrated_lane;
+};
+static_assert(sizeof(PolicyUniformGroupDescriptor)==88,"group policy domain ABI");
 struct PolicyUniformDescriptor {
     uint64_t outputs[3],roots[3];
     uint64_t recurrent,hidden,scores,recurrent_cotangents,score_cotangents,score_roots;
     uint64_t status,work,training_rows,return_bound;
     double loss_coefficients[4]; // edit, actor, critic, cost from the cold law
     uint64_t transfer_target,transferred;
+    PolicyUniformGroupDescriptor group;
 };
-static_assert(sizeof(PolicyUniformDescriptor)==176,"uniform policy domain ABI");
+static_assert(sizeof(PolicyUniformDescriptor)==264,"uniform policy domain ABI");
 static_assert(offsetof(PolicyUniformDescriptor,transfer_target)==160,"uniform work owner ABI");
 static_assert(offsetof(PolicyUniformDescriptor,transferred)==168,"uniform work marker ABI");
+static_assert(offsetof(PolicyUniformDescriptor,group)==176,"group policy owner ABI");
 
 namespace policy_uniform {
 using model_policy::DomainValue;
 using model_policy::CoherentCotangent;
+enum class ReferenceKind : uint32_t { ProspectiveFamily, CurrentActor, FixedDemonstration };
+struct Reference {
+    ReferenceKind kind;
+    uint64_t actor_rows,edit_rows;
+    uint32_t demonstrated_lane;
+};
 constexpr uint32_t general64=model_policy::exact_rounding | model_policy::normal_rounding |
     model_policy::inexact_tiny_rounding;
 constexpr uint32_t normal64=model_policy::exact_rounding | model_policy::normal_rounding;
@@ -74,8 +87,27 @@ __device__ DomainValue denominator_factor(double unit) {
     // Its exact ideal bound is one; the original division rounds only once.
     return {1.0,{__ddiv_ru(unit,__dadd_rd(1.0,-unit)),0.0},1.0};
 }
-__device__ CoherentCotangent divide_by_rows(CoherentCotangent input) {
-    return multiply64(input,denominator_factor(unit64),normal64);
+__device__ DomainValue denominator_factor(double unit,const Reference& reference,uint64_t rows) {
+    auto factor=denominator_factor(unit);
+    if(reference.kind!=ReferenceKind::ProspectiveFamily) {
+        if(!rows)return model_policy::invalid_domain();
+        const auto count64=policy_uint64_bound(rows);
+        const auto count32=policy_uint64_float_bound(rows);
+        const double denominator=unit==unit64 ? count64.value : double(count32.value);
+        const double conversion=unit==unit64 ? count64.error.ordinary : count32.error.ordinary;
+        const double ideal_minimum=__ull2double_rd(rows);
+        // The actual divide uses its original RN64/RN32 integer conversion.
+        // Its final rounding is charged by the caller, exactly once. Apply
+        // this genuine 1/N to each term before the original signed sum.
+        factor={__ddiv_ru(1.0,denominator),
+            {__ddiv_ru(__ddiv_ru(conversion,denominator),ideal_minimum),0.0},
+            __ddiv_ru(1.0,ideal_minimum)};
+    }
+    return factor;
+}
+__device__ CoherentCotangent divide_by_rows(CoherentCotangent input,const Reference& reference,
+        uint64_t rows) {
+    return multiply64(input,denominator_factor(unit64,reference,rows),normal64);
 }
 __device__ DomainValue reward(uint64_t bound,double unit) {
     const double ideal=__ull2double_ru(bound);
@@ -89,19 +121,24 @@ __device__ DomainValue normalized_cost() {
     return {factor,{__dadd_ru(factor,-1.0),0.0},1.0};
 }
 __device__ CoherentCotangent coefficient(const PolicyUniformDescriptor& u,
-        const PolicyDescriptor& p,uint32_t ordinal,DomainValue weight) {
+        const PolicyDescriptor& p,uint32_t ordinal,DomainValue weight,const Reference& reference) {
+    if(reference.kind==ReferenceKind::FixedDemonstration)
+        return divide_by_rows(seed(exact(u.loss_coefficients[0]),false),reference,reference.edit_rows);
     const double baseline=fabs(double(reinterpret_cast<const float*>(p.component_baselines)[ordinal]));
     // The actor reference fixes the original detached FP32 baseline EXACTLY;
     // live baseline E/D is consumed separately by the critic root below.
     const auto advantage=sum64(reward(u.return_bound,unit64),exact(baseline));
-    auto actor=divide_by_rows(multiply64(seed(exact(u.loss_coefficients[1]),true),weight,normal64));
+    auto actor=divide_by_rows(multiply64(seed(exact(u.loss_coefficients[1]),true),weight,normal64),
+        reference,reference.actor_rows);
     actor=multiply64(actor,advantage,normal64);
     const auto cost=divide_by_rows(multiply64(multiply64(seed(exact(u.loss_coefficients[3]),false),
-        weight,normal64),normalized_cost(),normal64));
-    const auto edit=divide_by_rows(seed(exact(u.loss_coefficients[0]),false));
+        weight,normal64),normalized_cost(),normal64),reference,reference.actor_rows);
+    const auto edit=reference.kind==ReferenceKind::CurrentActor ? model_policy::zero_cotangent()
+        : divide_by_rows(seed(exact(u.loss_coefficients[0]),false),reference,reference.edit_rows);
     // Negation is exact. Zero/ineligible/floor alternatives are already in
     // each magnitude domain. Preserve edit+(actor+cost), including shared κ.
-    return add64(edit,add64(actor,cost));
+    const auto actor_cost=add64(actor,cost);
+    return reference.kind==ReferenceKind::CurrentActor ? actor_cost : add64(edit,actor_cost);
 }
 __device__ CoherentCotangent score(CoherentCotangent input) {
     // P>=h*2^118: |h*delta-1|/(P*2^-149)<=2^31, including ALL h and
@@ -122,15 +159,16 @@ __device__ CoherentCotangent score(CoherentCotangent input) {
     result=model_policy::round_cotangent(result,general64,model_policy::unit_roundoff);
     return result.full.magnitude<=0x1.fffffep127 ? result : model_policy::invalid_cotangent();
 }
-__device__ CoherentCotangent critic(const PolicyUniformDescriptor& u,DomainValue baseline) {
+__device__ CoherentCotangent critic(const PolicyUniformDescriptor& u,DomainValue baseline,
+        const Reference& reference) {
     const double lambda=u.loss_coefficients[2];
-    const auto reciprocal=denominator_factor(model_policy::unit_roundoff);
+    const auto reciprocal=denominator_factor(model_policy::unit_roundoff,reference,reference.actor_rows);
     auto scale=model_policy::unrounded_cotangent_product(exact(lambda),reciprocal);
     // Original FP32 lambda/RN32(N), possibly tiny, then exact power-of-two
     // scaling by two. Ordinary and underflow errors remain separate.
     const double roundoff=__dmul_ru(model_policy::unit_roundoff,scale.magnitude);
     scale={__dadd_ru(__dadd_ru(scale.magnitude,roundoff),model_policy::half_min_subnormal),
-        {__dadd_ru(scale.error.ordinary,roundoff),model_policy::half_min_subnormal},lambda};
+        {__dadd_ru(scale.error.ordinary,roundoff),model_policy::half_min_subnormal},scale.ideal_magnitude};
     scale={__dmul_ru(2.0,scale.magnitude),{__dmul_ru(2.0,scale.error.ordinary),
         __dmul_ru(2.0,scale.error.underflow)},__dmul_ru(2.0,scale.ideal_magnitude)};
     const auto difference=model_policy::domain_add(baseline,reward(u.return_bound,model_policy::unit_roundoff));
@@ -160,8 +198,10 @@ __device__ void merge_work(uint64_t pointer,const semantic_graph::NativeWorkTall
 }
 }
 
-extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,PolicyUniformDescriptor u,
-        uint64_t components_pointer,uint64_t support_pointer,uint64_t snapshot_bytes) {
+template<bool GroupMean>
+__device__ void semantic_policy_uniform_domains_body(PolicyDescriptor p,PolicyUniformDescriptor u,
+        uint64_t components_pointer,uint64_t support_pointer,uint64_t snapshot_bytes,
+        policy_uniform::Reference reference) {
     using namespace policy_uniform;
     const auto* components=reinterpret_cast<const Component*>(components_pointer);
     const auto* support=reinterpret_cast<const uint8_t*>(support_pointer);
@@ -180,16 +220,23 @@ extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,Po
     __shared__ uint32_t legal_count,has_null;
     semantic_graph::NativeWorkTally work{};
     if(threadIdx.x==0) {
-        semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::Command,1);
-        // Initialize the retained private descriptor on-device; binding must
-        // not upload its immutable pointer/law metadata from host memory.
-        u.transferred=0;
-        *reinterpret_cast<PolicyUniformDescriptor*>(p.numerical.uniform)=u;
+        if constexpr(!GroupMean) {
+            semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::Command,1);
+            // Initialize the retained private descriptor on-device; binding
+            // never uploads its pointer/law metadata from host memory.
+            u.transferred=0;
+            *reinterpret_cast<PolicyUniformDescriptor*>(p.numerical.uniform)=u;
+            *reinterpret_cast<semantic_graph::NativeWorkTally*>(u.work)={};
+            semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::CanonicalByte,snapshot_bytes);
+            if(snapshot_bytes)semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::Command,9);
+        }
         *reinterpret_cast<uint64_t*>(u.status)=0;
-        *reinterpret_cast<semantic_graph::NativeWorkTally*>(u.work)={};
-        semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::CanonicalByte,snapshot_bytes);
-        if(snapshot_bytes)semantic_graph::charge_native(&work,semantic_graph::NativeWorkEvent::Command,9);
-        weight=importance();
+        if constexpr(GroupMean) {
+            if(!((reference.kind==ReferenceKind::CurrentActor && reference.actor_rows) ||
+                 (reference.kind==ReferenceKind::FixedDemonstration && reference.edit_rows &&
+                  reference.demonstrated_lane<2)))invalid(u.status);
+        }
+        weight=reference.kind==ReferenceKind::FixedDemonstration ? exact(1.0) : importance();
         charge(work,COMPONENT_COUNT);
         if(u.return_bound>uint64_t(INT64_MAX))invalid(u.status);
     }
@@ -217,8 +264,13 @@ extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,Po
         // Singleton and inactive TEXT have EXACT zero score/critic roots.
         // No prospective training domain means no admissible native training
         // group, not a fabricated denominator or a future use grant.
-        score_roots[i]=count>1 && u.training_rows ? score(coefficient(u,p,i,weight)) : model_policy::zero_cotangent();
-        baselines[i]=count>1 && u.training_rows ? critic(u,baseline) : model_policy::zero_cotangent();charge(work);
+        const bool training=GroupMean || u.training_rows;
+        const bool edit_component=reference.kind!=ReferenceKind::FixedDemonstration ||
+            (i>=reference.demonstrated_lane*68+32 && i<reference.demonstrated_lane*68+68);
+        score_roots[i]=count>1 && training && edit_component
+            ? score(coefficient(u,p,i,weight,reference)) : model_policy::zero_cotangent();
+        baselines[i]=count>1 && training && reference.kind!=ReferenceKind::FixedDemonstration
+            ? critic(u,baseline,reference) : model_policy::zero_cotangent();charge(work);
     }
     __syncthreads();
     // Abstract recurrent prefixes preserve lane/slot order and original
@@ -343,10 +395,38 @@ extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,Po
             if(!policy_cotangent_finite(value))invalid(u.status);
         }
     }
+    if constexpr(GroupMean) {
+        __syncthreads();
+        if(*reinterpret_cast<const uint64_t*>(u.status)) {
+            for(uint32_t root=0;root<3;++root) {
+                auto* output=reinterpret_cast<DomainValue*>(u.outputs[root]);
+                for(uint64_t i=threadIdx.x;i<2*cells[root];i+=blockDim.x) {
+                    output[i]=model_policy::invalid_domain();charge(work);
+                }
+            }
+        }
+    }
     merge_work(u.work,work);
     __syncthreads();
+}
+
+extern "C" __global__ void semantic_policy_uniform_domains(PolicyDescriptor p,PolicyUniformDescriptor u,
+        uint64_t components_pointer,uint64_t support_pointer,uint64_t snapshot_bytes) {
+    semantic_policy_uniform_domains_body<false>(p,u,components_pointer,support_pointer,snapshot_bytes,
+        {policy_uniform::ReferenceKind::ProspectiveFamily,0,0,UINT32_MAX});
+    if(u.group.kind) {
+        auto group=u;
+        for(uint32_t root=0;root<3;++root) {
+            group.outputs[root]=u.group.outputs[root];group.roots[root]=u.group.roots[root];
+        }
+        group.status=u.group.status;
+        semantic_policy_uniform_domains_body<true>(p,group,components_pointer,support_pointer,0,
+            {u.group.kind==1 ? policy_uniform::ReferenceKind::CurrentActor
+                            : policy_uniform::ReferenceKind::FixedDemonstration,
+             u.group.actor_rows,u.group.edit_rows,uint32_t(u.group.demonstrated_lane)});
+    }
     if(threadIdx.x==0 && u.transfer_target) {
-        merge_work(u.transfer_target,*reinterpret_cast<const semantic_graph::NativeWorkTally*>(u.work));
+        policy_uniform::merge_work(u.transfer_target,*reinterpret_cast<const semantic_graph::NativeWorkTally*>(u.work));
         reinterpret_cast<PolicyUniformDescriptor*>(p.numerical.uniform)->transferred=1;
     }
 }
@@ -358,17 +438,22 @@ __device__ bool policy_uniform_admissible(const PolicyDescriptor& p,semantic_gra
     if(!p.numerical.uniform)return false;
     const auto& u=*reinterpret_cast<const PolicyUniformDescriptor*>(p.numerical.uniform);
     const uint64_t cells[3]={p.numerical.parameter_cells,32ULL*TEXT_CARDINALITY,COMPONENT_COUNT};
-    for(uint32_t root=0;root<3;++root) {
-        const auto* labels=reinterpret_cast<const model_policy::CoherentCotangent*>(u.roots[root]);
-        const auto* output=reinterpret_cast<const model_policy::DomainValue*>(u.outputs[root]);
-        for(uint64_t i=threadIdx.x;i<cells[root];i+=blockDim.x) {
-            policy_uniform::charge(*work);
-            const auto& value=labels[root==1 ? i%TEXT_CARDINALITY : i];
-            for(uint32_t word=0;word<4;++word)
-                if(reinterpret_cast<const uint64_t*>(output+i)[word]!=reinterpret_cast<const uint64_t*>(&value.actor)[word] ||
-                   reinterpret_cast<const uint64_t*>(output+cells[root]+i)[word]!=reinterpret_cast<const uint64_t*>(&value.full)[word]) {
-                    semantic_content_integrity_trap();return false;
-                }
+    for(uint32_t family=0;family<(u.group.kind ? 2u : 1u);++family) {
+        if(family && *reinterpret_cast<const uint64_t*>(u.group.status))continue;
+        for(uint32_t root=0;root<3;++root) {
+            const auto* labels=reinterpret_cast<const model_policy::CoherentCotangent*>(
+                family ? u.group.roots[root] : u.roots[root]);
+            const auto* output=reinterpret_cast<const model_policy::DomainValue*>(
+                family ? u.group.outputs[root] : u.outputs[root]);
+            for(uint64_t i=threadIdx.x;i<cells[root];i+=blockDim.x) {
+                policy_uniform::charge(*work);
+                const auto& value=labels[root==1 ? i%TEXT_CARDINALITY : i];
+                for(uint32_t word=0;word<4;++word)
+                    if(reinterpret_cast<const uint64_t*>(output+i)[word]!=reinterpret_cast<const uint64_t*>(&value.actor)[word] ||
+                       reinterpret_cast<const uint64_t*>(output+cells[root]+i)[word]!=reinterpret_cast<const uint64_t*>(&value.full)[word]) {
+                        semantic_content_integrity_trap();return false;
+                    }
+            }
         }
     }
     if(threadIdx.x==0 && !u.transferred) {
@@ -377,5 +462,6 @@ __device__ bool policy_uniform_admissible(const PolicyDescriptor& p,semantic_gra
             semantic_graph::charge_native(work,static_cast<semantic_graph::NativeWorkEvent>(event),produced.events[event]);
         if(produced.overflow)work->overflow=1;
     }
-    return *reinterpret_cast<const uint64_t*>(u.status)==0;
+    return *reinterpret_cast<const uint64_t*>(u.status)==0 &&
+        (!u.group.kind || *reinterpret_cast<const uint64_t*>(u.group.status)==0);
 }

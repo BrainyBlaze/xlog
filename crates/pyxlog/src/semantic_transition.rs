@@ -22266,6 +22266,67 @@ impl PySemanticTransitionTaskUse {
         Ok(PyTuple::new(py, capsules)?.unbind())
     }
 
+    /// Allocation geometry for the current child's frozen full-group family.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (parent, bank))]
+    fn group_update_numerical_domain_layouts(
+        &self,
+        py: Python<'_>,
+        parent: PyRef<'_, PySemanticPreparedStep>,
+        bank: usize,
+    ) -> PyResult<Py<PyTuple>> {
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        parent.require_task(py, self)?;
+        let owner = session.owner()?;
+        self.require_identity(&owner)?;
+        let layouts = owner
+            .prepared_group_update_numerical_domain_layouts(&parent.inner, bank)
+            .map_err(xlog_err)?;
+        drop(owner);
+        let rows = layouts
+            .into_iter()
+            .map(|layout| policy_output_layout_row(py, layout))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, rows)?.unbind())
+    }
+
+    /// Full prospective actor/demonstration M/O/U/I in the original numerical
+    /// owner, after all nine snapshots and before the source Proposal.
+    #[cfg(feature = "semantic-policy")]
+    #[pyo3(signature = (parent, bank, consumer_stream, *, expected_layouts))]
+    fn group_update_numerical_domains(
+        &self,
+        py: Python<'_>,
+        parent: PyRef<'_, PySemanticPreparedStep>,
+        bank: usize,
+        consumer_stream: &Bound<'_, PyAny>,
+        expected_layouts: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let expected_layouts = policy_domain_expected_layouts(expected_layouts)?;
+        let stream = parse_witness_consumer_stream(consumer_stream, &mut 128)?;
+        let session = self.session.borrow(py);
+        session.require_creator()?;
+        parent.require_task(py, self)?;
+        let mut owner = session.owner()?;
+        self.require_identity(&owner)?;
+        parent.content_binding_with_owner(py, &owner)?;
+        parent.require_recording_stream(&owner, stream)?;
+        let tensors = owner
+            .prepared_group_update_numerical_domains(&parent.inner, bank, stream, &expected_layouts)
+            .map_err(xlog_err)?;
+        drop(owner);
+        let capsules = tensors
+            .into_iter()
+            .map(|tensor| {
+                let tensor =
+                    retain_export_owner(tensor, self.session.clone_ref(py), session.owner_thread)?;
+                crate::dlpack_capsule_from_tensor(py, tensor)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, capsules)?.unbind())
+    }
+
     /// Borrow five original device outputs: header, joint query masses,
     /// expected G/P/V, their factor VJP and the original factor log-potentials.
     /// No language loss or continuous rule-cell producer is inferred here.

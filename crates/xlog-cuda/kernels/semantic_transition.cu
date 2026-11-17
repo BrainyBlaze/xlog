@@ -5197,22 +5197,31 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
         // A genuine reached refusal has no actor derivative or critic term.
         // Clear the original output buffers without reading unexecuted inputs.
         for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x) {
-            slot(2);
+            slot(5);
             gradients[i]=0.0f;parameter_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.parameter_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.parameter_domains);
+            domains[i]=domains[b.parameter_cells+i]=model_policy::zero_cotangent().full;
         }
         for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x) {
-            slot(2);
+            slot(5);
             text_gradients[i]=0.0f;text_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.text_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.text_domains);
+            domains[i]=domains[b.text_cells+i]=model_policy::zero_cotangent().full;
         }
         for(uint32_t i=threadIdx.x;i<2*37*128;i+=blockDim.x) {
             slot(2);
             recurrent_gradients[i]=0.0f;recurrent_cotangents[i]=model_policy::zero_cotangent();
         }
         for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x) {
-            slot(4);
+            slot(7);
             coefficients[i]=0.0;baseline_gradients[i]=0.0f;
             baseline_cotangents[i]=model_policy::zero_cotangent();
             coefficient_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.baseline_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.baseline_domains);
+            domains[i]=domains[COMPONENT_COUNT+i]=model_policy::zero_cotangent().full;
         }
         if(threadIdx.x==0 && b.critic_term) { slot();*reinterpret_cast<float*>(b.critic_term)=0.0f; }
         return;

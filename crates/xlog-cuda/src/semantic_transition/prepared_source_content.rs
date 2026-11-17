@@ -546,6 +546,7 @@ enum SourceGeometryAllocationPort {
     Source,
     Feedback(usize),
     Uniform(usize),
+    GroupUniform(usize),
     ContentOverlay(usize),
 }
 
@@ -653,7 +654,8 @@ impl SourceContentGeometryOwner {
             | SourceGeometryAllocationPort::Source
             | SourceGeometryAllocationPort::Feedback(_) => section.map(|(kind, _)| (kind, 0)),
             // Uniform outputs retain their exact native Proposal bank.
-            SourceGeometryAllocationPort::Uniform(_) => section,
+            SourceGeometryAllocationPort::Uniform(_)
+            | SourceGeometryAllocationPort::GroupUniform(_) => section,
             SourceGeometryAllocationPort::ContentOverlay(_) => None,
             SourceGeometryAllocationPort::Model(_) => unreachable!(),
         })
@@ -675,7 +677,11 @@ impl SourceContentGeometryOwner {
             ));
         }
         if self.kind.is_current()
-            && matches!(allocation.port, SourceGeometryAllocationPort::Uniform(_))
+            && matches!(
+                allocation.port,
+                SourceGeometryAllocationPort::Uniform(_)
+                    | SourceGeometryAllocationPort::GroupUniform(_)
+            )
             && section.map(|(kind, _)| kind) != Some(SemanticTransitionKind::Proposal)
         {
             return Err(publication_input_error(
@@ -710,7 +716,11 @@ impl SourceContentGeometryOwner {
         &self,
         allocation: &SemanticSourceGeometryAllocation,
     ) -> bool {
-        matches!(allocation.port, SourceGeometryAllocationPort::Uniform(_))
+        matches!(
+            allocation.port,
+            SourceGeometryAllocationPort::Uniform(_)
+                | SourceGeometryAllocationPort::GroupUniform(_)
+        )
     }
 
     fn bind_uniform_domain_layouts(
@@ -838,15 +848,17 @@ impl SourceContentGeometryOwner {
                 .and_then(|feedback| feedback.content.tensors.get(index))
                 .and_then(|tensor| tensor.source.clone())
                 .ok_or(SemanticTransitionError::ObservationMismatch)?,
-            SourceGeometryAllocationPort::Uniform(index) => {
+            SourceGeometryAllocationPort::Uniform(index)
+            | SourceGeometryAllocationPort::GroupUniform(index) => {
                 let branch = &prepared.branches[section.1];
                 let buffers = branch
                     .policy_buffers
                     .as_ref()
                     .or_else(|| branch.policy.as_ref().map(|policy| &policy.buffers))
                     .ok_or(SemanticTransitionError::NotBound)?;
+                let group = matches!(declared.port, SourceGeometryAllocationPort::GroupUniform(_));
                 let layouts =
-                    policy_uniform_domain_layouts(buffers, session.codebooks.input_cells)?;
+                    policy_uniform_domain_layouts(buffers, session.codebooks.input_cells, group)?;
                 let expected = layouts
                     .get(index)
                     .ok_or(SemanticTransitionError::ObservationMismatch)?;
@@ -863,8 +875,12 @@ impl SourceContentGeometryOwner {
                 }
                 // SAFETY: the byte view retains the original F64 output;
                 // it is used only for authentic allocation/address comparison.
-                unsafe { buffers.numerical.uniform.outputs[index].view().cast::<u8>() }
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?
+                unsafe {
+                    buffers.numerical.uniform.domain_outputs(group)?[index]
+                        .view()
+                        .cast::<u8>()
+                }
+                .ok_or(SemanticTransitionError::ObservationMismatch)?
             }
             SourceGeometryAllocationPort::Model(_) => unreachable!(),
             SourceGeometryAllocationPort::ContentOverlay(_) => unreachable!(),
@@ -979,6 +995,7 @@ impl SourceContentGeometryOwner {
                 SourceGeometryAllocationPort::Header
                     | SourceGeometryAllocationPort::Source
                     | SourceGeometryAllocationPort::Uniform(_)
+                    | SourceGeometryAllocationPort::GroupUniform(_)
             ) {
                 // Uniform output ports keep their original producer identity;
                 // the capture roster supplies its own complete ordered indices.
@@ -1046,7 +1063,8 @@ impl SourceContentGeometryOwner {
                     return Ok((false, true));
                 }
             }
-            SourceGeometryAllocationPort::Uniform(index) => {
+            SourceGeometryAllocationPort::Uniform(index)
+            | SourceGeometryAllocationPort::GroupUniform(index) => {
                 let layout = *self
                     .publication
                     .uniform_layouts
@@ -1286,6 +1304,9 @@ impl SourceContentGeometryOwner {
                 .as_ref()
                 .and_then(|layouts| layouts.get(index))
                 .map(|layout| layout.allocation.clone()),
+            // CURRENT allocations are authenticated by require_prepared_allocation
+            // against their original child, after the backing has been allocated.
+            SourceGeometryAllocationPort::GroupUniform(_) => None,
             SourceGeometryAllocationPort::ContentOverlay(_) => unreachable!(),
         };
         if provenance
@@ -1344,13 +1365,16 @@ impl SourceContentGeometryOwner {
                     .ok_or(SemanticTransitionError::ObservationMismatch)?,
             )?)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
-            SourceGeometryAllocationPort::Uniform(index) => u64::try_from(tensor_layout_bytes(
-                self.publication
-                    .uniform_layouts
-                    .get(index)
-                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
-            )?)
-            .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            SourceGeometryAllocationPort::Uniform(index)
+            | SourceGeometryAllocationPort::GroupUniform(index) => {
+                u64::try_from(tensor_layout_bytes(
+                    self.publication
+                        .uniform_layouts
+                        .get(index)
+                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
+                )?)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?
+            }
             SourceGeometryAllocationPort::ContentOverlay(_) => {
                 return Err(publication_input_error(
                     "content overlay tensors come from their complete original capture roster",
@@ -1769,6 +1793,26 @@ impl SemanticPreparedSourceContentGeometry {
         &self,
         prepared_section: Option<(SemanticTransitionKind, usize)>,
     ) -> Result<[SemanticSourceGeometryTensor; 3], SemanticTransitionError> {
+        self.uniform_domain_layouts(prepared_section, false)
+    }
+
+    pub fn group_update_numerical_domain_layouts(
+        &self,
+        prepared_section: Option<(SemanticTransitionKind, usize)>,
+    ) -> Result<[SemanticSourceGeometryTensor; 3], SemanticTransitionError> {
+        if !self.owner.kind.is_current() {
+            return Err(publication_input_error(
+                "group domains require their original current child geometry",
+            ));
+        }
+        self.uniform_domain_layouts(prepared_section, true)
+    }
+
+    fn uniform_domain_layouts(
+        &self,
+        prepared_section: Option<(SemanticTransitionKind, usize)>,
+        group: bool,
+    ) -> Result<[SemanticSourceGeometryTensor; 3], SemanticTransitionError> {
         self.owner.require_geometry_section(prepared_section)?;
         if prepared_section.is_some_and(|(kind, _)| kind != SemanticTransitionKind::Proposal) {
             return Err(publication_input_error(
@@ -1780,7 +1824,11 @@ impl SemanticPreparedSourceContentGeometry {
                 self.owner.publication.uniform_layouts[index],
                 0,
                 0,
-                SourceGeometryAllocationPort::Uniform(index),
+                if group {
+                    SourceGeometryAllocationPort::GroupUniform(index)
+                } else {
+                    SourceGeometryAllocationPort::Uniform(index)
+                },
                 0,
                 prepared_section,
             )
@@ -2245,7 +2293,7 @@ pub(super) struct SourcePublicationGeometry {
     feedback_plan: FeedbackAllocationPlan,
     feedback_layouts: [SemanticTensorLayout; 6],
     pub(super) policy_layouts: [SemanticTensorLayout; 9],
-    pub(super) policy_producer_ceiling: [u64; 9],
+    pub(super) policy_producer_ceilings: [[u64; 9]; 2],
     uniform_layouts: [SemanticTensorLayout; 3],
     policy_layout: SemanticPolicyLayout,
     support_layout: [std::ops::Range<usize>; COMPONENT_COUNT],
@@ -2355,14 +2403,21 @@ impl SourcePublicationGeometry {
         let (components, support_cells) =
             ActionCodebooks::component_geometry(&original.codebook_header, seed.program.is_some())?;
         let policy = SemanticPolicyLayout::from_components(&components)?;
-        let mut policy_producer_ceiling = native_work_bound::policy_uniform_native_work_ceiling(
-            &components,
-            policy.parameter_cells as u64,
-        )?;
-        native_work_bound::add_native_work_ceiling(
-            &mut policy_producer_ceiling,
-            [9, 0, 0, 0, 0, 0, 0, 0, 0],
-        )?;
+        let mut policy_producer_ceilings = [
+            native_work_bound::policy_uniform_native_work_ceiling(
+                &components,
+                policy.parameter_cells as u64,
+                false,
+            )?,
+            native_work_bound::policy_uniform_native_work_ceiling(
+                &components,
+                policy.parameter_cells as u64,
+                true,
+            )?,
+        ];
+        for ceiling in &mut policy_producer_ceilings {
+            native_work_bound::add_native_work_ceiling(ceiling, [9, 0, 0, 0, 0, 0, 0, 0, 0])?;
+        }
         let mut support_layout = std::array::from_fn(|_| 0..0);
         for (component, span) in components.iter().zip(&mut support_layout) {
             let begin = usize::try_from(component.offset)
@@ -2377,9 +2432,11 @@ impl SourcePublicationGeometry {
         let policy_layouts =
             policy_numerical_producer_layouts(support_cells, policy.parameter_cells)?;
         for layout in &policy_layouts {
-            policy_producer_ceiling[8] = policy_producer_ceiling[8]
-                .checked_add(tensor_layout_bytes(layout)? as u64)
-                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            for ceiling in &mut policy_producer_ceilings {
+                ceiling[8] = ceiling[8]
+                    .checked_add(tensor_layout_bytes(layout)? as u64)
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            }
         }
         let uniform_layouts =
             policy_uniform_domain_tensor_layouts(support_cells, policy.parameter_cells)?;
@@ -2392,7 +2449,7 @@ impl SourcePublicationGeometry {
             feedback_plan,
             feedback_layouts,
             policy_layouts,
-            policy_producer_ceiling,
+            policy_producer_ceilings,
             uniform_layouts,
             policy_layout: policy,
             support_layout,
@@ -2866,7 +2923,8 @@ impl native_work_bound::FrozenColdSourceContent {
                 input_native,
                 input_dma,
                 owner.feedback_ceiling,
-                owner.geometry.publication.policy_producer_ceiling,
+                owner.geometry.publication.policy_producer_ceilings
+                    [usize::from(owner.geometry.kind.is_current())],
             ] {
                 native_work_bound::add_native_work_ceiling(&mut ceiling, producer)?;
             }

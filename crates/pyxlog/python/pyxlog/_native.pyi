@@ -753,6 +753,19 @@ class SemanticPreparedSourceContentGeometry:
         Proposal and bank; its two actual uniform buffer sets are distinct.
         """
         ...
+
+    def group_update_numerical_domain_layouts(
+        self, *, prepared_kind: Literal["proposal"],
+        prepared_bank: Literal[0, 1],
+    ) -> tuple[
+        _SourceGeometryTensor, _SourceGeometryTensor, _SourceGeometryTensor
+    ]:
+        """CURRENT-only geometry of the separate frozen full-group domain ports.
+
+        Cold declaration precedes allocation. The original child authenticates
+        each complete allocation against its TaskUse projection before use.
+        """
+        ...
     def continuation_capacity(self) -> int: ...
     def continuation_blocks(self) -> Optional[int]: ...
 
@@ -1390,6 +1403,26 @@ class SemanticTransitionTaskUse:
 
         Requires the original projected allocation owners, offsets, spans and
         layouts. Existing numerical, recording and stream guards still apply.
+        """
+        ...
+
+    def group_update_numerical_domain_layouts(
+        self, parent: SemanticPreparedStep, bank: int,
+    ) -> _PolicyNumericalDomainLayouts:
+        """Original allocations of the frozen current actor/demonstration family."""
+        ...
+
+    def group_update_numerical_domains(
+        self, parent: SemanticPreparedStep, bank: int, consumer_stream: int, *,
+        expected_layouts: _PolicyNumericalDomainLayouts,
+    ) -> tuple[Any, Any, Any]:
+        """Export prospective actor/full FP64 M/O/U/I before the source Proposal.
+
+        Shapes are [2,P,4], [2,32,V,4], [2,1,136,4]. The native frozen Update
+        owner supplies the original role, group means, objective and edit lane.
+        Consume in the source numerical owner after all nine primal snapshots.
+        These domains and their allocations are distinct from Proposal domains
+        and the nine selected-VJP outputs; neither is replaced or relabelled.
         """
         ...
 

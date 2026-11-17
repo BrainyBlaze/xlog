@@ -386,6 +386,9 @@ impl ActorRefreshPreparationEntry {
 pub(super) struct PreparedActorRefreshOwner {
     pub(super) kind: SemanticSourceContentGeometryKind,
     pub(super) demonstration: Option<OriginalEditDemonstration>,
+    pub(super) actor_group_rows: u64,
+    pub(super) edit_group_rows: u64,
+    pub(super) objective_law: SemanticTaskObjectiveLaw,
     pub(super) issuer: Arc<()>,
     pub(super) scope: Arc<()>,
     pub(super) step: u64,
@@ -1273,6 +1276,13 @@ impl SemanticTransitionSession {
             .ok_or_else(|| {
                 publication_input_error("actor refresh row is outside the frozen actor group")
             })?;
+        let actor_group_rows = u64::try_from(training.actor_group_members().len())
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let edit_group_rows = u64::try_from(training.edit_group_members().len())
+            .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
+        let objective_law = self
+            .task_objective_law()
+            .ok_or(SemanticTransitionError::NotBound)?;
         for (bank, geometry) in content_geometry.iter().enumerate() {
             if geometry.kind() != kind {
                 return Err(SemanticTransitionError::ObservationMismatch);
@@ -1477,6 +1487,9 @@ impl SemanticTransitionSession {
             inner: Arc::new(PreparedActorRefreshOwner {
                 kind,
                 demonstration,
+                actor_group_rows,
+                edit_group_rows,
+                objective_law,
                 issuer: Arc::clone(&self.publication_issuer),
                 scope: Arc::clone(&step.scope),
                 step: step.token,
