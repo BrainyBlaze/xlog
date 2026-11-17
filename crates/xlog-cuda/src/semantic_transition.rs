@@ -4847,9 +4847,31 @@ fn continuation_service_layouts(
         layout(5, 8, 1, 1, [1, 0, 0, 0])?,
     ];
     if let Some(blocks) = physical_blocks {
-        layouts.push(layout(6, 9, 8, 3, [blocks as u64, 2, 3, 0])?);
+        layouts.push(numerical_block_tensor_layout(first_index + 6, blocks)?);
     }
     Ok(layouts)
+}
+
+fn numerical_block_tensor_layout(
+    index: u64,
+    physical_blocks: usize,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    canonical_tensor_layout(SemanticTensorLayout {
+        role: 0,
+        index,
+        scalar_type: 9,
+        element_bytes: 8,
+        rank: 3,
+        dimensions: [
+            u64::try_from(physical_blocks)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            2,
+            3,
+            0,
+        ],
+        logical_axis: u64::MAX,
+        strides_bytes: [0; 4],
+    })
 }
 
 /// Decode the retained versioned schema from the original ModelContract slice.
@@ -16413,6 +16435,7 @@ struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
+    numerical_blocks: Option<PreparedSemanticTensor>,
     stream_scratch: [PreparedSemanticTensor; 4],
     _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
@@ -25218,7 +25241,7 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("original structural scope")
                 .transitions[index];
-            let binding_ceiling = match kind {
+            let mut binding_ceiling = match kind {
                 SemanticTransitionKind::Proposal => {
                     native_work_bound::policy_binding_native_work_ceiling(
                         &self.codebooks.components,
@@ -25231,6 +25254,23 @@ impl SemanticTransitionSession {
                 }
                 _ => [0; 9],
             };
+            if matches!(
+                kind,
+                SemanticTransitionKind::Proposal | SemanticTransitionKind::Update
+            ) {
+                if let Some(roster) = self
+                    .prepared_publication()?
+                    .physical_parameter_roster
+                    .as_ref()
+                {
+                    native_work_bound::add_native_work_ceiling(
+                        &mut binding_ceiling,
+                        native_work_bound::numerical_block_snapshot_native_work_ceiling(
+                            roster.len(),
+                        )?,
+                    )?;
+                }
+            }
             let prepared = self
                 .steps
                 .get_mut(&token)
@@ -25790,17 +25830,36 @@ impl SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let policy_bytes = block_bytes;
         #[cfg(feature = "semantic-policy")]
-        let policy_bytes = policy_buffer_bytes(
-            &self.policy_layout()?,
-            self.codebooks.input_cells,
-            self.actor_refresh.is_some(),
-        )?
-        .checked_add(self.codebooks.input_cells)
-        .and_then(|n| n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()))
-        .and_then(|n| n.checked_add(size_of::<DeviceState>()))
-        .and_then(|n| n.checked_mul(2))
-        .and_then(|n| n.checked_add(block_bytes))
-        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let policy_bytes =
+            policy_buffer_bytes(&self.policy_layout()?, self.codebooks.input_cells, false)?
+                .checked_add(self.codebooks.input_cells)
+                .and_then(|n| {
+                    n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>())
+                })
+                .and_then(|n| n.checked_add(size_of::<DeviceState>()))
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| n.checked_add(block_bytes))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        #[cfg(feature = "semantic-policy")]
+        let group_policy_bytes = if self.actor_refresh.is_some() {
+            let layout = self.policy_layout()?;
+            let ordinary = policy_buffer_bytes(&layout, self.codebooks.input_cells, false)?;
+            let grouped = policy_buffer_bytes(&layout, self.codebooks.input_cells, true)?;
+            let proposals = transitions
+                .iter()
+                .filter(|kind| **kind == SemanticTransitionKind::Proposal)
+                .count();
+            let bytes = grouped
+                .checked_sub(ordinary)
+                .and_then(|bytes| bytes.checked_mul(2))
+                .and_then(|bytes| bytes.checked_mul(proposals))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?
+        } else {
+            0
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let group_policy_bytes = 0;
         let ground_layout = self
             .task_ground
             .as_ref()
@@ -25911,6 +25970,7 @@ impl SemanticTransitionSession {
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .and_then(|bytes| bytes.checked_add(replay_bytes))
                 .and_then(|bytes| bytes.checked_add(policy_work_bytes))
+                .and_then(|bytes| bytes.checked_add(group_policy_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let generation_bytes = if !replace_catalogue {
             0
@@ -26246,8 +26306,14 @@ impl SemanticTransitionSession {
                 let [blocks_zero, blocks_one] = [allocate_block_slot()?, allocate_block_slot()?];
                 #[cfg(feature = "semantic-policy")]
                 let [branch_zero, branch_one] = [
-                    self.prepare_step_policy_storage(&mut reservation)?,
-                    self.prepare_step_policy_storage(&mut reservation)?,
+                    self.prepare_step_policy_storage(
+                        &mut reservation,
+                        *kind == SemanticTransitionKind::Proposal && self.actor_refresh.is_some(),
+                    )?,
+                    self.prepare_step_policy_storage(
+                        &mut reservation,
+                        *kind == SemanticTransitionKind::Proposal && self.actor_refresh.is_some(),
+                    )?,
                 ];
                 let [model_update_zero, model_update_one] = model_updates;
                 #[cfg(feature = "semantic-policy")]
@@ -31085,9 +31151,9 @@ impl SemanticTransitionSession {
         let kind = self.prepared_transition_kind(step)?;
         let (physical_blocks, model_schema_digest, model_identity) =
             storage.continuation_block_contract(kind, &continuation, true)?;
-        let model_contract = match (physical_blocks, model_owner) {
-            (None, None) => None,
-            (Some(_), Some(model_witness)) => {
+        let model_contract = if physical_blocks.is_some() || kind == SemanticTransitionKind::Update
+        {
+            if let Some(model_witness) = model_owner {
                 self.checked_prepared_tensor_owner(step, model_witness)?;
                 let owner = &self.steps[&step.token];
                 if owner.content[model_witness.index].model_bank != Some(bank) {
@@ -31095,22 +31161,28 @@ impl SemanticTransitionSession {
                         "prepared block bounds require the same bank's retained model owners",
                     ));
                 }
-                Some(
-                    owner
-                        .inputs
-                        .as_ref()
-                        .ok_or(SemanticTransitionError::NotBound)?
-                        .views[bank]
-                        .get(&(44, 0))
-                        .cloned()
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                )
-            }
-            _ => {
+            } else if kind != SemanticTransitionKind::Update {
                 return Err(publication_input_error(
                     "prepared proposal blocks and their model-content witness must be supplied together",
                 ));
             }
+            Some(
+                self.steps[&step.token]
+                    .inputs
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?
+                    .views[bank]
+                    .get(&(44, 0))
+                    .cloned()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            )
+        } else {
+            if model_owner.is_some() {
+                return Err(publication_input_error(
+                    "prepared model-content witness has no original block-bound consumer",
+                ));
+            }
+            None
         };
         let mut service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
@@ -31341,6 +31413,33 @@ impl SemanticTransitionSession {
                 "continuation witness has the wrong original service roster",
             ));
         }
+        let (physical_blocks, numerical_block_snapshot) = if kind == SemanticTransitionKind::Update
+        {
+            let blocks = storage
+                .physical_parameter_roster
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error(
+                        "Update gradient bounds require the original physical parameter roster",
+                    )
+                })?
+                .len();
+            let snapshot = owner
+                .prepared
+                .as_ref()
+                .expect("prepared Update owner")
+                .branches[bank]
+                .numerical_block_snapshot
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error(
+                        "Update gradient bounds lack their reserved native slot",
+                    )
+                })?;
+            (Some(blocks), Some(Arc::clone(snapshot)))
+        } else {
+            (physical_blocks, numerical_block_snapshot)
+        };
         let binding = Arc::new(TextBindingStorage {
             inputs: services,
             capacity_refusal,
@@ -31474,6 +31573,7 @@ impl SemanticTransitionSession {
         model_memory: SemanticModelMemory,
         tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        numerical_blocks: DlpackManagedTensor,
         slab_backing: SemanticTensorInput,
         baseline_forward: &SemanticModelForwardWitness,
         candidate_forward: &SemanticModelForwardWitness,
@@ -31488,6 +31588,7 @@ impl SemanticTransitionSession {
             model_memory,
             tensors,
             admissibility,
+            Some(numerical_blocks),
             slab_backing,
             baseline_forward,
             candidate_forward,
@@ -31520,6 +31621,7 @@ impl SemanticTransitionSession {
             model_memory,
             tensors,
             admissibility,
+            None,
             slab_backing,
             baseline_forward,
             candidate_forward,
@@ -31538,6 +31640,7 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        numerical_blocks: Option<DlpackManagedTensor>,
         slab_backing: SemanticTensorInput,
         baseline_forward: &SemanticModelForwardWitness,
         candidate_forward: &SemanticModelForwardWitness,
@@ -31594,8 +31697,31 @@ impl SemanticTransitionSession {
             ));
         }
         let tensor_count = tensors.len();
+        let numerical_blocks = match (expected, numerical_blocks) {
+            (SemanticTransitionKind::Update, Some(tensor)) => {
+                let blocks = self.prepared_publication()?.physical_parameter_roster.as_ref()
+                    .ok_or_else(|| publication_input_error(
+                        "Update gradient bounds require the original physical parameter roster",
+                    ))?.len();
+                let index = u64::try_from(allocation_count).ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                Some(SemanticTensorInput {
+                    tensor,
+                    layout: numerical_block_tensor_layout(index, blocks)?,
+                    logical_begin: 0,
+                    logical_end: 0,
+                    native_allocation: None,
+                })
+            }
+            (SemanticTransitionKind::Control, None) => None,
+            _ => return Err(publication_input_error(
+                "Update requires its complete common gradient bounds; Control owns no gradient table",
+            )),
+        };
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
+        model_memory.allocations.extend(numerical_blocks);
         self.bind_tensor_owner_inputs(
             step.token,
             witness.index,
@@ -31609,10 +31735,16 @@ impl SemanticTransitionSession {
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
         let (tensors, update_metadata) = outputs.split_at(tensor_count);
-        let [admissibility] = update_metadata else {
-            return Err(publication_input_error(
-                "model update output requires numerical admissibility",
-            ));
+        let (admissibility, numerical_blocks) = match (expected, update_metadata) {
+            (SemanticTransitionKind::Update, [admissibility, blocks]) => {
+                (admissibility, Some(blocks))
+            }
+            (SemanticTransitionKind::Control, [admissibility]) => (admissibility, None),
+            _ => {
+                return Err(publication_input_error(
+                    "model output differs from its original numerical producer roster",
+                ))
+            }
         };
         let allocation_index = u64::try_from(allocation_count)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -31748,6 +31880,38 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        if let Some(blocks) = numerical_blocks {
+            let bytes = tensor_layout_bytes(&blocks.layout)?;
+            if step_input_overlap(blocks.data, bytes, admissibility.data, 1)? {
+                return Err(publication_input_error(
+                    "Update gradient bounds alias numerical admissibility",
+                ));
+            }
+            for tensor in allocations.iter().chain(&stream_scratch) {
+                if step_input_overlap(
+                    blocks.data,
+                    bytes,
+                    tensor.data,
+                    tensor_layout_bytes(&tensor.layout)?,
+                )? {
+                    return Err(publication_input_error(
+                        "Update gradient bounds alias model output or stream scratch",
+                    ));
+                }
+            }
+            for owned in &storage.allocations {
+                if step_input_overlap(
+                    blocks.data,
+                    bytes,
+                    owned.entry().pointer,
+                    owned.entry().bytes as usize,
+                )? {
+                    return Err(publication_input_error(
+                        "Update gradient bounds alias native publication storage",
+                    ));
+                }
+            }
+        }
         let values = allocations
             .iter()
             .enumerate()
@@ -31785,6 +31949,7 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         let (slab_base, slab_allocation_bytes) = accounted_tensor_allocations(
             &std::iter::once(admissibility)
+                .chain(numerical_blocks)
                 .chain(&stream_scratch)
                 .collect::<Vec<_>>(),
             &slab,
@@ -31799,6 +31964,37 @@ impl SemanticTransitionSession {
         } else {
             slab_allocation_bytes
         };
+        if let Some(blocks) = numerical_blocks {
+            let snapshot = Arc::clone(
+                self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("prepared Update owner")
+                    .branches[bank]
+                    .numerical_block_snapshot
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "Update gradient bounds lack their reserved native slot",
+                        )
+                    })?,
+            );
+            let work = self.prepared_policy_work_counter(
+                step,
+                bank,
+                policy_work::PolicyWorkKey::ModelScratch,
+                &self.publication_issuer,
+                step.token,
+            )?;
+            enqueue_numerical_block_snapshot(
+                &self.provider,
+                &self.domain,
+                &mut self.poisoned,
+                blocks,
+                &snapshot,
+                Some(work),
+            )?;
+        }
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -31818,6 +32014,7 @@ impl SemanticTransitionSession {
             values,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
+            numerical_blocks: numerical_blocks.cloned(),
             stream_scratch,
             _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
@@ -43519,19 +43716,16 @@ impl SemanticTransitionSession {
         let mut reservation = self
             .provider
             .memory()
-            .reserve_bytes(policy_buffer_bytes(
-                &layout,
-                self.codebooks.input_cells,
-                self.actor_refresh.is_some(),
-            )? as u64)
+            .reserve_bytes(policy_buffer_bytes(&layout, self.codebooks.input_cells, false)? as u64)
             .map_err(|error| runtime_error("policy reservation", error))?;
-        self.allocate_policy_buffers_reserved(&mut reservation)
+        self.allocate_policy_buffers_reserved(&mut reservation, false)
     }
 
     #[cfg(feature = "semantic-policy")]
     fn allocate_policy_buffers_reserved(
         &self,
         reservation: &mut GpuMemoryReservation,
+        group: bool,
     ) -> Result<PolicyBuffers, SemanticTransitionError> {
         let layout = self.policy_layout()?;
         let law = self.task_objective_law().ok_or_else(|| {
@@ -43648,7 +43842,10 @@ impl SemanticTransitionSession {
             allocate_uniform(layout.score_cells() * 8)?,
             allocate_uniform(COMPONENT_COUNT * 8)?,
         ];
-        let group = if let Some(staged) = &self.actor_refresh {
+        let group = if group {
+            let staged = self.actor_refresh.as_ref().ok_or_else(|| {
+                publication_input_error("group domains require their original frozen refresh owner")
+            })?;
             if staged.proof.inner.objective_law != law {
                 return Err(publication_input_error(
                     "group domains changed their original frozen objective law",
@@ -43842,8 +44039,9 @@ impl SemanticTransitionSession {
     fn prepare_step_policy_storage(
         &self,
         reservation: &mut GpuMemoryReservation,
+        group: bool,
     ) -> Result<PreparedPolicyStorage, SemanticTransitionError> {
-        let buffers = self.allocate_policy_buffers_reserved(reservation)?;
+        let buffers = self.allocate_policy_buffers_reserved(reservation, group)?;
         let support = reservation
             .alloc(self.codebooks.input_cells)
             .map_err(|error| runtime_error("prepared support allocation", error))?;
@@ -47610,6 +47808,11 @@ impl SemanticTransitionSession {
                 }
                 if let Some(source) = &output.admissibility.source {
                     ranges.push((output.admissibility.data, source.len() as u64));
+                }
+                if let Some(blocks) = &output.numerical_blocks {
+                    if let Some(source) = &blocks.source {
+                        ranges.push((blocks.data, source.len() as u64));
+                    }
                 }
                 for scratch in &output.stream_scratch {
                     if scratch.source.is_some() {

@@ -26807,7 +26807,11 @@ impl PySemanticTransitionController {
 
     /// Bind the complete original model backing produced by this recorded
     /// update. The transient witness covers allocations, typed model views,
-    /// Bool8[1] numerical admissibility. ``baseline_forward`` and
+    /// Bool8[1] numerical admissibility and FP64[P,2,3] common gradient bounds.
+    /// Rows follow the original physical parameter roster; regions are actor/full
+    /// and columns are B/O/U for the whole original joint Update. XLOG retains a
+    /// private snapshot and checks 100*O <= B in each region before joint publication.
+    /// ``baseline_forward`` and
     /// ``candidate_forward`` are opaque witnesses issued only by
     /// each stream's ``finish`` at the two actual producer sites. They retain
     /// the bounded original scratch and complete native coverage receipts, not
@@ -26817,7 +26821,7 @@ impl PySemanticTransitionController {
     /// XLOG computes every canary measurement, resource tally and refusal on device.
     /// ``bank`` identifies the recorded branch that owns these original outputs.
     #[cfg(feature = "semantic-policy")]
-    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, slab_backing, slab_bytes, baseline_forward, candidate_forward, canary_comparison, allocation_owner, consumer_stream))]
+    #[pyo3(signature = (task_use, *, step, bank, tensors, model_allocations, model_storages, model_views, numerical_admissibility, numerical_blocks, slab_backing, slab_bytes, baseline_forward, candidate_forward, canary_comparison, allocation_owner, consumer_stream))]
     #[expect(
         clippy::too_many_arguments,
         reason = "prepared update binding retains model geometry and numerical admissibility"
@@ -26833,6 +26837,7 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
+        numerical_blocks: &Bound<'_, PyAny>,
         slab_backing: &Bound<'_, PyAny>,
         slab_bytes: &Bound<'_, PyAny>,
         baseline_forward: &PySemanticModelForwardWitness,
@@ -26852,6 +26857,7 @@ impl PySemanticTransitionController {
             model_storages,
             model_views,
             numerical_admissibility,
+            Some(numerical_blocks),
             slab_backing,
             slab_bytes,
             baseline_forward,
@@ -26944,6 +26950,7 @@ impl PySemanticTransitionController {
             model_storages,
             model_views,
             numerical_admissibility,
+            None,
             slab_backing,
             slab_bytes,
             baseline_forward,
@@ -35279,6 +35286,7 @@ impl PySemanticTransitionController {
         model_storages: &Bound<'_, PyAny>,
         model_views: &Bound<'_, PyAny>,
         numerical_admissibility: &Bound<'_, PyAny>,
+        numerical_blocks: Option<&Bound<'_, PyAny>>,
         slab_backing: &Bound<'_, PyAny>,
         slab_bytes: &Bound<'_, PyAny>,
         baseline_forward: &PySemanticModelForwardWitness,
@@ -35290,6 +35298,11 @@ impl PySemanticTransitionController {
         let _operation = TensorProducerOperation::begin(&self.session.borrow(py))?;
         self.session.borrow(py).require_creator()?;
         self.require_read_issued(task_use)?;
+        if (expected_kind == SemanticTransitionKind::Update) != numerical_blocks.is_some() {
+            return Err(invalid(
+                "Update requires its complete common gradient bounds",
+            ));
+        }
         if bank > 1 {
             return Err(invalid("pending model bank must be zero or one"));
         }
@@ -35383,6 +35396,18 @@ impl PySemanticTransitionController {
             logical_end: 0,
             native_allocation: None,
         };
+        let numerical_blocks = numerical_blocks
+            .map(|blocks| {
+                validate_producer_device_guarded(blocks, device, &check)?;
+                producer_owners.0.push(blocks.clone().unbind());
+                crate::dlpack_from_py_for_stream_guarded(
+                    blocks,
+                    i64::try_from(stream)
+                        .map_err(|_| invalid("consumer stream exceeds DLPack address space"))?,
+                    &check,
+                )
+            })
+            .transpose()?;
         validate_producer_device_guarded(slab_backing, device, &check)?;
         producer_owners.0.push(slab_backing.clone().unbind());
         let slab_backing = SemanticTensorInput {
@@ -35415,33 +35440,42 @@ impl PySemanticTransitionController {
                 "pending model authority changed during model output handoff",
             ));
         }
-        let bind = match expected_kind {
-            SemanticTransitionKind::Update => {
-                xlog_cuda::SemanticTransitionSession::bind_prepared_update_output
-            }
-            SemanticTransitionKind::Control => {
-                xlog_cuda::SemanticTransitionSession::bind_prepared_control_output
-            }
-            _ => return Err(invalid("pending-model output requires Update or Control")),
+        let model_memory = SemanticModelMemory {
+            allocations: allocation_handoff.into_native(),
+            storages,
+            views,
         };
-        bind(
-            &mut owner,
-            &step.inner,
-            bank,
-            SemanticModelMemory {
-                allocations: allocation_handoff.into_native(),
-                storages,
-                views,
-            },
-            tensor_handoff.into_native(),
-            numerical_admissibility,
-            slab_backing,
-            &baseline_forward.inner,
-            &candidate_forward.inner,
-            &canary_comparison.inner,
-            &allocation_owner.inner,
-            stream,
-        )
+        let tensors = tensor_handoff.into_native();
+        match expected_kind {
+            SemanticTransitionKind::Update => owner.bind_prepared_update_output(
+                &step.inner,
+                bank,
+                model_memory,
+                tensors,
+                numerical_admissibility,
+                numerical_blocks.ok_or_else(|| invalid("Update gradient bounds are absent"))?,
+                slab_backing,
+                &baseline_forward.inner,
+                &candidate_forward.inner,
+                &canary_comparison.inner,
+                &allocation_owner.inner,
+                stream,
+            ),
+            SemanticTransitionKind::Control => owner.bind_prepared_control_output(
+                &step.inner,
+                bank,
+                model_memory,
+                tensors,
+                numerical_admissibility,
+                slab_backing,
+                &baseline_forward.inner,
+                &candidate_forward.inner,
+                &canary_comparison.inner,
+                &allocation_owner.inner,
+                stream,
+            ),
+            _ => return Err(invalid("pending-model output requires Update or Control")),
+        }
         .map_err(xlog_err)?;
         drop(state);
         drop(owner);

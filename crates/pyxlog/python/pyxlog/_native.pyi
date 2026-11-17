@@ -2035,12 +2035,23 @@ class SemanticTransitionController:
     def bind_prepared_update_output(
         self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
         bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
-        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        model_views: Any, numerical_admissibility: Any, numerical_blocks: Any,
+        slab_backing: Any,
         slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
         candidate_forward: SemanticModelForwardWitness,
         canary_comparison: SemanticModelCanaryWitness,
         allocation_owner: SemanticTensorOwner, consumer_stream: int,
-    ) -> None: ...
+    ) -> None:
+        """Bind the complete common gradient budget with the pending model.
+
+        numerical_blocks is mandatory contiguous FP64[P,2,3] in the original
+        physical parameter order: actor/full regions and B/O/U columns. It
+        covers every contribution to the sole original joint Update gradient,
+        including actual typed accumulation. XLOG snapshots it privately and
+        applies the same 100*O <= B publication/refusal predicate. The complete
+        table belongs to this output's original allocation witness and slab.
+        """
+        ...
 
     def bind_prepared_control_output(
         self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
