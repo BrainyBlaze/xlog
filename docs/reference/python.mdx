@@ -247,6 +247,18 @@ Individual Adam counters are reported separately by `optimizer_steps`. Prefixes 
 same pre-update weights; input lists must have equal nonzero length. The caller
 owns minibatch selection, replay, attempt limits and the overall compute budget.
 
+`fit_tokens(..., train_acquired=False)` defaults to updating only the permitted
+down projection. Explicit `train_acquired=True` selects exactly the candidate's
+`adaptation_manifest.adaptation.trainable` IDs: the current acquired constants,
+their projection, and down when enabled. Earlier insertions remain frozen. The
+full-vocabulary loss, backward path, learning rates and common gradient clipping
+are unchanged, and existing Adam moments and counters continue without reset.
+Each selected parameter's `optimizer_steps` counter and the lineage's
+`completed_updates` advance once after a successful minibatch; other counters stay
+unchanged. An empty selected set raises an error. Rust callers supply the explicit
+`train_acquired` argument after `history_spans`. This is a per-call choice;
+applications must retain and supply it again when resuming token training.
+
 `fit_binary` raises `pyxlog.NativeFunctionResultNonFiniteError`, a subclass of
 `RuntimeError`, when the existing native finite check successfully observes
 nonfinite FP32 values in a causal function's result. The original message remains
@@ -1745,9 +1757,12 @@ and retain their final state after `end`; no last-position feature is broadcast
 backward to earlier positions.
 
 `fit_binary` updates new constants/P and the explicitly enabled down projection.
-`fit_tokens` updates only that down projection, preserving input VJPs through
-fixed acquired functions/P. Setting `train_down_projection=False` keeps the
-control's down projection frozen; a down-only fit then raises an error.
+By default, `fit_tokens` updates only that down projection, preserving input VJPs
+through fixed acquired functions/P. With `train_acquired=True`, it updates the
+same current trainable set as `fit_binary`. Setting `train_down_projection=False`
+keeps the control's down projection frozen in either mode: a default down-only
+token fit then raises an error, while acquired token training updates only the
+current constants/P.
 `fork_candidate()` is exact continuation of the current trainable set, definitions,
 aliases, and every master/moment/counter. It does not recreate P or enable a frozen
 down projection. A later `fork_acquired` retains all old definitions and optimizer
