@@ -2381,7 +2381,7 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
         // The native-acquired role44 snapshot carries this invocation's
         // structural schema, model generation and original branch identity.
         const auto& layout=contract.model_contract_layout;
-        if(inputs.transition_kind!=1 || !inputs.numerical_blocks ||
+        if((inputs.transition_kind!=1 && inputs.transition_kind!=4) || !inputs.numerical_blocks ||
            !inputs.model_contract || !inputs.model_contract_bytes ||
            inputs.model_contract>UINT64_MAX-inputs.model_contract_bytes ||
            layout.schema_digest_offset>inputs.model_contract_bytes ||
@@ -2405,14 +2405,13 @@ __device__ uint64_t publication_prepare_continuation(PublicationControl& control
            !(inputs.model_identity[0] || inputs.model_identity[1] ||
              inputs.model_identity[2] || inputs.model_identity[3]))return 1;
     }
-    // Cold binding requires this slot for a versioned physical roster; other
-    // model schemas retain their separate ordinary numerical predicate.
-    if(inputs.transition_kind==1 && inputs.numerical_blocks) {
+    // Update requires one common gradient table. Both paths authenticate the
+    // physical bounds against the acquired original model and versioned roster.
+    if((inputs.transition_kind==1 && inputs.numerical_blocks) || inputs.transition_kind==4) {
         uint64_t block_bytes=0;
         if(!inputs.physical_blocks ||
-           inputs.numerical_blocks%alignof(double) ||
            !semantic_graph::checked_mul(inputs.physical_blocks,6*sizeof(double),&block_bytes) ||
-           inputs.numerical_blocks>UINT64_MAX-block_bytes ||
+           !publication_pointer_span(inputs.numerical_blocks,block_bytes,alignof(double)) ||
            !publication_model_block_identity(control,base,contract,
                inputs.model_schema_digest,inputs.model_identity,work))return 1;
     } else if(inputs.numerical_blocks || inputs.physical_blocks ||
@@ -5197,22 +5196,31 @@ __device__ void semantic_policy_backward(const Descriptor& descriptor,
         // A genuine reached refusal has no actor derivative or critic term.
         // Clear the original output buffers without reading unexecuted inputs.
         for(uint64_t i=threadIdx.x;i<b.parameter_cells;i+=blockDim.x) {
-            slot(2);
+            slot(5);
             gradients[i]=0.0f;parameter_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.parameter_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.parameter_domains);
+            domains[i]=domains[b.parameter_cells+i]=model_policy::zero_cotangent().full;
         }
         for(uint64_t i=threadIdx.x;i<b.text_cells;i+=blockDim.x) {
-            slot(2);
+            slot(5);
             text_gradients[i]=0.0f;text_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.text_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.text_domains);
+            domains[i]=domains[b.text_cells+i]=model_policy::zero_cotangent().full;
         }
         for(uint32_t i=threadIdx.x;i<2*37*128;i+=blockDim.x) {
             slot(2);
             recurrent_gradients[i]=0.0f;recurrent_cotangents[i]=model_policy::zero_cotangent();
         }
         for(uint32_t i=threadIdx.x;i<COMPONENT_COUNT;i+=blockDim.x) {
-            slot(4);
+            slot(7);
             coefficients[i]=0.0;baseline_gradients[i]=0.0f;
             baseline_cotangents[i]=model_policy::zero_cotangent();
             coefficient_cotangents[i]=model_policy::zero_cotangent();
+            reinterpret_cast<model_policy::ErrorEnvelope*>(b.numerical.baseline_errors)[i]={0.0,0.0};
+            auto* domains=reinterpret_cast<model_policy::DomainValue*>(b.numerical.baseline_domains);
+            domains[i]=domains[COMPONENT_COUNT+i]=model_policy::zero_cotangent().full;
         }
         if(threadIdx.x==0 && b.critic_term) { slot();*reinterpret_cast<float*>(b.critic_term)=0.0f; }
         return;
@@ -8833,10 +8841,12 @@ extern "C" __global__ void semantic_transition_execute(Descriptor descriptor) {
             uint64_t training_status=0;
             uint8_t original_numerical=numerical;
             if(transition_kind==1)numerical &= critic_admissible && uniform_admissible;
-            if(transition_kind==1 && pending.numerical_blocks) {
+            if((transition_kind==1 && pending.numerical_blocks) || transition_kind==4) {
+                uint64_t bound_bytes=0;
                 if(!descriptor.publication.lease || !control.contract ||
                    !pending.physical_blocks ||
-                   pending.numerical_blocks%alignof(double)) {
+                   !semantic_graph::checked_mul(pending.physical_blocks,6*sizeof(double),&bound_bytes) ||
+                   !publication_pointer_span(pending.numerical_blocks,bound_bytes,alignof(double))) {
                     semantic_content_integrity_trap();return;
                 }
                 const auto& lease=*reinterpret_cast<const PublicationLease*>(descriptor.publication.lease);

@@ -44,6 +44,7 @@ impl OriginalNativeCommand {
 pub(super) fn policy_uniform_native_work_ceiling(
     components: &[SemanticComponent],
     parameter_cells: u64,
+    group: bool,
 ) -> Result<[u64; 9], SemanticTransitionError> {
     let cells = ceiling_sum(
         components
@@ -56,18 +57,35 @@ pub(super) fn policy_uniform_native_work_ceiling(
             .filter(|component| !component.is_text())
             .map(|component| u64::from(component.cardinality)),
     )?;
+    let categories = ceiling_sum([
+        ceiling_product(2, parameter_cells)?,
+        2 * 37 * 128,
+        ceiling_product(3, COMPONENT_COUNT as u64)?,
+        cells,
+        ceiling_product(257, edits)?,
+        ceiling_product(128, TEXT_CARDINALITY as u64)?,
+    ])?;
+    let group_categories = if group {
+        ceiling_sum([
+            categories,
+            // A failed group producer writes both regions of every full port.
+            ceiling_product(
+                2,
+                ceiling_sum([
+                    parameter_cells,
+                    32 * TEXT_CARDINALITY as u64,
+                    COMPONENT_COUNT as u64,
+                ])?,
+            )?,
+        ])?
+    } else {
+        0
+    };
     Ok([
         1,
         0,
         0,
-        ceiling_sum([
-            ceiling_product(2, parameter_cells)?,
-            2 * 37 * 128,
-            ceiling_product(3, COMPONENT_COUNT as u64)?,
-            cells,
-            ceiling_product(257, edits)?,
-            ceiling_product(128, TEXT_CARDINALITY as u64)?,
-        ])?,
+        ceiling_sum([categories, group_categories])?,
         0,
         0,
         0,
@@ -79,8 +97,10 @@ pub(super) fn policy_uniform_native_work_ceiling(
 pub(super) fn policy_binding_native_work_ceiling(
     components: &[SemanticComponent],
     layouts: &[SemanticTensorLayout; 9],
+    group: bool,
 ) -> Result<[u64; 9], SemanticTransitionError> {
-    let mut ceiling = policy_uniform_native_work_ceiling(components, layouts[2].dimensions[0])?;
+    let mut ceiling =
+        policy_uniform_native_work_ceiling(components, layouts[2].dimensions[0], group)?;
     add_native_work_ceiling(&mut ceiling, [9, 0, 0, 0, 0, 0, 0, 0, 0])?;
     for layout in layouts {
         let bytes = tensor_layout_bytes(layout)?;
@@ -3287,7 +3307,11 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
         if !transferred {
             add_native_work_ceiling(
                 ceiling,
-                policy_uniform_native_work_ceiling(components, parameter_cells)?,
+                policy_uniform_native_work_ceiling(
+                    components,
+                    parameter_cells,
+                    policy.buffers.numerical.uniform.group.is_some(),
+                )?,
             )?;
             let bytes = binding.as_ref().map_or(0, |binding| binding.snapshot_bytes);
             add_native_work_ceiling(
@@ -3295,11 +3319,18 @@ pub(super) fn actor_refresh_transition_native_work_ceilings(
                 [if bytes == 0 { 0 } else { 9 }, 0, 0, 0, 0, 0, 0, 0, bytes],
             )?;
         }
-        let alias = ceiling_sum([
-            parameter_cells,
-            32 * TEXT_CARDINALITY as u64,
-            COMPONENT_COUNT as u64,
-        ])?;
+        let alias = ceiling_product(
+            if policy.buffers.numerical.uniform.group.is_some() {
+                2
+            } else {
+                1
+            },
+            ceiling_sum([
+                parameter_cells,
+                32 * TEXT_CARDINALITY as u64,
+                COMPONENT_COUNT as u64,
+            ])?,
+        )?;
         let primal = ceiling_sum([
             cells,
             text_cells,

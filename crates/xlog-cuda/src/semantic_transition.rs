@@ -4847,9 +4847,31 @@ fn continuation_service_layouts(
         layout(5, 8, 1, 1, [1, 0, 0, 0])?,
     ];
     if let Some(blocks) = physical_blocks {
-        layouts.push(layout(6, 9, 8, 3, [blocks as u64, 2, 3, 0])?);
+        layouts.push(numerical_block_tensor_layout(first_index + 6, blocks)?);
     }
     Ok(layouts)
+}
+
+fn numerical_block_tensor_layout(
+    index: u64,
+    physical_blocks: usize,
+) -> Result<SemanticTensorLayout, SemanticTransitionError> {
+    canonical_tensor_layout(SemanticTensorLayout {
+        role: 0,
+        index,
+        scalar_type: 9,
+        element_bytes: 8,
+        rank: 3,
+        dimensions: [
+            u64::try_from(physical_blocks)
+                .map_err(|_| SemanticTransitionError::GenerationExhausted)?,
+            2,
+            3,
+            0,
+        ],
+        logical_axis: u64::MAX,
+        strides_bytes: [0; 4],
+    })
 }
 
 /// Decode the retained versioned schema from the original ModelContract slice.
@@ -16413,6 +16435,7 @@ struct BoundModelUpdate {
     values: Vec<ModelUpdateBinding>,
     allocations: Vec<PreparedSemanticTensor>,
     admissibility: PreparedSemanticTensor,
+    numerical_blocks: Option<PreparedSemanticTensor>,
     stream_scratch: [PreparedSemanticTensor; 4],
     _slab_backing: PreparedSemanticTensor,
     #[cfg(feature = "semantic-policy")]
@@ -18930,6 +18953,18 @@ struct PolicyNumericalDescriptor {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PolicyUniformGroupDescriptor {
+    outputs: [u64; 3],
+    roots: [u64; 3],
+    status: u64,
+    kind: u64,
+    actor_rows: u64,
+    edit_rows: u64,
+    demonstrated_lane: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct PolicyUniformDescriptor {
     outputs: [u64; 3],
@@ -18947,6 +18982,7 @@ struct PolicyUniformDescriptor {
     loss_coefficients: [f64; 4],
     transfer_target: u64,
     transferred: u64,
+    group: PolicyUniformGroupDescriptor,
 }
 
 // SAFETY: repr(C) contains only plain scalar/pointer words; the cold native
@@ -18963,10 +18999,37 @@ struct PolicyUniformBuffers {
     status: TrackedCudaSlice<u64>,
     work: TrackedCudaSlice<u64>,
     execute: CudaFunction,
+    group: Option<PolicyUniformGroupBuffers>,
+}
+
+#[cfg(feature = "semantic-policy")]
+struct PolicyUniformGroupBuffers {
+    outputs: [TrackedCudaSlice<f64>; 3],
+    roots: [TrackedCudaSlice<f64>; 3],
+    status: TrackedCudaSlice<u64>,
+    _reference: SemanticPreparedActorRefresh,
 }
 
 #[cfg(feature = "semantic-policy")]
 impl PolicyUniformBuffers {
+    fn domain_outputs(
+        &self,
+        group: bool,
+    ) -> Result<&[TrackedCudaSlice<f64>; 3], SemanticTransitionError> {
+        if group {
+            self.group
+                .as_ref()
+                .map(|group| &group.outputs)
+                .ok_or_else(|| {
+                    publication_input_error(
+                        "group domains require their original frozen refresh owner",
+                    )
+                })
+        } else {
+            Ok(&self.outputs)
+        }
+    }
+
     fn record(&self, recorder: &mut LaunchRecorder) {
         recorder.read(&self.descriptor);
         for buffer in self.outputs.iter().chain(&self.roots).chain(&self.scratch) {
@@ -18974,6 +19037,12 @@ impl PolicyUniformBuffers {
         }
         recorder.read_write(&self.status);
         recorder.read_write(&self.work);
+        if let Some(group) = &self.group {
+            for buffer in group.outputs.iter().chain(&group.roots) {
+                recorder.read_write(buffer);
+            }
+            recorder.read_write(&group.status);
+        }
     }
 }
 
@@ -19443,13 +19512,15 @@ fn policy_uniform_domain_tensor_layouts(
 fn policy_uniform_domain_layouts(
     buffers: &PolicyBuffers,
     support_cells: usize,
+    group: bool,
 ) -> Result<[SemanticPolicyNumericalDomainLayout; 3], SemanticTransitionError> {
     let original =
         policy_uniform_domain_tensor_layouts(support_cells, buffers.layout.parameter_cells)?;
+    let outputs = buffers.numerical.uniform.domain_outputs(group)?;
     let project =
         |index: usize, layout: SemanticTensorLayout| -> Result<_, SemanticTransitionError> {
             Ok(SemanticPolicyNumericalDomainLayout {
-                allocation: buffers.numerical.uniform.outputs[index]
+                allocation: outputs[index]
                     .view()
                     .allocation_provenance()
                     .ok_or_else(|| {
@@ -19472,8 +19543,9 @@ fn require_policy_uniform_domain_layouts(
     buffers: &PolicyBuffers,
     support_cells: usize,
     expected: &[SemanticPolicyNumericalDomainLayout; 3],
+    group: bool,
 ) -> Result<(), SemanticTransitionError> {
-    let original = policy_uniform_domain_layouts(buffers, support_cells)?;
+    let original = policy_uniform_domain_layouts(buffers, support_cells, group)?;
     if original.iter().zip(expected).any(|(original, expected)| {
         original.layout != expected.layout
             || !original.allocation.same_allocation(&expected.allocation)
@@ -19592,13 +19664,14 @@ fn export_policy_uniform_domains(
     device: i32,
     aliases: Arc<()>,
     publication: Arc<PublicationStorage>,
+    group: bool,
 ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
-    let layouts = policy_uniform_domain_layouts(buffers, support_cells)?;
+    let layouts = policy_uniform_domain_layouts(buffers, support_cells, group)?;
     let owner: Arc<dyn Send + Sync> = buffers.numerical.uniform.clone();
     let tensors = buffers
         .numerical
         .uniform
-        .outputs
+        .domain_outputs(group)?
         .iter()
         .zip(layouts)
         .map(|(buffer, projection)| {
@@ -20410,9 +20483,11 @@ const _: () = assert!(size_of::<DeviceTaskEvaluation>() == 184);
 const _: () = assert!(size_of::<DeviceState>() == 4424);
 const _: () = assert!(size_of::<PolicyField>() == 32);
 const _: () = assert!(size_of::<PolicyNumericalDescriptor>() == 96);
-const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 176);
+const _: () = assert!(size_of::<PolicyUniformGroupDescriptor>() == 88);
+const _: () = assert!(size_of::<PolicyUniformDescriptor>() == 264);
 const _: () = assert!(std::mem::offset_of!(PolicyUniformDescriptor, transfer_target) == 160);
 const _: () = assert!(std::mem::offset_of!(PolicyUniformDescriptor, transferred) == 168);
+const _: () = assert!(std::mem::offset_of!(PolicyUniformDescriptor, group) == 176);
 const _: () = assert!(size_of::<PolicyAdjointNumericalDescriptor>() == 96);
 const _: () = assert!(size_of::<PolicyDescriptor>() == 776);
 const _: () = assert!(size_of::<PolicyBackward>() == 296);
@@ -21514,6 +21589,7 @@ impl PreparedStepLayout {
 fn policy_buffer_bytes(
     layout: &SemanticPolicyLayout,
     mask_cells: usize,
+    group: bool,
 ) -> Result<usize, SemanticTransitionError> {
     let differentiable_cells = [
         layout.parameter_cells,
@@ -21570,7 +21646,7 @@ fn policy_buffer_bytes(
     let numerical_cells = numerical_cells
         .checked_add(adjoint_numerical_cells)
         .ok_or(SemanticTransitionError::GenerationExhausted)?;
-    let uniform_cells = layout
+    let root_cells = layout
         .parameter_cells
         .checked_add(COMPONENT_COUNT)
         .and_then(|cells| cells.checked_mul(2))
@@ -21579,6 +21655,9 @@ fn policy_buffer_bytes(
         .and_then(|cells| cells.checked_add(33 * TEXT_CARDINALITY))
         // Private coherent labels and distinct region-major export storage.
         .and_then(|cells| cells.checked_mul(8))
+        .ok_or(SemanticTransitionError::GenerationExhausted)?;
+    let uniform_cells = root_cells
+        .checked_mul(if group { 2 } else { 1 })
         .and_then(|cells| cells.checked_add(layout.recurrent_cells() * 12))
         .and_then(|cells| cells.checked_add(layout.score_cells() * 12))
         .and_then(|cells| cells.checked_add(128 * 4 + COMPONENT_COUNT * 8))
@@ -21599,7 +21678,9 @@ fn policy_buffer_bytes(
         .and_then(|bytes| bytes.checked_add(2 * size_of::<u64>()))
         .and_then(|bytes| bytes.checked_add(2 * 11 * size_of::<u64>()))
         .and_then(|bytes| {
-            bytes.checked_add(12 * size_of::<u64>() + size_of::<PolicyUniformDescriptor>())
+            bytes.checked_add(
+                (12 + usize::from(group)) * size_of::<u64>() + size_of::<PolicyUniformDescriptor>(),
+            )
         })
         .and_then(|bytes| {
             numerical_cells
@@ -25160,7 +25241,7 @@ impl SemanticTransitionSession {
                 .as_ref()
                 .expect("original structural scope")
                 .transitions[index];
-            let binding_ceiling = match kind {
+            let mut binding_ceiling = match kind {
                 SemanticTransitionKind::Proposal => {
                     native_work_bound::policy_binding_native_work_ceiling(
                         &self.codebooks.components,
@@ -25168,10 +25249,28 @@ impl SemanticTransitionSession {
                             self.codebooks.input_cells,
                             self.policy_layout()?.parameter_cells,
                         )?,
+                        self.actor_refresh.is_some(),
                     )?
                 }
                 _ => [0; 9],
             };
+            if matches!(
+                kind,
+                SemanticTransitionKind::Proposal | SemanticTransitionKind::Update
+            ) {
+                if let Some(roster) = self
+                    .prepared_publication()?
+                    .physical_parameter_roster
+                    .as_ref()
+                {
+                    native_work_bound::add_native_work_ceiling(
+                        &mut binding_ceiling,
+                        native_work_bound::numerical_block_snapshot_native_work_ceiling(
+                            roster.len(),
+                        )?,
+                    )?;
+                }
+            }
             let prepared = self
                 .steps
                 .get_mut(&token)
@@ -25731,13 +25830,36 @@ impl SemanticTransitionSession {
         #[cfg(not(feature = "semantic-policy"))]
         let policy_bytes = block_bytes;
         #[cfg(feature = "semantic-policy")]
-        let policy_bytes = policy_buffer_bytes(&self.policy_layout()?, self.codebooks.input_cells)?
-            .checked_add(self.codebooks.input_cells)
-            .and_then(|n| n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>()))
-            .and_then(|n| n.checked_add(size_of::<DeviceState>()))
-            .and_then(|n| n.checked_mul(2))
-            .and_then(|n| n.checked_add(block_bytes))
-            .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        let policy_bytes =
+            policy_buffer_bytes(&self.policy_layout()?, self.codebooks.input_cells, false)?
+                .checked_add(self.codebooks.input_cells)
+                .and_then(|n| {
+                    n.checked_add(COMPONENT_COUNT * size_of::<SemanticTransitionReceipt>())
+                })
+                .and_then(|n| n.checked_add(size_of::<DeviceState>()))
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| n.checked_add(block_bytes))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+        #[cfg(feature = "semantic-policy")]
+        let group_policy_bytes = if self.actor_refresh.is_some() {
+            let layout = self.policy_layout()?;
+            let ordinary = policy_buffer_bytes(&layout, self.codebooks.input_cells, false)?;
+            let grouped = policy_buffer_bytes(&layout, self.codebooks.input_cells, true)?;
+            let proposals = transitions
+                .iter()
+                .filter(|kind| **kind == SemanticTransitionKind::Proposal)
+                .count();
+            let bytes = grouped
+                .checked_sub(ordinary)
+                .and_then(|bytes| bytes.checked_mul(2))
+                .and_then(|bytes| bytes.checked_mul(proposals))
+                .ok_or(SemanticTransitionError::GenerationExhausted)?;
+            u64::try_from(bytes).map_err(|_| SemanticTransitionError::GenerationExhausted)?
+        } else {
+            0
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let group_policy_bytes = 0;
         let ground_layout = self
             .task_ground
             .as_ref()
@@ -25848,6 +25970,7 @@ impl SemanticTransitionSession {
                 .and_then(|bytes| bytes.checked_add(update_binding_bytes))
                 .and_then(|bytes| bytes.checked_add(replay_bytes))
                 .and_then(|bytes| bytes.checked_add(policy_work_bytes))
+                .and_then(|bytes| bytes.checked_add(group_policy_bytes))
                 .ok_or(SemanticTransitionError::GenerationExhausted)?;
         let generation_bytes = if !replace_catalogue {
             0
@@ -26183,8 +26306,14 @@ impl SemanticTransitionSession {
                 let [blocks_zero, blocks_one] = [allocate_block_slot()?, allocate_block_slot()?];
                 #[cfg(feature = "semantic-policy")]
                 let [branch_zero, branch_one] = [
-                    self.prepare_step_policy_storage(&mut reservation)?,
-                    self.prepare_step_policy_storage(&mut reservation)?,
+                    self.prepare_step_policy_storage(
+                        &mut reservation,
+                        *kind == SemanticTransitionKind::Proposal && self.actor_refresh.is_some(),
+                    )?,
+                    self.prepare_step_policy_storage(
+                        &mut reservation,
+                        *kind == SemanticTransitionKind::Proposal && self.actor_refresh.is_some(),
+                    )?,
                 ];
                 let [model_update_zero, model_update_one] = model_updates;
                 #[cfg(feature = "semantic-policy")]
@@ -31022,9 +31151,9 @@ impl SemanticTransitionSession {
         let kind = self.prepared_transition_kind(step)?;
         let (physical_blocks, model_schema_digest, model_identity) =
             storage.continuation_block_contract(kind, &continuation, true)?;
-        let model_contract = match (physical_blocks, model_owner) {
-            (None, None) => None,
-            (Some(_), Some(model_witness)) => {
+        let model_contract = if physical_blocks.is_some() || kind == SemanticTransitionKind::Update
+        {
+            if let Some(model_witness) = model_owner {
                 self.checked_prepared_tensor_owner(step, model_witness)?;
                 let owner = &self.steps[&step.token];
                 if owner.content[model_witness.index].model_bank != Some(bank) {
@@ -31032,22 +31161,28 @@ impl SemanticTransitionSession {
                         "prepared block bounds require the same bank's retained model owners",
                     ));
                 }
-                Some(
-                    owner
-                        .inputs
-                        .as_ref()
-                        .ok_or(SemanticTransitionError::NotBound)?
-                        .views[bank]
-                        .get(&(44, 0))
-                        .cloned()
-                        .ok_or(SemanticTransitionError::ObservationMismatch)?,
-                )
-            }
-            _ => {
+            } else if kind != SemanticTransitionKind::Update {
                 return Err(publication_input_error(
                     "prepared proposal blocks and their model-content witness must be supplied together",
                 ));
             }
+            Some(
+                self.steps[&step.token]
+                    .inputs
+                    .as_ref()
+                    .ok_or(SemanticTransitionError::NotBound)?
+                    .views[bank]
+                    .get(&(44, 0))
+                    .cloned()
+                    .ok_or(SemanticTransitionError::ObservationMismatch)?,
+            )
+        } else {
+            if model_owner.is_some() {
+                return Err(publication_input_error(
+                    "prepared model-content witness has no original block-bound consumer",
+                ));
+            }
+            None
         };
         let mut service_layouts =
             continuation_service_layouts(tensor_count, capacity, physical_blocks)?;
@@ -31278,6 +31413,33 @@ impl SemanticTransitionSession {
                 "continuation witness has the wrong original service roster",
             ));
         }
+        let (physical_blocks, numerical_block_snapshot) = if kind == SemanticTransitionKind::Update
+        {
+            let blocks = storage
+                .physical_parameter_roster
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error(
+                        "Update gradient bounds require the original physical parameter roster",
+                    )
+                })?
+                .len();
+            let snapshot = owner
+                .prepared
+                .as_ref()
+                .expect("prepared Update owner")
+                .branches[bank]
+                .numerical_block_snapshot
+                .as_ref()
+                .ok_or_else(|| {
+                    publication_input_error(
+                        "Update gradient bounds lack their reserved native slot",
+                    )
+                })?;
+            (Some(blocks), Some(Arc::clone(snapshot)))
+        } else {
+            (physical_blocks, numerical_block_snapshot)
+        };
         let binding = Arc::new(TextBindingStorage {
             inputs: services,
             capacity_refusal,
@@ -31411,6 +31573,7 @@ impl SemanticTransitionSession {
         model_memory: SemanticModelMemory,
         tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        numerical_blocks: DlpackManagedTensor,
         slab_backing: SemanticTensorInput,
         baseline_forward: &SemanticModelForwardWitness,
         candidate_forward: &SemanticModelForwardWitness,
@@ -31425,6 +31588,7 @@ impl SemanticTransitionSession {
             model_memory,
             tensors,
             admissibility,
+            Some(numerical_blocks),
             slab_backing,
             baseline_forward,
             candidate_forward,
@@ -31457,6 +31621,7 @@ impl SemanticTransitionSession {
             model_memory,
             tensors,
             admissibility,
+            None,
             slab_backing,
             baseline_forward,
             candidate_forward,
@@ -31475,6 +31640,7 @@ impl SemanticTransitionSession {
         mut model_memory: SemanticModelMemory,
         mut tensors: Vec<SemanticTensorInput>,
         admissibility: SemanticTensorInput,
+        numerical_blocks: Option<DlpackManagedTensor>,
         slab_backing: SemanticTensorInput,
         baseline_forward: &SemanticModelForwardWitness,
         candidate_forward: &SemanticModelForwardWitness,
@@ -31531,8 +31697,31 @@ impl SemanticTransitionSession {
             ));
         }
         let tensor_count = tensors.len();
+        let numerical_blocks = match (expected, numerical_blocks) {
+            (SemanticTransitionKind::Update, Some(tensor)) => {
+                let blocks = self.prepared_publication()?.physical_parameter_roster.as_ref()
+                    .ok_or_else(|| publication_input_error(
+                        "Update gradient bounds require the original physical parameter roster",
+                    ))?.len();
+                let index = u64::try_from(allocation_count).ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(SemanticTransitionError::GenerationExhausted)?;
+                Some(SemanticTensorInput {
+                    tensor,
+                    layout: numerical_block_tensor_layout(index, blocks)?,
+                    logical_begin: 0,
+                    logical_end: 0,
+                    native_allocation: None,
+                })
+            }
+            (SemanticTransitionKind::Control, None) => None,
+            _ => return Err(publication_input_error(
+                "Update requires its complete common gradient bounds; Control owns no gradient table",
+            )),
+        };
         model_memory.allocations.append(&mut tensors);
         model_memory.allocations.push(admissibility);
+        model_memory.allocations.extend(numerical_blocks);
         self.bind_tensor_owner_inputs(
             step.token,
             witness.index,
@@ -31546,10 +31735,16 @@ impl SemanticTransitionSession {
             .clone();
         let (allocations, outputs) = outputs.split_at(allocation_count);
         let (tensors, update_metadata) = outputs.split_at(tensor_count);
-        let [admissibility] = update_metadata else {
-            return Err(publication_input_error(
-                "model update output requires numerical admissibility",
-            ));
+        let (admissibility, numerical_blocks) = match (expected, update_metadata) {
+            (SemanticTransitionKind::Update, [admissibility, blocks]) => {
+                (admissibility, Some(blocks))
+            }
+            (SemanticTransitionKind::Control, [admissibility]) => (admissibility, None),
+            _ => {
+                return Err(publication_input_error(
+                    "model output differs from its original numerical producer roster",
+                ))
+            }
         };
         let allocation_index = u64::try_from(allocation_count)
             .map_err(|_| SemanticTransitionError::GenerationExhausted)?;
@@ -31685,6 +31880,38 @@ impl SemanticTransitionSession {
                 }
             }
         }
+        if let Some(blocks) = numerical_blocks {
+            let bytes = tensor_layout_bytes(&blocks.layout)?;
+            if step_input_overlap(blocks.data, bytes, admissibility.data, 1)? {
+                return Err(publication_input_error(
+                    "Update gradient bounds alias numerical admissibility",
+                ));
+            }
+            for tensor in allocations.iter().chain(&stream_scratch) {
+                if step_input_overlap(
+                    blocks.data,
+                    bytes,
+                    tensor.data,
+                    tensor_layout_bytes(&tensor.layout)?,
+                )? {
+                    return Err(publication_input_error(
+                        "Update gradient bounds alias model output or stream scratch",
+                    ));
+                }
+            }
+            for owned in &storage.allocations {
+                if step_input_overlap(
+                    blocks.data,
+                    bytes,
+                    owned.entry().pointer,
+                    owned.entry().bytes as usize,
+                )? {
+                    return Err(publication_input_error(
+                        "Update gradient bounds alias native publication storage",
+                    ));
+                }
+            }
+        }
         let values = allocations
             .iter()
             .enumerate()
@@ -31722,6 +31949,7 @@ impl SemanticTransitionSession {
         #[cfg(feature = "semantic-policy")]
         let (slab_base, slab_allocation_bytes) = accounted_tensor_allocations(
             &std::iter::once(admissibility)
+                .chain(numerical_blocks)
                 .chain(&stream_scratch)
                 .collect::<Vec<_>>(),
             &slab,
@@ -31736,6 +31964,37 @@ impl SemanticTransitionSession {
         } else {
             slab_allocation_bytes
         };
+        if let Some(blocks) = numerical_blocks {
+            let snapshot = Arc::clone(
+                self.steps[&step.token]
+                    .prepared
+                    .as_ref()
+                    .expect("prepared Update owner")
+                    .branches[bank]
+                    .numerical_block_snapshot
+                    .as_ref()
+                    .ok_or_else(|| {
+                        publication_input_error(
+                            "Update gradient bounds lack their reserved native slot",
+                        )
+                    })?,
+            );
+            let work = self.prepared_policy_work_counter(
+                step,
+                bank,
+                policy_work::PolicyWorkKey::ModelScratch,
+                &self.publication_issuer,
+                step.token,
+            )?;
+            enqueue_numerical_block_snapshot(
+                &self.provider,
+                &self.domain,
+                &mut self.poisoned,
+                blocks,
+                &snapshot,
+                Some(work),
+            )?;
+        }
         let prepared = self
             .steps
             .get_mut(&step.token)
@@ -31755,6 +32014,7 @@ impl SemanticTransitionSession {
             values,
             allocations: retained_allocations,
             admissibility: admissibility.clone(),
+            numerical_blocks: numerical_blocks.cloned(),
             stream_scratch,
             _slab_backing: slab,
             #[cfg(feature = "semantic-policy")]
@@ -41878,7 +42138,7 @@ impl SemanticTransitionSession {
             }
             &pending.buffers
         };
-        policy_uniform_domain_layouts(buffers, self.codebooks.input_cells)
+        policy_uniform_domain_layouts(buffers, self.codebooks.input_cells, false)
     }
 
     /// Project only the actual cold bank's allocation geometry. No policy
@@ -41888,6 +42148,27 @@ impl SemanticTransitionSession {
         &self,
         step: &SemanticPreparedStep,
         bank: usize,
+    ) -> Result<[SemanticPolicyNumericalDomainLayout; 3], SemanticTransitionError> {
+        self.prepared_policy_domain_layouts(step, bank, false)
+    }
+
+    /// The current child's independent full-group domains use the same layouts
+    /// and retain their original frozen Update reference before any draw.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_group_update_numerical_domain_layouts(
+        &self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+    ) -> Result<[SemanticPolicyNumericalDomainLayout; 3], SemanticTransitionError> {
+        self.prepared_policy_domain_layouts(step, bank, true)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_policy_domain_layouts(
+        &self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        group: bool,
     ) -> Result<[SemanticPolicyNumericalDomainLayout; 3], SemanticTransitionError> {
         self.check_prepared_cold(step)?;
         if bank > 1 || self.prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
@@ -41918,7 +42199,7 @@ impl SemanticTransitionSession {
             .as_ref()
             .or_else(|| branch.policy.as_ref().map(|policy| &policy.buffers))
             .ok_or_else(|| publication_input_error("original uniform policy bank is absent"))?;
-        policy_uniform_domain_layouts(buffers, self.codebooks.input_cells)
+        policy_uniform_domain_layouts(buffers, self.codebooks.input_cells, group)
     }
 
     /// Export the original initialized uniform domains only against their
@@ -41953,6 +42234,7 @@ impl SemanticTransitionSession {
             &pending.buffers,
             self.codebooks.input_cells,
             expected_layouts,
+            false,
         )?;
         let publication = Arc::clone(
             self.publication
@@ -41965,6 +42247,7 @@ impl SemanticTransitionSession {
             self.provider.device().ordinal() as i32,
             Arc::clone(&self.steps[&parent.token].aliases),
             publication,
+            false,
         )?;
         self.steps
             .get_mut(&parent.token)
@@ -41984,6 +42267,31 @@ impl SemanticTransitionSession {
         bank: usize,
         consumer_stream: u64,
         expected_layouts: &[SemanticPolicyNumericalDomainLayout; 3],
+    ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        self.prepared_policy_domains(step, bank, consumer_stream, expected_layouts, false)
+    }
+
+    /// Export the current actor/demonstration family's complete M/O/U/I before
+    /// Proposal. These roots never replace any selected derivative outputs.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_group_update_numerical_domains(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        consumer_stream: u64,
+        expected_layouts: &[SemanticPolicyNumericalDomainLayout; 3],
+    ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
+        self.prepared_policy_domains(step, bank, consumer_stream, expected_layouts, true)
+    }
+
+    #[cfg(feature = "semantic-policy")]
+    fn prepared_policy_domains(
+        &mut self,
+        step: &SemanticPreparedStep,
+        bank: usize,
+        consumer_stream: u64,
+        expected_layouts: &[SemanticPolicyNumericalDomainLayout; 3],
+        group: bool,
     ) -> Result<[DlpackManagedTensor; 3], SemanticTransitionError> {
         self.check_prepared_content_stream(step, consumer_stream)?;
         if bank > 1 {
@@ -42013,6 +42321,7 @@ impl SemanticTransitionSession {
             buffers,
             self.codebooks.input_cells,
             expected_layouts,
+            group,
         )?;
         let tensors = export_policy_uniform_domains(
             buffers,
@@ -42024,6 +42333,7 @@ impl SemanticTransitionSession {
                     .as_ref()
                     .ok_or(SemanticTransitionError::NotBound)?,
             ),
+            group,
         )?;
         self.steps
             .get_mut(&step.token)
@@ -43406,15 +43716,16 @@ impl SemanticTransitionSession {
         let mut reservation = self
             .provider
             .memory()
-            .reserve_bytes(policy_buffer_bytes(&layout, self.codebooks.input_cells)? as u64)
+            .reserve_bytes(policy_buffer_bytes(&layout, self.codebooks.input_cells, false)? as u64)
             .map_err(|error| runtime_error("policy reservation", error))?;
-        self.allocate_policy_buffers_reserved(&mut reservation)
+        self.allocate_policy_buffers_reserved(&mut reservation, false)
     }
 
     #[cfg(feature = "semantic-policy")]
     fn allocate_policy_buffers_reserved(
         &self,
         reservation: &mut GpuMemoryReservation,
+        group: bool,
     ) -> Result<PolicyBuffers, SemanticTransitionError> {
         let layout = self.policy_layout()?;
         let law = self.task_objective_law().ok_or_else(|| {
@@ -43531,6 +43842,55 @@ impl SemanticTransitionSession {
             allocate_uniform(layout.score_cells() * 8)?,
             allocate_uniform(COMPONENT_COUNT * 8)?,
         ];
+        let group = if group {
+            let staged = self.actor_refresh.as_ref().ok_or_else(|| {
+                publication_input_error("group domains require their original frozen refresh owner")
+            })?;
+            if staged.proof.inner.objective_law != law {
+                return Err(publication_input_error(
+                    "group domains changed their original frozen objective law",
+                ));
+            }
+            let mut outputs = Vec::with_capacity(3);
+            let mut roots = Vec::with_capacity(3);
+            for cells in root_cells {
+                outputs.push(allocate_uniform(
+                    cells
+                        .checked_mul(8)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                )?);
+            }
+            for cells in [layout.parameter_cells, TEXT_CARDINALITY, COMPONENT_COUNT] {
+                roots.push(allocate_uniform(
+                    cells
+                        .checked_mul(8)
+                        .ok_or(SemanticTransitionError::GenerationExhausted)?,
+                )?);
+            }
+            Some((
+                outputs
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("three group outputs")),
+                roots
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("three group roots")),
+                staged.proof.clone(),
+            ))
+        } else {
+            None
+        };
+        let group = group
+            .map(|(outputs, roots, reference)| {
+                Ok::<_, SemanticTransitionError>(PolicyUniformGroupBuffers {
+                    outputs,
+                    roots,
+                    status: reservation
+                        .alloc::<u64>(1)
+                        .map_err(|error| runtime_error("group policy status allocation", error))?,
+                    _reference: reference,
+                })
+            })
+            .transpose()?;
         let status = reservation
             .alloc::<u64>(1)
             .map_err(|error| runtime_error("uniform policy status allocation", error))?;
@@ -43558,6 +43918,30 @@ impl SemanticTransitionSession {
             loss_coefficients: [3, 6, 7, 8].map(|index| f64::from(law.coefficients[index])),
             transfer_target: 0,
             transferred: 0,
+            group: group
+                .as_ref()
+                .map_or(PolicyUniformGroupDescriptor::default(), |group| {
+                    let proof = &group._reference;
+                    PolicyUniformGroupDescriptor {
+                        outputs: group
+                            .outputs
+                            .each_ref()
+                            .map(TrackedCudaSlice::device_ptr_value),
+                        roots: group
+                            .roots
+                            .each_ref()
+                            .map(TrackedCudaSlice::device_ptr_value),
+                        status: group.status.device_ptr_value(),
+                        kind: if proof.is_demonstration() { 2 } else { 1 },
+                        actor_rows: proof.inner.actor_group_rows,
+                        edit_rows: proof.inner.edit_group_rows,
+                        demonstrated_lane: proof
+                            .inner
+                            .demonstration
+                            .as_ref()
+                            .map_or(u64::MAX, |original| original.lane - 1),
+                    }
+                }),
         };
         let uniform = Arc::new(PolicyUniformBuffers {
             descriptor,
@@ -43567,6 +43951,7 @@ impl SemanticTransitionSession {
             scratch,
             status,
             work,
+            group,
             execute: self
                 .provider
                 .device()
@@ -43654,8 +44039,9 @@ impl SemanticTransitionSession {
     fn prepare_step_policy_storage(
         &self,
         reservation: &mut GpuMemoryReservation,
+        group: bool,
     ) -> Result<PreparedPolicyStorage, SemanticTransitionError> {
-        let buffers = self.allocate_policy_buffers_reserved(reservation)?;
+        let buffers = self.allocate_policy_buffers_reserved(reservation, group)?;
         let support = reservation
             .alloc(self.codebooks.input_cells)
             .map_err(|error| runtime_error("prepared support allocation", error))?;
@@ -47422,6 +47808,11 @@ impl SemanticTransitionSession {
                 }
                 if let Some(source) = &output.admissibility.source {
                     ranges.push((output.admissibility.data, source.len() as u64));
+                }
+                if let Some(blocks) = &output.numerical_blocks {
+                    if let Some(source) = &blocks.source {
+                        ranges.push((blocks.data, source.len() as u64));
+                    }
                 }
                 for scratch in &output.stream_scratch {
                     if scratch.source.is_some() {

@@ -753,6 +753,19 @@ class SemanticPreparedSourceContentGeometry:
         Proposal and bank; its two actual uniform buffer sets are distinct.
         """
         ...
+
+    def group_update_numerical_domain_layouts(
+        self, *, prepared_kind: Literal["proposal"],
+        prepared_bank: Literal[0, 1],
+    ) -> tuple[
+        _SourceGeometryTensor, _SourceGeometryTensor, _SourceGeometryTensor
+    ]:
+        """CURRENT-only geometry of the separate frozen full-group domain ports.
+
+        Cold declaration precedes allocation. The original child authenticates
+        each complete allocation against its TaskUse projection before use.
+        """
+        ...
     def continuation_capacity(self) -> int: ...
     def continuation_blocks(self) -> Optional[int]: ...
 
@@ -1393,6 +1406,26 @@ class SemanticTransitionTaskUse:
         """
         ...
 
+    def group_update_numerical_domain_layouts(
+        self, parent: SemanticPreparedStep, bank: int,
+    ) -> _PolicyNumericalDomainLayouts:
+        """Original allocations of the frozen current actor/demonstration family."""
+        ...
+
+    def group_update_numerical_domains(
+        self, parent: SemanticPreparedStep, bank: int, consumer_stream: int, *,
+        expected_layouts: _PolicyNumericalDomainLayouts,
+    ) -> tuple[Any, Any, Any]:
+        """Export prospective actor/full FP64 M/O/U/I before the source Proposal.
+
+        Shapes are [2,P,4], [2,32,V,4], [2,1,136,4]. The native frozen Update
+        owner supplies the original role, group means, objective and edit lane.
+        Consume in the source numerical owner after all nine primal snapshots.
+        These domains and their allocations are distinct from Proposal domains
+        and the nine selected-VJP outputs; neither is replaced or relabelled.
+        """
+        ...
+
     def world_measure_values(
         self, step: SemanticPreparedStep, bank: int, consumer_stream: int,
     ) -> tuple[Any, Any, Any, Any, Any]:
@@ -2002,12 +2035,23 @@ class SemanticTransitionController:
     def bind_prepared_update_output(
         self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,
         bank: int, tensors: Any, model_allocations: Any, model_storages: Any,
-        model_views: Any, numerical_admissibility: Any, slab_backing: Any,
+        model_views: Any, numerical_admissibility: Any, numerical_blocks: Any,
+        slab_backing: Any,
         slab_bytes: int, baseline_forward: SemanticModelForwardWitness,
         candidate_forward: SemanticModelForwardWitness,
         canary_comparison: SemanticModelCanaryWitness,
         allocation_owner: SemanticTensorOwner, consumer_stream: int,
-    ) -> None: ...
+    ) -> None:
+        """Bind the complete common gradient budget with the pending model.
+
+        numerical_blocks is mandatory contiguous FP64[P,2,3] in the original
+        physical parameter order: actor/full regions and B/O/U columns. It
+        covers every contribution to the sole original joint Update gradient,
+        including actual typed accumulation. XLOG snapshots it privately and
+        applies the same 100*O <= B publication/refusal predicate. The complete
+        table belongs to this output's original allocation witness and slab.
+        """
+        ...
 
     def bind_prepared_control_output(
         self, task_use: SemanticTransitionTaskUse, *, step: SemanticPreparedStep,

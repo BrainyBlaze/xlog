@@ -705,6 +705,7 @@ struct GeometryProjections {
     feedback: [Option<GeometryTuple>; 5],
     policy: [Option<GeometryTuple>; 5],
     uniform: [Option<GeometryTuple>; 5],
+    group_uniform: [Option<GeometryTuple>; 5],
     task_metadata: Option<GeometryTuple>,
     input_generation: Option<Py<PySemanticModelInputGenerationPort>>,
     context: Option<GeometryTuple>,
@@ -1833,6 +1834,34 @@ impl PySemanticPreparedSourceContentGeometry {
             .value
             .clone_ref(py))
     }
+    #[pyo3(signature = (*, prepared_kind=None, prepared_bank=None))]
+    fn group_update_numerical_domain_layouts(
+        &self,
+        py: Python<'_>,
+        prepared_kind: Option<&Bound<'_, PyAny>>,
+        prepared_bank: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyTuple>> {
+        self.require_original(py)?;
+        let (section, index) = self.projection_section(prepared_kind, prepared_bank)?;
+        let mut cache = self
+            .projections
+            .try_lock()
+            .map_err(|_| invalid("original group geometry is already being projected"))?;
+        if cache.group_uniform[index].is_none() {
+            let tensors = self
+                .inner
+                .group_update_numerical_domain_layouts(section)
+                .map_err(xlog_err)?;
+            cache.group_uniform[index] =
+                Some(self.tensor_projection(py, tensors.into_iter().map(Ok))?);
+        }
+        Ok(cache.group_uniform[index]
+            .as_ref()
+            .expect("original group geometry")
+            .value
+            .clone_ref(py))
+    }
+
     fn continuation_capacity(&self) -> PyResult<u64> {
         self.inner.continuation_capacity().map_err(xlog_err)
     }
