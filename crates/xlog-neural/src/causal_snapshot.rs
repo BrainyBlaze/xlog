@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -341,6 +341,7 @@ impl SnapshotTensor {
 
 /// A validated description and the still-unpublished stream of native tensor bytes.
 pub struct CausalDecoderSnapshot {
+    path: PathBuf,
     description: CausalSnapshotDescription,
     archive: TensorArchive,
     expected_identity: [u8; 32],
@@ -392,6 +393,7 @@ impl CausalDecoderSnapshot {
             }
         }
         Ok(Self {
+            path: path.to_path_buf(),
             description,
             archive,
             expected_identity,
@@ -400,6 +402,7 @@ impl CausalDecoderSnapshot {
 
     /// Stream bytes into unpublished allocations, then verify the entire file's
     /// SHA256, including definitions and application state. No model is published here.
+    /// A mismatch reports the source path and both expected and observed digests.
     pub fn load<F>(mut self, mut write: F) -> Result<CausalSnapshotDescription>
     where
         F: FnMut(usize, usize, &[u8]) -> Result<()>,
@@ -413,9 +416,12 @@ impl CausalDecoderSnapshot {
         }
         let actual: [u8; 32] = digest.finalize().into();
         if actual != self.expected_identity {
-            return Err(invalid(
-                "snapshot SHA256 differs from the expected saved state",
-            ));
+            return Err(invalid(format!(
+                "snapshot SHA256 differs from the expected saved state for {}: expected {}, actual {}",
+                self.path.display(),
+                hex(&self.expected_identity),
+                hex(&actual)
+            )));
         }
         Ok(self.description)
     }
