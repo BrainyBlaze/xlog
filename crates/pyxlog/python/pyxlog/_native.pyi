@@ -73,7 +73,10 @@ class NativeCausalModel:
     def forward(
         self, token_ids: Sequence[int], *, prediction_position: int,
         history_span: Optional[tuple[int, int]] = None,
-    ) -> NativeLogits: ...
+        include_acquired: bool = True,
+    ) -> NativeLogits:
+        """Optionally exclude acquired residuals, retaining current backbone weights."""
+        ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
     def fork_candidate(self) -> NativeCausalModel: ...
     def acquisition_language(
@@ -361,6 +364,10 @@ class _LogitSelection(TypedDict):
 class NativeLogits:
     """One complete FP32 vocabulary row retaining its native allocation."""
 
+    @property
+    def entrypoint(self) -> str:
+        """Numerical entrypoint actually executed to produce this row."""
+        ...
     def read(self, token_ids: Sequence[int]) -> list[float]:
         """Copy requested logits in caller order; requires host-io."""
         ...

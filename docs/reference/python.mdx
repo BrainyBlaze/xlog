@@ -137,6 +137,22 @@ supplied prefix with a causal mask. A position cannot attend to later tokens.
 The explicit byte budget covers parameters, intermediate allocations and the
 cuBLAS workspace. Execution requires compute capability 8.0 or newer and cuBLAS.
 
+`forward(..., include_acquired=True)` executes the model's active decoder,
+including all acquired residuals. Explicit `include_acquired=False` executes the
+retained `model::forward` definition with the corresponding prefix of the current
+trained tensors. It excludes every acquired residual without reloading checkpoint
+weights or changing parameters, optimizer state, update counters, definitions,
+snapshots or subsequent training. The same executor, memory budget, original token
+IDs and history-span checks apply; an acquired model still requires an explicit
+`history_span`. A missing original decoder or a mismatch in its signature,
+vocabulary, context limit or parameter prefix raises an exception.
+
+The read-only `NativeLogits.entrypoint` identifies the numerical definition actually
+executed for that row. Record it with the model snapshot identity when comparing
+readouts: the same snapshot can produce different logits in the two explicit
+modes. The mode belongs to each forward call and is not stored in the model;
+callers must retain and supply it again after restoration.
+
 Matrix products accumulate in FP32 and return BF16. Normalization and softmax
 use FP32 reductions, with BF16 operation boundaries. The final BF16 output
 projection is converted to FP32 for observation. Invalid token IDs, context

@@ -9,7 +9,7 @@ use xlog_cuda::tensor::{
     LogitSelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
 };
 use xlog_cuda::{CudaProviderBuilder, DlpackManagedTensor};
-use xlog_ir::tensor::{TensorProgram, TensorValueShape};
+use xlog_ir::tensor::{TensorProgram, TensorSignature, TensorValueShape};
 use xlog_logic::function::FunctionRegistry;
 use xlog_neural::causal_decoder::CausalDecoderCheckpoint;
 use xlog_neural::causal_snapshot::{
@@ -51,6 +51,7 @@ pub struct NativeCausalModel {
 pub struct NativeLogits {
     executor: Arc<TensorExecutor>,
     tensor: NativeTensor,
+    entrypoint: String,
     /// Zero-based input position whose next-token distribution was computed.
     pub prediction_position: usize,
     /// Width of the complete vocabulary, including reserved token IDs.
@@ -426,22 +427,52 @@ impl NativeCausalModel {
     }
 
     /// Recompute the supplied causal prefix and return its requested vocabulary row.
+    /// With acquired residuals excluded, execute the original decoder definition
+    /// using its current trained parameter prefix, without changing model state.
     pub fn forward(
         &self,
         token_ids: &[u32],
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
+        include_acquired: bool,
     ) -> Result<NativeLogits> {
         self.validate_history_span(token_ids.len(), history_span)?;
+        let (entrypoint, parameters) = if include_acquired {
+            (self.entrypoint.as_str(), self.parameters.as_slice())
+        } else {
+            let entrypoint = "model::forward";
+            let backbone = self.functions.numerical(entrypoint)?;
+            let active = self.program();
+            if backbone.signature != TensorSignature::Decoder
+                || backbone.vocabulary != active.vocabulary
+                || backbone.max_context != active.max_context
+                || active.parameters.get(..backbone.parameters.len())
+                    != Some(backbone.parameters.as_slice())
+            {
+                return Err(XlogError::Compilation(
+                    "original decoder contract or parameter prefix differs from the active model"
+                        .into(),
+                ));
+            }
+            let parameters = self
+                .parameters
+                .get(..backbone.parameters.len())
+                .ok_or_else(|| {
+                    XlogError::Compilation(
+                        "original decoder parameter allocations are absent".into(),
+                    )
+                })?;
+            (entrypoint, parameters)
+        };
         let program = self.functions.compile_numerical(
-            &self.entrypoint,
+            entrypoint,
             token_ids.len(),
             prediction_position,
             history_span,
         )?;
         let tensor = self.executor.execute(
             &program,
-            &self.parameters,
+            parameters,
             token_ids,
             prediction_position,
             history_span,
@@ -449,8 +480,9 @@ impl NativeCausalModel {
         Ok(NativeLogits {
             executor: Arc::clone(&self.executor),
             tensor,
+            entrypoint: entrypoint.to_owned(),
             prediction_position,
-            vocabulary_size: self.program().vocabulary,
+            vocabulary_size: program.vocabulary,
             device: self.device,
         })
     }
@@ -486,6 +518,11 @@ impl NativeCausalModel {
 }
 
 impl NativeLogits {
+    /// Numerical entrypoint actually executed to produce this vocabulary row.
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
     /// Read only the explicitly requested token logits, in caller order.
     pub fn read(&self, token_ids: &[u32]) -> Result<Vec<f32>> {
         self.executor.read_logits(&self.tensor, token_ids)

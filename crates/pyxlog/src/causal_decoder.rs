@@ -98,17 +98,23 @@ impl PyNativeCausalModel {
 
     /// Use original token IDs and a zero-based prediction position. This computes
     /// next-token logits at that position, with full-prefix causal attention.
-    #[pyo3(signature = (token_ids, *, prediction_position, history_span=None))]
+    /// Excluding acquired residuals retains the current trained backbone weights.
+    #[pyo3(signature = (token_ids, *, prediction_position, history_span=None, include_acquired=true))]
     fn forward(
         &self,
         py: Python<'_>,
         token_ids: Vec<u32>,
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
+        include_acquired: bool,
     ) -> PyResult<PyNativeLogits> {
         py.detach(|| {
-            self.inner
-                .forward(&token_ids, prediction_position, history_span)
+            self.inner.forward(
+                &token_ids,
+                prediction_position,
+                history_span,
+                include_acquired,
+            )
         })
         .map(|inner| PyNativeLogits { inner })
         .map_err(xlog_err)
@@ -445,6 +451,12 @@ fn selection_record(
 
 #[pymethods]
 impl PyNativeLogits {
+    /// Numerical entrypoint actually executed to produce this vocabulary row.
+    #[getter]
+    fn entrypoint(&self) -> &str {
+        self.inner.entrypoint()
+    }
+
     /// Read specified token IDs to the host, in exactly the requested order.
     #[cfg(feature = "host-io")]
     fn read(&self, py: Python<'_>, token_ids: Vec<u32>) -> PyResult<Vec<f32>> {
