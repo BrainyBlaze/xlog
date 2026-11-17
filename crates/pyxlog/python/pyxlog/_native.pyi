@@ -253,7 +253,10 @@ class NativeCausalModel:
         self, token_ids: Sequence[Sequence[int]], *, prediction_positions: Sequence[int],
         target_ids: Sequence[int],
         history_spans: Optional[Sequence[tuple[int, int]]] = None,
-    ) -> tuple[float, float, int]: ...
+        train_acquired: bool = False,
+    ) -> tuple[float, float, int]:
+        """Full-vocabulary CE on down only, or the current trainable set when opted in."""
+        ...
     @property
     def checkpoint_identity(self) -> str: ...
     @property

@@ -375,8 +375,9 @@ impl PyNativeCausalModel {
     }
 
     /// One complete-vocabulary CE update. Returns (mean_loss, gradient_norm, step).
+    /// Optionally train the current acquired parameters and permitted down projection.
     #[cfg(feature = "host-io")]
-    #[pyo3(signature = (token_ids, *, prediction_positions, target_ids, history_spans=None))]
+    #[pyo3(signature = (token_ids, *, prediction_positions, target_ids, history_spans=None, train_acquired=false))]
     fn fit_tokens(
         &mut self,
         py: Python<'_>,
@@ -384,6 +385,7 @@ impl PyNativeCausalModel {
         prediction_positions: Vec<usize>,
         target_ids: Vec<u32>,
         history_spans: Option<Vec<(usize, usize)>>,
+        train_acquired: bool,
     ) -> PyResult<(f32, f32, u64)> {
         py.detach(|| {
             self.inner.fit_tokens(
@@ -391,6 +393,7 @@ impl PyNativeCausalModel {
                 &prediction_positions,
                 &target_ids,
                 history_spans.as_deref(),
+                train_acquired,
             )
         })
         .map(|result| (result.mean_loss, result.gradient_norm, result.step))

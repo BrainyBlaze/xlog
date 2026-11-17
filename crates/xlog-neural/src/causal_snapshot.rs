@@ -54,9 +54,9 @@ pub struct AcquiredInsertion {
 pub struct NativeAdaptation {
     /// All retained insertion generations, including frozen predecessors.
     pub insertions: Vec<AcquiredInsertion>,
-    /// Parameters updated by numerical outcome fitting in this owner.
+    /// Current parameters for outcome fitting and optional acquired token training.
     pub trainable: Vec<usize>,
-    /// The permitted down projection, also the sole behavior-cloning parameter.
+    /// Permitted down projection, selected alone by default token training.
     pub down_projection: Option<usize>,
     /// Number of successfully published minibatch updates on this model lineage.
     pub completed_updates: u64,

@@ -296,12 +296,15 @@ impl NativeCausalModel {
 
     /// One full-vocabulary next-token cross-entropy update. Every target is scored
     /// against all original vocabulary entries, including for editor training.
+    /// Train only the permitted down projection unless train_acquired selects the
+    /// candidate's current trainable set, leaving older insertions frozen.
     pub fn fit_tokens(
         &mut self,
         token_ids: &[Vec<u32>],
         prediction_positions: &[usize],
         target_ids: &[u32],
         history_spans: Option<&[(usize, usize)]>,
+        train_acquired: bool,
     ) -> Result<TensorTrainingResult> {
         if target_ids.len() != token_ids.len() {
             return Err(XlogError::Compilation(
@@ -317,7 +320,7 @@ impl NativeCausalModel {
             prediction_positions,
             &losses,
             history_spans,
-            true,
+            !train_acquired,
         )
     }
 
