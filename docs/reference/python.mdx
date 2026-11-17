@@ -138,10 +138,11 @@ The explicit byte budget covers parameters, intermediate allocations and the
 cuBLAS workspace. Execution requires compute capability 8.0 or newer and cuBLAS.
 
 `forward(..., include_acquired=True)` executes the model's active decoder,
-including all acquired residuals. Explicit `include_acquired=False` executes the
-retained `model::forward` definition with the corresponding prefix of the current
-trained tensors. It excludes every acquired residual without reloading checkpoint
-weights or changing parameters, optimizer state, update counters, definitions,
+including all acquired residuals. Python defaults to `True`; Rust callers supply
+`include_acquired` as the fourth argument. Explicit `include_acquired=False`
+executes the retained `model::forward` definition with the corresponding prefix
+of the current trained tensors. It excludes every acquired residual without
+reloading checkpoint weights or changing parameters, optimizer state, update counters, definitions,
 snapshots or subsequent training. The same executor, memory budget, original token
 IDs and history-span checks apply; an acquired model still requires an explicit
 `history_span`. A missing original decoder or a mismatch in its signature,

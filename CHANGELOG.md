@@ -6,9 +6,6 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- *(runtime, python)* allow causal forward calls to exclude acquired residuals while
-  using current trained backbone tensors, and expose the executed entrypoint on
-  logits. Rust callers pass `include_acquired` explicitly; Python defaults to `True`.
 - Epistemic execution classifies modal dependencies before single-pass planning.
   Acyclic programs use Generate-Propagate-Test; positive FAEEL cycles run to an
   ordinary founded least fixpoint; supported positive exact-tuple
