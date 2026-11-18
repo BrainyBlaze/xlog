@@ -659,7 +659,9 @@ impl TensorExecutor {
                     &output,
                 )?,
             }
-            values[id] = Some(output);
+            if uses[id] != 0 {
+                values[id] = Some(output);
+            }
             for source in operation.inputs() {
                 uses[source] -= 1;
                 if uses[source] == 0 {

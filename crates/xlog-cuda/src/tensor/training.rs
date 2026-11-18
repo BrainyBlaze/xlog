@@ -370,20 +370,22 @@ impl TensorExecutor {
         loss: TensorLoss,
     ) -> Result<(Vec<NativeTensor>, f32)> {
         let mut active = vec![false; program.operations.len()];
-        let mut retained = vec![false; program.operations.len()];
         for (id, operation) in program.operations.iter().enumerate() {
             active[id] = operation
                 .parameter()
                 .is_some_and(|parameter| trainable.contains(&parameter))
                 || operation.inputs().iter().any(|&input| active[input]);
-            if active[id] {
+        }
+        if !active[program.output] {
+            return Err(failure("trainable parameter does not reach the output"));
+        }
+        let mut retained = vec![false; program.operations.len()];
+        for (id, operation) in program.operations.iter().enumerate().rev() {
+            if active[id] && (id == program.output || retained[id]) {
                 for input in operation.inputs() {
                     retained[input] = true;
                 }
             }
-        }
-        if !active[program.output] {
-            return Err(failure("trainable parameter does not reach the output"));
         }
         let mut values = self.execute_retaining(
             program,
@@ -428,6 +430,8 @@ impl TensorExecutor {
         cotangents[program.output] = Some(seed);
         let mut parameter_gradients: Vec<Option<NativeTensor>> = vec![None; trainable.len()];
         for id in (0..program.operations.len()).rev() {
+            // Later consumers have finished. This VJP reads the operation's inputs.
+            values[id] = None;
             let Some(dy) = cotangents[id].take() else {
                 continue;
             };
@@ -599,8 +603,6 @@ impl TensorExecutor {
                     self.accumulate(&mut cotangents[source], contribution)?;
                 }
             }
-            // Every reverse consumer has a larger operation index.
-            values[id] = None;
         }
         let gradients = parameter_gradients
             .into_iter()

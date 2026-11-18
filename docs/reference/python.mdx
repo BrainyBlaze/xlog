@@ -285,8 +285,12 @@ zero weight decay and global gradient norm clipping at one. New moments start at
 zero. Each successful update replaces the weight and optimizer version together;
 an exception leaves both unchanged. Training uses the same memory budget as
 forward, including retained activations, FP32 reverse temporaries and optimizer
-state. It also reads loss/norm scalars to the host. `checkpoint_identity` continues
-to identify the imported checkpoint, not the subsequently trained parameter bytes.
+state. The executor releases unconsumed intermediate results after their
+producing operation. Training retains the inputs to operations on paths from
+trainable parameters to the loss, including frozen operands needed for the
+derivatives. It also reads loss/norm scalars to the host.
+`checkpoint_identity` continues to identify the imported checkpoint, not the
+subsequently trained parameter bytes.
 The Python `fit_binary` and `fit_tokens` methods require the default `host-io` feature.
 `fork_acquired(definition_json, parameter_values, insertion_layer=17,
 train_down_projection=True, source_encoding="funcdef-json-v1",
