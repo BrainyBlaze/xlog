@@ -3925,9 +3925,9 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
-        let gather_capacity = if self.field == "indices" && self.continuation.is_none() {
+        let gather_capacity = if self.field == "indices" {
             self.program
-                .flat_gather_prefix_capacity(self.material, self.signatures)
+                .flat_gather_capacity(self.material, self.signatures, self.continuation)
         } else {
             None
         };
