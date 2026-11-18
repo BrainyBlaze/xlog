@@ -596,6 +596,16 @@ class SemanticPreparedStep:
         tuple[tuple[int, int, int, int, int, int, bytes], ...],
     ]: ...
 
+    def completed_world_measure_vjp(
+        self, *, consumer_streams: Sequence[int],
+    ) -> Optional[tuple[tuple[int, int], ...]]:
+        """Original task-value VJP as FP64 bit pairs (false, true) in factor order.
+
+        Call after known completion of the Proposal and before its retirement.
+        Returns None when the completed Proposal has no measure observation.
+        """
+        ...
+
     def save_checkpoint(
         self, *, consumer_streams: Sequence[int],
         snapshot_model_state: Callable[[SemanticMaterialWriter], SemanticMaterialBytes],

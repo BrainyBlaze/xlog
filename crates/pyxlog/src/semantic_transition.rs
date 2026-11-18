@@ -19711,6 +19711,39 @@ impl PySemanticPreparedStep {
             .unbind())
     }
 
+    /// Original task-value derivative from the retained completed Proposal.
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_world_measure_vjp(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyTuple>>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = streams;
+            Err(invalid(
+                "completed measure observation requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let session = self.session.borrow(py);
+            let derivatives = session
+                .owner()?
+                .prepared_completed_world_measure_vjp(&self.inner, &streams)
+                .map_err(xlog_err)?;
+            derivatives
+                .map(|pairs| {
+                    let pairs = pairs
+                        .into_iter()
+                        .map(|[false_bits, true_bits]| (false_bits, true_bits));
+                    Ok(PyTuple::new(py, pairs)?.unbind())
+                })
+                .transpose()
+        }
+    }
+
     /// Original imported task lineage, with no invented publication identity.
     fn dependency_lineage(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         let session = self.session.borrow(py);

@@ -9,6 +9,8 @@ All notable changes to this project are documented in this file.
 - *(cuda)* allow an original signed rule cell to control one shared Bernoulli
   factor. Fractional weight edits use the same event for every grounding and
   the candidate's actual code for its measure and task-value derivative.
+- *(python)* expose the original measure derivative after its Proposal completes
+  so the caller can store the result with the same completed invocation.
 
 ### Changed
 

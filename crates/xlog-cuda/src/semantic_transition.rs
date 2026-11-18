@@ -42472,6 +42472,86 @@ impl SemanticTransitionSession {
         Ok(tensors)
     }
 
+    /// Read the original task-value VJP after the Proposal and its consumers
+    /// complete. The retained predecessor selects the executed publication bank.
+    #[cfg(feature = "semantic-policy")]
+    pub fn prepared_completed_world_measure_vjp(
+        &mut self,
+        step: &SemanticPreparedStep,
+        consumer_streams: &[u64],
+    ) -> Result<Option<Vec<[u64; 2]>>, SemanticTransitionError> {
+        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+            return Err(publication_input_error(
+                "completed measure observation requires its original Proposal",
+            ));
+        }
+        let binding = self.prepared_model_binding(step, consumer_streams)?;
+        if binding.1.is_none() {
+            return Ok(None);
+        }
+        let bank = (binding.0.word & 1) as usize;
+        let (view, geometry) = {
+            let prepared = self
+                .checked_prepared_step(step, false)?
+                .prepared
+                .as_ref()
+                .expect("checked original Proposal");
+            if prepared.transition_recorded & (1 << bank) == 0 {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            let ground = prepared.branches[bank]
+                .task_ground
+                .as_ref()
+                .ok_or(SemanticTransitionError::ObservationMismatch)?;
+            (ground.measure.view(), ground.measure_geometry)
+        };
+        if geometry.words == 0 && view.len() == 0 {
+            return Ok(None);
+        }
+        let header_words = world_state::MEASURE_HEADER_WORDS;
+        let original_end = geometry
+            .factors
+            .checked_mul(2)
+            .and_then(|words| geometry.factor_gradients.checked_add(words))
+            .filter(|&end| end <= geometry.words)
+            .ok_or(SemanticTransitionError::ObservationMismatch)?;
+        if view.len() != geometry.words || geometry.factor_gradients < header_words {
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        let derivatives = {
+            let _ordinary =
+                crate::cuda_graph::reserve_uncaptured_stream(&self.stream).map_err(|error| {
+                    runtime_error("completed measure observation stream admission", error)
+                })?;
+            let header = self.publication_read(view.clone().slice(0..header_words))?;
+            if header[0] != 1
+                || header[1] != geometry.queries as u64
+                || header[2] != geometry.factors as u64
+                || header[8] != 1
+                || header[31] > 1
+            {
+                return Err(SemanticTransitionError::ObservationMismatch);
+            }
+            if header[31] == 0 {
+                None
+            } else {
+                let values =
+                    self.publication_read(view.slice(geometry.factor_gradients..original_end))?;
+                Some(
+                    values
+                        .chunks_exact(2)
+                        .map(|pair| [pair[0], pair[1]])
+                        .collect(),
+                )
+            }
+        };
+        if self.prepared_model_binding(step, consumer_streams)? != binding {
+            self.poisoned = true;
+            return Err(SemanticTransitionError::ObservationMismatch);
+        }
+        Ok(derivatives)
+    }
+
     /// Semantic root of the validated goal witness bound to the current task.
     /// This is the same root retained in its completed task ground.
     pub fn task_semantic_goal_root(&self) -> Option<Identity256> {
