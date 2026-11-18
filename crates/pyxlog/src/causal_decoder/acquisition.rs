@@ -3925,23 +3925,37 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut values = Vec::new();
+        let gather_capacity = if self.field == "indices" && self.continuation.is_none() {
+            self.program
+                .flat_gather_prefix_capacity(self.material, self.signatures)
+        } else {
+            None
+        };
+        let domain = |prefix: &[usize]| {
+            if gather_capacity.is_some_and(|capacity| prefix.len() >= capacity) {
+                return 0..0;
+            }
+            self.program.array_range(self.material, self.field, prefix)
+        };
+        let accepts = |prefix: &[usize], value| {
+            gather_capacity.is_some()
+                || self.program.array_number_possible(
+                    self.material,
+                    self.field,
+                    prefix,
+                    value,
+                    self.signatures,
+                    self.continuation,
+                )
+        };
         if let Some(collection) = self.collection {
             collection.start();
         }
         loop {
             let Some(value) = sequence.next_element_seed(NumberChoice {
                 extensions: None,
-                values: self.program.array_range(self.material, self.field, &values),
-                accepts: |value| {
-                    self.program.array_number_possible(
-                        self.material,
-                        self.field,
-                        &values,
-                        value,
-                        self.signatures,
-                        self.continuation,
-                    )
-                },
+                values: domain(&values),
+                accepts: |value| accepts(&values, value),
                 bytes: self.bytes,
             })?
             else {
@@ -3954,19 +3968,7 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
             // Once all slots are filled, a comma cannot be accepted merely
             // because its next element has not arrived in this byte token yet.
             if self.bytes[value.end..].trim_ascii_start().starts_with(b",")
-                && !self
-                    .program
-                    .array_range(self.material, self.field, &values)
-                    .any(|value| {
-                        self.program.array_number_possible(
-                            self.material,
-                            self.field,
-                            &values,
-                            value,
-                            self.signatures,
-                            self.continuation,
-                        )
-                    })
+                && !domain(&values).any(|value| accepts(&values, value))
             {
                 return Err(A::Error::custom(
                     "operand array has no compatible next slot",

@@ -1674,6 +1674,31 @@ impl Program {
         self.possible(&candidate, Some(name), signatures, continuation)
     }
 
+    /// Maximum length of an open Gather list under flat necessary continuation
+    /// bounds. All in-range coordinates carry the input's dependencies and row
+    /// extents. The list length determines the output width.
+    pub(super) fn flat_gather_prefix_capacity(
+        &self,
+        fields: &Map<String, Value>,
+        signatures: &Signatures,
+    ) -> Option<usize> {
+        if !self.necessary_continuations || !self.searches_completion() {
+            return None;
+        }
+        let input = fields.get("input")?.as_u64()? as usize;
+        // The first coordinate must admit a typed completion, including the
+        // required width when this operation occupies the output slot.
+        if !self.array_number_possible(fields, "indices", &[], 0, signatures, None) {
+            return Some(0);
+        }
+        let mut capacity = self.output_columns().unwrap_or(usize::MAX);
+        for shapes in &self.shapes {
+            let rows = shapes.get(input)?.rows;
+            capacity = capacity.min(usize::MAX / std::mem::size_of::<f32>() / rows);
+        }
+        Some(capacity)
+    }
+
     pub(super) fn array_can_end(
         &self,
         fields: &Map<String, Value>,
