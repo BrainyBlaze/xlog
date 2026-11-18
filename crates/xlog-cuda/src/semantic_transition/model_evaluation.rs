@@ -2571,6 +2571,13 @@ impl SemanticTransitionSession {
     }
 
     pub(super) fn require_closed_evaluations(&self) -> Result<(), SemanticTransitionError> {
+        self.require_closed_evaluations_for_prefill(None)
+    }
+
+    pub(super) fn require_closed_evaluations_for_prefill(
+        &self,
+        work: Option<&SemanticColdModelWork>,
+    ) -> Result<(), SemanticTransitionError> {
         if self.steps.values().any(|step| {
             (step.evaluation_preparation.is_some() && step.evaluation.is_none())
                 || step.evaluation.as_ref().is_some_and(|evaluation| {
@@ -2583,7 +2590,7 @@ impl SemanticTransitionSession {
                 "state-changing work or release cannot interrupt an original read-only evaluation",
             ));
         }
-        self.require_completed_cold_model_work()
+        self.require_completed_cold_model_work_for_prefill(work)
     }
 
     /// A later cold operation may release only the original completed temporary

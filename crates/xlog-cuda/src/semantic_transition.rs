@@ -33089,7 +33089,37 @@ impl SemanticTransitionSession {
         layout: SemanticInitialSourceLayout,
         model_generation: u64,
     ) -> Result<SemanticInitialPrefillLease, SemanticTransitionError> {
-        self.ensure_rebindable_with_prefill()?;
+        self.begin_initial_prefill_inner(
+            layout,
+            model_generation,
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
+    }
+
+    /// Issue the stage needed to initialize the exact original prefill report.
+    /// The report remains open for that invocation and must still join before
+    /// parent publication. Live scratch exports prevent stage issuance.
+    #[cfg(feature = "semantic-policy")]
+    pub fn begin_prepared_initial_prefill(
+        &mut self,
+        work: &SemanticColdModelWork,
+        layout: SemanticInitialSourceLayout,
+        model_generation: u64,
+    ) -> Result<SemanticInitialPrefillLease, SemanticTransitionError> {
+        self.begin_initial_prefill_inner(layout, model_generation, Some(work))
+    }
+
+    fn begin_initial_prefill_inner(
+        &mut self,
+        layout: SemanticInitialSourceLayout,
+        model_generation: u64,
+        #[cfg(feature = "semantic-policy")] work: Option<&SemanticColdModelWork>,
+    ) -> Result<SemanticInitialPrefillLease, SemanticTransitionError> {
+        self.ensure_quiescent()?;
+        #[cfg(feature = "semantic-policy")]
+        self.require_closed_evaluations_for_prefill(work)?;
+        self.require_rebinding_state()?;
         if self.publication.is_some() || self.initial_prefill.is_some() {
             return Err(publication_input_error(
                 "initial prefill requires one unpublished imported task",
@@ -33119,6 +33149,10 @@ impl SemanticTransitionSession {
             ));
         }
         let scope = Arc::new(());
+        #[cfg(feature = "semantic-policy")]
+        if let Some(original) = &mut self.initial_cold_model_work {
+            original.bind_scope(&scope)?;
+        }
         self.initial_prefill = Some(InitialPrefillStage {
             scope: Arc::clone(&scope),
             task_identity,
@@ -33130,10 +33164,6 @@ impl SemanticTransitionSession {
             output_content: None,
             consumer_stream: None,
         });
-        #[cfg(feature = "semantic-policy")]
-        if let Some(original) = &mut self.initial_cold_model_work {
-            original.bind_scope(&scope)?;
-        }
         Ok(SemanticInitialPrefillLease {
             issuer: Arc::clone(&self.publication_issuer),
             scope,
@@ -47414,6 +47444,10 @@ impl SemanticTransitionSession {
     fn ensure_rebinding_ownership(&self) -> Result<(), SemanticTransitionError> {
         #[cfg(feature = "semantic-policy")]
         self.require_closed_evaluations()?;
+        self.require_rebinding_state()
+    }
+
+    fn require_rebinding_state(&self) -> Result<(), SemanticTransitionError> {
         validate_rebinding_ownership(
             self.prepared_segment.as_ref(),
             self.steps.values().any(|step| step.identity.is_none()),

@@ -538,6 +538,9 @@ impl InitialPrefillColdWork {
             || self.storage.as_ref().is_none_or(|storage| {
                 !storage.initialized
                     || storage.plan.is_none()
+                    || storage.pending_operation.is_some()
+                    || storage.stopped_before_entry
+                    || storage.disposition.is_some()
                     || !matches!(
                         storage.state,
                         RecordingState::Waiting | RecordingState::Recording
@@ -672,12 +675,18 @@ impl SemanticTransitionSession {
         &self,
         work: &SemanticColdModelWork,
     ) -> Result<(), SemanticTransitionError> {
+        self.original_initial_prefill_cold_model_work(work)
+            .map(|_| ())
+    }
+
+    fn original_initial_prefill_cold_model_work(
+        &self,
+        work: &SemanticColdModelWork,
+    ) -> Result<&ColdModelWorkStorage, SemanticTransitionError> {
         if work.token != 0 {
             return Err(SemanticTransitionError::ObservationMismatch);
         }
-        self.require_initial_prefill_cold_owner()?;
-        self.original_cold_model_work(work)?;
-        Ok(())
+        self.original_cold_model_work(work)
     }
 
     fn in_cold_model_work_domain<T>(
@@ -2353,6 +2362,18 @@ impl SemanticTransitionSession {
     }
 
     pub(super) fn require_completed_cold_model_work(&self) -> Result<(), SemanticTransitionError> {
+        self.require_completed_cold_model_work_for_prefill(None)
+    }
+
+    pub(super) fn require_completed_cold_model_work_for_prefill(
+        &self,
+        work: Option<&SemanticColdModelWork>,
+    ) -> Result<(), SemanticTransitionError> {
+        // Only the report that needs this stage may still be recording. Its
+        // scratch aliases and all other reports obey the usual requirements.
+        let preparing = work
+            .map(|work| self.original_initial_prefill_cold_model_work(work))
+            .transpose()?;
         if self
             .steps
             .values()
@@ -2363,8 +2384,9 @@ impl SemanticTransitionSession {
                     .and_then(|owner| owner.storage.as_ref()),
             )
             .any(|storage| {
-                storage.state != RecordingState::Completed
-                    || Arc::strong_count(&storage.aliases) != 1
+                Arc::strong_count(&storage.aliases) != 1
+                    || (storage.state != RecordingState::Completed
+                        && !preparing.is_some_and(|original| std::ptr::eq(storage, original)))
             })
         {
             return Err(publication_input_error(
