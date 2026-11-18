@@ -16,6 +16,37 @@ and reuse or improve it. Do not create duplicate paths, legacy branches, silent
 fallbacks, compatibility shims, placeholders, toy substitutes, dead public APIs,
 workarounds, or deferred required debt.
 
+## Active structured neural integration assignment
+
+For the assignment in `#mistaber`
+`msg-20261105-110646-48f70d22a085`, read and apply the
+[joint project policy at 217e1e5](https://github.com/BrainyBlaze/mistaber-xlog/blob/217e1e5eff454ffed4193c8dbd246154f6860638/AGENTS.md),
+including its two pinned source scopes, source ownership, complete production
+path, preservation, Stop and publication rules. XLOG's `ENGINEERING.md`
+remains binding; current human decisions and the assignment-specific
+restrictions take precedence over conflicting older execution advice.
+
+The authorized phase is preparation and draft PRs. Implementation starts only
+after human approval, substantive agreement on the complete interface contract,
+and finalized Desk preparation. Read the current owning conversation for later
+approval or Stop. Interface consensus alone does not open implementation.
+Instructions below to implement immediately or use standing RunPod authority
+do not open this gate; project preparation does not authorize runtime spending.
+
+This assignment uses the XLOG-owned Git worktree
+`/root/projects/mistaber-xlog/.worktrees/xlog-structured-neural-20261105`,
+whose common repository is `/root/projects/xlog/.git`.
+Its location beneath the Mistaber directory does not change engine ownership.
+The older ancestor instruction to use `/home/dev/projects/xlog` is superseded
+for this assignment. Preserve unrelated dirty work and existing history.
+
+For this assignment, both declared and implicit fallback execution paths are
+prohibited. Explicitly selected comparison strategies remain distinct from
+fallbacks. Do not create process reports or standalone validators; preserve
+product data, historical evidence, checkpoints and pending publication records.
+Use direct source tools; older lean-ctx preferences do not require an indexing
+service or tool installation.
+
 ## Current Execution and Delivery Rules
 
 The current human direction is direct implementation of the governing design. These
