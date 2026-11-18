@@ -303,6 +303,7 @@ impl PySemanticTransitionTaskUse {
                     (Arc::clone(&original.scope), original.layout.clone())
                 };
                 let parts = initial_source_parts(py, layout.clone())?;
+                let original_work = work.borrow(py).custody(py)?.inner.clone();
                 issued.state()?.begin_prepared_initial_prefill(&scope)?;
                 let stage = issue_initial_prefill_stage(
                     py,
@@ -311,6 +312,7 @@ impl PySemanticTransitionTaskUse {
                     layout,
                     parts,
                     model_generation,
+                    Some(&original_work),
                 )?;
                 retained()?.stage = Some(stage);
             }

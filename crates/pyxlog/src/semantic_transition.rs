@@ -21934,13 +21934,21 @@ fn issue_initial_prefill_stage(
     layout: SemanticInitialSourceLayout,
     layout_parts: Py<PyTuple>,
     model_generation: u64,
+    #[cfg(feature = "semantic-policy")] work: Option<&xlog_cuda::SemanticColdModelWork>,
 ) -> PyResult<Py<PySemanticInitialPrefillStage>> {
     let prefix_len = layout.prefill_tokens.len();
     let session = task_use.borrow(py).session.clone_ref(py);
     let lease = {
         let session_ref = session.borrow(py);
         let mut owner = session_ref.owner()?;
-        match owner.begin_initial_prefill(layout, model_generation) {
+        #[cfg(feature = "semantic-policy")]
+        let begun = match work {
+            Some(work) => owner.begin_prepared_initial_prefill(work, layout, model_generation),
+            None => owner.begin_initial_prefill(layout, model_generation),
+        };
+        #[cfg(not(feature = "semantic-policy"))]
+        let begun = owner.begin_initial_prefill(layout, model_generation);
+        match begun {
             Ok(lease) => lease,
             Err(error) => {
                 owner.abort();
@@ -22048,7 +22056,16 @@ impl PySemanticTransitionTaskUse {
             .ok_or_else(|| invalid("initial prefill requires its registered original model"))?;
         let scope = issued.state()?.begin_initial_prefill(scope)?;
         drop(issued);
-        issue_initial_prefill_stage(py, slf, scope, layout, parts, model_generation)
+        issue_initial_prefill_stage(
+            py,
+            slf,
+            scope,
+            layout,
+            parts,
+            model_generation,
+            #[cfg(feature = "semantic-policy")]
+            None,
+        )
     }
 
     /// Return one immutable native projection of the exact ordered query,
