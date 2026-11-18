@@ -209,12 +209,22 @@ impl<'de> Visitor<'de> for Fields<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut numbers = [0usize; 4];
+        let gather = serde_json::Map::from_iter([
+            ("operation".into(), json!("gather_columns")),
+            ("input".into(), json!(self.pending.target.input)),
+        ]);
         for (field, expected) in FIELDS.into_iter().enumerate() {
             if map.next_key::<String>()?.as_deref() != Some(expected) {
                 return Err(A::Error::custom(
                     "structured indices fields or order differ",
                 ));
             }
+            let flat_capacity = if field == 0 {
+                self.program
+                    .flat_gather_capacity(&gather, self.signatures, self.continuation)
+            } else {
+                None
+            };
             let values = match field {
                 0 => {
                     let mut range = self.program.column_range();
@@ -243,11 +253,11 @@ impl<'de> Visitor<'de> for Fields<'_> {
                     if field != 0 {
                         return true;
                     }
-                    let material = serde_json::Map::from_iter([
-                        ("operation".into(), json!("gather_columns")),
-                        ("input".into(), json!(self.pending.target.input)),
-                        ("indices".into(), Value::Array(vec![json!(0); count])),
-                    ]);
+                    if let Some(capacity) = flat_capacity {
+                        return count <= capacity;
+                    }
+                    let mut material = gather.clone();
+                    material.insert("indices".into(), Value::Array(vec![json!(0); count]));
                     self.program
                         .possible(&material, None, self.signatures, self.continuation)
                 },

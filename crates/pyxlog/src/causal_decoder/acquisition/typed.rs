@@ -1674,15 +1674,16 @@ impl Program {
         self.possible(&candidate, Some(name), signatures, continuation)
     }
 
-    /// Maximum length of an open Gather list under flat necessary continuation
-    /// bounds. All in-range coordinates carry the input's dependencies and row
-    /// extents. The list length determines the output width.
-    pub(super) fn flat_gather_prefix_capacity(
+    /// A flat Gather's coordinates share the input's dependencies and row extents.
+    /// Its length determines the output width. A complete count at the output
+    /// slot must also satisfy `column_range`.
+    pub(super) fn flat_gather_capacity(
         &self,
         fields: &Map<String, Value>,
         signatures: &Signatures,
+        continuation: Option<Continuation<'_>>,
     ) -> Option<usize> {
-        if !self.necessary_continuations || !self.searches_completion() {
+        if continuation.is_some() || !self.necessary_continuations || !self.searches_completion() {
             return None;
         }
         let input = fields.get("input")?.as_u64()? as usize;
