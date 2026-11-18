@@ -4803,9 +4803,11 @@ __device__ bool task_program_prefix(const Descriptor& d,TaskProgramBank* bank,
     uint64_t inspected=0;
     semantic_world::Measure original{};
     semantic_world::MeasureFuel original_fuel(&original,&inspected,PROGRAM_FUEL);
+    const auto source=task_world_original(d,SEMANTIC_WORLD_SOURCE_ROLE,original);
     const auto cells=task_world_original(d,SEMANTIC_WORLD_STATE_ROLE,original);
-    const bool bound=semantic_rule_cells::bind(cells.words,cells.bytes,&bank->cells,
-        [&](const uint64_t* data,uint64_t index) { return original.read(data,index); });
+    auto read=[&](const uint64_t* data,uint64_t index) { return original.read(data,index); };
+    const bool bound=semantic_world::decode_source(source.words,source.bytes,&original.source,read) &&
+        semantic_rule_cells::bind(original.source,cells.words,cells.bytes,&bank->cells,read);
     semantic_graph::charge_native(work,semantic_graph::NativeWorkEvent::TableSlot,inspected);
     if(!bound)return false;
     if(slot) {
@@ -7846,6 +7848,7 @@ __device__ uint64_t publication_discard_control(const Descriptor& descriptor,Pub
 
 struct SemanticRuleCellPublication {
     uint64_t created,updated,count,capacity,contexts,context,next_rule,birth_low,birth_high,generation;
+    semantic_world::Source source;
     semantic_rule_cells::Update updates[2];
 };
 __device__ uint64_t semantic_world_word(const uint64_t* words,uint64_t index,
@@ -7889,8 +7892,7 @@ __device__ bool publication_plan_rule_cells(const PublicationControl& control,co
        source->length_bytes<semantic_world::kSourceHeaderWords*8 || cells->length_bytes<16*8)return false;
     const auto* original=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*source));
     const auto* current=reinterpret_cast<const uint64_t*>(publication_range_bytes(control,*cells));
-    semantic_world::Source authored{};
-    if(!current || !semantic_world::decode_source(original,source->length_bytes,&authored,
+    if(!current || !semantic_world::decode_source(original,source->length_bytes,&plan->source,
             [&](const uint64_t* words,uint64_t index) { return semantic_world_word(words,index,work); }) ||
        semantic_world_word(current,0,work)!=1)return false;
     for(uint32_t word=1;word<9;++word)
@@ -7921,7 +7923,7 @@ __device__ bool publication_plan_rule_cells(const PublicationControl& control,co
        (plan->birth_high==UINT64_MAX && plan->birth_low>UINT64_MAX-plan->created))return false;
     semantic_rule_cells::View selected{};
     auto read=[&](const uint64_t* data,uint64_t index) { return semantic_world_word(data,index,work); };
-    if(!semantic_rule_cells::bind(current,cells->length_bytes,&selected,read))return false;
+    if(!semantic_rule_cells::bind(plan->source,current,cells->length_bytes,&selected,read))return false;
     for(uint32_t index=0;index<plan->updated;++index) {
         if(!semantic_rule_cells::read_update(selected,weight_receipts[index],&plan->updates[index],read))return false;
         if(index && plan->updates[0].original.rule==plan->updates[index].original.rule)return false;
@@ -7949,7 +7951,7 @@ __device__ bool publication_apply_rule_cells(const PublicationControl& control,
        cells->offset_bytes>backing.bytes || bytes>backing.bytes-cells->offset_bytes)return false;
     semantic_rule_cells::View selected{};
     auto read=[&](const uint64_t* data,uint64_t index) { return semantic_world_word(data,index,work); };
-    if(!semantic_rule_cells::bind(destination,cells->length_bytes,&selected,read) ||
+    if(!semantic_rule_cells::bind(plan.source,destination,cells->length_bytes,&selected,read) ||
        selected.context!=plan.context || selected.count!=plan.count ||
        selected.generation!=plan.generation)return false;
     for(uint32_t index=0;index<plan.updated;++index) {
@@ -7958,7 +7960,8 @@ __device__ bool publication_apply_rule_cells(const PublicationControl& control,
         if(!semantic_rule_cells::lookup(selected,expected.rule,&current,read) ||
            current.ordinal!=expected.ordinal || current.context!=expected.context ||
            current.birth_low!=expected.birth_low || current.birth_high!=expected.birth_high ||
-           current.generation!=expected.generation || current.code!=expected.code)return false;
+           current.generation!=expected.generation || current.code!=expected.code ||
+           current.bernoulli_variable!=expected.bernoulli_variable)return false;
     }
     for(uint32_t index=0;index<plan.updated;++index) {
         const auto& update=plan.updates[index];
@@ -8408,7 +8411,7 @@ __device__ uint64_t publication_feedback_lineage(const Descriptor& descriptor,
         const auto cells=task_world_original(descriptor,SEMANTIC_WORLD_STATE_ROLE,world,lease);
         auto read=[&](const uint64_t* words,uint64_t index) { return world.read(words,index); };
         if(!semantic_world::decode_source(source.words,source.bytes,&world.source,read) ||
-           !semantic_rule_cells::bind(cells.words,cells.bytes,&world.rule_cells,read) ||
+           !semantic_rule_cells::bind(world.source,cells.words,cells.bytes,&world.rule_cells,read) ||
            !semantic_world::decode_context(world.source,uint32_t(world.rule_cells.context),&world.context,read))return 1;
     }
     FeedbackSupportCollector collector{supports,support_capacity,0,0};

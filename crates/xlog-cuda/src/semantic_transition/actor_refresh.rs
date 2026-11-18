@@ -1564,6 +1564,7 @@ impl SemanticTransitionSession {
         capacities: crate::SemanticHypergraphCapacities,
         limits: crate::SemanticAdmissionLimits,
         program: Option<Arc<crate::SemanticProgramAdmission>>,
+        semantic_context: SemanticWorldContext,
         work: SemanticColdNativeWork,
     ) -> Result<SemanticTransitionSessionConstruction, SemanticTransitionError> {
         self.ensure_quiescent()?;
@@ -1625,6 +1626,7 @@ impl SemanticTransitionSession {
             admitted_graph: None,
             program,
             model_context,
+            semantic_context,
             session: None,
             completed: None,
             binding,

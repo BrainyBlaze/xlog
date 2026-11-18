@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "semantic_world.cuh"
 
 namespace semantic_rule_cells {
 
@@ -7,13 +8,17 @@ static constexpr uint32_t kReplaceWeight=6;
 static constexpr uint64_t kTargetTag=UINT64_MAX-3;
 static constexpr uint64_t kCoefficientSort=5;
 static constexpr uint64_t kEditReceiptTag=0x584c4f47494d4544ULL;
+static constexpr uint32_t kCoefficientDenominator=32768;
+static constexpr uint32_t kUnitCode=1+kCoefficientDenominator;
 
 struct View {
     const uint64_t* data;
     uint64_t contexts,context,count,generation;
+    semantic_world::RuleBindings bindings;
 };
 struct Handle {
     uint64_t context,rule,birth_low,birth_high,generation,code,ordinal;
+    uint32_t gate_event,bernoulli_variable;
 };
 struct Update {
     Handle original;
@@ -21,16 +26,34 @@ struct Update {
 };
 
 // Exact zero and unit endpoints of the authored absolute coefficient grid.
-__device__ bool endpoint(uint64_t code) { return code==1 || code==32769; }
+__device__ bool endpoint(uint64_t code) { return code==1 || code==kUnitCode; }
+
+__device__ bool can_replace(const Handle& handle,uint64_t code) {
+    return code>=1 && code<=kUnitCode && code!=handle.code &&
+        (handle.bernoulli_variable || (endpoint(handle.code) && endpoint(code)));
+}
 
 template<class Read>
-__device__ bool bind(const uint64_t* data,uint64_t bytes,View* output,Read read) {
+__device__ bool select_context(const semantic_world::Source& source,uint64_t context,
+        View* view,Read read) {
+    if(context>=source.context_count ||
+       !semantic_world::decode_rule_bindings(source,uint32_t(context),&view->bindings,read))return false;
+    view->context=context;
+    return true;
+}
+
+template<class Read>
+__device__ bool bind(const semantic_world::Source& source,const uint64_t* data,
+        uint64_t bytes,View* output,Read read) {
     if(!data || !output || bytes%8 || bytes<16*8 || read(data,0)!=1)return false;
     const uint64_t words=bytes/8,contexts=read(data,9),context=read(data,15);
     const uint64_t count=read(data,11),capacity=read(data,12),generation=read(data,10);
-    if(!contexts || context>=contexts || !generation || contexts>words-16 ||
+    if(!contexts || contexts!=source.context_count || context>=contexts || !generation ||
+       contexts>words-16 ||
        count>capacity || count>(words-16-contexts)/6 || words!=16+contexts+6*count)return false;
-    *output={data,contexts,context,count,generation};
+    View view{data,contexts,context,count,generation,{}};
+    if(!select_context(source,context,&view,read))return false;
+    *output=view;
     return true;
 }
 
@@ -42,11 +65,14 @@ __device__ bool lookup(const View& view,uint64_t rule,Handle* output,Read read) 
     for(uint64_t ordinal=0;ordinal<view.count;++ordinal) {
         const uint64_t offset=16+view.contexts+ordinal*6;
         if(read(view.data,offset)!=view.context || read(view.data,offset+1)!=rule)continue;
+        const uint64_t gate=rule<view.bindings.count ?
+            read(view.bindings.words,rule*semantic_world::kRuleWords) : 1;
         Handle handle{view.context,rule,read(view.data,offset+2),read(view.data,offset+3),
-            read(view.data,offset+4),read(view.data,offset+5),ordinal};
+            read(view.data,offset+4),read(view.data,offset+5),ordinal,uint32_t(gate),uint32_t(gate>>32)};
         if(!(handle.birth_low|handle.birth_high) || !handle.generation ||
            handle.generation>view.generation ||
-           handle.code<1 || handle.code>32769)return false;
+           handle.code<1 || handle.code>kUnitCode ||
+           handle.bernoulli_variable>view.bindings.base_variables)return false;
         *output=handle;return true;
     }
     return false;
@@ -64,7 +90,7 @@ __device__ bool update_for_handle(const View& view,const Handle& handle,
        handle.context!=view.context || handle.generation==UINT64_MAX ||
        view.generation==UINT64_MAX)return false;
     const uint64_t code=read(receipt,33);
-    if(!endpoint(handle.code) || !endpoint(code) || code==handle.code)return false;
+    if(!can_replace(handle,code))return false;
     *output={handle,uint32_t(code)};
     return true;
 }

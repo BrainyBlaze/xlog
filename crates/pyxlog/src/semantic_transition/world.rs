@@ -39,6 +39,10 @@ impl ContextSourceData {
     pub(super) fn declaration(&self) -> &world::SemanticContextDeclaration {
         &self.owner.declaration.native.contexts[self.index as usize]
     }
+
+    pub(super) fn native_context(&self) -> PyResult<xlog_cuda::SemanticWorldContext> {
+        self.owner.native.context(self.index).map_err(xlog_err)
+    }
 }
 
 fn text_value(value: &ColdValue) -> PyResult<&str> {
@@ -179,7 +183,12 @@ fn parse_context(value: &ColdValue) -> PyResult<world::SemanticContextDeclaratio
             }
             let mut rules = Vec::new();
             for row in signed[2].sequence()? {
-                let row = row.fields(4)?;
+                let row = row.sequence()?;
+                if !matches!(row.len(), 4 | 5) {
+                    return Err(invalid(
+                        "a signed rule requires its ordinal, channels, gate and optional Bernoulli variable",
+                    ));
+                }
                 rules.push(world::SemanticRuleEventBinding {
                     rule: index(&row[0])?,
                     head: polarity(&row[1])?,
@@ -189,6 +198,7 @@ fn parse_context(value: &ColdValue) -> PyResult<world::SemanticContextDeclaratio
                         .map(polarity)
                         .collect::<PyResult<Vec<_>>>()?,
                     gate_event: index(&row[3])?,
+                    bernoulli_variable: row.get(4).map(index).transpose()?,
                 });
             }
             world::SemanticSignedProgram::SignedProgram { facts, rules }

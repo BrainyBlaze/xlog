@@ -10,6 +10,7 @@ pub(super) const HEADER_WORDS: usize = 36;
 pub(super) const CONTEXT_WORDS: usize = 20;
 const EVENT_WORDS: usize = 4;
 const FACTOR_WORDS: usize = 4;
+const RULE_BERNOULLI_FACTOR: u64 = 3;
 
 fn kind(kind: SemanticValueQueryKind) -> u64 {
     match kind {
@@ -92,7 +93,9 @@ pub(super) fn encode(
         };
         words[row..row + EVENT_WORDS].copy_from_slice(&record);
     }
+    let mut bernoulli_rows = BTreeMap::new();
     for (index, factor) in declaration.measure_factors.iter().enumerate() {
+        let row = factors + index * FACTOR_WORDS;
         let record = match factor {
             SemanticMeasureFactor::Unit => [0, 0, 1, 1],
             SemanticMeasureFactor::Bernoulli {
@@ -101,6 +104,7 @@ pub(super) fn encode(
                 denominator,
             } => {
                 base_variables = base_variables.max(u64::from(*variable));
+                bernoulli_rows.insert(*variable, row);
                 [1, u64::from(*variable), *numerator, *denominator]
             }
             SemanticMeasureFactor::EventWeight {
@@ -112,10 +116,11 @@ pub(super) fn encode(
                 [2, u64::from(*event), *numerator, *denominator]
             }
         };
-        let row = factors + index * FACTOR_WORDS;
         words[row..row + FACTOR_WORDS].copy_from_slice(&record);
     }
-    for (index, (context, program)) in declaration.contexts.iter().zip(programs).enumerate() {
+    for (context_ordinal, (context, program)) in
+        declaration.contexts.iter().zip(programs).enumerate()
+    {
         let fact_begin = reserve(&mut words, rows(program.initial_facts.len(), 2)?)?;
         let rule_begin = reserve(&mut words, rows(program.initial_rules.len(), 3)?)?;
         let query_begin = reserve(&mut words, rows(context.queries.len(), 2)?)?;
@@ -138,7 +143,21 @@ pub(super) fn encode(
                 }
                 for (index, rule) in rules.iter().enumerate() {
                     let row = rule_begin + index * 3;
-                    words[row] = u64::from(rule.gate_event);
+                    let variable = rule.bernoulli_variable.unwrap_or(0);
+                    words[row] = u64::from(rule.gate_event) | (u64::from(variable) << 32);
+                    if let Some(variable) = rule.bernoulli_variable {
+                        let factor = *bernoulli_rows.get(&variable).ok_or_else(|| {
+                            invalid_world("rule cell refers to a missing Bernoulli factor")
+                        })?;
+                        // The cold declaration already checked the initial fraction.
+                        // The acquired original cell owns the weight at execution.
+                        words[factor..factor + FACTOR_WORDS].copy_from_slice(&[
+                            RULE_BERNOULLI_FACTOR,
+                            u64::from(variable),
+                            context_ordinal as u64,
+                            u64::from(rule.rule),
+                        ]);
+                    }
                     words[row + 1] = u64::from(rule.head == SemanticSupportPolarity::Contra);
                     words[row + 2] =
                         rule.body
@@ -160,7 +179,7 @@ pub(super) fn encode(
         for (index, (_, value)) in context.view.assignment.iter().enumerate() {
             words[assignment_begin + index] = u64::from(*value);
         }
-        let row = contexts + index * CONTEXT_WORDS;
+        let row = contexts + context_ordinal * CONTEXT_WORDS;
         words[row..row + 12].copy_from_slice(&[
             u64::from(context.view.world_ordinal),
             kind(context.view.kind),
@@ -175,7 +194,7 @@ pub(super) fn encode(
             assignment_begin as u64,
             signed,
         ]);
-        for (seal, identity) in context_identities[index].iter().enumerate() {
+        for (seal, identity) in context_identities[context_ordinal].iter().enumerate() {
             for (word, bytes) in identity.as_bytes().chunks_exact(8).enumerate() {
                 words[row + 12 + seal * 4 + word] =
                     u64::from_le_bytes(bytes.try_into().expect("identity word"));

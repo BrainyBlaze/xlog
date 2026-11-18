@@ -1912,6 +1912,7 @@ impl SemanticTransitionSession {
                     &admission.admission,
                     self.graph.transition_arena()[1],
                     Some(&context.program),
+                    self.codebooks.semantic_context.as_ref(),
                     self.replay_material_budget
                         .as_ref()
                         .ok_or(SemanticTransitionError::NotBound)?,
@@ -2019,6 +2020,7 @@ impl SemanticTransitionSession {
             &admission.admission,
             self.graph.transition_arena()[1],
             Some(&program),
+            self.codebooks.semantic_context.as_ref(),
             budget,
         )?;
         let rule_library = self

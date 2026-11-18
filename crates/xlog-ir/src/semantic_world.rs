@@ -3,8 +3,13 @@
 //! A declaration describes immutable input. Mutable event roots and allocation state
 //! belong to the publication bank that selects a semantic version.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use xlog_core::{Result, XlogError};
+
+/// Denominator of the absolute rule coefficient grid.
+pub const RULE_COEFFICIENT_DENOMINATOR: u32 = 32768;
+/// Code for the exact unit coefficient. Code 1 is exact zero.
+pub const UNIT_RULE_COEFFICIENT_CODE: u32 = RULE_COEFFICIENT_DENOMINATOR + 1;
 
 /// Authored Boolean expression. Indices refer to earlier declaration nodes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +121,8 @@ pub struct SemanticRuleEventBinding {
     pub body: Vec<SemanticSupportPolarity>,
     /// Authored gate event, distinct from the mutable rule coefficient.
     pub gate_event: u32,
+    /// The declared Bernoulli variable controlled by this original rule cell.
+    pub bernoulli_variable: Option<u32>,
 }
 
 /// Explicit lowering law for authored source.
@@ -265,7 +272,7 @@ impl SemanticWorldDeclaration {
         if edges > u64::from(cap.edges) {
             return Err(invalid("semantic event edges exceed the declared capacity"));
         }
-        let mut laws = BTreeSet::new();
+        let mut laws = BTreeMap::new();
         let singleton = self.measure_factors.as_slice() == [SemanticMeasureFactor::Unit];
         for factor in &self.measure_factors {
             match factor {
@@ -283,7 +290,7 @@ impl SemanticWorldDeclaration {
                         || *variable > cap.variables
                         || *denominator == 0
                         || numerator > denominator
-                        || !laws.insert(*variable)
+                        || laws.insert(*variable, (*numerator, *denominator)).is_some()
                     {
                         return Err(invalid(
                             "a base variable requires one valid authored Bernoulli law",
@@ -301,16 +308,17 @@ impl SemanticWorldDeclaration {
                 }
             }
         }
-        let base_variables = laws.iter().next_back().copied().unwrap_or(0);
+        let base_variables = laws.keys().next_back().copied().unwrap_or(0);
         if (!singleton
             && (self.measure_factors.is_empty() || laws.len() != base_variables as usize))
-            || variable_ids.iter().any(|var| !laws.contains(var))
+            || variable_ids.iter().any(|var| !laws.contains_key(var))
         {
             return Err(invalid(
                 "common measure must define the complete contiguous variable domain",
             ));
         }
         let mut worlds = BTreeSet::new();
+        let mut controlled_variables = BTreeSet::new();
         for context in &self.contexts {
             worlds.insert(context.view.world_ordinal);
             if context.view.condition_event >= node_count {
@@ -367,6 +375,34 @@ impl SemanticWorldDeclaration {
                 }) {
                     return Err(invalid("signed source bindings require ordered complete native ordinals and event roots"));
                 }
+                for rule in rules {
+                    let Some(variable) = rule.bernoulli_variable else {
+                        continue;
+                    };
+                    let &(numerator, denominator) = laws.get(&variable).ok_or_else(|| {
+                        invalid("a rule cell must bind an authored Bernoulli variable")
+                    })?;
+                    if !controlled_variables.insert(variable) {
+                        return Err(invalid(
+                            "a Bernoulli variable has more than one original rule cell",
+                        ));
+                    }
+                    let code = match &context.rule_cells {
+                        SemanticInitialRuleCells::Uniform(code) => *code,
+                        SemanticInitialRuleCells::Codes(codes) => {
+                            *codes.get(rule.rule as usize).ok_or_else(|| {
+                                invalid("a Bernoulli-linked rule requires an initial cell code")
+                            })?
+                        }
+                    };
+                    if u128::from(numerator) * u128::from(RULE_COEFFICIENT_DENOMINATOR)
+                        != u128::from(denominator) * u128::from(code - 1)
+                    {
+                        return Err(invalid(
+                            "the authored Bernoulli probability differs from the initial rule code",
+                        ));
+                    }
+                }
             }
         }
         if worlds
@@ -385,7 +421,7 @@ impl SemanticWorldDeclaration {
 /// Validates an authored coefficient code: NULL is transport-only, and code
 /// `1 + m` denotes `m / 32768` for `0 <= m <= 32768`.
 pub fn validate_rule_code(code: u32) -> Result<()> {
-    if !(1..=32769).contains(&code) {
+    if !(1..=UNIT_RULE_COEFFICIENT_CODE).contains(&code) {
         return Err(invalid(
             "semantic rule coefficient requires a non-NULL absolute code",
         ));

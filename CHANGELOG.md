@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- *(cuda)* allow an original signed rule cell to control one shared Bernoulli
+  factor. Fractional weight edits use the same event for every grounding and
+  the candidate's actual code for its measure and task-value derivative.
+
 ### Changed
 
 - Epistemic execution classifies modal dependencies before single-pass planning.

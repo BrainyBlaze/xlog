@@ -135,16 +135,19 @@ __device__ bool weight_prefix_completes(const uint64_t* books,const Component* c
     };
     for(uint32_t position=4;position<18;++position)if(!admitted(position,0))return false;
     bool zero=false,unit=false;
+    uint32_t first=0,other=0;
     const uint32_t code_begin=field>=3 ? (field==3 ? category : choices[3]) : 1;
     const uint32_t code_end=field>=3 ? code_begin+uint32_t(code_begin<books[3]) : uint32_t(books[3]);
     for(uint32_t value=code_begin;value<code_end;++value) {
         uint32_t code=0;
         if(admitted(3,value) && operand(books,3,value,semantic_rule_cells::kCoefficientSort,
-                0,32770,&code,charge)) {
-            zero|=code==1;unit|=code==32769;
+                 0,semantic_rule_cells::kUnitCode+1,&code,charge) && code) {
+            zero|=code==1;unit|=code==semantic_rule_cells::kUnitCode;
+            if(!first)first=code;
+            else if(code!=first)other=code;
         }
     }
-    if(!zero && !unit)return false;
+    if(!first)return false;
     auto read=[&](const uint64_t* row,uint64_t index) {
         charge(semantic_rule_action::PrefixWorkEvent::TableSlot);return row[index];
     };
@@ -157,7 +160,12 @@ __device__ bool weight_prefix_completes(const uint64_t* books,const Component* c
            (frame.has_prior && frame.prior.opcode==semantic_rule_cells::kReplaceWeight &&
                 frame.prior.target==rule) ||
            !semantic_rule_cells::lookup(cells,rule,&cell,read) || cell.generation==UINT64_MAX)continue;
-        if((zero && cell.code==32769) || (unit && cell.code==1))return true;
+        if(cell.bernoulli_variable) {
+            // Two distinct admitted codes suffice to find a change to any cell.
+            if(semantic_rule_cells::can_replace(cell,first) ||
+               semantic_rule_cells::can_replace(cell,other))return true;
+        } else if((zero && semantic_rule_cells::can_replace(cell,1)) ||
+                  (unit && semantic_rule_cells::can_replace(cell,semantic_rule_cells::kUnitCode)))return true;
     }
     return false;
 }
@@ -175,16 +183,16 @@ __device__ bool decode_weight(const uint64_t* books,const uint32_t choices[18],
     semantic_program_image::DecodedEdit edit{};
     edit.opcode=semantic_rule_cells::kReplaceWeight;edit.library_index=UINT32_MAX;
     if(!target(books,choices[2],semantic_rule_cells::kTargetTag,0,UINT32_MAX,&edit.target,charge) ||
-       !operand(books,3,choices[3],semantic_rule_cells::kCoefficientSort,0,32770,&edit.coefficient,charge) ||
-       !semantic_rule_cells::endpoint(edit.coefficient) ||
+       !operand(books,3,choices[3],semantic_rule_cells::kCoefficientSort,
+           0,semantic_rule_cells::kUnitCode+1,&edit.coefficient,charge) ||
        (frame.has_prior && frame.prior.opcode==semantic_rule_cells::kReplaceWeight &&
             frame.prior.target==edit.target))return false;
     auto read=[&](const uint64_t* row,uint64_t index) {
         charge(semantic_rule_action::PrefixWorkEvent::TableSlot);return row[index];
     };
     if(!semantic_rule_cells::lookup(cells,edit.target,&edit.cell,read) ||
-       edit.cell.generation==UINT64_MAX || !semantic_rule_cells::endpoint(edit.cell.code) ||
-       edit.cell.code==edit.coefficient)return false;
+       edit.cell.generation==UINT64_MAX ||
+       !semantic_rule_cells::can_replace(edit.cell,edit.coefficient))return false;
     *output=edit;return true;
 }
 

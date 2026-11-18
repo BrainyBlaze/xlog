@@ -1689,6 +1689,7 @@ impl PySemanticTransitionColdTask {
                     admission.clone(),
                     &parent,
                     &task_ground,
+                    &semantic_context,
                     capacities,
                     admission_limits,
                     device_ordinal,
@@ -1719,6 +1720,7 @@ impl PySemanticTransitionColdTask {
                     allocation,
                     canary,
                     None,
+                    Some(&semantic_context),
                 )
                 .map_err(|error| {
                     #[cfg(feature = "semantic-policy")]

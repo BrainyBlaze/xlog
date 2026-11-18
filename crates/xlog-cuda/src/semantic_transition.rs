@@ -2120,6 +2120,7 @@ struct ActionCodebooks {
     components: Vec<SemanticComponent>,
     binding: SemanticCatalogueBinding,
     program_binding: Option<Identity256>,
+    semantic_context: Option<SemanticWorldContext>,
     input_cells: usize,
     model_catalogue: Option<(Arc<model_catalogue::FrozenModelCatalogue>, usize)>,
     model_projection_reservation: Option<Arc<SemanticReplayMaterialReservation>>,
@@ -2127,6 +2128,31 @@ struct ActionCodebooks {
 }
 
 impl ActionCodebooks {
+    fn rule_coefficient_codes(
+        semantic_context: Option<&SemanticWorldContext>,
+    ) -> impl ExactSizeIterator<Item = u32> {
+        use xlog_ir::semantic_world::{RULE_COEFFICIENT_DENOMINATOR, UNIT_RULE_COEFFICIENT_CODE};
+        let stride = if semantic_context.is_some_and(SemanticWorldContext::has_linked_rules) {
+            1
+        } else {
+            RULE_COEFFICIENT_DENOMINATOR as usize
+        };
+        (1..UNIT_RULE_COEFFICIENT_CODE as usize + 1)
+            .step_by(stride)
+            .map(|code| code as u32)
+    }
+
+    fn rule_accepts_coefficient(&self, rule: u32, code: u64) -> bool {
+        let unit = u64::from(xlog_ir::semantic_world::UNIT_RULE_COEFFICIENT_CODE);
+        (1..=unit).contains(&code)
+            && (code == 1
+                || code == unit
+                || self
+                    .semantic_context
+                    .as_ref()
+                    .is_some_and(|context| context.links_rule(rule)))
+    }
+
     fn descriptor_table(field: u32) -> Option<usize> {
         match field {
             2 => Some(0),
@@ -2378,9 +2404,11 @@ impl ActionCodebooks {
                 .local_category(3, choices[3])
                 .and_then(|index| self.operands.get(index))
             {
-                Some(SemanticActionDescriptor::RuleCoefficient {
-                    code: code @ (1 | 32769),
-                }) => *code,
+                Some(SemanticActionDescriptor::RuleCoefficient { code })
+                    if self.rule_accepts_coefficient(edit.target, u64::from(*code)) =>
+                {
+                    *code
+                }
                 _ => return Err(mismatch()),
             };
         } else {
@@ -2571,6 +2599,7 @@ impl ActionCodebooks {
         admission: &SemanticAdmission,
         owner: u64,
         program: Option<&crate::SemanticProgramAdmission>,
+        semantic_context: Option<&SemanticWorldContext>,
     ) -> Result<Self, SemanticTransitionError> {
         if let Some(program) = program {
             program
@@ -2706,13 +2735,14 @@ impl ActionCodebooks {
                     + program.image.mutation_capacity as usize
             })
             .unwrap_or(0);
+        let coefficient_codes = Self::rule_coefficient_codes(semantic_context);
         let additional_operands = program
             .map(|program| {
                 program.predicate_count as usize
                     + 4
                     + program.image.guards.len()
                     + program.image.nodes.len()
-                    + 2
+                    + coefficient_codes.len()
             })
             .unwrap_or(0);
         if [
@@ -2823,7 +2853,7 @@ impl ActionCodebooks {
                 words.extend([0, 0, 0, 2, u64::from(index), 0]);
                 operand_views.push(SemanticActionDescriptor::RuleVariable { index });
             }
-            for code in [1, 32769] {
+            for code in coefficient_codes {
                 words.extend([0, 0, 0, 5, u64::from(code), 0]);
                 operand_views.push(SemanticActionDescriptor::RuleCoefficient { code });
             }
@@ -2934,6 +2964,7 @@ impl ActionCodebooks {
             components,
             binding,
             program_binding,
+            semantic_context: semantic_context.cloned(),
             input_cells,
             model_catalogue: None,
             model_projection_reservation: None,
@@ -9821,7 +9852,7 @@ fn validated_program_edit_receipt(
     }
     if decoded.opcode == 6 {
         if control != SemanticEvaluationIntervention::Structural as u64
-            || !matches!(receipt[32], 1 | 32769)
+            || !codebooks.rule_accepts_coefficient(decoded.target, receipt[32])
             || receipt[33] != u64::from(decoded.coefficient)
             || receipt[32] == receipt[33]
             || (receipt[34] | receipt[35]) == 0
@@ -23768,6 +23799,7 @@ pub struct SemanticTransitionSessionConstruction {
     admitted_graph: Option<SemanticHypergraph>,
     program: Option<Arc<crate::SemanticProgramAdmission>>,
     model_context: Option<SemanticFrozenModelContext>,
+    semantic_context: SemanticWorldContext,
     session: Option<SemanticTransitionSession>,
     completed: Option<Arc<Mutex<Option<SemanticTransitionSession>>>>,
     binding: Arc<actor_refresh::ActorRefreshConstructionBinding>,
@@ -23815,6 +23847,7 @@ impl SemanticTransitionSessionConstruction {
                 self.program.as_deref(),
                 Arc::clone(&self.binding.issuer),
                 self.model_context.as_ref(),
+                Some(&self.semantic_context),
             )?;
             session.actor_refresh_construction = Some(Arc::clone(&self.binding));
             if let Some(budget) = &self.replay_material_budget {
@@ -40570,7 +40603,7 @@ impl SemanticTransitionSession {
         graph: SemanticHypergraph,
         program: Option<&crate::SemanticProgramAdmission>,
     ) -> Result<Self, SemanticTransitionError> {
-        Self::from_hypergraph_with_model_context(graph, program, None)
+        Self::from_hypergraph_with_model_context(graph, program, None, None)
     }
 
     /// Project the original cold model rows before sizing resident buffers.
@@ -40578,6 +40611,7 @@ impl SemanticTransitionSession {
         graph: SemanticHypergraph,
         program: Option<&crate::SemanticProgramAdmission>,
         context: Option<&SemanticFrozenModelContext>,
+        semantic_context: Option<&SemanticWorldContext>,
     ) -> Result<Self, SemanticTransitionError> {
         let mut graph = Some(graph);
         let mut session = Self::allocate_from_hypergraph_with_program(
@@ -40585,6 +40619,7 @@ impl SemanticTransitionSession {
             program,
             Arc::new(()),
             context,
+            semantic_context,
         )?;
         session.upload_cold_codebooks()?;
         Ok(session)
@@ -40595,6 +40630,7 @@ impl SemanticTransitionSession {
         program: Option<&crate::SemanticProgramAdmission>,
         publication_issuer: Arc<()>,
         context: Option<&SemanticFrozenModelContext>,
+        semantic_context: Option<&SemanticWorldContext>,
     ) -> Result<Self, SemanticTransitionError> {
         let graph = original_graph
             .as_ref()
@@ -40616,8 +40652,12 @@ impl SemanticTransitionSession {
             .expect("transition owner validated admission");
         let root = admission.base();
         let base_snapshot = *admission.base_snapshot();
-        let mut codebooks =
-            ActionCodebooks::derive(admission, graph.transition_arena()[1], program)?;
+        let mut codebooks = ActionCodebooks::derive(
+            admission,
+            graph.transition_arena()[1],
+            program,
+            semantic_context,
+        )?;
         if let Some(context) = context {
             codebooks.project_model_catalogue(Arc::clone(&context.catalogue), context.member)?;
         }
@@ -41596,6 +41636,14 @@ impl SemanticTransitionSession {
             .checked_add(1)
             .ok_or(SemanticTransitionError::GenerationExhausted)?;
         spec.validate_records(admission.records())?;
+        if self.codebooks.semantic_context.as_ref().map_or_else(
+            || self.codebooks.program_binding.is_some() && spec.semantic_context.has_linked_rules(),
+            |original| !original.same_original(&spec.semantic_context),
+        ) {
+            return Err(publication_input_error(
+                "task semantic context differs from the cold rule coefficient domain",
+            ));
+        }
         if spec
             .program
             .editable_program()
@@ -54353,8 +54401,8 @@ pub(crate) mod task_binding_tests {
                 },
             ],
         };
-        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
-        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        let generic = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program), None).unwrap();
         assert_eq!(books.targets[..generic.targets.len()], generic.targets);
         assert_eq!(
             books.targets[generic.targets.len()..]
@@ -54408,7 +54456,7 @@ pub(crate) mod task_binding_tests {
                 first: 10,
                 second: 11,
             });
-        let changed = ActionCodebooks::derive(&admission, 1, Some(&changed_program)).unwrap();
+        let changed = ActionCodebooks::derive(&admission, 1, Some(&changed_program), None).unwrap();
         assert_ne!(books.binding.digest, changed.binding.digest);
 
         let predicate = |index| generic.operands.len() as u32 + 1 + index;
@@ -54437,7 +54485,7 @@ pub(crate) mod task_binding_tests {
 
         let mut too_many_predicates = program;
         too_many_predicates.predicate_count = 65_536;
-        assert!(ActionCodebooks::derive(&admission, 1, Some(&too_many_predicates)).is_err());
+        assert!(ActionCodebooks::derive(&admission, 1, Some(&too_many_predicates), None).is_err());
     }
 
     #[test]
@@ -54449,7 +54497,7 @@ pub(crate) mod task_binding_tests {
         records.supports.last_mut().unwrap().statement = 1;
         let original_count = records.supports.len();
         let admission = admit_material_records(records);
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         assert_eq!(books.leaves.len(), original_count);
         assert_eq!(books.words[7], original_count as u64 + 1);
         let mut seen = BTreeSet::new();
@@ -54525,7 +54573,7 @@ pub(crate) mod task_binding_tests {
     fn policy_support_reserves_every_original_category_span() {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let (spans, cells) = books.support_layout();
         assert_eq!(spans.len(), COMPONENT_COUNT);
         let mut cursor = 0;
@@ -54548,7 +54596,7 @@ pub(crate) mod task_binding_tests {
     fn action_codebooks_retain_typed_reconstruction_sources() {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         assert_eq!(
             books.words[4] - books.words[2],
             6 * books.words[3],
@@ -54601,7 +54649,7 @@ pub(crate) mod task_binding_tests {
         );
 
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let codebook = books.completed_material();
         assert_eq!(codebook.identity, books.binding.digest);
         assert_eq!(codebook.bytes, publication_abi_bytes(&books.words));
@@ -54640,7 +54688,7 @@ pub(crate) mod task_binding_tests {
             );
         }
         assert_ne!(roster.identity, codebook.identity);
-        let other_owner_books = ActionCodebooks::derive(&admission, 2, None).unwrap();
+        let other_owner_books = ActionCodebooks::derive(&admission, 2, None, None).unwrap();
         assert_ne!(
             other_owner_books.completed_material().identity,
             codebook.identity
@@ -54659,7 +54707,7 @@ pub(crate) mod task_binding_tests {
         };
 
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let mut choices = [0u32; 18];
         choices[0] = 1;
         choices[1] = 1;
@@ -54697,7 +54745,7 @@ pub(crate) mod task_binding_tests {
         use crate::semantic_hypergraph::tests::{admit_material_records, root_material_records};
 
         let admission = admit_material_records(root_material_records());
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let mut choices = [0u32; 18];
         choices[0] = 1;
         choices[1] = 1;
@@ -54810,8 +54858,8 @@ pub(crate) mod task_binding_tests {
                 },
             ],
         };
-        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
-        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        let generic = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program), None).unwrap();
         let predicate = |index| generic.operands.len() as u32 + 1 + index;
         let variable = |index| generic.operands.len() as u32 + 4 + index;
         let mut choices = [0u32; 18];
@@ -54934,7 +54982,7 @@ pub(crate) mod task_binding_tests {
             initial_rules: vec![],
             queries: [fact; 3],
         };
-        let books = ActionCodebooks::derive(&admission, 1, Some(&program)).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, Some(&program), None).unwrap();
         let task = Identity256::from_bytes([7; 32]);
         let edits = [[[0u32; 18]; 2]; 2];
         let mut state = DeviceState {
@@ -54968,7 +55016,7 @@ pub(crate) mod task_binding_tests {
             validate_program_query_receipts(&program, task, &books, &state, &fact_edit).is_err()
         );
 
-        let generic = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let generic = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let predicate = generic.operands.len() as u32 + 1;
         let first = predicate + 1;
         let second = first + 1;
@@ -55298,7 +55346,7 @@ pub(crate) mod task_binding_tests {
         let mut records = root_material_records();
         records.supports.push(records.supports[0].clone());
         let admission = admit_material_records(records);
-        let books = ActionCodebooks::derive(&admission, 1, None).unwrap();
+        let books = ActionCodebooks::derive(&admission, 1, None, None).unwrap();
         let leaf = books
             .leaves
             .iter()
