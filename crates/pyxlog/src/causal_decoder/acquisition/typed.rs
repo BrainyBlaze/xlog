@@ -1204,6 +1204,42 @@ impl Program {
         0..self.body.operations.len()
     }
 
+    /// Numeric literal arrays have one coordinate per output column. Reuse the
+    /// same partial ancestor relations at both lengths; unknown widths stay free.
+    pub(super) fn array_minimum(
+        &self,
+        fields: &Map<String, Value>,
+        name: &str,
+        continuation: Option<Continuation<'_>>,
+    ) -> Result<usize, XlogError> {
+        if !matches!(name, "indices" | "token_ids") {
+            return Ok(0);
+        }
+        let mut minimum = self.output_columns().unwrap_or(1);
+        let mut fields = fields.clone();
+        // A prefix length is not the selected final width of an open array.
+        fields.remove(name);
+        for length in 0..2 {
+            let mut expected = TensorShapeConstraint::default();
+            if let Some(partial) = continuation.and_then(|value| value.partial) {
+                expected = self.partial_shape(
+                    &fields,
+                    None,
+                    partial.expected(self, length)?,
+                    length,
+                    partial.fields,
+                )?;
+            }
+            if let Some(constraints) = continuation.and_then(|value| value.expected) {
+                expected.intersect(constraints[length])?;
+            }
+            if let Some(columns) = expected.columns {
+                minimum = minimum.max(columns);
+            }
+        }
+        Ok(minimum)
+    }
+
     pub(super) fn array_number_possible(
         &self,
         fields: &Map<String, Value>,
