@@ -3682,27 +3682,26 @@ impl<'de> Visitor<'de> for Operation<'_> {
                     }
                     Value::from(choice.value)
                 } else if key == "arguments" || key == "indices" {
-                    serde_json::to_value(
-                        map.next_value_seed(TypedIndices {
-                            program,
-                            material: &material,
-                            field: &key,
-                            signatures: self.signatures,
-                            bytes: self.bytes,
-                            continuation: self.continuation,
-                            collection: self
-                                .pending_collection
-                                .filter(|_| key == "indices")
-                                .map(|pending| {
-                                    program
-                                        .array_minimum(&material, &key, self.continuation)
-                                        .map(|minimum| NumericCollection { pending, minimum })
-                                })
-                                .transpose()
-                                .map_err(A::Error::custom)?,
-                        })?,
-                    )
-                    .map_err(A::Error::custom)?
+                    let collection = self
+                        .pending_collection
+                        .filter(|_| key == "indices")
+                        .map(|pending| {
+                            program
+                                .array_minimum(&material, &key, self.continuation)
+                                .map(|minimum| NumericCollection { pending, minimum })
+                        })
+                        .transpose()
+                        .map_err(A::Error::custom)?;
+                    map.next_value_seed(TypedIndices {
+                        program,
+                        material: &mut material,
+                        field: key,
+                        signatures: self.signatures,
+                        bytes: self.bytes,
+                        continuation: self.continuation,
+                        collection,
+                    })?;
+                    continue;
                 } else if key == "token_ids" {
                     serde_json::to_value(
                         map.next_value_seed(TokenIds {
@@ -3856,18 +3855,18 @@ impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
         let spelling = raw.get();
         let end = spelling.as_bytes().as_ptr_range().end as usize - self.bytes.as_ptr() as usize;
         let value = spelling.parse::<usize>().map_err(D::Error::custom)?;
-        let extension = if end == self.bytes.len() {
+        let decimal_tail = if end == self.bytes.len() {
             // Only unfinished decimals need a search for compatible extensions.
             self.prefix_choice(spelling)
+                .map(|extension| extension.to_string().len().saturating_sub(spelling.len()))
         } else {
-            (self.values.contains(&value) && (self.accepts)(value)).then_some(value)
-        };
-        let extension = extension
-            .ok_or_else(|| D::Error::custom("reference has no compatible decimal continuation"))?;
+            (self.values.contains(&value) && (self.accepts)(value)).then_some(0)
+        }
+        .ok_or_else(|| D::Error::custom("reference has no compatible decimal continuation"))?;
         Ok(ChosenNumber {
             value,
             end,
-            decimal_tail: extension.to_string().len().saturating_sub(spelling.len()),
+            decimal_tail,
         })
     }
 }
@@ -3905,21 +3904,21 @@ impl NumericCollection<'_> {
 
 struct TypedIndices<'a> {
     program: &'a typed::Program,
-    material: &'a serde_json::Map<String, Value>,
-    field: &'a str,
+    material: &'a mut serde_json::Map<String, Value>,
+    field: String,
     signatures: &'a typed::Signatures,
     bytes: &'a [u8],
     continuation: Option<typed::Continuation<'a>>,
     collection: Option<NumericCollection<'a>>,
 }
 impl<'de> DeserializeSeed<'de> for TypedIndices<'_> {
-    type Value = Vec<usize>;
+    type Value = ();
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         decoder.deserialize_seq(self)
     }
 }
 impl<'de> Visitor<'de> for TypedIndices<'_> {
-    type Value = Vec<usize>;
+    type Value = ();
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("compatible numeric operands")
     }
@@ -3935,13 +3934,13 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
             if gather_capacity.is_some_and(|capacity| prefix.len() >= capacity) {
                 return 0..0;
             }
-            self.program.array_range(self.material, self.field, prefix)
+            self.program.array_range(self.material, &self.field, prefix)
         };
         let accepts = |prefix: &[usize], value| {
             gather_capacity.is_some()
                 || self.program.array_number_possible(
                     self.material,
-                    self.field,
+                    &self.field,
                     prefix,
                     value,
                     self.signatures,
@@ -3975,13 +3974,11 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
                 ));
             }
         }
-        if !self.program.array_can_end(
-            self.material,
-            self.field,
-            &values,
-            self.signatures,
-            self.continuation,
-        ) {
+        self.material.insert(self.field, Value::from(values));
+        if !self
+            .program
+            .possible(self.material, None, self.signatures, self.continuation)
+        {
             return Err(A::Error::custom(
                 "operand array cannot complete this operation",
             ));
@@ -3989,7 +3986,7 @@ impl<'de> Visitor<'de> for TypedIndices<'_> {
         if let Some(collection) = self.collection {
             collection.finish();
         }
-        Ok(values)
+        Ok(())
     }
 }
 

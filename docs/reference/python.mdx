@@ -1503,9 +1503,10 @@ list whether the first coordinate admits a completion. It checks subsequent
 coordinates against the input width and the list length against the FP32
 extent at both context lengths and any required output width. A structured
 descriptor uses the same bound for its `count` before expanding the indices.
-At the output row, the count must equal the required output width. Closing a
-literal list or expanding a descriptor checks the complete ordered list,
-including repeated coordinates, through canonical Gather inference.
+At the output row, the count must equal the required output width. When a
+literal list or descriptor closes, the typed reader admits the complete ordered
+list, including repeated coordinates, through canonical Gather inference.
+It reuses that admitted list when constructing the operation.
 
 The token contract is `ordered-structural-subsequence-v5`. The same row reader
 retains already selected fields for future `indices`/`token_ids` costs; the
