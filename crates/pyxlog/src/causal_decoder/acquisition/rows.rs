@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use xlog_logic::ast::FuncBody;
 
+pub(super) mod budget;
 pub(super) mod indices;
 
 pub(super) const ENCODING: &str = "numerical-rows-v1";
@@ -133,6 +134,7 @@ pub(super) struct Prefix<'a> {
     pub operation_count: Option<&'a [u8]>,
     pub indices: Vec<indices::Record>,
     pub pending_indices: Option<indices::Pending<'a>>,
+    pub budget: budget::State,
 }
 
 enum Stop {
@@ -213,6 +215,7 @@ struct Reader<'a> {
     definition_index: usize,
     indices: Vec<indices::Record>,
     pending_indices: Option<(usize, indices::Target)>,
+    budget: budget::State,
 }
 
 /// Only syntax is expanded. An unfinished operand remains the same byte prefix
@@ -245,12 +248,16 @@ pub(super) fn prefix<'a>(
         definition_index: 0,
         indices: Vec::new(),
         pending_indices: None,
+        budget: budget::State::default(),
     };
     let complete = match reader.document() {
         Ok(()) => true,
         Err(Stop::Incomplete) => false,
         Err(Stop::Invalid(error)) => return Err(error),
     };
+    if complete {
+        reader.budget.phase = budget::Phase::Complete;
+    }
     Ok(Prefix {
         bytes: reader.output.bytes,
         complete,
@@ -262,6 +269,7 @@ pub(super) fn prefix<'a>(
                 bytes: &source[start..],
                 target,
             }),
+        budget: reader.budget,
     })
 }
 
@@ -345,12 +353,14 @@ impl Reader<'_> {
     }
 
     fn take(&mut self, expected: u8) -> Result<(), Stop> {
+        self.budget.pending = budget::Atom::of(expected);
         if self.peek()? != expected {
             return Err(Stop::Invalid(
                 "numerical rows field order or arity differs".into(),
             ));
         }
         self.offset += 1;
+        self.budget.pending = None;
         Ok(())
     }
 
@@ -361,6 +371,7 @@ impl Reader<'_> {
     }
 
     fn raw(&mut self, copy: bool) -> Result<&RawValue, Stop> {
+        self.budget.pending = None;
         self.whitespace()?;
         let tail = &self.source[self.offset..];
         let mut values = serde_json::Deserializer::from_slice(tail).into_iter::<&RawValue>();
@@ -446,6 +457,7 @@ impl Reader<'_> {
             }
             self.take(b',')?;
         }
+        self.budget.phase = budget::Phase::Helpers;
         self.key("helpers")?;
         self.output.extend_from_slice(b"\"entrypoint\":")?;
         self.output.json(&self.context["entrypoint"])?;
@@ -462,6 +474,7 @@ impl Reader<'_> {
                 self.punctuation(b',', b',')?;
             }
         }
+        self.budget.phase = budget::Phase::EntryStart;
         self.take(b']')?;
         self.take(b',')?;
         self.key("entry")?;
@@ -470,6 +483,7 @@ impl Reader<'_> {
         }
         self.definition(true)?;
         self.output.push(b']')?;
+        self.budget.phase = budget::Phase::RootEnd;
         self.punctuation(b'}', b'}')?;
         self.whitespace()?;
         if self.offset != self.source.len() {
@@ -479,6 +493,8 @@ impl Reader<'_> {
     }
 
     fn definition(&mut self, entry: bool) -> Result<(), Stop> {
+        self.budget.definition(entry);
+        self.budget.definition_index = self.definition_index;
         self.punctuation(b'{', b'{')?;
         let signature: TensorSignature = if entry {
             self.definition_name = self.context["entrypoint"].as_str().unwrap().to_owned();
@@ -495,15 +511,18 @@ impl Reader<'_> {
             self.take(b',')?;
             self.output
                 .extend_from_slice(b",\"body\":{\"Numerical\":{")?;
+            self.budget.phase = budget::Phase::Signature;
             self.field("signature")?;
             let signature = self.value()?;
             self.punctuation(b',', b',')?;
             signature
         };
+        self.budget.phase = budget::Phase::Parameters;
         self.field("parameters")?;
         self.value::<Vec<TensorParameter>>()?;
         self.punctuation(b',', b',')?;
         let operation_count = if self.context_entry {
+            self.budget.phase = budget::Phase::Count;
             self.key("operation_count")?;
             self.output.extend_from_slice(b"\"output\":")?;
             // Retain the original decimal until its canonical output index can
@@ -516,6 +535,7 @@ impl Reader<'_> {
                 return Err(Stop::Invalid("invalid numerical operation count".into()));
             }
             self.pending_operation_count = None;
+            self.budget.count = Some(count);
             self.output
                 .extend_from_slice((count - 1).to_string().as_bytes())?;
             Some(count)
@@ -525,25 +545,31 @@ impl Reader<'_> {
             None
         };
         self.punctuation(b',', b',')?;
+        self.budget.phase = budget::Phase::Operations;
         self.field("operations")?;
         self.punctuation(b'[', b'[')?;
         let mut operations = 0;
         if self.peek()? != b']' {
             loop {
+                self.budget.phase = budget::Phase::Row;
                 self.operation(operations)?;
                 operations += 1;
+                self.budget.completed_rows = operations;
+                self.budget.phase = budget::Phase::Operations;
                 if self.peek()? != b',' {
                     break;
                 }
                 self.punctuation(b',', b',')?;
             }
         }
+        self.budget.phase = budget::Phase::OperationsEnd;
         self.punctuation(b']', b']')?;
         if operation_count.is_some_and(|count| count != operations) {
             return Err(Stop::Invalid(
                 "numerical operation count differs from rows".into(),
             ));
         }
+        self.budget.phase = budget::Phase::DefinitionEnd;
         self.take(b'}')?;
         let vocabulary = self.context["vocabulary"].as_u64().unwrap() as usize;
         let max_context = self.context["max_context"].as_u64().unwrap() as usize;

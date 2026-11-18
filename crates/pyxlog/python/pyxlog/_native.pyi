@@ -77,7 +77,7 @@ class NativeCausalModel:
         self, *, insertion_layer: int = 17, language_version: int = 1,
         raw_token_ids: Optional[Sequence[int]] = None,
     ) -> str:
-        """Exact native context/schema; v18 adds bounded structured Gather indices."""
+        """Exact native context/schema; v19 admits the remaining original-token budget."""
         ...
     def fork_acquired(
         self, definition_json: str, parameter_values: dict[str, Sequence[float]], *,
@@ -112,7 +112,10 @@ class NativeAcquisitionMask:
     """Intersect byte-token masks with the selected native acquisition contract."""
 
     def __init__(self, language_json: str, token_bytes: Sequence[bytes]) -> None: ...
-    def filter(self, prefix: bytes, allowed_mask: bytes) -> bytes: ...
+    def filter(
+        self, prefix: bytes, allowed_mask: bytes, *, remaining_tokens: Optional[int] = None,
+    ) -> bytes:
+        """v19 requires remaining original IDs including the next choice and paid EOS."""
     def completion_state(self, prefix: bytes) -> str:
         """Version4–9 prefix facts as JSON; no token selection or final admission."""
     def decode_definition(self, source_bytes: bytes) -> str:
