@@ -75,31 +75,29 @@ impl Pattern {
     }
 
     pub(super) fn write(&self, output: &mut super::Output) -> Result<(), super::Stop> {
-        // Count exact canonical bytes before expansion. No intermediate index
-        // vector or unbounded serialization buffer is allocated by the codec.
-        let mut bytes = self.count.checked_add(1).ok_or_else(|| {
-            super::Stop::Invalid("structured indices byte extent overflow".into())
-        })?;
-        output.ensure(bytes.checked_add(self.count).ok_or_else(|| {
-            super::Stop::Invalid("structured indices byte extent overflow".into())
-        })?)?;
-        let mut value = self.start;
-        for index in 0..self.count {
-            let digits = if value == 0 {
-                1
-            } else {
-                value.ilog10() as usize + 1
-            };
-            bytes = bytes.checked_add(digits).ok_or_else(|| {
-                super::Stop::Invalid("structured indices byte extent overflow".into())
-            })?;
-            if index + 1 < self.count {
-                value = self.next(value).map_err(super::Stop::Invalid)?;
+        let overflow = || super::Stop::Invalid("structured indices byte extent overflow".into());
+        let digits = |value: usize| value.max(1).ilog10() as usize + 1;
+        let punctuation = self.count.checked_add(1).ok_or_else(overflow)?;
+        // Every coordinate is below the modulus. Count individual digits only
+        // when this upper bound cannot establish that the whole array fits.
+        let upper = self
+            .count
+            .checked_mul(digits(self.modulus - 1))
+            .and_then(|bytes| punctuation.checked_add(bytes));
+        if !upper.is_some_and(|bytes| output.fits(bytes)) {
+            output.ensure(punctuation.checked_add(self.count).ok_or_else(overflow)?)?;
+            let mut bytes = punctuation;
+            let mut value = self.start;
+            for index in 0..self.count {
+                bytes = bytes.checked_add(digits(value)).ok_or_else(overflow)?;
+                if index + 1 < self.count {
+                    value = self.next(value).map_err(super::Stop::Invalid)?;
+                }
             }
+            output.ensure(bytes)?;
         }
-        output.ensure(bytes)?;
         output.push(b'[')?;
-        value = self.start;
+        let mut value = self.start;
         for index in 0..self.count {
             if index != 0 {
                 output.push(b',')?;
