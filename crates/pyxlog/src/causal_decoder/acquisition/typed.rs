@@ -1663,8 +1663,8 @@ impl Program {
         continuation: Option<Continuation<'_>>,
     ) -> bool {
         if name == "indices" && !self.searches_completion() && continuation.is_none() {
-            // The contiguous domain is exact; the complete array still uses
-            // canonical gather inference in array_can_end.
+            // The contiguous domain is exact. Closing the array checks the
+            // complete operand through canonical Gather inference.
             return true;
         }
         let mut candidate = fields.clone();
@@ -1698,19 +1698,6 @@ impl Program {
             capacity = capacity.min(usize::MAX / std::mem::size_of::<f32>() / rows);
         }
         Some(capacity)
-    }
-
-    pub(super) fn array_can_end(
-        &self,
-        fields: &Map<String, Value>,
-        name: &str,
-        prefix: &[usize],
-        signatures: &Signatures,
-        continuation: Option<Continuation<'_>>,
-    ) -> bool {
-        let mut candidate = fields.clone();
-        candidate.insert(name.into(), serde_json::json!(prefix));
-        self.possible(&candidate, None, signatures, continuation)
     }
 
     /// Necessary leaf feasibility uses the same scalar domains and canonical
