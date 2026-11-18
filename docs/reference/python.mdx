@@ -1494,6 +1494,13 @@ necessary producer, dependency-frontier, row and shape bounds, with original-ID
 row capacity; they do not invoke hypothetical continuation graph search.
 Expression-only ancestor and child-reference obligations do not apply to rows.
 
+For a flat `gather_columns` row, the typed reader determines once per index
+list whether the first coordinate admits a completion. It checks subsequent
+coordinates against the input width and the list length against the FP32
+extent at both context lengths and any required output width. Closing a
+literal list or expanding a descriptor checks the complete ordered list,
+including repeated coordinates, through canonical Gather inference.
+
 The token contract is `ordered-structural-subsequence-v5`. The same row reader
 retains already selected fields for future `indices`/`token_ids` costs; the
 shared typed array minimum and literal-or-Gather-descriptor alternatives join
