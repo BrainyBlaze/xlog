@@ -1503,6 +1503,9 @@ list whether the first coordinate admits a completion. It checks subsequent
 coordinates against the input width and the list length against the FP32
 extent at both context lengths and any required output width. A structured
 descriptor uses the same bound for its `count` before expanding the indices.
+Its modulus bounds the number of decimal digits per coordinate. If that
+upper bound exceeds the remaining canonical byte budget, the reader counts
+the actual digits before writing the array.
 At the output row, the count must equal the required output width. When a
 literal list or descriptor closes, the typed reader admits the complete ordered
 list, including repeated coordinates, through canonical Gather inference.

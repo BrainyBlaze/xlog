@@ -175,14 +175,17 @@ struct Output {
 }
 
 impl Output {
-    fn ensure(&self, additional: usize) -> Result<(), std::io::Error> {
-        if self.bounded
-            && self
+    fn fits(&self, additional: usize) -> bool {
+        !self.bounded
+            || self
                 .bytes
                 .len()
                 .checked_add(additional)
-                .is_none_or(|size| size > ACQUIRED_SOURCE_BYTES)
-        {
+                .is_some_and(|size| size <= ACQUIRED_SOURCE_BYTES)
+    }
+
+    fn ensure(&self, additional: usize) -> Result<(), std::io::Error> {
+        if !self.fits(additional) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "projected acquisition source byte budget exceeded",
@@ -1317,12 +1320,14 @@ impl Reader<'_> {
                 && self.peek()? == b'{'
             {
                 self.structured_indices(index, input.unwrap())?;
+                // The expanded array is the final Gather operand. Only the row
+                // delimiter remains in the token budget.
+                continue;
             } else {
                 self.raw(true)?;
             }
             if let Some(selected) = &mut selected {
-                // Reuse the canonical value emitted by this reader, including
-                // retained symbols and compact Gather descriptors.
+                // Retained symbols use the canonical name emitted by this reader.
                 selected.insert(
                     field.clone(),
                     serde_json::from_slice(&self.output.bytes[value_start..])?,
