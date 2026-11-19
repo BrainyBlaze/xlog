@@ -1635,6 +1635,7 @@ impl ActorRefreshCustody {
         records: SemanticAdmissionRecords,
         parent: &Py<cold_task::PySemanticTransitionFreshParent>,
         task_ground: &ColdValue,
+        semantic_context: &world::ContextSourceData,
         capacities: (u32, u32, u32, u32),
         limits: (u32, u32, u32, usize),
         device: usize,
@@ -1705,6 +1706,7 @@ impl ActorRefreshCustody {
                             max_utf8_bytes: limits.3,
                         },
                         editable.as_ref().map(|source| Arc::clone(&source.program)),
+                        semantic_context.native_context()?,
                         child.cold_work.clone().ok_or_else(|| {
                             invalid("actor constructor lost its original cold work")
                         })?,

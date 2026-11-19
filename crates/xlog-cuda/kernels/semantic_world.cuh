@@ -8,6 +8,8 @@ constexpr uint64_t kSourceHeaderWords = 36;
 constexpr uint64_t kContextWords = 20;
 constexpr uint64_t kEventWords = 4;
 constexpr uint64_t kFactorWords = 4;
+constexpr uint64_t kRuleWords = 3;
+constexpr uint64_t kRuleBernoulliFactor = 3;
 
 // The immutable source is a range in the same PublicationBank as its selected
 // rule-cell ledger. Offsets are words relative to this acquired original range.
@@ -19,6 +21,23 @@ struct Source {
     uint32_t nodes,edges,unique_slots,apply_entries,dependency_edges,frontier_entries;
     uint32_t particles,variables,base_variables,selectors;
 };
+
+struct RuleBindings {
+    const uint64_t* words;
+    uint32_t count,base_variables;
+};
+
+template<class Read>
+__device__ bool decode_rule_bindings(const Source& source,uint32_t context,
+        RuleBindings* output,Read read) {
+    if(!source.words || !output || context>=source.context_count)return false;
+    const auto* row=source.words+source.context_offset+uint64_t(context)*kContextWords;
+    const uint64_t count=read(row,4),offset=read(row,8);
+    if(count>UINT32_MAX || offset<source.payload_offset || offset>source.word_count ||
+       count>(source.word_count-offset)/kRuleWords)return false;
+    *output={source.words+offset,uint32_t(count),source.base_variables};
+    return true;
+}
 
 template<class Read>
 __device__ bool decode_source(const uint64_t* words,uint64_t bytes,

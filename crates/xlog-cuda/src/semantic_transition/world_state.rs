@@ -4,7 +4,10 @@
 //! probabilistic interpretation of a coefficient or manufacture event realizations.
 
 use super::*;
-use xlog_ir::semantic_world::{SemanticInitialRuleCells, SemanticWorldDeclaration};
+use xlog_ir::semantic_world::{
+    SemanticInitialRuleCells, SemanticRuleEventBinding, SemanticSignedProgram,
+    SemanticWorldDeclaration, UNIT_RULE_COEFFICIENT_CODE,
+};
 
 mod source;
 
@@ -323,7 +326,7 @@ impl SemanticWorldSource {
                 || word(bytes, begin + 4) > word(bytes, 10)
                 || !births.insert(birth)
                 || !targets.insert((context, rule))
-                || !(1..=32769).contains(&word(bytes, begin + 5))
+                || !(1..=u64::from(UNIT_RULE_COEFFICIENT_CODE)).contains(&word(bytes, begin + 5))
                 || rule >= word(bytes, STATE_HEADER_WORDS + context)
             {
                 return Err(mismatch());
@@ -344,6 +347,29 @@ impl SemanticWorldSource {
 }
 
 impl SemanticWorldContext {
+    fn signed_rules(&self) -> &[SemanticRuleEventBinding] {
+        match &self.source.declaration.contexts[self.ordinal as usize].program {
+            SemanticSignedProgram::NativeProgram => &[],
+            SemanticSignedProgram::SignedProgram { rules, .. } => rules,
+        }
+    }
+
+    pub(super) fn has_linked_rules(&self) -> bool {
+        self.signed_rules()
+            .iter()
+            .any(|rule| rule.bernoulli_variable.is_some())
+    }
+
+    pub(super) fn links_rule(&self, rule: u32) -> bool {
+        self.signed_rules()
+            .get(rule as usize)
+            .is_some_and(|rule| rule.bernoulli_variable.is_some())
+    }
+
+    pub(super) fn same_original(&self, other: &Self) -> bool {
+        self.ordinal == other.ordinal && Arc::ptr_eq(&self.source, &other.source)
+    }
+
     pub(super) fn measure_geometry(
         &self,
         layout: task_ground::TaskGroundLayout,

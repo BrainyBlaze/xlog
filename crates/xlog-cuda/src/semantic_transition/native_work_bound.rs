@@ -1742,7 +1742,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
         )?;
     } else {
         // Two acquired original-range scans, the immutable source/context
-        // decoders, six ledger-header reads, and each query's actual seals.
+        // decoders, ledger-header and rule-binding reads, and each query's seals.
         add_native_work_ceiling(
             &mut ceiling,
             [
@@ -1751,7 +1751,7 @@ pub(super) fn feedback_geometry_native_work_ceiling(
                     ceiling_product(2, ranges)?,
                     world_state::SOURCE_HEADER_WORDS as u64,
                     world_state::SOURCE_CONTEXT_WORDS as u64,
-                    8,
+                    10,
                     ceiling_product(slots, 3 + 5 * 4)?,
                 ])?,
                 0,
@@ -2224,19 +2224,20 @@ fn rule_prefix_native_work_ceiling(
             .ok_or(SemanticTransitionError::NotBound)?
             .bank_templates[0]
             .len() as u64;
-        // Weight completion scans each actual target once and summarizes the
-        // two typed coefficient choices through the original operand roster.
-        // Each ledger lookup inspects two slots per reserved cell and the
-        // selected handle; the prefix also binds its original captured range.
+        // Weight completion scans each actual target once and summarizes admitted
+        // coefficients in one operand scan. Each ledger lookup inspects two slots
+        // per reserved cell, the selected handle and its original rule binding.
+        // Qualification reads both original ranges from the captured bank.
         ceiling[1] = ceiling_sum([
             ceiling[1],
             ceiling_product(
                 predicate_bound,
-                ceiling_sum([ceiling_product(2, cells)?, 96])?,
+                ceiling_sum([ceiling_product(2, cells)?, 97])?,
             )?,
             ceiling_product(32, operands)?,
-            ceiling_product(4, ranges)?,
-            64,
+            ceiling_product(8, ranges)?,
+            world_state::SOURCE_HEADER_WORDS as u64,
+            66,
         ])?;
         ceiling[3] = ceiling_sum([ceiling[3], predicate_bound, operands, 14])?;
     }
@@ -2889,7 +2890,7 @@ fn publication_finalization_native_work_ceiling(
                     8,
                     capacity(SemanticStateRole::SemanticWorldState as u64, 0)? / (6 * 8),
                 )?,
-                128,
+                136, // Includes both rule rosters and the binding of each rechecked cell.
             ])?,
             0,
             0,

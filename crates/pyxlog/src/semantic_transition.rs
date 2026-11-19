@@ -1469,10 +1469,14 @@ impl PySemanticTransitionSession {
         allocation_domain: Option<CheckpointAllocationDomain>,
         training_canary_owner: Option<TrainingCanaryOwner>,
         model_context: Option<&xlog_cuda::SemanticFrozenModelContext>,
+        semantic_context: Option<&world::ContextSourceData>,
     ) -> PyResult<Self> {
         let records = records.into();
         let editable_source =
             cold_task::editable_source_from_admission_bound(records.records(), &material_sources)?;
+        let semantic_context = semantic_context
+            .map(world::ContextSourceData::native_context)
+            .transpose()?;
         let native_capacities = SemanticHypergraphCapacities::try_new(
             capacities.0,
             capacities.1,
@@ -1561,6 +1565,7 @@ impl PySemanticTransitionSession {
                 .as_ref()
                 .map(|source| source.program.as_ref()),
             model_context,
+            semantic_context.as_ref(),
         )
         .map_err(xlog_err)?;
         if material_sources.saved_caps()?.is_some() {
@@ -3053,6 +3058,7 @@ impl PySemanticTransitionSession {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -4465,8 +4471,9 @@ impl PySemanticTransitionSession {
             allocation_domain,
             canary_source.clone().zip(canary_owner.clone()),
             seed.native_model_context.as_ref(),
+            Some(&canary_context),
         )?;
-        restored_session.bind_semantic_context(seed.semantic_context()?)?;
+        restored_session.bind_semantic_context(canary_context)?;
 
         if let Some(registry) = evaluation_source_registry {
             restored_session.retain_evaluation_source_registry(Arc::clone(registry))?;
@@ -19702,6 +19709,39 @@ impl PySemanticPreparedStep {
         Ok((identity(predecessor), successor.map(identity), records)
             .into_pyobject(py)?
             .unbind())
+    }
+
+    /// Original task-value derivative from the retained completed Proposal.
+    #[pyo3(signature = (*, consumer_streams))]
+    fn completed_world_measure_vjp(
+        &self,
+        py: Python<'_>,
+        consumer_streams: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyTuple>>> {
+        let streams = self.completed_observation_streams(py, consumer_streams)?;
+        #[cfg(not(feature = "semantic-policy"))]
+        {
+            let _ = streams;
+            Err(invalid(
+                "completed measure observation requires the semantic-policy feature",
+            ))
+        }
+        #[cfg(feature = "semantic-policy")]
+        {
+            let session = self.session.borrow(py);
+            let derivatives = session
+                .owner()?
+                .prepared_completed_world_measure_vjp(&self.inner, &streams)
+                .map_err(xlog_err)?;
+            derivatives
+                .map(|pairs| {
+                    let pairs = pairs
+                        .into_iter()
+                        .map(|[false_bits, true_bits]| (false_bits, true_bits));
+                    Ok(PyTuple::new(py, pairs)?.unbind())
+                })
+                .transpose()
+        }
     }
 
     /// Original imported task lineage, with no invented publication identity.

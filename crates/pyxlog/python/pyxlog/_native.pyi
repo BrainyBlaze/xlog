@@ -596,6 +596,17 @@ class SemanticPreparedStep:
         tuple[tuple[int, int, int, int, int, int, bytes], ...],
     ]: ...
 
+    def completed_world_measure_vjp(
+        self, *, consumer_streams: Sequence[int],
+    ) -> Optional[tuple[tuple[int, int], ...]]:
+        """Original task-value VJP as FP64 bit pairs (false, true) in factor order.
+
+        Call after known completion of the Proposal and before its retirement.
+        Returns None when the completed Proposal has no measure observation.
+        A late refusal preserves an already completed original derivative.
+        """
+        ...
+
     def save_checkpoint(
         self, *, consumer_streams: Sequence[int],
         snapshot_model_state: Callable[[SemanticMaterialWriter], SemanticMaterialBytes],
@@ -1120,6 +1131,13 @@ class SemanticWorldDeclaration:
     Each contexts row is (source6, context_view, signed_program, rule_cells,
     query_views). The native parser owns exact nested tags, arities and bounds.
     The source6 image owner is retained, never reconstructed by a dependent caller.
+
+    A signed rule row is (ordinal, head, body, gate_event), with an optional
+    fifth field, bernoulli_variable. The initial probability of that variable
+    must equal (cell_code - 1) / 32768. One original rule cell controls each
+    linked variable across the declaration. All groundings at a fractional
+    weight share its event. Measure uses the code in the acquired bank, with
+    private edits applied only to their candidate.
     """
     def __init__(
         self, *, contexts: tuple[tuple[Any, ...], ...],
@@ -1451,6 +1469,8 @@ class SemanticTransitionTaskUse:
         invalid program). Header[31] records whether any original query uses
         the common measure; an assignment context may contain measure queries.
         Assignment queries remain point-truth at their original realization.
+        The VJP is for the full task value and each branch uses its own factor
+        potentials. A linked rule coefficient changes through ReplaceWeight.
         Structural numerical values are not certificates. Static factors grant
         no model learning destination. The actor return remains stop-gradient.
         """

@@ -555,11 +555,12 @@ impl ActionCodebooks {
         admission: &SemanticAdmission,
         owner: u64,
         program: Option<&crate::SemanticProgramAdmission>,
+        semantic_context: Option<&SemanticWorldContext>,
         budget: &SemanticReplayMaterialBudget,
     ) -> Result<Self, SemanticTransitionError> {
-        let bound = Self::derivation_allocation_bound(admission, program)?;
+        let bound = Self::derivation_allocation_bound(admission, program, semantic_context)?;
         let mut reservation = budget.reserve_auxiliary(bound as u64)?;
-        let mut codebooks = Self::derive(admission, owner, program)?;
+        let mut codebooks = Self::derive(admission, owner, program, semantic_context)?;
         let retained = codebooks
             .descriptor_allocation_bytes()?
             .checked_add(
@@ -629,6 +630,7 @@ impl ActionCodebooks {
     fn derivation_allocation_bound(
         admission: &SemanticAdmission,
         program: Option<&crate::SemanticProgramAdmission>,
+        semantic_context: Option<&SemanticWorldContext>,
     ) -> Result<usize, SemanticTransitionError> {
         let overflow = || SemanticTransitionError::GenerationExhausted;
         let add = |left: usize, right: usize| left.checked_add(right).ok_or_else(overflow);
@@ -708,10 +710,24 @@ impl ActionCodebooks {
         let additional = program.map_or(0, |program| program.predicate_count as usize);
         let image_targets = program.map_or(0, |p| p.image.nodes.len() + p.image.roots.len());
         let image_operands = program.map_or(0, |p| p.image.guards.len() + p.image.nodes.len());
-        let targets = add(add(records.predicates.len(), additional)?, image_targets)?;
+        let rule_cells = program
+            .map(|program| {
+                add(
+                    program.initial_rules.len(),
+                    program.image.mutation_capacity as usize,
+                )
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let targets = add(
+            add(add(records.predicates.len(), additional)?, image_targets)?,
+            rule_cells,
+        )?;
         let operands = add(
             add(add(argument_count, additional)?, image_operands)?,
-            if program.is_some() { 4 } else { 0 },
+            program.map_or(0, |_| {
+                4 + Self::rule_coefficient_codes(semantic_context).len()
+            }),
         )?;
         let leaves = add(
             records.supports.len(),

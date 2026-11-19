@@ -266,11 +266,7 @@ impl MaterialSourceRegistry {
                     .map_err(|_| invalid("common semantic world allocation extent exceeds u64"))?;
             *retained = Some(budget.reserve_auxiliary(bytes).map_err(xlog_err)?);
         }
-        context
-            .owner
-            .native
-            .context(context.index)
-            .map_err(xlog_err)
+        context.native_context()
     }
 
     /// Warm the same original cache before acquiring a consumer's own mutex.

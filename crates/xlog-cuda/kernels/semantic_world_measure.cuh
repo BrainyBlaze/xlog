@@ -27,7 +27,7 @@ __device__ bool decode_context(const Source& source,uint32_t ordinal,
     for(uint32_t index=0;index<kContextWords;++index)c[index]=read(row,index);
     if(c[1]>1 || c[2]>=source.event_count || c[11]>1)return false;
     for(uint32_t index=3;index<7;++index)if(c[index]>UINT32_MAX)return false;
-    const uint64_t widths[4]={2,3,2,1};
+    const uint64_t widths[4]={2,kRuleWords,2,1};
     for(uint32_t index=0;index<4;++index)
         if(c[7+index]<source.payload_offset || c[7+index]>source.word_count ||
            c[3+index]*widths[index]>source.word_count-c[7+index])return false;
@@ -267,7 +267,7 @@ struct Measure {
         next_rule=read(ledger,16+context.ordinal);
         if(next_rule<context.rules || next_rule>UINT32_MAX)fail(MeasureStatus::InvalidSource);
         if(status==MeasureStatus::Ok &&
-           (!semantic_rule_cells::bind(ledger,bytes,&rule_cells,
+           (!semantic_rule_cells::bind(source,ledger,bytes,&rule_cells,
                 [&](const uint64_t* data,uint64_t index) { return read(data,index); }) ||
             rule_cells.context!=context.ordinal))fail(MeasureStatus::InvalidSource);
         return status==MeasureStatus::Ok;
@@ -278,36 +278,41 @@ struct Measure {
         if(event>=source.event_count) { fail(MeasureStatus::InvalidSource);return 0; }
         return restrict_view(uint32_t(events[event]));
     }
-    // The categorical cell has no continuous Jacobian. Only its exact zero and
-    // unit endpoints have a settled Boolean meaning; intermediate codes need an
-    // authored coefficient law before any value or adjoint can be published.
+    __device__ bool rule_coefficient(const semantic_rule_cells::View& cells,uint64_t rule,
+            semantic_rule_cells::Handle* cell,uint64_t* code) {
+        auto read_cell=[&](const uint64_t* data,uint64_t index) { return read(data,index); };
+        const uint32_t edits=cells.context==rule_cells.context ? candidate_update_count : 0;
+        if(!semantic_rule_cells::lookup(cells,rule,cell,read_cell) ||
+           !semantic_rule_cells::candidate_coefficient(cells,*cell,candidate_updates,edits,code,read_cell))
+            fail(MeasureStatus::InvalidSource);
+        return status==MeasureStatus::Ok;
+    }
+
+    // All groundings share the variable of their authored rule.
     __device__ uint32_t rule_gate(uint32_t rule,uint32_t appended_rules,
             uint32_t* head,uint32_t* body_mask) {
         *head=0;*body_mask=0;
         if(rule==UINT32_MAX)return 1; // Original fixed library activation.
-        uint32_t gate=1;
-        if(rule<context.rules) {
-            const uint64_t offset=context.rule_offset+uint64_t(rule)*3;
-            const uint64_t event=read(source.words,offset),head_channel=read(source.words,offset+1),
-                body=read(source.words,offset+2);
-            if(event>=source.event_count || head_channel>1 || body>7) {
-                fail(MeasureStatus::InvalidSource);return 0;
-            }
-            gate=uint32_t(events[event]);*head=uint32_t(head_channel);*body_mask=uint32_t(body);
-        }
         if(next_rule>uint64_t(context.rules)+appended_rules ||
            rule>=uint64_t(context.rules)+appended_rules) { fail(MeasureStatus::InvalidSource);return 0; }
-        if(rule>=next_rule)return gate; // Native append creates a unit cell at the sole publication.
+        if(rule>=next_rule)return 1; // Native append creates a unit cell at the sole publication.
         semantic_rule_cells::Handle cell{};uint64_t code=0;
-        auto read_cell=[&](const uint64_t* data,uint64_t index) { return read(data,index); };
-        if(!semantic_rule_cells::lookup(rule_cells,rule,&cell,read_cell) ||
-           !semantic_rule_cells::candidate_coefficient(rule_cells,cell,candidate_updates,
-                candidate_update_count,&code,read_cell)) {
-            fail(MeasureStatus::InvalidSource);return 0;
+        if(!rule_coefficient(rule_cells,rule,&cell,&code))return 0;
+        if(rule<context.rules) {
+            const uint64_t offset=context.rule_offset+uint64_t(rule)*kRuleWords;
+            const uint64_t head_channel=read(source.words,offset+1),
+                body=read(source.words,offset+2);
+            if(cell.gate_event>=source.event_count || head_channel>1 || body>7) {
+                fail(MeasureStatus::InvalidSource);return 0;
+            }
+            *head=uint32_t(head_channel);*body_mask=uint32_t(body);
         }
         if(code==1)return 0;
-        if(code==32769)return gate;
-        fail(code>1 && code<32769 ? MeasureStatus::UnsupportedCoefficient : MeasureStatus::InvalidSource);
+        const uint32_t gate=uint32_t(events[cell.gate_event]);
+        if(code==semantic_rule_cells::kUnitCode)return gate;
+        if(cell.bernoulli_variable)
+            return intersection(gate,literal(cell.bernoulli_variable,true));
+        fail(MeasureStatus::UnsupportedCoefficient);
         return 0;
     }
     __device__ bool assignment(uint32_t root) {
@@ -370,25 +375,45 @@ struct Measure {
         uint32_t selector=source.base_variables;
         for(uint32_t index=0;index<source.factor_count && status==MeasureStatus::Ok;++index) {
             const auto* row=source.words+source.factor_offset+uint64_t(index)*kFactorWords;
-            const uint64_t type=read(row,0),target=read(row,1),numerator=read(row,2),denominator=read(row,3);
-            if(!denominator || type>2) { fail(MeasureStatus::InvalidSource);break; }
-            if(type==0)continue;
-            const uint32_t variable=type==1 ? uint32_t(target) : ++selector;
-            if(!variable || variable>variables || (type==1 && (target>source.base_variables || numerator>denominator)) ||
-               (type==2 && target>=source.event_count)) { fail(MeasureStatus::InvalidSource);break; }
+            const uint64_t type=read(row,0),target=read(row,1);
+            uint64_t numerator=read(row,2),denominator=read(row,3);
+            if(type>kRuleBernoulliFactor) { fail(MeasureStatus::InvalidSource);break; }
+            if(type==0) {
+                if(!denominator)fail(MeasureStatus::InvalidSource);
+                continue;
+            }
+            const bool bernoulli=type!=2;
+            const uint32_t variable=bernoulli ? uint32_t(target) : ++selector;
+            if(!variable || variable>variables || (bernoulli && target>source.base_variables) ||
+               (!bernoulli && target>=source.event_count)) { fail(MeasureStatus::InvalidSource);break; }
+            if(type==kRuleBernoulliFactor) {
+                const uint64_t owner_context=numerator,owner_rule=denominator;
+                auto cells=rule_cells;
+                auto read_cell=[&](const uint64_t* data,uint64_t index) { return read(data,index); };
+                semantic_rule_cells::Handle cell{};uint64_t code=0;
+                if((owner_context!=cells.context &&
+                        !semantic_rule_cells::select_context(source,owner_context,&cells,read_cell)) ||
+                   !rule_coefficient(cells,owner_rule,&cell,&code) || cell.bernoulli_variable!=variable) {
+                    fail(MeasureStatus::InvalidSource);break;
+                }
+                numerator=code-1;denominator=semantic_rule_cells::kCoefficientDenominator;
+            }
+            if(!denominator || (bernoulli && numerator>denominator)) {
+                fail(MeasureStatus::InvalidSource);break;
+            }
             const double positive=numerator ? log(double(numerator)/double(denominator)) : -INFINITY;
-            const uint64_t negative=type==1 ? denominator-numerator : denominator;
+            const uint64_t negative=bernoulli ? denominator-numerator : denominator;
             const double negative_weight=negative ? log(double(negative)/double(denominator)) : -INFINITY;
             if(!charge(2))break;
             true_weights[variable]=positive;false_weights[variable]=negative_weight;
             if(!charge(8))break;
-            if(!numerator || (type==1 && numerator==denominator)) {
+            if(!numerator || (bernoulli && numerator==denominator)) {
                 true_probability_bounds[variable]=semantic_measure::exact_mass_interval(numerator ? 1.0 : 0.0);
                 false_probability_bounds[variable]=semantic_measure::exact_mass_interval(numerator ? 0.0 : 1.0);
             } else {
-                const double denominator_lower=type==1 ? __ull2double_rd(denominator) :
+                const double denominator_lower=bernoulli ? __ull2double_rd(denominator) :
                     __dadd_rd(__ull2double_rd(numerator),__ull2double_rd(denominator));
-                const double denominator_upper=type==1 ? __ull2double_ru(denominator) :
+                const double denominator_upper=bernoulli ? __ull2double_ru(denominator) :
                     __dadd_ru(__ull2double_ru(numerator),__ull2double_ru(denominator));
                 true_probability_bounds[variable]=semantic_measure::rational_mass_interval(
                     numerator,denominator_lower,denominator_upper);
@@ -399,7 +424,7 @@ struct Measure {
                 if(!numerator)condition=intersection(condition,literal(variable,false));
                 if(!negative)condition=intersection(condition,literal(variable,true));
             }
-            if(type==2) {
+            if(!bernoulli) {
                 const uint32_t authored=uint32_t(events[target]);
                 if(context.kind==0)assigned[variable]=assignment(authored);
                 const uint32_t equivalent=complement(apply(2,literal(variable,true),authored));
@@ -430,6 +455,12 @@ struct Measure {
         return status==MeasureStatus::Ok;
     }
 
+    __device__ uint32_t factor_variable(uint32_t factor,uint32_t& selector) {
+        const auto* row=source.words+source.factor_offset+uint64_t(factor)*kFactorWords;
+        const uint64_t kind=read(row,0);
+        return kind==2 ? ++selector : kind ? uint32_t(read(row,1)) : 0;
+    }
+
     __device__ bool begin_results(uint32_t slot) {
         if(slot>2 || !header)return false;
         if(slot==0) {
@@ -451,18 +482,16 @@ struct Measure {
             header[5]=context.ordinal;header[6]=read(ledger,10);header[26]=variables;
             for(uint32_t word=0;word<4;++word)header[27+word]=read(source.words,word+1);
             if(!charge())return false;header[31]=uint64_t(has_measure);
+            uint32_t selector=source.base_variables;
+            for(uint32_t factor=0;factor<source.factor_count && status==MeasureStatus::Ok;++factor) {
+                const uint32_t variable=factor_variable(factor,selector);
+                if(!variable)continue;
+                if(!charge(4))return false;
+                log_potentials[uint64_t(factor)*2]=false_weights[variable];
+                log_potentials[uint64_t(factor)*2+1]=true_weights[variable];
+            }
         }
         if(!charge())return false;header[8+slot]=0;
-        uint32_t selector=source.base_variables;
-        for(uint32_t factor=0;factor<source.factor_count && status==MeasureStatus::Ok;++factor) {
-            const auto* row=source.words+source.factor_offset+uint64_t(factor)*kFactorWords;
-            const uint64_t kind=read(row,0);
-            if(!kind)continue;
-            const uint32_t variable=kind==1 ? uint32_t(read(row,1)) : ++selector;
-            if(!charge(4))return false;
-            log_potentials[uint64_t(factor)*2]=false_weights[variable];
-            log_potentials[uint64_t(factor)*2+1]=true_weights[variable];
-        }
         return status==MeasureStatus::Ok;
     }
     __device__ uint32_t support_outcome(uint32_t pro,uint32_t contra,uint32_t truth) {
@@ -544,9 +573,7 @@ struct Measure {
         }
         uint32_t selector=source.base_variables;
         for(uint32_t factor=0;factor<source.factor_count;++factor) {
-            const auto* row=source.words+source.factor_offset+uint64_t(factor)*kFactorWords;
-            const uint64_t kind=read(row,0);
-            const uint32_t variable=kind==1 ? uint32_t(read(row,1)) : kind==2 ? ++selector : 0;
+            const uint32_t variable=factor_variable(factor,selector);
             const uint64_t offset=(uint64_t(slot)*source.factor_count+factor)*2;
             if(!charge(2))return false;
             factor_gradients[offset]=has_measure && variable ? false_gradients[variable] : 0.0;
