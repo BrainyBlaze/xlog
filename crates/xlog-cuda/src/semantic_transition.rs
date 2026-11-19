@@ -42480,16 +42480,33 @@ impl SemanticTransitionSession {
         step: &SemanticPreparedStep,
         consumer_streams: &[u64],
     ) -> Result<Option<Vec<[u64; 2]>>, SemanticTransitionError> {
-        if self.completed_prepared_transition_kind(step)? != SemanticTransitionKind::Proposal {
+        let original = self.checked_prepared_step(step, false)?;
+        let prepared = original.prepared.as_ref().expect("checked original step");
+        let segment = self
+            .prepared_segment
+            .as_ref()
+            .expect("checked prepared scope");
+        if !segment.completed
+            || segment.requested_kind(step, &self.publication_issuer)?
+                != SemanticTransitionKind::Proposal
+        {
             return Err(publication_input_error(
-                "completed measure observation requires its original Proposal",
+                "measure observation requires known completion of its original Proposal",
             ));
         }
+        let bank = match prepared.observed_outcome.as_ref() {
+            Some(SemanticPreparedStepOutcome::Skipped { .. }) => return Ok(None),
+            Some(SemanticPreparedStepOutcome::Completed {
+                transition: SemanticTransitionKind::Proposal,
+                bank,
+                ..
+            }) if *bank <= 1 => usize::from(*bank),
+            _ => return Err(SemanticTransitionError::ObservationMismatch),
+        };
         let binding = self.prepared_model_binding(step, consumer_streams)?;
-        if binding.1.is_none() {
-            return Ok(None);
+        if bank as u64 != binding.0.word & 1 {
+            return Err(SemanticTransitionError::ObservationMismatch);
         }
-        let bank = (binding.0.word & 1) as usize;
         let (view, geometry) = {
             let prepared = self
                 .checked_prepared_step(step, false)?
@@ -42524,25 +42541,31 @@ impl SemanticTransitionSession {
                     runtime_error("completed measure observation stream admission", error)
                 })?;
             let header = self.publication_read(view.clone().slice(0..header_words))?;
-            if header[0] != 1
-                || header[1] != geometry.queries as u64
-                || header[2] != geometry.factors as u64
-                || header[8] != 1
-                || header[31] > 1
-            {
-                return Err(SemanticTransitionError::ObservationMismatch);
-            }
-            if header[31] == 0 {
+            // An early refusal can leave the Measure header unwritten. A late
+            // refusal retains a completed original branch in this allocation.
+            if header[8] != 1 && binding.1.is_none() {
                 None
             } else {
-                let values =
-                    self.publication_read(view.slice(geometry.factor_gradients..original_end))?;
-                Some(
-                    values
-                        .chunks_exact(2)
-                        .map(|pair| [pair[0], pair[1]])
-                        .collect(),
-                )
+                if header[0] != 1
+                    || header[1] != geometry.queries as u64
+                    || header[2] != geometry.factors as u64
+                    || header[8] != 1
+                    || header[31] > 1
+                {
+                    return Err(SemanticTransitionError::ObservationMismatch);
+                }
+                if header[31] == 0 {
+                    None
+                } else {
+                    let values =
+                        self.publication_read(view.slice(geometry.factor_gradients..original_end))?;
+                    Some(
+                        values
+                            .chunks_exact(2)
+                            .map(|pair| [pair[0], pair[1]])
+                            .collect(),
+                    )
+                }
             }
         };
         if self.prepared_model_binding(step, consumer_streams)? != binding {

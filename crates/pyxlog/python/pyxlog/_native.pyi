@@ -603,6 +603,7 @@ class SemanticPreparedStep:
 
         Call after known completion of the Proposal and before its retirement.
         Returns None when the completed Proposal has no measure observation.
+        A late refusal preserves an already completed original derivative.
         """
         ...
 
