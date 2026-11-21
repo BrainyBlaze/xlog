@@ -771,9 +771,12 @@ input's column count; `start` and `step` are nonnegative and below `modulus`.
 The codec checks arithmetic and exact array byte extent before writing the
 expanded indices, without allocating an intermediate index vector. Both the
 original source and the cumulative canonical elaboration must fit 1048576 bytes.
-The pending descriptor retains its original decimal spans for prefix admission:
-EOF allows compatible number extensions, while a delimiter requires exact
-membership. It never publishes a prospective row as a parsed operation.
+The pending descriptor retains its original decimal spans for prefix admission.
+At the end of the source, an unfinished `modulus`, `start`, or `step` admits
+only values in its domain with the same leading digits. For example, with
+`modulus = 5012`, a `step` prefix of `121` can select `121` or `1210` through
+`1219`. A delimiter selects the exact value. The codec never publishes a
+prospective row as a parsed operation.
 Source-only bounds are rechecked even when an equivalent canonical prefix is
 reused. `decode_definition` and
 `fork_acquired(..., source_encoding="numerical-rows-v4")` share this elaborator.

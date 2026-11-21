@@ -3831,21 +3831,40 @@ impl<F: Fn(usize) -> bool> NumberChoice<'_, F> {
     }
 
     fn prefix_choice(&self, spelling: &str) -> Option<usize> {
-        let accepts = |id: usize| {
-            self.values.contains(&id) && id.to_string().starts_with(spelling) && (self.accepts)(id)
-        };
         if let Some(widths) = &self.extensions {
             // ABI/frontier widths are distinct structural classes. Any other
             // width can only feed column-preserving operations or a gather,
             // so the current decimal represents that class.
-            widths
+            return widths
                 .iter()
                 .copied()
                 .chain(spelling.parse::<usize>())
-                .find(|&value| accepts(value))
-        } else {
-            self.values.clone().find(|&value| accepts(value))
+                .find(|&value| {
+                    self.values.contains(&value)
+                        && value.to_string().starts_with(spelling)
+                        && (self.accepts)(value)
+                });
         }
+        if spelling.is_empty() {
+            return self.values.clone().find(|&value| (self.accepts)(value));
+        }
+        let mut start = spelling.parse::<usize>().ok()?;
+        if start == 0 {
+            // JSON integers cannot extend a leading zero.
+            return (self.values.contains(&0) && (self.accepts)(0)).then_some(0);
+        }
+
+        // For example, 12 can match 12, then 120..130, then 1200..1300.
+        let mut end = start.saturating_add(1);
+        while start < self.values.end {
+            let mut matching = start.max(self.values.start)..end.min(self.values.end);
+            if let Some(value) = matching.find(|&value| (self.accepts)(value)) {
+                return Some(value);
+            }
+            start = start.checked_mul(10)?;
+            end = end.saturating_mul(10);
+        }
+        None
     }
 }
 impl<'de, F: Fn(usize) -> bool> DeserializeSeed<'de> for NumberChoice<'_, F> {
