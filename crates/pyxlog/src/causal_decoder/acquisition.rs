@@ -768,6 +768,25 @@ fn raw_alphabet(tokens: &[u32], vocabulary: usize) -> PyResult<BTreeSet<u32>> {
     Ok(unique)
 }
 
+fn grammar_token_ids(mask: &[u8], vocabulary_size: usize) -> impl Iterator<Item = usize> + '_ {
+    let (words, _) = mask.as_chunks::<4>();
+    words
+        .iter()
+        .enumerate()
+        .flat_map(|(word_index, &bytes)| {
+            let mut bits = u32::from_le_bytes(bytes);
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let offset = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some(word_index * 32 + offset)
+            })
+        })
+        .take_while(move |&id| id < vocabulary_size)
+}
+
 /// Keep only observed failures, in the filter's ascending original-token order.
 /// Samples are bounded; neither a representative nor its text repairs the source.
 fn record_rejection(
@@ -1319,11 +1338,9 @@ impl PyNativeAcquisitionMask {
             let mut mask = allowed_mask.to_vec();
             let mut samples = Vec::new();
             let mut bytes = prefix.to_vec();
-            for (id, spelling) in self.token_bytes.iter().enumerate() {
+            for id in grammar_token_ids(allowed_mask, self.token_bytes.len()) {
+                let spelling = &self.token_bytes[id];
                 let bit = 1 << (id % 8);
-                if mask[id / 8] & bit == 0 {
-                    continue;
-                }
                 bytes.truncate(prefix.len());
                 bytes.extend_from_slice(spelling);
                 let canonical = match self.canonical_prefix(&bytes) {

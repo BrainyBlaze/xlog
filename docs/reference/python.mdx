@@ -382,10 +382,12 @@ cumulative resource admission. Supply one exact byte spelling per vocabulary
 token from the policy's pinned byte tokenizer; EOS spellings are empty because
 the grammar owns EOS eligibility. Before each token selection, intersect the
 grammar mask using `mask.filter(original_prefix_bytes, allowed_mask)`. The mask
-uses little-endian bits with whole-u32 padding. It counts new unique scalar
-storage across definitions as shape digits arrive, excludes retained aliases,
-and caps total new operations and source bytes using the same limits as
-`fork_acquired`. Preserve the schema's field order (parameter name precedes shape).
+uses little-endian bits with whole-u32 padding. The native filter visits the
+set bits in ascending token ID order and stops at the end of the vocabulary.
+It counts new unique scalar storage across definitions as shape digits arrive,
+excludes retained aliases, and caps total new operations and source bytes at
+the limits used by `fork_acquired`. Preserve the schema's field order
+(parameter name precedes shape).
 An empty intersection is a decoding failure, not EOS or permission to repair a
 prefix. These restrictions do not guarantee a completable or semantically valid
 program; final admission still belongs to `fork_acquired`.
