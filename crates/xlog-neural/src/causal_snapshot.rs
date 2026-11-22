@@ -56,8 +56,41 @@ pub struct GridAdaptation {
     pub sensor: usize,
     /// FP32 projection from the normalized query state to the prediction row.
     pub readout: usize,
+    /// Frozen log colour transitions and progress intercept. Its presence selects target-centred queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_prior: Option<usize>,
     /// Zero-based layer after which acquired features enter the residual.
     pub insertion_layer: usize,
+}
+
+impl GridAdaptation {
+    /// Hidden query state shared by the observation update and the prediction head.
+    pub fn prediction_state(&self, program: &TensorProgram) -> Result<usize> {
+        use xlog_ir::tensor::TensorOperation as Op;
+        let mut projection = program.output;
+        if let Some(prior) = self.color_prior {
+            let Some(Op::SoftplusColumn { input, column: 16 }) = program.operations.get(projection)
+            else {
+                return Err(invalid(
+                    "grid progress link differs from its calibrated output",
+                ));
+            };
+            let Some(Op::Add { left, right }) = program.operations.get(*input) else {
+                return Err(invalid("grid output lacks its colour prior"));
+            };
+            if !matches!(program.operations.get(*right), Some(Op::Linear { weight, .. }) if *weight == prior)
+            {
+                return Err(invalid(
+                    "grid colour prior differs from its numerical caller",
+                ));
+            }
+            projection = *left;
+        }
+        match program.operations.get(projection) {
+            Some(Op::Linear { input, weight }) if *weight == self.readout => Ok(*input),
+            _ => Err(invalid("grid state readout differs from its physical role")),
+        }
+    }
 }
 
 /// Parameter ownership of the default editor and its immutable acquisition rules.
@@ -133,9 +166,22 @@ impl NativeAdaptation {
             let [width, hidden] = input_widths.as_slice() else {
                 return Err(invalid("invalid grid inputs"));
             };
+            grid.prediction_state(program)?;
+            if let Some(id) = grid.color_prior {
+                if !program
+                    .parameters
+                    .get(id)
+                    .is_some_and(|p| p.float32 && p.shape == [17, 16])
+                    || optimizer_ids.contains(&id)
+                    || *output_width != 17
+                {
+                    return Err(invalid(
+                        "grid colour prior must be a frozen 17 by 16 matrix",
+                    ));
+                }
+            }
             if !sensor.float32 || sensor.shape != [*hidden, *width] || !readout.float32
                 || readout.shape != [*output_width, *hidden]
-                || !matches!(program.operations.get(program.output), Some(Op::Linear { weight, .. }) if *weight == grid.readout)
                 || !program.operations.iter().any(|op| matches!(op, Op::Linear { weight, input } if *weight == grid.sensor && matches!(program.operations.get(*input), Some(Op::Argument { argument: 0 }))))
                 || grid.insertion_layer.saturating_add(1) >= program.operations.iter().filter(|op| matches!(op, Op::Attention { .. })).count()
                 || !owned.insert(grid.sensor) || !owned.insert(grid.readout)

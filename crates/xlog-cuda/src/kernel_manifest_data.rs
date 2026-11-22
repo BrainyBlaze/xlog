@@ -97,6 +97,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "tensor_broadcast_vjp_f32",
             "tensor_tanh_f32",
             "tensor_tanh_vjp_f32",
+            "tensor_softplus_column_f32",
+            "tensor_softplus_column_vjp_f32",
             "tensor_f32_to_bf16",
             "tensor_binary_f32",
             "tensor_binary_vjp_f32",

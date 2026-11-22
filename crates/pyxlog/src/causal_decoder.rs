@@ -134,6 +134,19 @@ impl PyNativeCausalModel {
             .map_err(xlog_err)
     }
 
+    /// Start outcome fitting at the supplied add-one-smoothed colour counts and positive mean progress.
+    #[pyo3(signature = (counts, *, progress_prior))]
+    fn fork_grid_priors(
+        &self,
+        py: Python<'_>,
+        counts: [[u64; 16]; 16],
+        progress_prior: f32,
+    ) -> PyResult<Self> {
+        py.detach(|| self.inner.fork_grid_priors(&counts, progress_prior))
+            .map(|inner| Self { inner })
+            .map_err(xlog_err)
+    }
+
     /// Incorporate one public grid, the turn boundary and the move actually executed.
     #[pyo3(signature = (frame, *, memory, turn_start, executed_action=None, disabled_definition=None))]
     fn observe_grid(
@@ -189,10 +202,12 @@ impl PyNativeCausalModel {
     }
 
     /// Fit one mean minibatch from recorded moves. A missing progress label leaves colour loss active.
+    #[pyo3(signature = (examples, *, shared_only=false))]
     fn fit_grid_batch(
         &mut self,
         py: Python<'_>,
         examples: Vec<(PyRef<'_, PyGridMemory>, grid::Query, u32, Option<f32>)>,
+        shared_only: bool,
     ) -> PyResult<(f32, f32, u64)> {
         let examples = examples
             .into_iter()
@@ -200,9 +215,15 @@ impl PyNativeCausalModel {
                 Ok((memory.inner.clone(), query.into_query()?, color, progress))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        py.detach(|| self.inner.fit_grid_batch(&examples))
-            .map(|r| (r.mean_loss, r.gradient_norm, r.step))
-            .map_err(xlog_err)
+        py.detach(|| {
+            if shared_only {
+                self.inner.fit_grid_shared_batch(&examples)
+            } else {
+                self.inner.fit_grid_batch(&examples)
+            }
+        })
+        .map(|r| (r.mean_loss, r.gradient_norm, r.step))
+        .map_err(xlog_err)
     }
 
     /// Return acquired and fixed-recurrent grid branches with matched trainable connections.

@@ -108,6 +108,13 @@ pub enum TensorOperation {
         /// Preceding numeric value.
         input: usize,
     },
+    /// Apply softplus to one coordinate in each FP32 row, preserving the other outputs.
+    SoftplusColumn {
+        /// Preceding numeric row or matrix.
+        input: usize,
+        /// Coordinate representing a nonnegative prediction.
+        column: usize,
+    },
     /// FP32 elementwise product.
     Multiply {
         /// First preceding FP32 value.

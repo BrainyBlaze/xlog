@@ -783,6 +783,7 @@ impl NativeCausalModel {
             "id": id, "name": parameter.name, "shape": parameter.shape, "dtype": if parameter.float32 { "f32" } else { "bf16" },
             "role": if self.adaptation.grid.as_ref().is_some_and(|g| g.sensor == id) { "observation_sensor" }
                 else if self.adaptation.grid.as_ref().is_some_and(|g| g.readout == id) { "observation_readout" }
+                else if self.adaptation.grid.as_ref().is_some_and(|g| g.color_prior == Some(id)) { "prediction_prior" }
                 else if projections.contains(&id) { "projection" } else if owned.contains(&id) { "acquired_constant" }
                 else if self.adaptation.editor.as_ref().is_some_and(|editor| editor.base_parameters.contains(&id)) { "editor" }
                 else if self.adaptation.editor.as_ref().is_some_and(|editor| editor.rules.values().any(|ids| ids.contains(&id))) { "acquisition_rule" }

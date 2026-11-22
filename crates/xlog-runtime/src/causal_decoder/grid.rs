@@ -7,6 +7,9 @@ use xlog_neural::causal_snapshot::GridAdaptation;
 
 const COLORS: usize = 16;
 const PATCH: usize = 4;
+// The target occupies row 1, column 1 of the four-by-four query window.
+const TARGET_IN_WINDOW: usize = (PATCH - 1) / 2;
+const TARGET_COLOR: usize = (TARGET_IN_WINDOW * PATCH + TARGET_IN_WINDOW) * (COLORS + 1);
 const BOARD: usize = 64;
 const ACTIONS: usize = 8;
 // One channel per colour or padding at each position in the patch.
@@ -96,6 +99,21 @@ impl GridFrame {
         2 + self.height.div_ceil(PATCH) * self.width.div_ceil(PATCH)
     }
 
+    fn write_patch(&self, row: &mut [f32; FEATURES], top: isize, left: isize) {
+        for dy in 0..PATCH {
+            for dx in 0..PATCH {
+                let y = (top + dy as isize) as usize;
+                let x = (left + dx as isize) as usize;
+                let colour = if y < self.height && x < self.width {
+                    self.cells[y * self.width + x] as usize
+                } else {
+                    COLORS
+                };
+                row[(dy * PATCH + dx) * (COLORS + 1) + colour] = 1.0;
+            }
+        }
+    }
+
     fn features(&self, query_row: &[f32; FEATURES]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.rows() * FEATURES * 4);
         let mut prior = [0.0f32; FEATURES];
@@ -109,16 +127,7 @@ impl GridFrame {
                 row[POSITION + 1] = x as f32 / (BOARD - 1) as f32;
                 row[POSITION + 2] = self.height as f32 / BOARD as f32;
                 row[POSITION + 3] = self.width as f32 / BOARD as f32;
-                for dy in 0..PATCH {
-                    for dx in 0..PATCH {
-                        let colour = if y + dy < self.height && x + dx < self.width {
-                            self.cells[(y + dy) * self.width + x + dx] as usize
-                        } else {
-                            COLORS
-                        };
-                        row[(dy * PATCH + dx) * (COLORS + 1) + colour] = 1.0;
-                    }
-                }
+                self.write_patch(&mut row, y as isize, x as isize);
                 bytes.extend(row.iter().flat_map(|v| v.to_le_bytes()));
             }
         }
@@ -126,7 +135,7 @@ impl GridFrame {
         bytes
     }
 
-    fn query(&self, query: &GridQuery) -> Result<([f32; FEATURES], usize)> {
+    fn query(&self, query: &GridQuery, grid: &GridAdaptation) -> Result<([f32; FEATURES], usize)> {
         let (y, x) = query.target;
         let (py, px) = query.attention_patch;
         if y >= self.height
@@ -139,6 +148,13 @@ impl GridFrame {
             ));
         }
         let mut row = [0.0; FEATURES];
+        if grid.color_prior.is_some() {
+            self.write_patch(
+                &mut row,
+                y as isize - TARGET_IN_WINDOW as isize,
+                x as isize - TARGET_IN_WINDOW as isize,
+            );
+        }
         row[KIND + 3] = 1.0;
         row[TARGET] = y as f32 / (BOARD - 1) as f32;
         row[TARGET + 1] = x as f32 / (BOARD - 1) as f32;
@@ -193,6 +209,62 @@ pub(super) fn append(program: &mut TensorProgram, operation: Op) -> usize {
 }
 
 impl NativeCausalModel {
+    fn grid_prior_tensor(
+        &self,
+        counts: &[[u64; COLORS]; COLORS],
+        progress_prior: f32,
+    ) -> Result<NativeTensor> {
+        if !progress_prior.is_finite() || progress_prior <= 0.0 {
+            return Err(invalid(
+                "grid progress prior must be a finite positive mean",
+            ));
+        }
+        let mut weights = [[0.0f32; COLORS]; READOUT];
+        let mean = f64::from(progress_prior);
+        // The last coordinate uses inverse softplus so its initial output is the requested mean.
+        weights[COLORS].fill((mean + (-(-mean).exp_m1()).ln()) as f32);
+        for (before, row) in counts.iter().enumerate() {
+            let total = row.iter().map(|&n| n as f64).sum::<f64>() + COLORS as f64;
+            for (after, &n) in row.iter().enumerate() {
+                weights[after][before] = (((n as f64 + 1.0) / total).ln()) as f32;
+            }
+        }
+        let bytes = weights
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut tensor = self.executor.allocate_tensor(TensorValueShape {
+            rows: READOUT,
+            columns: COLORS,
+            float32: true,
+        })?;
+        self.executor.write_tensor(&mut tensor, 0, &bytes)?;
+        Ok(tensor)
+    }
+
+    /// Start a new fit against a frozen transition table with zero output corrections.
+    /// Retain the sensor, decoder and editor. Reset the output weights and their Adam moments together.
+    pub fn fork_grid_priors(
+        &self,
+        counts: &[[u64; COLORS]; COLORS],
+        progress_prior: f32,
+    ) -> Result<Self> {
+        self.require_editable_functions()?;
+        let grid = self.grid()?;
+        let prior = grid
+            .color_prior
+            .ok_or_else(|| invalid("this grid snapshot uses an uncalibrated readout"))?;
+        let mut fork = self.fork_candidate();
+        fork.parameters[prior] = self.grid_prior_tensor(counts, progress_prior)?;
+        let (zero, optimizer) =
+            self.zero_projection(grid.readout, &self.program().parameters[grid.readout])?;
+        fork.parameters[grid.readout] = zero;
+        fork.optimizers.insert(grid.readout, optimizer);
+        fork.version = Arc::new(());
+        Ok(fork)
+    }
+
     /// Install trainable observation and prediction matrices around the imported causal layers.
     /// Both matrices, their optimizer and the full numerical definition survive cold restoration.
     pub fn fork_grid(&self, seed: u64, insertion_layer: usize) -> Result<Self> {
@@ -230,18 +302,34 @@ impl NativeCausalModel {
             ));
         }
         let hidden = program.parameters[*embedding].linear_dimensions()?[1];
-        let sensor = program.parameters.len();
-        let readout = sensor + 1;
         let mut rng = NumericalSeed(seed);
-        for (id, name, rows, columns) in [
-            (sensor, "model::grid::sensor", hidden, FEATURES),
-            (readout, "model::grid::readout", READOUT, hidden),
-        ] {
-            let parameter =
-                candidate.add_matrix(&mut program, name.into(), rows, columns, &mut rng)?;
-            debug_assert_eq!(parameter, id);
-            candidate.adaptation.trainable.push(parameter);
-        }
+        let sensor = candidate.add_matrix(
+            &mut program,
+            "model::grid::sensor".into(),
+            hidden,
+            FEATURES,
+            &mut rng,
+        )?;
+        let readout = program.parameters.len();
+        let head = xlog_ir::tensor::TensorParameter {
+            name: "model::grid::readout".into(),
+            shape: vec![READOUT, hidden],
+            float32: true,
+        };
+        let (zero, optimizer) = candidate.zero_projection(readout, &head)?;
+        candidate.parameters.push(zero);
+        candidate.optimizers.insert(readout, optimizer);
+        program.parameters.push(head);
+        candidate.adaptation.trainable.extend([sensor, readout]);
+        let color_prior = program.parameters.len();
+        candidate
+            .parameters
+            .push(candidate.grid_prior_tensor(&[[0; COLORS]; COLORS], 1.0 / 32.0)?);
+        program.parameters.push(xlog_ir::tensor::TensorParameter {
+            name: "model::grid::prediction_prior".into(),
+            shape: vec![READOUT, COLORS],
+            float32: true,
+        });
         program.signature = TensorSignature::Observations {
             input_widths: vec![FEATURES, hidden],
             output_rows: 1,
@@ -275,11 +363,40 @@ impl NativeCausalModel {
                 input: mapping[*row],
             },
         );
-        program.output = append(
+        let correction = append(
             &mut program,
             Op::Linear {
                 input: state,
                 weight: readout,
+            },
+        );
+        let query = append(&mut program, Op::PredictionRow { input: features });
+        let current_color = append(
+            &mut program,
+            Op::GatherColumns {
+                input: query,
+                indices: (TARGET_COLOR..TARGET_COLOR + COLORS).collect(),
+            },
+        );
+        let prior = append(
+            &mut program,
+            Op::Linear {
+                input: current_color,
+                weight: color_prior,
+            },
+        );
+        let logits = append(
+            &mut program,
+            Op::Add {
+                left: correction,
+                right: prior,
+            },
+        );
+        program.output = append(
+            &mut program,
+            Op::SoftplusColumn {
+                input: logits,
+                column: COLORS,
             },
         );
         let entrypoint = String::from("model::grid");
@@ -294,6 +411,7 @@ impl NativeCausalModel {
         candidate.adaptation.grid = Some(GridAdaptation {
             sensor,
             readout,
+            color_prior: Some(color_prior),
             insertion_layer,
         });
         candidate.install_editor(&mut rng)?;
@@ -380,13 +498,7 @@ impl NativeCausalModel {
             .checked_add(substitutions)
             .ok_or_else(|| invalid("grid intervention counter overflow"))?;
         let grid = self.grid()?;
-        let Some(Op::Linear { input, weight }) = program.operations.get(program.output) else {
-            return Err(invalid("grid output lacks its state readout"));
-        };
-        if *weight != grid.readout {
-            return Err(invalid("grid readout differs from its physical role"));
-        }
-        program.output = *input;
+        program.output = grid.prediction_state(&program)?;
         program.operations.truncate(program.output + 1);
         if let TensorSignature::Observations { output_width, .. } = &mut program.signature {
             *output_width = program.parameters[grid.sensor].shape[0];
@@ -421,7 +533,7 @@ impl NativeCausalModel {
         queries
             .iter()
             .map(|query| {
-                let (row, patch) = memory.frame.query(query)?;
+                let (row, patch) = memory.frame.query(query, self.grid()?)?;
                 let inputs = self.grid_inputs(&memory.frame, Some(memory), &row)?;
                 let (output, mass) = self.executor.execute_inputs(
                     &program,
@@ -467,11 +579,35 @@ impl NativeCausalModel {
         &mut self,
         examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
     ) -> Result<TensorTrainingResult> {
+        self.fit_grid_parameters(examples, self.adaptation.trainable.clone())
+    }
+
+    /// Fit the parent control on the same common parameters that a new insertion can update.
+    pub fn fit_grid_shared_batch(
+        &mut self,
+        examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
+    ) -> Result<TensorTrainingResult> {
+        self.require_editable_functions()?;
+        let grid = self.grid()?;
+        let mut ids = vec![grid.sensor, grid.readout];
+        ids.extend(self.adaptation.down_projection);
+        self.fit_grid_parameters(examples, ids)
+    }
+
+    fn fit_grid_parameters(
+        &mut self,
+        examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
+        ids: Vec<usize>,
+    ) -> Result<TensorTrainingResult> {
+        let grid = self.grid()?;
         let samples = examples
             .iter()
             .map(|(memory, query, color, progress)| {
                 let rows = memory.frame.rows();
-                let (row, _) = memory.frame.query(query)?;
+                if grid.color_prior.is_some() && progress.is_some_and(|v| v < 0.0) {
+                    return Err(invalid("observed grid progress must be nonnegative"));
+                }
+                let (row, _) = memory.frame.query(query, grid)?;
                 let inputs = self.grid_inputs(&memory.frame, Some(memory), &row)?;
                 let (program, _) = self.grid_program(rows, None)?;
                 Ok((
@@ -497,7 +633,6 @@ impl NativeCausalModel {
                 )
             })
             .collect::<Vec<_>>();
-        let ids = self.adaptation.trainable.clone();
         self.fit_inputs(&ids, &batch)
     }
 }
