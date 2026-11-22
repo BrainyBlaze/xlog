@@ -114,11 +114,18 @@ impl GridFrame {
         }
     }
 
-    fn features(&self, query_row: &[f32; FEATURES]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.rows() * FEATURES * 4);
+    fn features(&self, query_row: &[f32; FEATURES], action_prefix: bool, rows: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(rows * FEATURES * 4);
         let mut prior = [0.0f32; FEATURES];
         prior[KIND] = 1.0;
+        if action_prefix && query_row[KIND + 3] == 1.0 {
+            prior[KIND + 3] = 1.0;
+            prior[ACTION..TARGET].copy_from_slice(&query_row[ACTION..TARGET]);
+        }
         bytes.extend(prior.iter().flat_map(|v| v.to_le_bytes()));
+        if rows == 1 {
+            return bytes;
+        }
         for y in (0..self.height).step_by(PATCH) {
             for x in (0..self.width).step_by(PATCH) {
                 let mut row = [0.0f32; FEATURES];
@@ -135,6 +142,22 @@ impl GridFrame {
         bytes
     }
 
+    fn action_query(&self, available: &[usize], action: GridAction) -> Result<[f32; FEATURES]> {
+        let mut row = [0.0; FEATURES];
+        row[KIND + 3] = 1.0;
+        for &id in available {
+            if id >= ACTIONS || row[AVAILABLE + id] != 0.0 {
+                return Err(invalid("invalid public action set"));
+            }
+            row[AVAILABLE + id] = 1.0;
+        }
+        action.write(&mut row, self.height, self.width)?;
+        if row[AVAILABLE + action.id] == 0.0 {
+            return Err(invalid("proposed move is unavailable"));
+        }
+        Ok(row)
+    }
+
     fn query(&self, query: &GridQuery, grid: &GridAdaptation) -> Result<([f32; FEATURES], usize)> {
         let (y, x) = query.target;
         let (py, px) = query.attention_patch;
@@ -147,7 +170,7 @@ impl GridFrame {
                 "prediction cell or attention patch outside observed board",
             ));
         }
-        let mut row = [0.0; FEATURES];
+        let mut row = self.action_query(&query.available_actions, query.action)?;
         if grid.color_prior.is_some() {
             self.write_patch(
                 &mut row,
@@ -155,20 +178,9 @@ impl GridFrame {
                 x as isize - TARGET_IN_WINDOW as isize,
             );
         }
-        row[KIND + 3] = 1.0;
         row[TARGET] = y as f32 / (BOARD - 1) as f32;
         row[TARGET + 1] = x as f32 / (BOARD - 1) as f32;
         row[TARGET_OFFSET + (y % PATCH) * PATCH + x % PATCH] = 1.0;
-        for &id in &query.available_actions {
-            if id >= ACTIONS || row[AVAILABLE + id] != 0.0 {
-                return Err(invalid("invalid public action set"));
-            }
-            row[AVAILABLE + id] = 1.0;
-        }
-        query.action.write(&mut row, self.height, self.width)?;
-        if row[AVAILABLE + query.action.id] == 0.0 {
-            return Err(invalid("proposed move is unavailable"));
-        }
         Ok((row, 1 + py * self.width.div_ceil(PATCH) + px))
     }
 }
@@ -202,6 +214,17 @@ pub struct GridPrediction {
     pub disabled_calls: usize,
 }
 
+/// Parameters admitted for one recorded grid minibatch.
+#[derive(Clone, Copy)]
+pub enum GridFitScope {
+    /// The model's installed trainable parameters.
+    Active,
+    /// The shared sensor, readout and any admitted decoder projection.
+    Shared,
+    /// Only the newest feature's internal parameters and residual connection.
+    Definition,
+}
+
 pub(super) fn append(program: &mut TensorProgram, operation: Op) -> usize {
     let index = program.operations.len();
     program.operations.push(operation);
@@ -213,16 +236,22 @@ impl NativeCausalModel {
         &self,
         counts: &[[u64; COLORS]; COLORS],
         progress_prior: f32,
+        action_prefix: bool,
     ) -> Result<NativeTensor> {
         if !progress_prior.is_finite() || progress_prior <= 0.0 {
             return Err(invalid(
                 "grid progress prior must be a finite positive mean",
             ));
         }
-        let mut weights = [[0.0f32; COLORS]; READOUT];
+        let columns = COLORS + usize::from(action_prefix);
+        let mut weights = vec![vec![0.0f32; columns]; READOUT];
         let mean = f64::from(progress_prior);
-        // The last coordinate uses inverse softplus so its initial output is the requested mean.
-        weights[COLORS].fill((mean + (-(-mean).exp_m1()).ln()) as f32);
+        let intercept = (mean + (-(-mean).exp_m1()).ln()) as f32;
+        if action_prefix {
+            weights[COLORS][COLORS] = intercept;
+        } else {
+            weights[COLORS].fill(intercept);
+        }
         for (before, row) in counts.iter().enumerate() {
             let total = row.iter().map(|&n| n as f64).sum::<f64>() + COLORS as f64;
             for (after, &n) in row.iter().enumerate() {
@@ -236,7 +265,7 @@ impl NativeCausalModel {
             .collect::<Vec<_>>();
         let mut tensor = self.executor.allocate_tensor(TensorValueShape {
             rows: READOUT,
-            columns: COLORS,
+            columns,
             float32: true,
         })?;
         self.executor.write_tensor(&mut tensor, 0, &bytes)?;
@@ -256,7 +285,11 @@ impl NativeCausalModel {
             .color_prior
             .ok_or_else(|| invalid("this grid snapshot uses an uncalibrated readout"))?;
         let mut fork = self.fork_candidate();
-        fork.parameters[prior] = self.grid_prior_tensor(counts, progress_prior)?;
+        fork.parameters[prior] = self.grid_prior_tensor(
+            counts,
+            progress_prior,
+            grid.has_action_prefix(self.program()),
+        )?;
         let (zero, optimizer) =
             self.zero_projection(grid.readout, &self.program().parameters[grid.readout])?;
         fork.parameters[grid.readout] = zero;
@@ -296,7 +329,10 @@ impl NativeCausalModel {
         let Some(Op::Linear { input: row, weight }) = original.get(*logits) else {
             return Err(invalid("missing tied language projection"));
         };
-        if weight != embedding || !matches!(original.get(*row), Some(Op::PredictionRow { .. })) {
+        let Some(Op::PredictionRow { input: normalized }) = original.get(*row) else {
+            return Err(invalid("missing normalized decoder prediction state"));
+        };
+        if weight != embedding {
             return Err(invalid(
                 "tied prediction row differs from the imported decoder",
             ));
@@ -310,24 +346,22 @@ impl NativeCausalModel {
             FEATURES,
             &mut rng,
         )?;
-        let readout = program.parameters.len();
         let head = xlog_ir::tensor::TensorParameter {
             name: "model::grid::readout".into(),
             shape: vec![READOUT, hidden],
             float32: true,
         };
-        let (zero, optimizer) = candidate.zero_projection(readout, &head)?;
-        candidate.parameters.push(zero);
-        candidate.optimizers.insert(readout, optimizer);
-        program.parameters.push(head);
+        let readout = candidate.add_zero_projection(&mut program, head)?;
         candidate.adaptation.trainable.extend([sensor, readout]);
         let color_prior = program.parameters.len();
-        candidate
-            .parameters
-            .push(candidate.grid_prior_tensor(&[[0; COLORS]; COLORS], 1.0 / 32.0)?);
+        candidate.parameters.push(candidate.grid_prior_tensor(
+            &[[0; COLORS]; COLORS],
+            1.0 / 32.0,
+            true,
+        )?);
         program.parameters.push(xlog_ir::tensor::TensorParameter {
             name: "model::grid::prediction_prior".into(),
-            shape: vec![READOUT, COLORS],
+            shape: vec![READOUT, READOUT],
             float32: true,
         });
         program.signature = TensorSignature::Observations {
@@ -353,35 +387,69 @@ impl NativeCausalModel {
         );
         let mut mapping = vec![append(&mut program, Op::Bfloat16 { input: residual })];
         let parameter_ids = (0..program.parameters.len()).collect::<Vec<_>>();
-        for op in &original[1..=*row] {
+        for op in &original[1..*row] {
             let remapped = op.remap(&mapping, &parameter_ids);
             mapping.push(append(&mut program, remapped));
         }
-        let state = append(
+        let sequence = append(
             &mut program,
             Op::Float32 {
-                input: mapping[*row],
+                input: mapping[*normalized],
             },
         );
-        let correction = append(
+        let state = append(&mut program, Op::PredictionRow { input: sequence });
+        let cell_correction = append(
             &mut program,
             Op::Linear {
                 input: state,
                 weight: readout,
             },
         );
+        let action_state = append(
+            &mut program,
+            Op::Row {
+                input: sequence,
+                row: 0,
+            },
+        );
+        let action_correction = append(
+            &mut program,
+            Op::Linear {
+                input: action_state,
+                weight: readout,
+            },
+        );
         let query = append(&mut program, Op::PredictionRow { input: features });
-        let current_color = append(
+        // The query-kind flag selects the action coordinate, and the patch-kind flag
+        // is zero on every query. Neither flag depends on a colour or location.
+        let mask = append(
             &mut program,
             Op::GatherColumns {
                 input: query,
-                indices: (TARGET_COLOR..TARGET_COLOR + COLORS).collect(),
+                indices: [vec![KIND + 1; COLORS], vec![KIND + 3]].concat(),
+            },
+        );
+        let correction = append(
+            &mut program,
+            Op::Select {
+                condition: mask,
+                positive: action_correction,
+                negative: cell_correction,
+            },
+        );
+        let prior_features = append(
+            &mut program,
+            Op::GatherColumns {
+                input: query,
+                indices: (TARGET_COLOR..TARGET_COLOR + COLORS)
+                    .chain([KIND + 3])
+                    .collect(),
             },
         );
         let prior = append(
             &mut program,
             Op::Linear {
-                input: current_color,
+                input: prior_features,
                 weight: color_prior,
             },
         );
@@ -430,9 +498,9 @@ impl NativeCausalModel {
         frame: &GridFrame,
         memory: Option<&GridMemory>,
         row: &[f32; FEATURES],
+        rows: usize,
     ) -> Result<[NativeTensor; 2]> {
         let grid = self.grid()?;
-        let rows = frame.rows();
         if rows > self.max_context() {
             return Err(invalid(
                 "observation exceeds this checkpoint's admitted context",
@@ -443,7 +511,7 @@ impl NativeCausalModel {
                 "replay observations on the selected model version before using memory",
             ));
         }
-        let bytes = frame.features(row);
+        let bytes = frame.features(row, grid.has_action_prefix(self.program()), rows);
         let mut features = self.executor.allocate_tensor(TensorValueShape {
             rows,
             columns: FEATURES,
@@ -490,8 +558,8 @@ impl NativeCausalModel {
         if let (Some(action), Some(prior)) = (executed_action, memory) {
             action.write(&mut row, prior.frame.height, prior.frame.width)?;
         }
-        let inputs = self.grid_inputs(&frame, memory, &row)?;
         let rows = frame.rows();
+        let inputs = self.grid_inputs(&frame, memory, &row, rows)?;
         let (mut program, substitutions) = self.grid_program(rows, disabled)?;
         let disabled_calls = memory
             .map_or(0, |m| m.disabled_calls)
@@ -534,7 +602,7 @@ impl NativeCausalModel {
             .iter()
             .map(|query| {
                 let (row, patch) = memory.frame.query(query, self.grid()?)?;
-                let inputs = self.grid_inputs(&memory.frame, Some(memory), &row)?;
+                let inputs = self.grid_inputs(&memory.frame, Some(memory), &row, rows)?;
                 let (output, mass) = self.executor.execute_inputs(
                     &program,
                     &self.parameters,
@@ -574,12 +642,49 @@ impl NativeCausalModel {
             .collect()
     }
 
+    /// Predict level gain from retained history and a move, without reading a cell or patch.
+    /// Each result contains expected gain in levels and this one-position forward's substitutions.
+    pub fn predict_grid_progress(
+        &self,
+        memory: &GridMemory,
+        available_actions: &[usize],
+        actions: &[GridAction],
+        disabled: Option<&str>,
+    ) -> Result<Vec<(f32, usize)>> {
+        if !self.grid()?.has_action_prefix(self.program()) {
+            return Err(invalid(
+                "this snapshot has no cell-independent progress head",
+            ));
+        }
+        let (program, disabled_calls) = self.grid_program(1, disabled)?;
+        actions
+            .iter()
+            .map(|&action| {
+                let row = memory.frame.action_query(available_actions, action)?;
+                let inputs = self.grid_inputs(&memory.frame, Some(memory), &row, 1)?;
+                let (output, _) = self.executor.execute_inputs(
+                    &program,
+                    &self.parameters,
+                    TensorInputs::Observations(&inputs),
+                    0,
+                    Some((0, 1)),
+                    None,
+                )?;
+                let progress = self.executor.read_logits(&output, &[COLORS as u32])?[0];
+                if !progress.is_finite() {
+                    return Err(invalid("nonfinite action progress prediction"));
+                }
+                Ok((progress, disabled_calls))
+            })
+            .collect()
+    }
+
     /// One atomic minibatch update on the action actually played and any observed level gain.
     pub fn fit_grid_batch(
         &mut self,
         examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
     ) -> Result<TensorTrainingResult> {
-        self.fit_grid_parameters(examples, self.adaptation.trainable.clone())
+        self.fit_weighted_grid_batch(examples, None, GridFitScope::Active)
     }
 
     /// Fit the parent control on the same common parameters that a new insertion can update.
@@ -587,36 +692,64 @@ impl NativeCausalModel {
         &mut self,
         examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
     ) -> Result<TensorTrainingResult> {
-        self.require_editable_functions()?;
-        let grid = self.grid()?;
-        let mut ids = vec![grid.sensor, grid.readout];
-        ids.extend(self.adaptation.down_projection);
-        self.fit_grid_parameters(examples, ids)
+        self.fit_weighted_grid_batch(examples, None, GridFitScope::Shared)
     }
 
-    fn fit_grid_parameters(
+    /// Normalize weighted colour NLL and the sum of observed gain losses by total colour weight.
+    pub fn fit_weighted_grid_batch(
         &mut self,
         examples: &[(GridMemory, GridQuery, u32, Option<f32>)],
-        ids: Vec<usize>,
+        color_weights: Option<&[f32]>,
+        scope: GridFitScope,
     ) -> Result<TensorTrainingResult> {
         let grid = self.grid()?;
+        if color_weights.is_some_and(|w| {
+            w.len() != examples.len()
+                || w.iter().any(|x| !x.is_finite() || *x < 0.0)
+                || !w.iter().any(|x| *x > 0.0)
+        }) {
+            return Err(invalid(
+                "grid colour weights must match the examples and have positive finite mass",
+            ));
+        }
+        let ids = match scope {
+            GridFitScope::Active => self.adaptation.trainable.clone(),
+            GridFitScope::Shared => {
+                self.require_editable_functions()?;
+                let mut ids = vec![grid.sensor, grid.readout];
+                ids.extend(self.adaptation.down_projection);
+                ids
+            }
+            GridFitScope::Definition => {
+                self.require_editable_functions()?;
+                let insertion =
+                    self.adaptation.insertions.last().ok_or_else(|| {
+                        invalid("definition fitting requires an installed feature")
+                    })?;
+                let mut ids = insertion.parameters.clone();
+                ids.push(insertion.projection);
+                ids
+            }
+        };
         let samples = examples
             .iter()
-            .map(|(memory, query, color, progress)| {
+            .enumerate()
+            .map(|(index, (memory, query, color, progress))| {
                 let rows = memory.frame.rows();
                 if grid.color_prior.is_some() && progress.is_some_and(|v| v < 0.0) {
                     return Err(invalid("observed grid progress must be nonnegative"));
                 }
                 let (row, _) = memory.frame.query(query, grid)?;
-                let inputs = self.grid_inputs(&memory.frame, Some(memory), &row)?;
+                let inputs = self.grid_inputs(&memory.frame, Some(memory), &row, rows)?;
                 let (program, _) = self.grid_program(rows, None)?;
                 Ok((
                     program,
                     inputs,
                     rows,
-                    TensorLoss::CategoricalRegression {
+                    TensorLoss::WeightedCategoricalRegression {
                         target: *color,
                         regression: *progress,
+                        class_weight: color_weights.map_or(1.0, |w| w[index]),
                     },
                 ))
             })

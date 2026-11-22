@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "host-io")]
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
+use xlog_runtime::causal_decoder::grid::GridFitScope;
 use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
@@ -201,14 +202,60 @@ impl PyNativeCausalModel {
             .collect()
     }
 
-    /// Fit one mean minibatch from recorded moves. A missing progress label leaves colour loss active.
-    #[pyo3(signature = (examples, *, shared_only=false))]
+    /// Read one predicted level gain per action from the retained history in a single position.
+    #[pyo3(signature = (memory, available_actions, actions, *, disabled_definition=None))]
+    fn predict_grid_progress(
+        &self,
+        py: Python<'_>,
+        memory: &PyGridMemory,
+        available_actions: Vec<usize>,
+        actions: Vec<grid::Action>,
+        disabled_definition: Option<&str>,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let actions = actions
+            .into_iter()
+            .map(grid::action)
+            .collect::<PyResult<Vec<_>>>()?;
+        let memory = &memory.inner;
+        let results = py
+            .detach(|| {
+                self.inner.predict_grid_progress(
+                    memory,
+                    &available_actions,
+                    &actions,
+                    disabled_definition,
+                )
+            })
+            .map_err(xlog_err)?;
+        results
+            .into_iter()
+            .map(|(progress, disabled_calls)| {
+                let row = PyDict::new(py);
+                row.set_item("expected_progress", progress)?;
+                row.set_item("disabled_calls", disabled_calls)?;
+                Ok(row.unbind())
+            })
+            .collect()
+    }
+
+    /// Fit recorded moves with independently weighted colour labels and one gain label per move.
+    #[pyo3(signature = (examples, *, shared_only=false, definition_only=false, color_weights=None))]
     fn fit_grid_batch(
         &mut self,
         py: Python<'_>,
         examples: Vec<(PyRef<'_, PyGridMemory>, grid::Query, u32, Option<f32>)>,
         shared_only: bool,
+        definition_only: bool,
+        color_weights: Option<Vec<f32>>,
     ) -> PyResult<(f32, f32, u64)> {
+        let scope = match (shared_only, definition_only) {
+            (false, false) => GridFitScope::Active,
+            (true, false) => GridFitScope::Shared,
+            (false, true) => GridFitScope::Definition,
+            (true, true) => {
+                return Err(PyValueError::new_err("select only one grid fitting scope"))
+            }
+        };
         let examples = examples
             .into_iter()
             .map(|(memory, query, color, progress)| {
@@ -216,11 +263,8 @@ impl PyNativeCausalModel {
             })
             .collect::<PyResult<Vec<_>>>()?;
         py.detach(|| {
-            if shared_only {
-                self.inner.fit_grid_shared_batch(&examples)
-            } else {
-                self.inner.fit_grid_batch(&examples)
-            }
+            self.inner
+                .fit_weighted_grid_batch(&examples, color_weights.as_deref(), scope)
         })
         .map(|r| (r.mean_loss, r.gradient_norm, r.step))
         .map_err(xlog_err)
@@ -269,19 +313,23 @@ impl PyNativeCausalModel {
     }
 
     /// Enumerate complete typed edits to a named version or to the current residual.
-    #[pyo3(signature = (*, target, limit, seed))]
+    #[pyo3(signature = (*, target, limit, seed, shared_seed=false))]
     fn enumerate_edits(
         &self,
         py: Python<'_>,
         target: Option<&str>,
         limit: usize,
         seed: u64,
+        shared_seed: bool,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        py.detach(|| self.inner.enumerate_edits(target, limit, seed))
-            .map_err(xlog_err)?
-            .into_iter()
-            .map(|edit| edits::record(py, edit))
-            .collect()
+        py.detach(|| {
+            self.inner
+                .enumerate_edits_with_seed(target, limit, seed, shared_seed)
+        })
+        .map_err(xlog_err)?
+        .into_iter()
+        .map(|edit| edits::record(py, edit))
+        .collect()
     }
 
     /// Return the ordinary and rule contribution for every edit in proposal order.
@@ -320,6 +368,20 @@ impl PyNativeCausalModel {
                 xlog_core::XlogError::Compilation(message) => PyValueError::new_err(message),
                 other => xlog_err(other),
             })
+    }
+
+    /// Apply a linear feature at this edit's site with matched initialization and parameter count.
+    #[pyo3(signature = (edit, *, seed))]
+    fn apply_edit_control(
+        &self,
+        py: Python<'_>,
+        edit: &Bound<'_, PyDict>,
+        seed: u64,
+    ) -> PyResult<(Self, String)> {
+        let edit = edits::extract(edit)?;
+        py.detach(|| self.inner.apply_edit_control(&edit, seed))
+            .map(|(inner, name)| (Self { inner }, name))
+            .map_err(xlog_err)
     }
 
     /// Fit an observed pairwise preference on this fork. Tied losses leave all optimizer slots intact.

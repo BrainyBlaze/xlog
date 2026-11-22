@@ -17,6 +17,15 @@ pub enum TensorLoss {
         /// Optional target for the final scalar, with half squared error.
         regression: Option<f32>,
     },
+    /// Weighted categorical NLL and an independently observed, unit-weight regression loss.
+    WeightedCategoricalRegression {
+        /// Observed class in the categorical part of the row.
+        target: u32,
+        /// Optional target for the final scalar, with half squared error.
+        regression: Option<f32>,
+        /// Contribution of this class observation to the objective and its normalization.
+        class_weight: f32,
+    },
     /// Pairwise preference loss weighted by the measured difference between alternatives.
     WeightedBinary {
         /// Coordinate subtracted in the margin.
@@ -40,13 +49,22 @@ pub enum TensorLoss {
 }
 
 impl TensorLoss {
+    fn normalization_weight(self) -> f32 {
+        match self {
+            Self::WeightedCategoricalRegression { class_weight, .. } => class_weight,
+            _ => 1.0,
+        }
+    }
+
     fn arguments(self, vocabulary: usize) -> Result<(u32, u32, u32, u32, f32)> {
         match self {
             Self::Token { target } if (target as usize) < vocabulary => Ok((0, target, 0, 0, 0.0)),
             Self::CategoricalRegression { target, regression }
-                if vocabulary >= 2
-                    && (target as usize) < vocabulary - 1
-                    && regression.is_none_or(f32::is_finite) =>
+            | Self::WeightedCategoricalRegression {
+                target, regression, ..
+            } if vocabulary >= 2
+                && (target as usize) < vocabulary - 1
+                && regression.is_none_or(f32::is_finite) =>
             {
                 Ok((
                     if regression.is_some() { 3 } else { 2 },
@@ -467,6 +485,7 @@ impl TensorExecutor {
                 negative,
                 positive,
                 regression,
+                loss.normalization_weight(),
             ),
         )?;
         let loss = self.read_logits(&scalar, &[0])?[0];
@@ -728,6 +747,20 @@ impl TensorExecutor {
         if batch.is_empty() || states.is_empty() {
             return Err(failure("training requires data and selected parameters"));
         }
+        let mut mass = 0.0f64;
+        for (_, _, _, _, loss) in batch {
+            let weight = loss.normalization_weight();
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(failure("categorical weight must be finite and nonnegative"));
+            }
+            mass += f64::from(weight);
+        }
+        let inverse_mass = mass.recip() as f32;
+        if !inverse_mass.is_finite() || inverse_mass <= 0.0 {
+            return Err(failure(
+                "training requires positive representable normalization",
+            ));
+        }
         let ids = states
             .iter()
             .map(|(state, _)| state.parameter)
@@ -766,7 +799,7 @@ impl TensorExecutor {
             for (sum, gradient) in sums.iter_mut().zip(gradients) {
                 self.accumulate(sum, gradient)?;
             }
-            mean_loss += loss / batch.len() as f32;
+            mean_loss += loss * inverse_mass;
         }
         if !mean_loss.is_finite() {
             return Err(failure("nonfinite minibatch loss"));
@@ -784,7 +817,7 @@ impl TensorExecutor {
                     sum.pointer(),
                     gradient.pointer(),
                     sum.elements() as u64,
-                    1.0f32 / batch.len() as f32,
+                    inverse_mass,
                 ),
             )?;
             let partials = self.float_shape(TensorValueShape {
