@@ -244,6 +244,14 @@ function operand invokes a retained definition with matching argument and result
 shapes. A null target creates a new observation feature. A named target extends
 that version's output with a learned residual.
 
+On a calibrated grid, edits to an acquisition rule propose a new term that
+can change relative edit scores across histories. Products and conditional
+selection can couple history with the edit description. A call can carry an
+interaction from an existing definition. The editor follows each callee's
+returned expression when proposing and applying edits. A term that only adds
+a history-dependent offset to every score is excluded. The actual ranking
+depends on learned weights and on the histories and edit descriptions supplied.
+
 `score_edits(memory, edits, rule_id=...)` executes the ordinary editor and the
 specified rule in one numerical graph. Each row contains their separate scores
 and the program, edit and rule identities. The editor reads the current

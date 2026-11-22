@@ -10,6 +10,8 @@ use xlog_ir::tensor::{TensorOperation as Op, TensorParameter};
 use xlog_logic::ast::FuncDef;
 use xlog_neural::causal_snapshot::EditAdaptation;
 
+mod interaction;
+
 const WIDTH: usize = ACQUIRED_WIDTH;
 const DESCRIPTOR: usize = 96;
 const FEATURES: &str = "model::edit_features";
@@ -21,7 +23,7 @@ fn invalid(message: impl Into<String>) -> XlogError {
 }
 
 /// A typed operand of a whole edit. Coordinates keep their actual within-row order.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EditOperand {
     /// Read columns of the observed hidden state.
@@ -158,6 +160,7 @@ struct EditSite {
     index: usize,
     hidden: usize,
     callees: Vec<(String, usize)>,
+    rule_inputs: Option<BTreeMap<String, interaction::Sources>>,
 }
 
 impl NativeCausalModel {
@@ -341,11 +344,17 @@ impl NativeCausalModel {
         }
         callees.sort();
         callees.dedup();
+        let rule_inputs = if rule && grid.color_prior.is_some() {
+            Some(interaction::callees(&self.functions, &callees)?)
+        } else {
+            None
+        };
         Ok(EditSite {
             rule,
             index,
             hidden,
             callees,
+            rule_inputs,
         })
     }
 
@@ -395,6 +404,13 @@ impl NativeCausalModel {
                 operation,
                 arguments,
             };
+            if site
+                .rule_inputs
+                .as_ref()
+                .is_some_and(|inputs| !interaction::permits(&edit, inputs))
+            {
+                continue;
+            }
             edit.edit_id = edit.identity()?;
             if seen.insert(edit.edit_id.clone()) {
                 edits.push(edit);
@@ -427,6 +443,15 @@ impl NativeCausalModel {
             if !valid {
                 return Err(invalid("edit operand is not available at its typed site"));
             }
+        }
+        if site
+            .rule_inputs
+            .as_ref()
+            .is_some_and(|inputs| !interaction::permits(edit, inputs))
+        {
+            return Err(invalid(
+                "the new rule term must couple history with differences between edits",
+            ));
         }
         Ok(site)
     }
