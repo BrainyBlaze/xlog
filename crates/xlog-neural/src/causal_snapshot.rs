@@ -72,6 +72,16 @@ pub struct EditAdaptation {
     pub rules: std::collections::BTreeMap<String, Vec<usize>>,
 }
 
+/// The residual connection fitted in a matched comparison and its actual callee.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridFunctionComparison {
+    /// Physical output projection shared at initialization by the two alternatives.
+    pub projection: usize,
+    /// Feature function called at the selected insertion in this branch.
+    pub function: String,
+}
+
 /// Continuation roles are explicit and independent of per-parameter Adam counters.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +92,9 @@ pub struct NativeAdaptation {
     /// Installed numerical observation boundary, absent in a token checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridAdaptation>,
+    /// Selected function and its independently fitted connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<GridFunctionComparison>,
     /// All retained insertion generations, including frozen predecessors.
     pub insertions: Vec<AcquiredInsertion>,
     /// Current parameters for outcome fitting and optional acquired token training.
@@ -194,7 +207,23 @@ impl NativeAdaptation {
                     "insertion does not match its actual numerical call path",
                 ));
             };
-            if function != &insertion.function
+            let selected = self
+                .comparison
+                .as_ref()
+                .filter(|c| c.projection == insertion.projection);
+            let expected_function = selected.map_or(&insertion.function, |c| &c.function);
+            if expected_function != &insertion.function
+                && functions.numerical(expected_function)?.signature
+                    != (TensorSignature::Recurrent {
+                        input_width: hidden,
+                        output_width: width,
+                    })
+            {
+                return Err(invalid(
+                    "comparison recurrence has a different numerical signature",
+                ));
+            }
+            if function != expected_function
                 || arguments != &[offset]
                 || *feature != offset + 1
                 || *weight != insertion.projection
@@ -278,6 +307,20 @@ impl NativeAdaptation {
                 return Err(invalid("trainable down projection role is invalid"));
             }
             expected.insert(id);
+        }
+        if let Some(comparison) = &self.comparison {
+            if self.grid.is_none()
+                || self.down_projection.is_some()
+                || !self
+                    .insertions
+                    .iter()
+                    .any(|entry| entry.projection == comparison.projection)
+            {
+                return Err(invalid(
+                    "comparison requires an installed grid feature connection",
+                ));
+            }
+            expected = std::collections::BTreeSet::from([comparison.projection]);
         }
         let actual = self
             .trainable

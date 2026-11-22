@@ -18,6 +18,7 @@ use xlog_neural::causal_snapshot::{
 };
 
 pub mod acquired;
+mod comparison;
 pub mod edits;
 pub mod grid;
 
@@ -89,7 +90,26 @@ pub struct NativeLogits {
     pub device: usize,
 }
 
+fn register(registry: &mut FunctionRegistry, name: &str, program: TensorProgram) -> Result<()> {
+    registry.register(xlog_logic::ast::FuncDef::numerical(
+        name.to_owned(),
+        program,
+    )?)?;
+    Ok(())
+}
+
 impl NativeCausalModel {
+    fn numerical_body(&self, signature: TensorSignature) -> TensorProgram {
+        TensorProgram {
+            signature,
+            parameters: vec![],
+            operations: vec![],
+            output: 0,
+            vocabulary: self.program().vocabulary,
+            max_context: self.program().max_context,
+        }
+    }
+
     fn program(&self) -> &TensorProgram {
         self.functions
             .numerical(&self.entrypoint)
@@ -97,6 +117,20 @@ impl NativeCausalModel {
     }
 
     fn add_matrix(
+        &mut self,
+        program: &mut TensorProgram,
+        name: String,
+        rows: usize,
+        columns: usize,
+        seed: &mut NumericalSeed,
+    ) -> Result<usize> {
+        let id = self.add_frozen_matrix(program, name, rows, columns, seed)?;
+        self.optimizers
+            .insert(id, self.executor.optimizer(id, &self.parameters[id])?);
+        Ok(id)
+    }
+
+    fn add_frozen_matrix(
         &mut self,
         program: &mut TensorProgram,
         name: String,
@@ -121,11 +155,26 @@ impl NativeCausalModel {
         let mut tensor = self.executor.allocate_tensor(shape)?;
         self.executor.write_tensor(&mut tensor, 0, &bytes)?;
         let id = program.parameters.len();
-        self.optimizers
-            .insert(id, self.executor.optimizer(id, &tensor)?);
         self.parameters.push(tensor);
         program.parameters.push(parameter);
         Ok(id)
+    }
+
+    fn zero_projection(
+        &self,
+        id: usize,
+        parameter: &xlog_ir::tensor::TensorParameter,
+    ) -> Result<(NativeTensor, TensorAdamState)> {
+        let [rows, columns] = parameter.linear_dimensions()?;
+        let mut tensor = self.executor.allocate_tensor(TensorValueShape {
+            rows,
+            columns,
+            float32: true,
+        })?;
+        self.executor
+            .write_tensor(&mut tensor, 0, &vec![0; parameter.bytes()?])?;
+        let optimizer = self.executor.optimizer(id, &tensor)?;
+        Ok((tensor, optimizer))
     }
 
     /// Import local config.json and authentic SafeTensors shards, then publish
@@ -463,6 +512,16 @@ impl NativeCausalModel {
             TensorLoss,
         )],
     ) -> Result<TensorTrainingResult> {
+        if self
+            .adaptation
+            .comparison
+            .as_ref()
+            .is_some_and(|c| ids != [c.projection])
+        {
+            return Err(XlogError::Compilation(
+                "only the comparison's output connection can be fitted".into(),
+            ));
+        }
         let states = ids
             .iter()
             .map(|id| {
