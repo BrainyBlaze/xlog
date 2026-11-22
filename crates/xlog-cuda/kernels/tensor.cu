@@ -518,7 +518,8 @@ extern "C" __global__ void tensor_loss_f32(
     const float* logits, float* cotangent, float* loss,
     uint32_t vocabulary, uint32_t kind, uint32_t target, uint32_t negative, uint32_t positive, float regression
 ) {
-    if (kind == 1) {
+    if (kind == 1 || kind == 4) {
+        const float weight = kind == 4 ? regression : 1.0f;
         const float a = logits[positive] - logits[negative];
         const float e = expf(-fabsf(a));
         // Evaluate the target residual directly: computing p - 1 first would
@@ -528,10 +529,10 @@ extern "C" __global__ void tensor_loss_f32(
         const float derivative = target == 1 ? (a >= 0.0f ? -small : -large)
                                              : (a >= 0.0f ? large : small);
         for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) {
-            cotangent[i] = i == positive ? derivative : (i == negative ? -derivative : 0.0f);
+            cotangent[i] = weight * (i == positive ? derivative : (i == negative ? -derivative : 0.0f));
         }
         const float signed_margin = target == 1 ? -a : a;
-        if (threadIdx.x == 0) loss[0] = fmaxf(signed_margin, 0.0f) + log1pf(e);
+        if (threadIdx.x == 0) loss[0] = weight * (fmaxf(signed_margin, 0.0f) + log1pf(e));
     } else {
         const uint32_t classes = kind >= 2 ? vocabulary - 1 : vocabulary;
         float maximum = -INFINITY;

@@ -2577,7 +2577,9 @@ name = "xlog-runtime"
 version = "0.12.0"
 dependencies = [
  "cudarc",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "xlog-core",
  "xlog-cuda",
  "xlog-ir",

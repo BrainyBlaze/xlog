@@ -193,7 +193,10 @@ immutable state. A query for `predict_grid_actions(memory, queries)` supplies
 Only action 6 takes `x` and `y` coordinates. Each prediction contains sixteen
 natural-log colour probabilities, expected level gain and mean attention probability
 at the selected patch in the first attention layer after insertion. The optional
-`disabled_definition` applies during observation or readout, including nested calls.
+`disabled_definition` applies during observation or readout, including nested calls. `memory.disabled_calls` counts the substitutions through
+every frame in that memory's history. Each prediction's `disabled_calls` counts
+substitutions in that single query. `memory.sequence_rows` gives the number of
+numerical positions per query for accounting.
 
 `fit_grid_batch(examples)` takes (memory, query, observed colour, level gain)
 tuples for moves actually played. Each term differentiates the current query on
@@ -201,6 +204,30 @@ its retained recurrent state. A missing level gain omits that scalar's loss.
 An update produces a new weight version. Replay the public frames to build memory
 for that version. Snapshots store the projections, their optimizer and acquired
 definitions. A restored process starts a new episode at its first public frame.
+
+A fresh grid fork also registers a numerical editor and its zero-valued
+`initial_rule_id`. To install the editor on a saved grid that predates it, use
+`fork_grid_editor(seed=seed)`. `enumerate_edits(target=..., limit=..., seed=...)`
+names a program, a residual or function output, an operation and its ordered
+operands. Coordinates read the actual hidden state or edit description. A
+function operand invokes a retained definition with matching argument and result
+shapes. A null target creates a new observation feature. A named target extends
+that version's output with a learned residual.
+
+`score_edits(memory, edits, rule_id=...)` executes the ordinary editor and the
+specified rule in one numerical graph. Each row contains their separate scores
+and the program, edit and rule identities. The editor reads the current
+recurrent state and numerical features of the program site, operator and operand
+positions. `apply_edit(edit, seed=...)` returns a fork and the new callable
+definition's name. Existing callers retain the names they originally referenced.
+
+`fit_edit_preference(memory, left_edit, right_edit, left_loss=..., right_loss=...,
+rule_id=...)` trains on two measured development losses from the same target.
+The pairwise logistic loss favors the lower loss and is weighted by the
+absolute loss difference. The initial rule trains the ordinary editor.
+Selecting a revised rule trains its new readout and preserves the common
+ordinary editor. A tie returns `None`. Restoring a snapshot retains both
+versions and their optimizer state. The caller selects the rule by name.
 
 For greedy generation, `NativeLogits.select_greedy(allowed_mask=None)` reduces
 the actual vocabulary row on CUDA. An optional mask contains exactly

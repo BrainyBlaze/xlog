@@ -9,6 +9,21 @@ pub(crate) struct PyGridMemory {
     pub(super) inner: GridMemory,
 }
 
+#[pymethods]
+impl PyGridMemory {
+    /// Actual number of numerical positions consumed by an action query.
+    #[getter]
+    fn sequence_rows(&self) -> usize {
+        self.inner.sequence_rows()
+    }
+
+    /// Accumulated successful substitutions across the frames leading to this memory.
+    #[getter]
+    fn disabled_calls(&self) -> usize {
+        self.inner.disabled_calls
+    }
+}
+
 pub(super) type Action = BTreeMap<String, usize>;
 
 pub(super) fn action(mut fields: Action) -> PyResult<GridAction> {

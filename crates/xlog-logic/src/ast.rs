@@ -1525,6 +1525,7 @@ impl FuncDef {
         let result = match signature {
             TensorSignature::Observations {
                 input_widths,
+                output_rows,
                 output_width,
             } => {
                 for (id, &width) in input_widths.iter().enumerate() {
@@ -1537,7 +1538,10 @@ impl FuncDef {
                     name: "prediction_position".into(),
                     typ: Some(ScalarType::U32.into()),
                 });
-                tensor(one, *output_width)
+                tensor(
+                    FunctionDimension::Fixed { size: *output_rows },
+                    *output_width,
+                )
             }
             TensorSignature::Decoder => {
                 params.push(FuncParam {

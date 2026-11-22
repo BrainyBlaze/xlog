@@ -60,6 +60,10 @@ class NativeFunctionResultNonFiniteError(RuntimeError):
 
 class NativeGridMemory:
     """Immutable episode state after one public grid observation."""
+    @property
+    def sequence_rows(self) -> int: ...
+    @property
+    def disabled_calls(self) -> int: ...
 
 class _GridQuery(TypedDict):
     available_actions: Sequence[int]
@@ -71,6 +75,7 @@ class _GridPrediction(TypedDict):
     color_log_probs: list[float]
     expected_progress: float
     attention_mass: float
+    disabled_calls: int
 
 class NativeCausalModel:
     """Native decoder with canonical acquired definitions and atomic candidate training."""
@@ -103,6 +108,20 @@ class NativeCausalModel:
     def fit_grid_batch(
         self, examples: Sequence[tuple[NativeGridMemory, _GridQuery, int, Optional[float]]],
     ) -> tuple[float, float, int]: ...
+    def fork_grid_editor(self, *, seed: int) -> NativeCausalModel: ...
+    @property
+    def program_id(self) -> str: ...
+    @property
+    def initial_rule_id(self) -> str: ...
+    def enumerate_edits(self, *, target: Optional[str], limit: int, seed: int) -> list[dict[str, Any]]: ...
+    def score_edits(
+        self, memory: NativeGridMemory, edits: Sequence[dict[str, Any]], *, rule_id: str,
+    ) -> list[dict[str, Any]]: ...
+    def apply_edit(self, edit: dict[str, Any], *, seed: int) -> tuple[NativeCausalModel, str]: ...
+    def fit_edit_preference(
+        self, memory: NativeGridMemory, left_edit: dict[str, Any], right_edit: dict[str, Any],
+        *, left_loss: float, right_loss: float, rule_id: str,
+    ) -> Optional[tuple[float, float, int]]: ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
     def fork_candidate(self) -> NativeCausalModel: ...
     def acquisition_language(

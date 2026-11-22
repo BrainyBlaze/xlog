@@ -706,7 +706,7 @@ impl TensorExecutor {
                     kv_heads,
                     head_dim,
                 } => {
-                    let key = attention_key
+                    let read_mass = attention_key
                         .filter(|(layer, _)| *layer == attention_layer)
                         .map(|(_, key)| (prediction_position, key));
                     let mass = self.attention(
@@ -717,7 +717,7 @@ impl TensorExecutor {
                         heads,
                         kv_heads,
                         head_dim,
-                        key,
+                        read_mass,
                     )?;
                     if mass.is_some() {
                         attention_mass = mass;

@@ -18,6 +18,7 @@ use xlog_neural::causal_snapshot::{
 };
 
 pub mod acquired;
+pub mod edits;
 pub mod grid;
 
 fn native_executor(
@@ -35,6 +36,28 @@ fn native_executor(
         CudaProviderBuilder::new(device, MemoryBudget::with_limit(memory_budget_bytes))
             .build_tensor_executor()?,
     ))
+}
+
+/// Seeded SplitMix64 stream used for numerical initialization and proposal sampling.
+struct NumericalSeed(u64);
+
+impl NumericalSeed {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+        value ^ (value >> 31)
+    }
+
+    fn index(&mut self, upper: usize) -> usize {
+        ((u128::from(self.next()) * upper as u128) >> 64) as usize
+    }
+
+    fn weight(&mut self, fan_in: usize) -> f32 {
+        let uniform = (self.next() >> 40) as f32 / 16_777_216.0;
+        (2.0 * uniform - 1.0) * (3.0 / fan_in as f32).sqrt()
+    }
 }
 
 /// Versioned weights and executable numerical definition on one native provider.
@@ -71,6 +94,38 @@ impl NativeCausalModel {
         self.functions
             .numerical(&self.entrypoint)
             .expect("validated immutable decoder definition")
+    }
+
+    fn add_matrix(
+        &mut self,
+        program: &mut TensorProgram,
+        name: String,
+        rows: usize,
+        columns: usize,
+        seed: &mut NumericalSeed,
+    ) -> Result<usize> {
+        let parameter = xlog_ir::tensor::TensorParameter {
+            name,
+            shape: vec![rows, columns],
+            float32: true,
+        };
+        let mut bytes = Vec::with_capacity(parameter.bytes()?);
+        for _ in 0..rows * columns {
+            bytes.extend_from_slice(&seed.weight(columns).to_le_bytes());
+        }
+        let shape = TensorValueShape {
+            rows,
+            columns,
+            float32: true,
+        };
+        let mut tensor = self.executor.allocate_tensor(shape)?;
+        self.executor.write_tensor(&mut tensor, 0, &bytes)?;
+        let id = program.parameters.len();
+        self.optimizers
+            .insert(id, self.executor.optimizer(id, &tensor)?);
+        self.parameters.push(tensor);
+        program.parameters.push(parameter);
+        Ok(id)
     }
 
     /// Import local config.json and authentic SafeTensors shards, then publish

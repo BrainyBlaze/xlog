@@ -1,7 +1,7 @@
 //! Recurrent public colour-grid observations in the native causal backbone.
 
 use super::*;
-use xlog_ir::tensor::{TensorOperation as Op, TensorParameter};
+use xlog_ir::tensor::TensorOperation as Op;
 use xlog_logic::ast::FuncDef;
 use xlog_neural::causal_snapshot::GridAdaptation;
 
@@ -162,7 +162,16 @@ impl GridFrame {
 pub struct GridMemory {
     pub(super) state: NativeTensor,
     frame: Arc<GridFrame>,
-    version: Arc<()>,
+    pub(super) version: Arc<()>,
+    /// Definitions replaced during all successful frame updates leading to this state.
+    pub disabled_calls: usize,
+}
+
+impl GridMemory {
+    /// State position, actual patch positions and final readout position.
+    pub fn sequence_rows(&self) -> usize {
+        self.frame.rows()
+    }
 }
 
 /// Joint prediction and attention measurement from the same query forward.
@@ -173,9 +182,11 @@ pub struct GridPrediction {
     pub expected_progress: f32,
     /// Mean attention probability at the preselected patch in the first layer after insertion.
     pub attention_mass: f32,
+    /// Calls replaced during this query alone.
+    pub disabled_calls: usize,
 }
 
-fn append(program: &mut TensorProgram, operation: Op) -> usize {
+pub(super) fn append(program: &mut TensorProgram, operation: Op) -> usize {
     let index = program.operations.len();
     program.operations.push(operation);
     index
@@ -221,43 +232,19 @@ impl NativeCausalModel {
         let hidden = program.parameters[*embedding].linear_dimensions()?[1];
         let sensor = program.parameters.len();
         let readout = sensor + 1;
-        let mut rng = seed;
+        let mut rng = NumericalSeed(seed);
         for (id, name, rows, columns) in [
             (sensor, "model::grid::sensor", hidden, FEATURES),
             (readout, "model::grid::readout", READOUT, hidden),
         ] {
-            let shape = TensorValueShape {
-                rows,
-                columns,
-                float32: true,
-            };
-            let parameter = TensorParameter {
-                name: name.into(),
-                shape: vec![rows, columns],
-                float32: true,
-            };
-            let mut bytes = Vec::with_capacity(parameter.bytes()?);
-            let scale = (3.0 / columns as f32).sqrt();
-            for _ in 0..rows * columns {
-                // SplitMix64, using the top 24 bits for a uniform FP32 mantissa.
-                rng = rng.wrapping_add(0x9e3779b97f4a7c15);
-                let mut z = rng;
-                z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-                let u = ((z ^ (z >> 31)) >> 40) as f32 / 16_777_216.0;
-                bytes.extend_from_slice(&((2.0 * u - 1.0) * scale).to_le_bytes());
-            }
-            let mut tensor = self.executor.allocate_tensor(shape)?;
-            self.executor.write_tensor(&mut tensor, 0, &bytes)?;
-            candidate
-                .optimizers
-                .insert(id, self.executor.optimizer(id, &tensor)?);
-            candidate.parameters.push(tensor);
-            candidate.adaptation.trainable.push(id);
-            program.parameters.push(parameter);
+            let parameter =
+                candidate.add_matrix(&mut program, name.into(), rows, columns, &mut rng)?;
+            debug_assert_eq!(parameter, id);
+            candidate.adaptation.trainable.push(parameter);
         }
         program.signature = TensorSignature::Observations {
             input_widths: vec![FEATURES, hidden],
+            output_rows: 1,
             output_width: READOUT,
         };
         let features = append(&mut program, Op::Argument { argument: 0 });
@@ -309,10 +296,11 @@ impl NativeCausalModel {
             readout,
             insertion_layer,
         });
+        candidate.install_editor(&mut rng)?;
         Ok(candidate)
     }
 
-    fn grid(&self) -> Result<&GridAdaptation> {
+    pub(super) fn grid(&self) -> Result<&GridAdaptation> {
         self.adaptation
             .grid
             .as_ref()
@@ -351,16 +339,14 @@ impl NativeCausalModel {
         Ok([features, prior])
     }
 
-    fn grid_program(&self, rows: usize, disabled: Option<&str>) -> Result<TensorProgram> {
-        self.functions
-            .compile_numerical_with_intervention(
-                &self.entrypoint,
-                rows,
-                rows - 1,
-                Some((0, rows)),
-                disabled,
-            )
-            .map(|(program, _)| program)
+    fn grid_program(&self, rows: usize, disabled: Option<&str>) -> Result<(TensorProgram, usize)> {
+        self.functions.compile_numerical_with_intervention(
+            &self.entrypoint,
+            rows,
+            rows - 1,
+            Some((0, rows)),
+            disabled,
+        )
     }
 
     /// Advance the retained state once for this public frame and actual preceding move.
@@ -388,7 +374,11 @@ impl NativeCausalModel {
         }
         let inputs = self.grid_inputs(&frame, memory, &row)?;
         let rows = frame.rows();
-        let mut program = self.grid_program(rows, disabled)?;
+        let (mut program, substitutions) = self.grid_program(rows, disabled)?;
+        let disabled_calls = memory
+            .map_or(0, |m| m.disabled_calls)
+            .checked_add(substitutions)
+            .ok_or_else(|| invalid("grid intervention counter overflow"))?;
         let grid = self.grid()?;
         let Some(Op::Linear { input, weight }) = program.operations.get(program.output) else {
             return Err(invalid("grid output lacks its state readout"));
@@ -412,6 +402,7 @@ impl NativeCausalModel {
         Ok(GridMemory {
             state,
             frame: Arc::new(frame),
+            disabled_calls,
             version: Arc::clone(&self.version),
         })
     }
@@ -425,7 +416,7 @@ impl NativeCausalModel {
     ) -> Result<Vec<GridPrediction>> {
         let rows = memory.frame.rows();
         let attention_layer = self.grid()?.insertion_layer + 1;
-        let program = self.grid_program(rows, disabled)?;
+        let (program, disabled_calls) = self.grid_program(rows, disabled)?;
         let indices = (0..READOUT as u32).collect::<Vec<_>>();
         queries
             .iter()
@@ -465,6 +456,7 @@ impl NativeCausalModel {
                     color_log_probs,
                     expected_progress: logits[COLORS],
                     attention_mass: mass,
+                    disabled_calls,
                 })
             })
             .collect()
@@ -481,7 +473,7 @@ impl NativeCausalModel {
                 let rows = memory.frame.rows();
                 let (row, _) = memory.frame.query(query)?;
                 let inputs = self.grid_inputs(&memory.frame, Some(memory), &row)?;
-                let program = self.grid_program(rows, None)?;
+                let (program, _) = self.grid_program(rows, None)?;
                 Ok((
                     program,
                     inputs,
