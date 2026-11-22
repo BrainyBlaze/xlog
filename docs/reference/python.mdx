@@ -193,7 +193,10 @@ immutable state. A query for `predict_grid_actions(memory, queries)` supplies
 Only action 6 takes `x` and `y` coordinates. Each prediction contains sixteen
 natural-log colour probabilities, expected level gain and mean attention probability
 at the selected patch in the first attention layer after insertion. The optional
-`disabled_definition` applies during observation or readout, including nested calls.
+`disabled_definition` applies during observation or readout, including nested calls. `memory.disabled_calls` counts the substitutions through
+every frame in that memory's history. Each prediction's `disabled_calls` counts
+substitutions in that single query. `memory.sequence_rows` gives the number of
+numerical positions per query for accounting.
 
 `fit_grid_batch(examples)` takes (memory, query, observed colour, level gain)
 tuples for moves actually played. Each term differentiates the current query on

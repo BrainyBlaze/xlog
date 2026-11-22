@@ -60,6 +60,10 @@ class NativeFunctionResultNonFiniteError(RuntimeError):
 
 class NativeGridMemory:
     """Immutable episode state after one public grid observation."""
+    @property
+    def sequence_rows(self) -> int: ...
+    @property
+    def disabled_calls(self) -> int: ...
 
 class _GridQuery(TypedDict):
     available_actions: Sequence[int]
@@ -71,6 +75,7 @@ class _GridPrediction(TypedDict):
     color_log_probs: list[float]
     expected_progress: float
     attention_mass: float
+    disabled_calls: int
 
 class NativeCausalModel:
     """Native decoder with canonical acquired definitions and atomic candidate training."""

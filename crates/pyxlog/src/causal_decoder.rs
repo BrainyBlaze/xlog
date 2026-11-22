@@ -182,6 +182,7 @@ impl PyNativeCausalModel {
                 row.set_item("color_log_probs", value.color_log_probs)?;
                 row.set_item("expected_progress", value.expected_progress)?;
                 row.set_item("attention_mass", value.attention_mass)?;
+                row.set_item("disabled_calls", value.disabled_calls)?;
                 Ok(row.unbind())
             })
             .collect()
