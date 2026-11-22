@@ -104,6 +104,24 @@ impl TensorExecutor {
                     (source.pointer(), output.pointer(), count),
                 )
             }
+            Op::SoftplusColumn {
+                input: source,
+                column,
+            } => {
+                let source = input(*source)?;
+                self.launch(
+                    self.recorder(&[source], output),
+                    "tensor_softplus_column_f32",
+                    config,
+                    (
+                        source.pointer(),
+                        output.pointer(),
+                        count,
+                        output.shape.columns as u32,
+                        *column as u32,
+                    ),
+                )
+            }
             Op::MatMul { left, right } => {
                 let (left, right) = (input(*left)?, input(*right)?);
                 // Row-major C=A*B is column-major C^T=B^T*A^T on the same bytes.
@@ -225,7 +243,7 @@ impl TensorExecutor {
         Ok(output)
     }
 
-    fn copy_row(
+    pub(super) fn copy_row(
         &self,
         source: &NativeTensor,
         source_row: usize,
@@ -274,6 +292,27 @@ impl TensorExecutor {
                         dy.pointer(),
                         dx.pointer(),
                         dx.elements() as u64,
+                    ),
+                )?;
+                contributions.push((*source, dx));
+            }
+            Op::SoftplusColumn {
+                input: source,
+                column,
+            } => {
+                let x = input(*source)?;
+                let dx = self.float_shape(x.shape)?;
+                self.launch(
+                    self.recorder(&[x, dy], &dx),
+                    "tensor_softplus_column_vjp_f32",
+                    grid(dx.elements().div_ceil(256))?,
+                    (
+                        x.pointer(),
+                        dy.pointer(),
+                        dx.pointer(),
+                        dx.elements() as u64,
+                        dx.shape.columns as u32,
+                        *column as u32,
                     ),
                 )?;
                 contributions.push((*source, dx));

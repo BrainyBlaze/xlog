@@ -748,17 +748,21 @@ impl TensorExecutor {
                 }
                 Op::PredictionRow { input: source } => {
                     let source = input(source)?;
-                    self.launch(
-                        self.recorder(&[source], &output),
-                        "tensor_prediction_row_bf16",
-                        vector_grid,
-                        (
-                            source.pointer(),
-                            output.pointer(),
-                            output.shape.columns as u32,
-                            prediction_position as u32,
-                        ),
-                    )?;
+                    if source.shape.float32 {
+                        self.copy_row(source, prediction_position, &output, 0)?;
+                    } else {
+                        self.launch(
+                            self.recorder(&[source], &output),
+                            "tensor_prediction_row_bf16",
+                            vector_grid,
+                            (
+                                source.pointer(),
+                                output.pointer(),
+                                output.shape.columns as u32,
+                                prediction_position as u32,
+                            ),
+                        )?;
+                    }
                 }
                 Op::Float32 { input: source } => {
                     let source = input(source)?;

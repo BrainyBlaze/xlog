@@ -98,6 +98,9 @@ class NativeCausalModel:
         """Run the active decoder, disable one named callee, or select the original decoder."""
         ...
     def fork_grid(self, *, seed: int, insertion_layer: int = 17) -> NativeCausalModel: ...
+    def fork_grid_priors(
+        self, counts: Sequence[Sequence[int]], *, progress_prior: float,
+    ) -> NativeCausalModel: ...
     def observe_grid(
         self, frame: Sequence[Sequence[int]], *, memory: Optional[NativeGridMemory], turn_start: bool,
         executed_action: Optional[dict[str, int]] = None, disabled_definition: Optional[str] = None,
@@ -107,6 +110,7 @@ class NativeCausalModel:
     ) -> list[_GridPrediction]: ...
     def fit_grid_batch(
         self, examples: Sequence[tuple[NativeGridMemory, _GridQuery, int, Optional[float]]],
+        *, shared_only: bool = False,
     ) -> tuple[float, float, int]: ...
     def fork_grid_function_comparison(
         self, definition_id: str, *, seed: int,

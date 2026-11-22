@@ -629,6 +629,27 @@ extern "C" __global__ void tensor_tanh_f32(const float* input, float* output, ui
     if (i < elements) output[i] = tanhf(input[i]);
 }
 
+extern "C" __global__ void tensor_softplus_column_f32(const float* input, float* output,
+        uint64_t elements, uint32_t width, uint32_t column) {
+    const uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= elements) return;
+    const float x = input[i];
+    output[i] = i % width == column ? fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x))) : x;
+}
+
+extern "C" __global__ void tensor_softplus_column_vjp_f32(const float* input, const float* dy,
+        float* dx, uint64_t elements, uint32_t width, uint32_t column) {
+    const uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= elements) return;
+    float gradient = dy[i];
+    if (i % width == column) {
+        const float x = input[i];
+        const float e = expf(-fabsf(x));
+        gradient *= (x >= 0.0f ? 1.0f : e) / (1.0f + e);
+    }
+    dx[i] = gradient;
+}
+
 extern "C" __global__ void tensor_tanh_vjp_f32(const float* input, const float* dy, float* dx, uint64_t elements) {
     const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < elements) { const float t = tanhf(input[i]); dx[i] = dy[i] * (1.0f - t * t); }

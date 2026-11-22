@@ -181,6 +181,7 @@ impl TensorOperation {
             Zeros { .. } | Argument { .. } | Parameter { .. } | TokenIndicators { .. } => vec![],
             Broadcast { input }
             | Tanh { input }
+            | SoftplusColumn { input, .. }
             | GatherColumns { input, .. }
             | Bfloat16 { input }
             | Finite { input }
@@ -238,6 +239,7 @@ impl TensorOperation {
             | Float32 { input }
             | Broadcast { input }
             | Tanh { input }
+            | SoftplusColumn { input, .. }
             | GatherColumns { input, .. }
             | Bfloat16 { input }
             | Finite { input }
@@ -416,6 +418,13 @@ impl TensorProgram {
             }
             Tanh { input: id } | Finite { input: id } => {
                 related_shape("tanh", [float(*id)?], tokens, None)?
+            }
+            SoftplusColumn { input, column } => {
+                let source = float(*input)?;
+                if *column >= source.columns {
+                    return Err(invalid("softplus coordinate exceeds the row width"));
+                }
+                source
             }
             Bfloat16 { input: id } => TensorValueShape {
                 float32: false,

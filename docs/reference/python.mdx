@@ -185,6 +185,21 @@ output projections. It splits rectangular grids of up to 64 by 64 cells into
 4 by 4 patches. A distinct padding channel bounds each partial patch. The largest
 grid requires a context of 258 positions including memory and query.
 
+Each fresh grid query includes a 4 by 4 window from the most recent public
+frame. The target is at row 1, column 1 of the window. Positions outside the
+frame use the padding channel. The initial colour distribution is uniform and
+the expected level gain is 1/32 for every proposed action.
+
+Use `model.fork_grid_priors(counts, progress_prior=mean_gain)` after collecting
+fitting data. Supply 16 rows of transition counts indexed by the colour before
+the action, with columns indexed by the observed next colour. The fork freezes
+the add-one-smoothed distribution for each previous colour. Its output starts
+with a zero correction to the log frequencies and fresh output-layer Adam
+moments. The progress coordinate uses softplus and starts at the supplied
+positive mean, in levels. The sensor, decoder and editor retain their weights.
+Both priors and the query encoding survive cold restoration. Older snapshots
+replay their original position-only queries and linear progress output.
+
 Call `observe_grid(frame, memory=None, turn_start=True)` for the first frame.
 Subsequent turn starts take the previous memory and `executed_action`. Intermediate
 frames take the previous memory and `turn_start=False`. Each call returns a new
@@ -201,6 +216,9 @@ numerical positions per query for accounting.
 `fit_grid_batch(examples)` takes (memory, query, observed colour, level gain)
 tuples for moves actually played. Each term differentiates the current query on
 its retained recurrent state. A missing level gain omits that scalar's loss.
+When several cells share a move, supply its observed gain only for the primary
+prediction. Use `shared_only=True` to fit a parent control on the same common
+weights as a candidate while keeping its earlier acquired functions frozen.
 An update produces a new weight version. Replay the public frames to build memory
 for that version. Snapshots store the projections, their optimizer and acquired
 definitions. A restored process starts a new episode at its first public frame.
