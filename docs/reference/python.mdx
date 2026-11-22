@@ -148,11 +148,19 @@ IDs and history-span checks apply; an acquired model still requires an explicit
 `history_span`. A missing original decoder or a mismatch in its signature,
 vocabulary, context limit or parameter prefix raises an exception.
 
-The read-only `NativeLogits.entrypoint` identifies the numerical definition actually
-executed for that row. Record it with the model snapshot identity when comparing
-readouts: the same snapshot can produce different logits in the two explicit
-modes. The mode belongs to each forward call and is not stored in the model;
-callers must retain and supply it again after restoration.
+`forward(..., disabled_definition=name)` runs the active decoder and replaces
+calls to that numerical definition with FP32 zeros of its declared result shape.
+This applies to nested calls and each executed step of a scan. Other definitions
+and all trained parameters retain their current values, including parameters
+referenced directly by another definition. The name must resolve to a numerical
+callee in the registry. Combining this option with `include_acquired=False`
+raises an exception.
+
+The returned `NativeLogits` exposes the executed decoder `entrypoint`, the
+selected `disabled_definition` and the number of replaced calls in
+`disabled_calls`. A registered definition can have zero calls on a given prefix.
+Record these fields with the snapshot identity for comparisons. Each forward
+call selects its own intervention, including after snapshot restoration.
 
 Matrix products accumulate in FP32 and return BF16. Normalization and softmax
 use FP32 reductions, with BF16 operation boundaries. The final BF16 output

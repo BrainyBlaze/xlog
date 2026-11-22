@@ -8,6 +8,15 @@ fn invalid(message: &str) -> XlogError {
     XlogError::Compilation(message.into())
 }
 
+struct NumericalExpansion<'a> {
+    tokens: usize,
+    position: usize,
+    history_span: Option<(usize, usize)>,
+    disabled_definition: Option<&'a str>,
+    disabled_calls: usize,
+    stack: Vec<String>,
+}
+
 impl FunctionRegistry {
     pub(super) fn validate_numerical_program(&self, program: &TensorProgram) -> NativeResult<()> {
         for tokens in [1, program.max_context] {
@@ -35,6 +44,20 @@ impl FunctionRegistry {
         position: usize,
         history_span: Option<(usize, usize)>,
     ) -> NativeResult<TensorProgram> {
+        self.compile_numerical_with_intervention(name, tokens, position, history_span, None)
+            .map(|(program, _)| program)
+    }
+
+    /// Compile this prefix with an optional numerical callee replaced by its
+    /// typed zero result. Return the number of calls replaced in this expansion.
+    pub fn compile_numerical_with_intervention(
+        &self,
+        name: &str,
+        tokens: usize,
+        position: usize,
+        history_span: Option<(usize, usize)>,
+        disabled_definition: Option<&str>,
+    ) -> NativeResult<(TensorProgram, usize)> {
         self.validate()
             .map_err(|error| invalid(&error.to_string()))?;
         if history_span.is_some_and(|(start, end)| start > end || end > tokens) {
@@ -44,47 +67,64 @@ impl FunctionRegistry {
         if entry.signature != TensorSignature::Decoder {
             return Err(invalid("execution entry must be a decoder"));
         }
+        if let Some(disabled) = disabled_definition {
+            if self.numerical(disabled)?.signature == TensorSignature::Decoder {
+                return Err(invalid("only a numerical callee can be disabled"));
+            }
+        }
         let mut program = entry.clone();
         program.operations.clear();
-        let mut stack = Vec::new();
-        program.output = self.expand_numerical(
-            name,
-            &[],
+        let mut expansion = NumericalExpansion {
             tokens,
             position,
             history_span,
-            &mut program,
-            &mut stack,
-        )?;
+            disabled_definition,
+            disabled_calls: 0,
+            stack: Vec::new(),
+        };
+        program.output = self.expand_numerical(name, &[], &mut program, &mut expansion)?;
         program.shapes(tokens, position)?;
-        Ok(program)
+        Ok((program, expansion.disabled_calls))
     }
 
     fn expand_numerical(
         &self,
         name: &str,
         arguments: &[usize],
-        tokens: usize,
-        position: usize,
-        history_span: Option<(usize, usize)>,
         target: &mut TensorProgram,
-        stack: &mut Vec<String>,
+        expansion: &mut NumericalExpansion<'_>,
     ) -> NativeResult<usize> {
-        if stack.iter().any(|ancestor| ancestor == name) {
+        let tokens = expansion.tokens;
+        if expansion.stack.iter().any(|ancestor| ancestor == name) {
             return Err(invalid("numerical calls must form a DAG"));
         }
         let body = self.numerical(name)?;
-        body.shapes_resolved(tokens, position, &|callee| {
+        body.shapes_resolved(tokens, expansion.position, &|callee| {
             Ok(self.numerical(callee)?.signature.clone())
         })?;
         if arguments.len() != body.signature.arguments(tokens)?.len() {
             return Err(invalid("numerical call arity differs"));
         }
+        if expansion.disabled_definition == Some(name) {
+            let shape = body.signature.output(tokens, body.vocabulary)?;
+            let zero = emit(
+                target,
+                Op::Zeros {
+                    columns: shape.columns,
+                },
+            )?;
+            expansion.disabled_calls += 1;
+            return if shape.rows == 1 {
+                Ok(zero)
+            } else {
+                emit(target, Op::Broadcast { input: zero })
+            };
+        }
         let parameters = body.parameters.iter().map(|parameter| {
             target.parameters.iter().position(|physical| physical == parameter)
                 .ok_or_else(|| invalid("called definition's parameter identity is absent or has a different type"))
         }).collect::<NativeResult<Vec<_>>>()?;
-        stack.push(name.into());
+        expansion.stack.push(name.into());
         let mut values = Vec::with_capacity(body.operations.len());
         for operation in &body.operations {
             let id = match operation {
@@ -94,15 +134,7 @@ impl FunctionRegistry {
                     arguments,
                 } => {
                     let actual = arguments.iter().map(|&id| values[id]).collect::<Vec<_>>();
-                    self.expand_numerical(
-                        function,
-                        &actual,
-                        tokens,
-                        position,
-                        history_span,
-                        target,
-                        stack,
-                    )?
+                    self.expand_numerical(function, &actual, target, expansion)?
                 }
                 Op::Scan {
                     input,
@@ -112,7 +144,7 @@ impl FunctionRegistry {
                 } => {
                     let mut state = values[*initial];
                     let mut states = Vec::with_capacity(tokens);
-                    let (start, end) = history_span.ok_or_else(|| {
+                    let (start, end) = expansion.history_span.ok_or_else(|| {
                         invalid("causal scan requires an explicit raw history span")
                     })?;
                     if end - start > *max_steps {
@@ -130,15 +162,8 @@ impl FunctionRegistry {
                                 row,
                             },
                         )?;
-                        state = self.expand_numerical(
-                            function,
-                            &[state, current],
-                            tokens,
-                            position,
-                            history_span,
-                            target,
-                            stack,
-                        )?;
+                        state =
+                            self.expand_numerical(function, &[state, current], target, expansion)?;
                         states.push(state);
                     }
                     emit(target, Op::Stack { inputs: states })?
@@ -147,7 +172,7 @@ impl FunctionRegistry {
             };
             values.push(id);
         }
-        stack.pop();
+        expansion.stack.pop();
         let output = values[body.output];
         if matches!(body.signature, TensorSignature::Causal { .. }) {
             emit(target, Op::Finite { input: output })

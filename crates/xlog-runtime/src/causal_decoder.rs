@@ -52,6 +52,9 @@ pub struct NativeLogits {
     executor: Arc<TensorExecutor>,
     tensor: NativeTensor,
     entrypoint: String,
+    disabled_definition: Option<String>,
+    /// Calls to the selected definition replaced in this prefix, including scan steps.
+    pub disabled_calls: usize,
     /// Zero-based input position whose next-token distribution was computed.
     pub prediction_position: usize,
     /// Width of the complete vocabulary, including reserved token IDs.
@@ -439,10 +442,34 @@ impl NativeCausalModel {
         history_span: Option<(usize, usize)>,
         include_acquired: bool,
     ) -> Result<NativeLogits> {
+        self.forward_with_intervention(
+            token_ids,
+            prediction_position,
+            history_span,
+            include_acquired,
+            None,
+        )
+    }
+
+    /// Execute a prefix while optionally disabling one named numerical callee
+    /// in the active model. Other calls and their physical parameters are shared.
+    pub fn forward_with_intervention(
+        &self,
+        token_ids: &[u32],
+        prediction_position: usize,
+        history_span: Option<(usize, usize)>,
+        include_acquired: bool,
+        disabled_definition: Option<&str>,
+    ) -> Result<NativeLogits> {
         self.validate_history_span(token_ids.len(), history_span)?;
         let (entrypoint, parameters) = if include_acquired {
             (self.entrypoint.as_str(), self.parameters.as_slice())
         } else {
+            if disabled_definition.is_some() {
+                return Err(XlogError::Compilation(
+                    "disabling a named definition requires the active decoder".into(),
+                ));
+            }
             let entrypoint = "model::forward";
             let backbone = self.functions.numerical(entrypoint)?;
             let active = self.program();
@@ -467,11 +494,12 @@ impl NativeCausalModel {
                 })?;
             (entrypoint, parameters)
         };
-        let program = self.functions.compile_numerical(
+        let (program, disabled_calls) = self.functions.compile_numerical_with_intervention(
             entrypoint,
             token_ids.len(),
             prediction_position,
             history_span,
+            disabled_definition,
         )?;
         let tensor = self.executor.execute(
             &program,
@@ -484,6 +512,8 @@ impl NativeCausalModel {
             executor: Arc::clone(&self.executor),
             tensor,
             entrypoint: entrypoint.to_owned(),
+            disabled_definition: disabled_definition.map(str::to_owned),
+            disabled_calls,
             prediction_position,
             vocabulary_size: program.vocabulary,
             device: self.device,
@@ -521,6 +551,11 @@ impl NativeCausalModel {
 }
 
 impl NativeLogits {
+    /// Optional callee selected for this invocation, even when its call count is zero.
+    pub fn disabled_definition(&self) -> Option<&str> {
+        self.disabled_definition.as_deref()
+    }
+
     /// Numerical entrypoint actually executed to produce this vocabulary row.
     pub fn entrypoint(&self) -> &str {
         &self.entrypoint
