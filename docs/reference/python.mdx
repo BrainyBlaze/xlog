@@ -205,6 +205,18 @@ An update produces a new weight version. Replay the public frames to build memor
 for that version. Snapshots store the projections, their optimizer and acquired
 definitions. A restored process starts a new episode at its first public frame.
 
+To compare an installed feature with a fixed recurrence, call
+`acquired, fixed = model.fork_grid_function_comparison(definition_id, seed=seed)`.
+Both branches start from the selected grid model. The acquired branch calls the
+original feature at its residual insertion. At that same site the fixed branch
+computes `h[t] = tanh(Wx x[t] + Wh h[t-1])` on the ordered hidden rows,
+starting each sequence from zero. The seed sets the two frozen recurrence
+matrices. Both branches reset the selected feature's output projection and its
+Adam state to zero. Only this projection can train. Replay the same recorded
+frames and moves on each branch, and call `fit_grid_batch` with the same
+examples in the same order. Both the actual callee (`comparison_function`) and
+the fitted connection survive `save_snapshot` and `from_snapshot`.
+
 A fresh grid fork also registers a numerical editor and its zero-valued
 `initial_rule_id`. To install the editor on a saved grid that predates it, use
 `fork_grid_editor(seed=seed)`. `enumerate_edits(target=..., limit=..., seed=...)`

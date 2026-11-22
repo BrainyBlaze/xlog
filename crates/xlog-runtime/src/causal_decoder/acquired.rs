@@ -206,7 +206,7 @@ impl NativeCausalModel {
             let FuncBody::Numerical(body) = &function.body else {
                 return None;
             };
-            if body.signature.is_entrypoint() {
+            if !matches!(body.signature, TensorSignature::Pure { .. } | TensorSignature::Causal { .. }) {
                 return None;
             }
             Some((function.name.clone(), json!({
@@ -486,6 +486,7 @@ impl NativeCausalModel {
         predicate_values: bool,
         feature_output: bool,
     ) -> Result<Self> {
+        self.require_editable_functions()?;
         if definitions.is_empty() {
             return Err(invalid("unknown acquired fields or empty definitions"));
         }
@@ -508,7 +509,10 @@ impl NativeCausalModel {
             };
             if body.vocabulary != program.vocabulary
                 || body.max_context != program.max_context
-                || body.signature.is_entrypoint()
+                || !matches!(
+                    body.signature,
+                    TensorSignature::Pure { .. } | TensorSignature::Causal { .. }
+                )
             {
                 return Err(invalid(
                     "acquired definition has a different causal contract",
@@ -735,14 +739,9 @@ impl NativeCausalModel {
                 .insert(id, self.executor.optimizer(id, &tensor)?);
             candidate.parameters.push(tensor);
         }
-        let mut tensor = self.executor.allocate_tensor(parameter_shape(
-            &candidate.program().parameters[projection],
-        )?)?;
-        self.executor
-            .write_tensor(&mut tensor, 0, &vec![0u8; hidden * ACQUIRED_WIDTH * 4])?;
-        candidate
-            .optimizers
-            .insert(projection, self.executor.optimizer(projection, &tensor)?);
+        let (tensor, optimizer) =
+            self.zero_projection(projection, &candidate.program().parameters[projection])?;
+        candidate.optimizers.insert(projection, optimizer);
         candidate.parameters.push(tensor);
         candidate.version = Arc::new(());
         candidate.adaptation.trainable = ids;
@@ -785,6 +784,9 @@ impl NativeCausalModel {
             "role": if self.adaptation.grid.as_ref().is_some_and(|g| g.sensor == id) { "observation_sensor" }
                 else if self.adaptation.grid.as_ref().is_some_and(|g| g.readout == id) { "observation_readout" }
                 else if projections.contains(&id) { "projection" } else if owned.contains(&id) { "acquired_constant" }
+                else if self.adaptation.editor.as_ref().is_some_and(|editor| editor.base_parameters.contains(&id)) { "editor" }
+                else if self.adaptation.editor.as_ref().is_some_and(|editor| editor.rules.values().any(|ids| ids.contains(&id))) { "acquisition_rule" }
+                else if parameter.name.starts_with("model::fixed_recurrence::") { "fixed_recurrence" }
                 else if self.optimizers.contains_key(&id) { "backbone_down_projection" } else { "frozen_backbone" },
             "optimizer_step": self.optimizers.get(&id).map(TensorAdamState::step),
         })).collect::<Vec<_>>();

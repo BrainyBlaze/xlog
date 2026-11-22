@@ -185,7 +185,10 @@ impl FunctionRegistry {
         }
         expansion.stack.pop();
         let output = values[body.output];
-        if matches!(body.signature, TensorSignature::Causal { .. }) {
+        if matches!(
+            body.signature,
+            TensorSignature::Causal { .. } | TensorSignature::Recurrent { .. }
+        ) {
             emit(target, Op::Finite { input: output })
         } else {
             Ok(output)

@@ -1553,6 +1553,10 @@ impl FuncDef {
             TensorSignature::Causal {
                 input_width,
                 output_width,
+            }
+            | TensorSignature::Recurrent {
+                input_width,
+                output_width,
             } => {
                 params.push(FuncParam {
                     name: "hidden".into(),

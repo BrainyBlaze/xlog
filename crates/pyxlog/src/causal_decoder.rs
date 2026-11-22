@@ -205,6 +205,28 @@ impl PyNativeCausalModel {
             .map_err(xlog_err)
     }
 
+    /// Return acquired and fixed-recurrent grid branches with matched trainable connections.
+    #[pyo3(signature = (definition_id, *, seed))]
+    fn fork_grid_function_comparison(
+        &self,
+        py: Python<'_>,
+        definition_id: &str,
+        seed: u64,
+    ) -> PyResult<(Self, Self)> {
+        py.detach(|| {
+            self.inner
+                .fork_grid_function_comparison(definition_id, seed)
+        })
+        .map(|(acquired, fixed)| (Self { inner: acquired }, Self { inner: fixed }))
+        .map_err(xlog_err)
+    }
+
+    /// Name of the feature used at the comparison site, if this model is a comparison branch.
+    #[getter]
+    fn comparison_function(&self) -> Option<&str> {
+        self.inner.comparison_function()
+    }
+
     /// Equip a previously saved grid without a numerical editor.
     #[pyo3(signature = (*, seed))]
     fn fork_grid_editor(&self, py: Python<'_>, seed: u64) -> PyResult<Self> {

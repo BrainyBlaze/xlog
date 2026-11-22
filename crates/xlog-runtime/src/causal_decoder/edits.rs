@@ -153,11 +153,6 @@ fn digest(value: &impl Serialize) -> Result<String> {
         .collect())
 }
 
-fn register(registry: &mut FunctionRegistry, name: &str, program: TensorProgram) -> Result<()> {
-    registry.register(FuncDef::numerical(name.to_owned(), program)?)?;
-    Ok(())
-}
-
 struct EditSite {
     rule: bool,
     index: usize,
@@ -166,16 +161,6 @@ struct EditSite {
 }
 
 impl NativeCausalModel {
-    fn edit_body(&self, signature: TensorSignature) -> TensorProgram {
-        TensorProgram {
-            signature,
-            parameters: vec![],
-            operations: vec![],
-            output: 0,
-            vocabulary: self.program().vocabulary,
-            max_context: self.program().max_context,
-        }
-    }
     fn score_abi(&self, width: usize) -> Result<TensorSignature> {
         let hidden = self.program().parameters[self.grid()?.sensor].shape[0];
         Ok(TensorSignature::Pure {
@@ -199,6 +184,7 @@ impl NativeCausalModel {
     }
 
     pub(super) fn install_editor(&mut self, seed: &mut NumericalSeed) -> Result<()> {
+        self.require_editable_functions()?;
         if self.adaptation.editor.is_some() {
             return Err(invalid("grid editor already installed"));
         }
@@ -221,7 +207,7 @@ impl NativeCausalModel {
         )?;
         let output = self.add_matrix(&mut root, "model::editor::readout".into(), 1, WIDTH, seed)?;
         let mut registry = (*self.functions).clone();
-        let mut features = self.edit_body(self.score_abi(WIDTH)?);
+        let mut features = self.numerical_body(self.score_abi(WIDTH)?);
         features.parameters = vec![root.parameters[h].clone(), root.parameters[e].clone()];
         features.operations = vec![
             Op::Argument { argument: 0 },
@@ -239,7 +225,7 @@ impl NativeCausalModel {
         ];
         features.output = 5;
         register(&mut registry, FEATURES, features)?;
-        let mut base = self.edit_body(self.score_abi(1)?);
+        let mut base = self.numerical_body(self.score_abi(1)?);
         base.parameters.push(root.parameters[output].clone());
         base.operations = vec![
             Op::Argument { argument: 0 },
@@ -255,7 +241,7 @@ impl NativeCausalModel {
         ];
         base.output = 3;
         register(&mut registry, BASE, base)?;
-        let mut initial = self.edit_body(self.score_abi(1)?);
+        let mut initial = self.numerical_body(self.score_abi(1)?);
         initial.operations.push(Op::Zeros { columns: 1 });
         register(&mut registry, INITIAL, initial)?;
         self.adaptation.editor = Some(EditAdaptation {
@@ -486,6 +472,7 @@ impl NativeCausalModel {
 
     /// Apply one complete typed edit on a fork, preserving older callable versions and their weights.
     pub fn apply_edit(&self, edit: &NumericalEdit, seed: u64) -> Result<(Self, String)> {
+        self.require_editable_functions()?;
         let site = self.check_edit(edit, &self.program_id()?)?;
         let mut rng = NumericalSeed(seed);
         let name = format!(
@@ -501,7 +488,7 @@ impl NativeCausalModel {
                 output_width: WIDTH,
             }
         };
-        let mut body = self.edit_body(signature);
+        let mut body = self.numerical_body(signature);
         append(&mut body, Op::Argument { argument: 0 });
         if site.rule {
             append(&mut body, Op::Argument { argument: 1 });
@@ -665,7 +652,7 @@ impl NativeCausalModel {
             .len()
             .checked_mul(if combined { 1 } else { 2 })
             .ok_or_else(|| invalid("too many edit outputs"))?;
-        let mut body = self.edit_body(TensorSignature::Observations {
+        let mut body = self.numerical_body(TensorSignature::Observations {
             input_widths: widths,
             output_rows,
             output_width: 1,

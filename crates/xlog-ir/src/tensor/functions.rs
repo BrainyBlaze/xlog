@@ -25,6 +25,13 @@ pub enum TensorSignature {
         /// Coordinates in each result row.
         output_width: usize,
     },
+    /// Numerical sequence transform that may carry state across its ordered input rows.
+    Recurrent {
+        /// Coordinates in each input row.
+        input_width: usize,
+        /// Coordinates in the recurrent state returned at each position.
+        output_width: usize,
+    },
     /// Numeric single-row arguments only, suitable for a causal scan cell.
     Pure {
         /// Coordinates of each single-row numeric argument.
@@ -106,7 +113,9 @@ impl TensorSignature {
                     .map(|&width| fp32(tokens, width))
                     .collect()
             }
-            Self::Causal { input_width, .. } => Ok(vec![fp32(tokens, *input_width)?]),
+            Self::Causal { input_width, .. } | Self::Recurrent { input_width, .. } => {
+                Ok(vec![fp32(tokens, *input_width)?])
+            }
             Self::Pure { input_widths, .. } => {
                 input_widths.iter().map(|&width| fp32(1, width)).collect()
             }
@@ -122,7 +131,9 @@ impl TensorSignature {
                 output_width,
                 ..
             } => fp32(*output_rows, *output_width),
-            Self::Causal { output_width, .. } => fp32(tokens, *output_width),
+            Self::Causal { output_width, .. } | Self::Recurrent { output_width, .. } => {
+                fp32(tokens, *output_width)
+            }
             Self::Pure { output_width, .. } => fp32(1, *output_width),
         }
     }
@@ -138,7 +149,10 @@ impl TensorSignature {
         arguments: impl IntoIterator<Item = Result<Option<TensorValueShape>>>,
     ) -> Result<TensorValueShape> {
         if self.is_entrypoint()
-            || (matches!(caller, Self::Pure { .. }) && !matches!(self, Self::Pure { .. }))
+            || (matches!(self, Self::Recurrent { .. })
+                && !matches!(caller, Self::Observations { .. }))
+            || (matches!(caller, Self::Pure { .. } | Self::Recurrent { .. })
+                && !matches!(self, Self::Pure { .. }))
         {
             return Err(invalid(
                 "numerical call arguments or causal boundary differ",
@@ -316,7 +330,11 @@ impl TensorProgram {
             ) {
                 return Err(invalid("operation is outside the acquired FP32 grammar"));
             }
-            if matches!(operation, Scan { .. }) && arguments[index] {
+            if matches!(self.signature, TensorSignature::Recurrent { .. }) {
+                if matches!(operation, TokenIndicators { .. }) {
+                    return Err(invalid("a numerical recurrence cannot inspect token IDs"));
+                }
+            } else if matches!(operation, Scan { .. }) && arguments[index] {
                 return Err(invalid(
                     "causal scans read raw-prefix features, not other positions' hidden states",
                 ));
