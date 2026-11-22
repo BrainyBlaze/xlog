@@ -48,10 +48,25 @@ pub struct AcquiredInsertion {
     pub output: usize,
 }
 
+/// Trainable sensor and readout surrounding the checkpoint's causal layers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridAdaptation {
+    /// FP32 projection from positioned observation features to the residual width.
+    pub sensor: usize,
+    /// FP32 projection from the normalized query state to the prediction row.
+    pub readout: usize,
+    /// Zero-based layer after which acquired features enter the residual.
+    pub insertion_layer: usize,
+}
+
 /// Continuation roles are explicit and independent of per-parameter Adam counters.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeAdaptation {
+    /// Installed numerical observation boundary, absent in a token checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridAdaptation>,
     /// All retained insertion generations, including frozen predecessors.
     pub insertions: Vec<AcquiredInsertion>,
     /// Current parameters for outcome fitting and optional acquired token training.
@@ -72,6 +87,33 @@ impl NativeAdaptation {
         use xlog_ir::tensor::{TensorOperation as Op, TensorSignature};
         let mut owned = std::collections::BTreeSet::new();
         let mut outputs = std::collections::BTreeSet::new();
+        if let Some(grid) = &self.grid {
+            let Some(sensor) = program.parameters.get(grid.sensor) else {
+                return Err(invalid("grid sensor is absent"));
+            };
+            let Some(readout) = program.parameters.get(grid.readout) else {
+                return Err(invalid("grid readout is absent"));
+            };
+            let TensorSignature::Observations {
+                input_widths,
+                output_width,
+            } = &program.signature
+            else {
+                return Err(invalid("grid requires a numerical observation entrypoint"));
+            };
+            let [width, hidden] = input_widths.as_slice() else {
+                return Err(invalid("invalid grid inputs"));
+            };
+            if !sensor.float32 || sensor.shape != [*hidden, *width] || !readout.float32
+                || readout.shape != [*output_width, *hidden]
+                || !matches!(program.operations.get(program.output), Some(Op::Linear { weight, .. }) if *weight == grid.readout)
+                || !program.operations.iter().any(|op| matches!(op, Op::Linear { weight, input } if *weight == grid.sensor && matches!(program.operations.get(*input), Some(Op::Argument { argument: 0 }))))
+                || grid.insertion_layer.saturating_add(1) >= program.operations.iter().filter(|op| matches!(op, Op::Attention { .. })).count()
+                || !owned.insert(grid.sensor) || !owned.insert(grid.readout)
+            { return Err(invalid("grid observation roles differ from their numerical caller")); }
+        } else if matches!(program.signature, TensorSignature::Observations { .. }) {
+            return Err(invalid("observation entrypoint lacks continuation roles"));
+        }
         for insertion in &self.insertions {
             let projection = program
                 .parameters
@@ -184,6 +226,9 @@ impl NativeAdaptation {
             return Err(invalid("acquired optimizer state is incomplete"));
         }
         let mut expected = std::collections::BTreeSet::new();
+        if let Some(grid) = &self.grid {
+            expected.extend([grid.sensor, grid.readout]);
+        }
         if let Some(last) = self.insertions.last() {
             expected.extend(last.parameters.iter().copied());
             expected.insert(last.projection);

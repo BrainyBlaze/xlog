@@ -8,6 +8,13 @@ use super::*;
 pub enum TensorSignature {
     /// Original tokens and prediction position produce a full vocabulary row.
     Decoder,
+    /// Numerical observation sequences and a query position produce one numerical row.
+    Observations {
+        /// Coordinates per position in each supplied observation tensor.
+        input_widths: Vec<usize>,
+        /// Coordinates in the result at the queried position.
+        output_width: usize,
+    },
     /// One hidden row per available position produces one feature row per position.
     Causal {
         /// Coordinates in each hidden argument row.
@@ -56,6 +63,11 @@ fn related_shape<const N: usize>(
 }
 
 impl TensorSignature {
+    /// Whether the caller supplies the complete external observation boundary.
+    pub fn is_entrypoint(&self) -> bool {
+        matches!(self, Self::Decoder | Self::Observations { .. })
+    }
+
     /// State and item widths of an available pure, state-preserving scan cell.
     /// This is the same ABI domain used by concrete Scan inference; it supplies
     /// no activation, initial state or source operation.
@@ -75,6 +87,15 @@ impl TensorSignature {
     pub fn arguments(&self, tokens: usize) -> Result<Vec<TensorValueShape>> {
         match self {
             Self::Decoder => Ok(vec![]),
+            Self::Observations { input_widths, .. } => {
+                if input_widths.is_empty() {
+                    return Err(invalid("an observation program requires numerical inputs"));
+                }
+                input_widths
+                    .iter()
+                    .map(|&width| fp32(tokens, width))
+                    .collect()
+            }
             Self::Causal { input_width, .. } => Ok(vec![fp32(tokens, *input_width)?]),
             Self::Pure { input_widths, .. } => {
                 input_widths.iter().map(|&width| fp32(1, width)).collect()
@@ -86,6 +107,7 @@ impl TensorSignature {
     pub fn output(&self, tokens: usize, vocabulary: usize) -> Result<TensorValueShape> {
         match self {
             Self::Decoder => fp32(1, vocabulary),
+            Self::Observations { output_width, .. } => fp32(1, *output_width),
             Self::Causal { output_width, .. } => fp32(tokens, *output_width),
             Self::Pure { output_width, .. } => fp32(1, *output_width),
         }
@@ -101,7 +123,7 @@ impl TensorSignature {
         vocabulary: usize,
         arguments: impl IntoIterator<Item = Result<Option<TensorValueShape>>>,
     ) -> Result<TensorValueShape> {
-        if matches!(self, Self::Decoder)
+        if self.is_entrypoint()
             || (matches!(caller, Self::Pure { .. }) && !matches!(self, Self::Pure { .. }))
         {
             return Err(invalid(
@@ -254,7 +276,7 @@ impl TensorProgram {
     /// Enforce the executable acquisition grammar and its causal information boundary.
     pub fn validate_acquired_body(&self) -> Result<()> {
         use TensorOperation::*;
-        if matches!(self.signature, TensorSignature::Decoder) {
+        if self.signature.is_entrypoint() {
             return Ok(());
         }
         let arguments = self.value_argument_dependencies();

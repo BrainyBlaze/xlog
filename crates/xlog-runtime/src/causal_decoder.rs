@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::tensor::{
-    LogitSelection, NativeTensor, TensorAdamState, TensorExecutor, TensorLoss, TensorTrainingResult,
+    LogitSelection, NativeTensor, TensorAdamState, TensorExecutor, TensorInputs, TensorLoss,
+    TensorTrainingResult,
 };
 use xlog_cuda::{CudaProviderBuilder, DlpackManagedTensor};
 use xlog_ir::tensor::{TensorProgram, TensorSignature, TensorValueShape};
@@ -17,6 +18,7 @@ use xlog_neural::causal_snapshot::{
 };
 
 pub mod acquired;
+pub mod grid;
 
 fn native_executor(
     device: usize,
@@ -40,6 +42,7 @@ pub struct NativeCausalModel {
     executor: Arc<TensorExecutor>,
     parameters: Vec<NativeTensor>,
     functions: Arc<FunctionRegistry>,
+    version: Arc<()>,
     entrypoint: String,
     checkpoint_identity: [u8; 32],
     device: usize,
@@ -109,6 +112,7 @@ impl NativeCausalModel {
             executor,
             parameters,
             functions: Arc::clone(checkpoint.functions()),
+            version: Arc::new(()),
             entrypoint: checkpoint.entrypoint().into(),
             checkpoint_identity,
             device,
@@ -199,6 +203,7 @@ impl NativeCausalModel {
                 executor,
                 parameters: tensors,
                 functions: description.functions,
+                version: Arc::new(()),
                 entrypoint: description.entrypoint,
                 checkpoint_identity: description.checkpoint_identity,
                 device,
@@ -246,6 +251,12 @@ impl NativeCausalModel {
         }
         candidate.adaptation.down_projection = Some(parameter);
         candidate.adaptation.trainable = vec![parameter];
+        if let Some(grid) = &candidate.adaptation.grid {
+            candidate
+                .adaptation
+                .trainable
+                .extend([grid.sensor, grid.readout]);
+        }
         Ok(candidate)
     }
 
@@ -256,6 +267,7 @@ impl NativeCausalModel {
             executor: Arc::clone(&self.executor),
             parameters: self.parameters.clone(),
             functions: Arc::clone(&self.functions),
+            version: Arc::clone(&self.version),
             entrypoint: self.entrypoint.clone(),
             checkpoint_identity: self.checkpoint_identity,
             device: self.device,
@@ -356,6 +368,46 @@ impl NativeCausalModel {
         } else {
             self.adaptation.trainable.clone()
         };
+        let mut programs = Vec::with_capacity(token_ids.len());
+        for (index, (tokens, &position)) in token_ids.iter().zip(prediction_positions).enumerate() {
+            let span = history_spans.map(|spans| spans[index]);
+            self.validate_history_span(tokens.len(), span)?;
+            programs.push(self.functions.compile_numerical(
+                &self.entrypoint,
+                tokens.len(),
+                position,
+                span,
+            )?);
+        }
+        let batch = token_ids
+            .iter()
+            .zip(prediction_positions)
+            .zip(losses)
+            .enumerate()
+            .map(|(index, ((tokens, &position), &loss))| {
+                (
+                    &programs[index],
+                    TensorInputs::Tokens(tokens),
+                    position,
+                    history_spans.map(|spans| spans[index]),
+                    loss,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.fit_inputs(&ids, &batch)
+    }
+
+    fn fit_inputs(
+        &mut self,
+        ids: &[usize],
+        batch: &[(
+            &TensorProgram,
+            TensorInputs<'_>,
+            usize,
+            Option<(usize, usize)>,
+            TensorLoss,
+        )],
+    ) -> Result<TensorTrainingResult> {
         let states = ids
             .iter()
             .map(|id| {
@@ -381,40 +433,15 @@ impl NativeCausalModel {
             .completed_updates
             .checked_add(1)
             .ok_or_else(|| XlogError::Compilation("completed update counter overflow".into()))?;
-        let mut programs = Vec::with_capacity(token_ids.len());
-        for (index, (tokens, &position)) in token_ids.iter().zip(prediction_positions).enumerate() {
-            let span = history_spans.map(|spans| spans[index]);
-            self.validate_history_span(tokens.len(), span)?;
-            programs.push(self.functions.compile_numerical(
-                &self.entrypoint,
-                tokens.len(),
-                position,
-                span,
-            )?);
-        }
-        let batch = token_ids
-            .iter()
-            .zip(prediction_positions)
-            .zip(losses)
-            .enumerate()
-            .map(|(index, ((tokens, &position), &loss))| {
-                (
-                    &programs[index],
-                    tokens.as_slice(),
-                    position,
-                    history_spans.map(|spans| spans[index]),
-                    loss,
-                )
-            })
-            .collect::<Vec<_>>();
-        let (updates, mut result) =
-            self.executor
-                .train_parameters(&self.parameters, &states, &batch)?;
+        let (updates, mut result) = self
+            .executor
+            .train_inputs(&self.parameters, &states, batch)?;
         // Publish only after every new parameter and optimizer version is finite.
         for (id, forward, state) in updates {
             self.parameters[id] = forward;
             self.optimizers.insert(id, state);
         }
+        self.version = Arc::new(());
         self.adaptation.completed_updates = next_step;
         result.step = next_step;
         Ok(result)

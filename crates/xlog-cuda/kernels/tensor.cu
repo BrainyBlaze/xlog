@@ -46,6 +46,19 @@ static __device__ float block_max(float value) {
     return warps[0];
 }
 
+extern "C" __global__ void tensor_attention_mass_f32(
+    const uint16_t* probabilities, float* output, uint32_t sequence,
+    uint32_t heads, uint32_t query, uint32_t key
+) {
+    float sum = 0.0f;
+    for (uint32_t head = threadIdx.x; head < heads; head += blockDim.x) {
+        const uint64_t row = static_cast<uint64_t>(head) * sequence + query;
+        sum += from_bf16(probabilities[row * sequence + key]);
+    }
+    sum = block_sum(sum);
+    if (threadIdx.x == 0) output[0] = sum / static_cast<float>(heads);
+}
+
 extern "C" __global__ void tensor_embedding_bf16(
     const uint32_t* tokens, const uint16_t* weight, uint16_t* output,
     uint64_t elements, uint32_t width
@@ -500,10 +513,10 @@ extern "C" __global__ void tensor_causal_softmax_vjp_f32(
     }
 }
 
-// kind=0: a full-vocabulary next-token target; kind=1: a binary logit difference.
+// Full categorical row, binary margin, or a categorical row followed by a regression coordinate.
 extern "C" __global__ void tensor_loss_f32(
     const float* logits, float* cotangent, float* loss,
-    uint32_t vocabulary, uint32_t kind, uint32_t target, uint32_t negative, uint32_t positive
+    uint32_t vocabulary, uint32_t kind, uint32_t target, uint32_t negative, uint32_t positive, float regression
 ) {
     if (kind == 1) {
         const float a = logits[positive] - logits[negative];
@@ -520,16 +533,25 @@ extern "C" __global__ void tensor_loss_f32(
         const float signed_margin = target == 1 ? -a : a;
         if (threadIdx.x == 0) loss[0] = fmaxf(signed_margin, 0.0f) + log1pf(e);
     } else {
+        const uint32_t classes = kind >= 2 ? vocabulary - 1 : vocabulary;
         float maximum = -INFINITY;
-        for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) maximum = fmaxf(maximum, logits[i]);
+        for (uint32_t i = threadIdx.x; i < classes; i += blockDim.x) maximum = fmaxf(maximum, logits[i]);
         maximum = block_max(maximum);
         float denominator = 0.0f;
-        for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) denominator += expf(logits[i] - maximum);
+        for (uint32_t i = threadIdx.x; i < classes; i += blockDim.x) denominator += expf(logits[i] - maximum);
         denominator = block_sum(denominator);
-        for (uint32_t i = threadIdx.x; i < vocabulary; i += blockDim.x) {
+        for (uint32_t i = threadIdx.x; i < classes; i += blockDim.x) {
             cotangent[i] = expf(logits[i] - maximum) / denominator - (i == target ? 1.0f : 0.0f);
         }
-        if (threadIdx.x == 0) loss[0] = maximum - logits[target] + logf(denominator);
+        if (threadIdx.x == 0) {
+            float nll = maximum - logits[target] + logf(denominator);
+            if (kind >= 2) {
+                const float error = kind == 3 ? logits[classes] - regression : 0.0f;
+                cotangent[classes] = error;
+                nll += 0.5f * error * error;
+            }
+            loss[0] = nll;
+        }
     }
 }
 

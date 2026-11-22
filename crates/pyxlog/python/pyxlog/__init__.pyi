@@ -22,6 +22,7 @@ from pyxlog._native import (
     NativeCausalModel as NativeCausalModel,
     NativeFunctionResultNonFiniteError as NativeFunctionResultNonFiniteError,
     NativeAcquisitionMask as NativeAcquisitionMask,
+    NativeGridMemory as NativeGridMemory,
     NativeLogits as NativeLogits,
     SemanticColdModelWork as SemanticColdModelWork,
     SemanticColdModelWorkOperation as SemanticColdModelWorkOperation,
