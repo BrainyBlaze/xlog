@@ -99,7 +99,7 @@ impl PyNativeCausalModel {
     /// Use original token IDs and a zero-based prediction position. This computes
     /// next-token logits at that position, with full-prefix causal attention.
     /// Excluding acquired residuals retains the current trained backbone weights.
-    #[pyo3(signature = (token_ids, *, prediction_position, history_span=None, include_acquired=true))]
+    #[pyo3(signature = (token_ids, *, prediction_position, history_span=None, include_acquired=true, disabled_definition=None))]
     fn forward(
         &self,
         py: Python<'_>,
@@ -107,13 +107,15 @@ impl PyNativeCausalModel {
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
         include_acquired: bool,
+        disabled_definition: Option<&str>,
     ) -> PyResult<PyNativeLogits> {
         py.detach(|| {
-            self.inner.forward(
+            self.inner.forward_with_intervention(
                 &token_ids,
                 prediction_position,
                 history_span,
                 include_acquired,
+                disabled_definition,
             )
         })
         .map(|inner| PyNativeLogits { inner })
@@ -454,6 +456,18 @@ fn selection_record(
 
 #[pymethods]
 impl PyNativeLogits {
+    /// Name selected for this prefix's intervention.
+    #[getter]
+    fn disabled_definition(&self) -> Option<&str> {
+        self.inner.disabled_definition()
+    }
+
+    /// Actual substitutions in the numerical execution graph for this prefix.
+    #[getter]
+    fn disabled_calls(&self) -> usize {
+        self.inner.disabled_calls
+    }
+
     /// Numerical entrypoint actually executed to produce this vocabulary row.
     #[getter]
     fn entrypoint(&self) -> &str {

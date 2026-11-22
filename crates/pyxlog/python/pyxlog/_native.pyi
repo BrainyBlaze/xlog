@@ -74,8 +74,9 @@ class NativeCausalModel:
         self, token_ids: Sequence[int], *, prediction_position: int,
         history_span: Optional[tuple[int, int]] = None,
         include_acquired: bool = True,
+        disabled_definition: Optional[str] = None,
     ) -> NativeLogits:
-        """Optionally exclude acquired residuals, retaining current backbone weights."""
+        """Run the active decoder, disable one named callee, or select the original decoder."""
         ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
     def fork_candidate(self) -> NativeCausalModel: ...
@@ -367,6 +368,14 @@ class _LogitSelection(TypedDict):
 class NativeLogits:
     """One complete FP32 vocabulary row retaining its native allocation."""
 
+    @property
+    def disabled_definition(self) -> Optional[str]:
+        """Definition selected for this invocation."""
+        ...
+    @property
+    def disabled_calls(self) -> int:
+        """Number of calls replaced in the graph for this prefix."""
+        ...
     @property
     def entrypoint(self) -> str:
         """Numerical entrypoint actually executed to produce this row."""
