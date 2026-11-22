@@ -1,7 +1,7 @@
 //! Recurrent public colour-grid observations in the native causal backbone.
 
 use super::*;
-use xlog_ir::tensor::{TensorOperation as Op, TensorParameter};
+use xlog_ir::tensor::TensorOperation as Op;
 use xlog_logic::ast::FuncDef;
 use xlog_neural::causal_snapshot::GridAdaptation;
 
@@ -162,7 +162,7 @@ impl GridFrame {
 pub struct GridMemory {
     pub(super) state: NativeTensor,
     frame: Arc<GridFrame>,
-    version: Arc<()>,
+    pub(super) version: Arc<()>,
 }
 
 /// Joint prediction and attention measurement from the same query forward.
@@ -175,7 +175,7 @@ pub struct GridPrediction {
     pub attention_mass: f32,
 }
 
-fn append(program: &mut TensorProgram, operation: Op) -> usize {
+pub(super) fn append(program: &mut TensorProgram, operation: Op) -> usize {
     let index = program.operations.len();
     program.operations.push(operation);
     index
@@ -221,43 +221,19 @@ impl NativeCausalModel {
         let hidden = program.parameters[*embedding].linear_dimensions()?[1];
         let sensor = program.parameters.len();
         let readout = sensor + 1;
-        let mut rng = seed;
+        let mut rng = NumericalSeed(seed);
         for (id, name, rows, columns) in [
             (sensor, "model::grid::sensor", hidden, FEATURES),
             (readout, "model::grid::readout", READOUT, hidden),
         ] {
-            let shape = TensorValueShape {
-                rows,
-                columns,
-                float32: true,
-            };
-            let parameter = TensorParameter {
-                name: name.into(),
-                shape: vec![rows, columns],
-                float32: true,
-            };
-            let mut bytes = Vec::with_capacity(parameter.bytes()?);
-            let scale = (3.0 / columns as f32).sqrt();
-            for _ in 0..rows * columns {
-                // SplitMix64, using the top 24 bits for a uniform FP32 mantissa.
-                rng = rng.wrapping_add(0x9e3779b97f4a7c15);
-                let mut z = rng;
-                z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-                let u = ((z ^ (z >> 31)) >> 40) as f32 / 16_777_216.0;
-                bytes.extend_from_slice(&((2.0 * u - 1.0) * scale).to_le_bytes());
-            }
-            let mut tensor = self.executor.allocate_tensor(shape)?;
-            self.executor.write_tensor(&mut tensor, 0, &bytes)?;
-            candidate
-                .optimizers
-                .insert(id, self.executor.optimizer(id, &tensor)?);
-            candidate.parameters.push(tensor);
-            candidate.adaptation.trainable.push(id);
-            program.parameters.push(parameter);
+            let parameter =
+                candidate.add_matrix(&mut program, name.into(), rows, columns, &mut rng)?;
+            debug_assert_eq!(parameter, id);
+            candidate.adaptation.trainable.push(parameter);
         }
         program.signature = TensorSignature::Observations {
             input_widths: vec![FEATURES, hidden],
+            output_rows: 1,
             output_width: READOUT,
         };
         let features = append(&mut program, Op::Argument { argument: 0 });
@@ -309,10 +285,11 @@ impl NativeCausalModel {
             readout,
             insertion_layer,
         });
+        candidate.install_editor(&mut rng)?;
         Ok(candidate)
     }
 
-    fn grid(&self) -> Result<&GridAdaptation> {
+    pub(super) fn grid(&self) -> Result<&GridAdaptation> {
         self.adaptation
             .grid
             .as_ref()

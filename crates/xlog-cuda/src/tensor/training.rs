@@ -17,6 +17,17 @@ pub enum TensorLoss {
         /// Optional target for the final scalar, with half squared error.
         regression: Option<f32>,
     },
+    /// Pairwise preference loss weighted by the measured difference between alternatives.
+    WeightedBinary {
+        /// Coordinate subtracted in the margin.
+        negative: u32,
+        /// Coordinate added in the margin.
+        positive: u32,
+        /// Whether the positive coordinate should rank higher.
+        outcome: bool,
+        /// Positive, finite strength of the observed preference.
+        weight: f32,
+    },
     /// Bernoulli NLL of sigmoid(logit[positive] - logit[negative]).
     Binary {
         /// Original ID whose logit is subtracted.
@@ -44,6 +55,19 @@ impl TensorLoss {
                     0,
                     regression.unwrap_or_default(),
                 ))
+            }
+            Self::WeightedBinary {
+                negative,
+                positive,
+                outcome,
+                weight,
+            } if negative != positive
+                && (negative as usize) < vocabulary
+                && (positive as usize) < vocabulary
+                && weight.is_finite()
+                && weight > 0.0 =>
+            {
+                Ok((4, u32::from(outcome), negative, positive, weight))
             }
             Self::Binary {
                 negative,
@@ -425,7 +449,7 @@ impl TensorExecutor {
             columns: 1,
             float32: true,
         })?;
-        let width = logits.shape.columns;
+        let width = logits.elements();
         let (kind, target, negative, positive, regression) = loss.arguments(width)?;
         let mut recorder = self.recorder(&[logits], &seed);
         recorder.write(scalar.storage.as_ref());

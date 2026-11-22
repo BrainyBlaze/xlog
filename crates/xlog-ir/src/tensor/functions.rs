@@ -12,6 +12,9 @@ pub enum TensorSignature {
     Observations {
         /// Coordinates per position in each supplied observation tensor.
         input_widths: Vec<usize>,
+        /// Number of output rows in the external readout.
+        #[serde(default = "one_row", skip_serializing_if = "is_one_row")]
+        output_rows: usize,
         /// Coordinates in the result at the queried position.
         output_width: usize,
     },
@@ -29,6 +32,13 @@ pub enum TensorSignature {
         /// Coordinates in each result row.
         output_width: usize,
     },
+}
+
+fn one_row() -> usize {
+    1
+}
+fn is_one_row(rows: &usize) -> bool {
+    *rows == 1
 }
 
 fn fp32(rows: usize, columns: usize) -> Result<TensorValueShape> {
@@ -107,7 +117,11 @@ impl TensorSignature {
     pub fn output(&self, tokens: usize, vocabulary: usize) -> Result<TensorValueShape> {
         match self {
             Self::Decoder => fp32(1, vocabulary),
-            Self::Observations { output_width, .. } => fp32(1, *output_width),
+            Self::Observations {
+                output_rows,
+                output_width,
+                ..
+            } => fp32(*output_rows, *output_width),
             Self::Causal { output_width, .. } => fp32(tokens, *output_width),
             Self::Pure { output_width, .. } => fp32(1, *output_width),
         }

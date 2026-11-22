@@ -60,10 +60,25 @@ pub struct GridAdaptation {
     pub insertion_layer: usize,
 }
 
+/// Parameter ownership of the default editor and its immutable acquisition rules.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditAdaptation {
+    /// Name of the ordinary score function, shared by both rule interventions.
+    pub base: String,
+    /// Parameter IDs for the ordinary editor.
+    pub base_parameters: Vec<usize>,
+    /// Names and newly owned optimizer slots of all retained search rules.
+    pub rules: std::collections::BTreeMap<String, Vec<usize>>,
+}
+
 /// Continuation roles are explicit and independent of per-parameter Adam counters.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeAdaptation {
+    /// Registered editor and its versioned score functions, if initialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<EditAdaptation>,
     /// Installed numerical observation boundary, absent in a token checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridAdaptation>,
@@ -97,6 +112,7 @@ impl NativeAdaptation {
             let TensorSignature::Observations {
                 input_widths,
                 output_width,
+                output_rows: 1,
             } = &program.signature
             else {
                 return Err(invalid("grid requires a numerical observation entrypoint"));
@@ -113,6 +129,30 @@ impl NativeAdaptation {
             { return Err(invalid("grid observation roles differ from their numerical caller")); }
         } else if matches!(program.signature, TensorSignature::Observations { .. }) {
             return Err(invalid("observation entrypoint lacks continuation roles"));
+        }
+        if let Some(editor) = &self.editor {
+            if self.grid.is_none() || editor.rules.is_empty() {
+                return Err(invalid("editor has no observation boundary or search rule"));
+            }
+            let base = &functions.numerical(&editor.base)?.signature;
+            if !matches!(base, TensorSignature::Pure { input_widths, output_width: 1 } if input_widths.len() == 2)
+            {
+                return Err(invalid(
+                    "editor score requires state and edit arguments and a scalar result",
+                ));
+            }
+            for (name, ids) in
+                std::iter::once((&editor.base, &editor.base_parameters)).chain(&editor.rules)
+            {
+                if &functions.numerical(name)?.signature != base {
+                    return Err(invalid("search rule has a different calling convention"));
+                }
+                for &id in ids {
+                    if !owned.insert(id) || !program.parameters.get(id).is_some_and(|p| p.float32) {
+                        return Err(invalid("editor parameter identity or type differs"));
+                    }
+                }
+            }
         }
         for insertion in &self.insertions {
             let projection = program

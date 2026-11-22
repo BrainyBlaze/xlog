@@ -12,6 +12,7 @@ use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
 
 mod acquisition;
+mod edits;
 mod grid;
 pub(crate) use acquisition::PyNativeAcquisitionMask;
 pub(crate) use grid::PyGridMemory;
@@ -201,6 +202,103 @@ impl PyNativeCausalModel {
         py.detach(|| self.inner.fit_grid_batch(&examples))
             .map(|r| (r.mean_loss, r.gradient_norm, r.step))
             .map_err(xlog_err)
+    }
+
+    /// Equip a previously saved grid without a numerical editor.
+    #[pyo3(signature = (*, seed))]
+    fn fork_grid_editor(&self, py: Python<'_>, seed: u64) -> PyResult<Self> {
+        py.detach(|| self.inner.fork_grid_editor(seed))
+            .map(|inner| Self { inner })
+            .map_err(xlog_err)
+    }
+
+    /// Immutable structural identity of the active program.
+    #[getter]
+    fn program_id(&self) -> PyResult<String> {
+        self.inner.program_id().map_err(xlog_err)
+    }
+
+    /// Executable rule that contributes zero to ordinary edit scores.
+    #[getter]
+    fn initial_rule_id(&self) -> PyResult<&'static str> {
+        self.inner.initial_rule_id().map_err(xlog_err)
+    }
+
+    /// Enumerate complete typed edits to a named version or to the current residual.
+    #[pyo3(signature = (*, target, limit, seed))]
+    fn enumerate_edits(
+        &self,
+        py: Python<'_>,
+        target: Option<&str>,
+        limit: usize,
+        seed: u64,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        py.detach(|| self.inner.enumerate_edits(target, limit, seed))
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|edit| edits::record(py, edit))
+            .collect()
+    }
+
+    /// Return the ordinary and rule contribution for every edit in proposal order.
+    #[pyo3(signature = (memory, edits, *, rule_id))]
+    fn score_edits(
+        &self,
+        py: Python<'_>,
+        memory: &PyGridMemory,
+        edits: Vec<Bound<'_, PyDict>>,
+        rule_id: &str,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let choices = edits
+            .iter()
+            .map(edits::extract)
+            .collect::<PyResult<Vec<_>>>()?;
+        let state = &memory.inner;
+        py.detach(|| self.inner.score_edits(state, &choices, rule_id))
+            .map_err(xlog_err)?
+            .into_iter()
+            .map(|value| edits::score(py, value))
+            .collect()
+    }
+
+    /// Apply one structural edit on a fork and retain the identity of the new function.
+    #[pyo3(signature = (edit, *, seed))]
+    fn apply_edit(
+        &self,
+        py: Python<'_>,
+        edit: &Bound<'_, PyDict>,
+        seed: u64,
+    ) -> PyResult<(Self, String)> {
+        let edit = edits::extract(edit)?;
+        py.detach(|| self.inner.apply_edit(&edit, seed))
+            .map(|(inner, name)| (Self { inner }, name))
+            .map_err(|e| match e {
+                xlog_core::XlogError::Compilation(message) => PyValueError::new_err(message),
+                other => xlog_err(other),
+            })
+    }
+
+    /// Fit an observed pairwise preference on this fork. Tied losses leave all optimizer slots intact.
+    #[pyo3(signature = (memory, left_edit, right_edit, *, left_loss, right_loss, rule_id))]
+    fn fit_edit_preference(
+        &mut self,
+        py: Python<'_>,
+        memory: &PyGridMemory,
+        left_edit: &Bound<'_, PyDict>,
+        right_edit: &Bound<'_, PyDict>,
+        left_loss: f64,
+        right_loss: f64,
+        rule_id: &str,
+    ) -> PyResult<Option<(f32, f32, u64)>> {
+        let left = edits::extract(left_edit)?;
+        let right = edits::extract(right_edit)?;
+        let state = &memory.inner;
+        py.detach(|| {
+            self.inner
+                .fit_edit_preference(state, &left, &right, left_loss, right_loss, rule_id)
+        })
+        .map(|result| result.map(|r| (r.mean_loss, r.gradient_norm, r.step)))
+        .map_err(xlog_err)
     }
 
     /// Fork a candidate; the source model and its retained outputs stay unchanged.
