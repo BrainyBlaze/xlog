@@ -264,7 +264,7 @@ pub enum TensorOperation {
         /// Preceding activation multiplied by the activated gate.
         value: usize,
     },
-    /// Select the caller's prediction position, retaining its exact hidden row.
+    /// Select the caller's prediction row, preserving its width and scalar type.
     PredictionRow {
         /// Complete preceding causal sequence.
         input: usize,
@@ -530,7 +530,7 @@ impl TensorProgram {
                 lhs
             }
             TensorOperation::PredictionRow { input: id } => {
-                let source = input(id)?;
+                let source = value(id)?;
                 if source.rows != tokens {
                     return Err(invalid(
                         "prediction row must select from the complete causal sequence",
