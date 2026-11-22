@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use cudarc::cublas::{result as blas_result, sys as blas_sys, CudaBlas};
 use sha2::{Digest, Sha256};
 use xlog_core::{Result, XlogError};
-use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorValueShape};
+use xlog_ir::tensor::{TensorOperation as Op, TensorProgram, TensorSignature, TensorValueShape};
 
 use crate::device_runtime::StreamId;
 use crate::dlpack::{export_slice_managed_tensor, DLDataType, DlpackManagedTensor};
@@ -19,6 +19,24 @@ const BLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 mod functions;
 mod training;
 pub use training::{TensorAdamState, TensorLoss, TensorTrainingResult};
+
+/// External inputs supplied to one compiled numerical entrypoint.
+#[derive(Clone, Copy)]
+pub enum TensorInputs<'a> {
+    /// Original vocabulary IDs for a token decoder.
+    Tokens(&'a [u32]),
+    /// FP32 sequences on the model device, in the entrypoint's declared order.
+    Observations(&'a [NativeTensor]),
+}
+
+impl TensorInputs<'_> {
+    fn rows(self) -> usize {
+        match self {
+            Self::Tokens(tokens) => tokens.len(),
+            Self::Observations(inputs) => inputs.first().map_or(0, |input| input.shape.rows),
+        }
+    }
+}
 
 /// CUDA token selection and the digest of the complete original FP32 vocabulary row.
 pub struct LogitSelection {
@@ -386,7 +404,8 @@ impl TensorExecutor {
         heads: usize,
         kv_heads: usize,
         head_dim: usize,
-    ) -> Result<()> {
+        read_mass: Option<(usize, usize)>,
+    ) -> Result<Option<NativeTensor>> {
         let sequence = query.shape.rows;
         let packed_shape = TensorValueShape {
             rows: heads * sequence,
@@ -408,6 +427,32 @@ impl TensorExecutor {
         drop(k);
         let probabilities = self.attention_probabilities(&scores, sequence, head_dim)?;
         drop(scores);
+        let mass = if let Some((query_row, key_row)) = read_mass {
+            if query_row >= sequence || key_row >= sequence {
+                return Err(failure("attention coordinate is outside the sequence"));
+            }
+            let result = self.allocate_tensor(TensorValueShape {
+                rows: 1,
+                columns: 1,
+                float32: true,
+            })?;
+            self.launch(
+                self.recorder(&[&probabilities], &result),
+                "tensor_attention_mass_f32",
+                grid(1)?,
+                (
+                    probabilities.pointer(),
+                    result.pointer(),
+                    sequence as u32,
+                    heads as u32,
+                    query_row as u32,
+                    key_row as u32,
+                ),
+            )?;
+            Some(result)
+        } else {
+            None
+        };
         let attended = self.allocate_tensor(packed_shape)?;
         self.gemm(
             &v,
@@ -432,7 +477,8 @@ impl TensorExecutor {
                 heads as u32,
                 head_dim as u32,
             ),
-        )
+        )?;
+        Ok(mass)
     }
 
     /// Execute the validated graph, freeing intermediates after their last consumer.
@@ -445,36 +491,61 @@ impl TensorExecutor {
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
     ) -> Result<NativeTensor> {
-        let mut values = self.execute_retaining(
+        self.execute_inputs(
             program,
             parameters,
-            token_ids,
+            TensorInputs::Tokens(token_ids),
+            prediction_position,
+            history_span,
+            None,
+        )
+        .map(|(value, _)| value)
+    }
+
+    /// Execute on the declared inputs. An optional (attention layer, key row)
+    /// reads the mean attention mass from the queried position in this same pass.
+    pub fn execute_inputs(
+        &self,
+        program: &TensorProgram,
+        parameters: &[NativeTensor],
+        inputs: TensorInputs<'_>,
+        prediction_position: usize,
+        history_span: Option<(usize, usize)>,
+        attention_key: Option<(usize, usize)>,
+    ) -> Result<(NativeTensor, Option<f32>)> {
+        let (mut values, mass) = self.execute_retaining(
+            program,
+            parameters,
+            inputs,
             prediction_position,
             history_span,
             &[],
+            attention_key,
         )?;
-        values[program.output]
+        let value = values[program.output]
             .take()
-            .ok_or_else(|| failure("missing numerical output"))
+            .ok_or_else(|| failure("missing numerical output"))?;
+        let mass = mass
+            .map(|mass| self.read_logits(&mass, &[0]).map(|values| values[0]))
+            .transpose()?;
+        Ok((value, mass))
     }
 
     fn execute_retaining(
         &self,
         program: &TensorProgram,
         parameters: &[NativeTensor],
-        token_ids: &[u32],
+        inputs: TensorInputs<'_>,
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
         retained: &[bool],
-    ) -> Result<Vec<Option<NativeTensor>>> {
-        let shapes = program.shapes(token_ids.len(), prediction_position)?;
-        if parameters.len() != program.parameters.len()
-            || token_ids
-                .iter()
-                .any(|&id| id as usize >= program.vocabulary)
-        {
+        attention_key: Option<(usize, usize)>,
+    ) -> Result<(Vec<Option<NativeTensor>>, Option<NativeTensor>)> {
+        let rows = inputs.rows();
+        let shapes = program.shapes(rows, prediction_position)?;
+        if parameters.len() != program.parameters.len() {
             return Err(failure(
-                "parameter roster or token ID is outside the numerical program",
+                "parameter roster differs from the numerical program",
             ));
         }
         for (parameter, expected) in parameters.iter().zip(&program.parameters) {
@@ -487,9 +558,35 @@ impl TensorExecutor {
                 ));
             }
         }
-        let mut tokens = self.provider.memory().alloc::<u32>(token_ids.len())?;
-        self.provider
-            .htod_sync_copy_into_tracked(token_ids, &mut tokens)?;
+        let tokens = match (&program.signature, inputs) {
+            (TensorSignature::Decoder, TensorInputs::Tokens(ids)) => {
+                if ids.iter().any(|&id| id as usize >= program.vocabulary) {
+                    return Err(failure("token ID is outside the numerical program"));
+                }
+                let mut tokens = self.provider.memory().alloc::<u32>(ids.len())?;
+                self.provider
+                    .htod_sync_copy_into_tracked(ids, &mut tokens)?;
+                Some(tokens)
+            }
+            (TensorSignature::Observations { .. }, TensorInputs::Observations(values)) => {
+                let expected = program.signature.arguments(rows)?;
+                if values.len() != expected.len()
+                    || values.iter().zip(expected).any(|(v, shape)| {
+                        v.shape != shape || v.device != self.provider.device().ordinal()
+                    })
+                {
+                    return Err(failure(
+                        "observation tensors differ from the declared device or shape",
+                    ));
+                }
+                None
+            }
+            _ => {
+                return Err(failure(
+                    "external inputs differ from the entrypoint signature",
+                ))
+            }
+        };
         let mut uses = vec![0usize; program.operations.len()];
         uses[program.output] = 1;
         for (id, &keep) in retained.iter().enumerate() {
@@ -501,7 +598,18 @@ impl TensorExecutor {
             }
         }
         let mut values: Vec<Option<NativeTensor>> = vec![None; program.operations.len()];
+        let mut attention_layer = 0;
+        let mut attention_mass = None;
         for (id, operation) in program.operations.iter().enumerate() {
+            if let Op::Argument { argument } = *operation {
+                let TensorInputs::Observations(external) = inputs else {
+                    return Err(failure("numerical argument has no external input"));
+                };
+                if uses[id] != 0 {
+                    values[id] = Some(external[argument].clone());
+                }
+                continue;
+            }
             let output = self.allocate_tensor(shapes[id])?;
             let input = |index: usize| -> Result<&NativeTensor> {
                 values[index]
@@ -512,9 +620,12 @@ impl TensorExecutor {
             let vector_grid = grid(output.elements().div_ceil(256))?;
             match *operation {
                 Op::Embedding { weight } => {
+                    let tokens = tokens
+                        .as_ref()
+                        .ok_or_else(|| failure("embedding requires token inputs"))?;
                     let weight = &parameters[weight];
                     let mut recorder = self.recorder(&[weight], &output);
-                    recorder.read(&tokens);
+                    recorder.read(tokens);
                     self.launch(
                         recorder,
                         "tensor_embedding_bf16",
@@ -595,7 +706,10 @@ impl TensorExecutor {
                     kv_heads,
                     head_dim,
                 } => {
-                    self.attention(
+                    let key = attention_key
+                        .filter(|(layer, _)| *layer == attention_layer)
+                        .map(|(_, key)| (prediction_position, key));
+                    let mass = self.attention(
                         input(query)?,
                         input(key)?,
                         input(value)?,
@@ -603,7 +717,12 @@ impl TensorExecutor {
                         heads,
                         kv_heads,
                         head_dim,
+                        key,
                     )?;
+                    if mass.is_some() {
+                        attention_mass = mass;
+                    }
+                    attention_layer += 1;
                 }
                 Op::Add { left, right }
                 | Op::SiluGate {
@@ -654,7 +773,7 @@ impl TensorExecutor {
                     operation,
                     parameters,
                     &values,
-                    &tokens,
+                    tokens.as_ref(),
                     history_span,
                     &output,
                 )?,
@@ -673,7 +792,10 @@ impl TensorExecutor {
             .as_ref()
             .ok_or_else(|| failure("missing numerical output"))?;
         self.require_finite(output, "program output")?;
-        Ok(values)
+        if attention_key.is_some() && attention_mass.is_none() {
+            return Err(failure("requested attention layer was not executed"));
+        }
+        Ok((values, attention_mass))
     }
 
     fn is_finite(&self, tensor: &NativeTensor) -> Result<bool> {

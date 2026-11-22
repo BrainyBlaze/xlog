@@ -5,13 +5,16 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 #[cfg(feature = "host-io")]
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyBytes;
+use pyo3::types::PyDict;
 use xlog_runtime::causal_decoder::{NativeCausalModel, NativeLogits};
 
 use super::{dlpack_capsule_from_tensor, types::xlog_err};
 
 mod acquisition;
+mod grid;
 pub(crate) use acquisition::PyNativeAcquisitionMask;
+pub(crate) use grid::PyGridMemory;
 
 pyo3::create_exception!(
     pyxlog,
@@ -120,6 +123,84 @@ impl PyNativeCausalModel {
         })
         .map(|inner| PyNativeLogits { inner })
         .map_err(xlog_err)
+    }
+
+    /// Create a trainable grid sensor and prediction head sharing the checkpoint backbone.
+    #[pyo3(signature = (*, seed, insertion_layer=17))]
+    fn fork_grid(&self, py: Python<'_>, seed: u64, insertion_layer: usize) -> PyResult<Self> {
+        py.detach(|| self.inner.fork_grid(seed, insertion_layer))
+            .map(|inner| Self { inner })
+            .map_err(xlog_err)
+    }
+
+    /// Incorporate one public grid, the turn boundary and the move actually executed.
+    #[pyo3(signature = (frame, *, memory, turn_start, executed_action=None, disabled_definition=None))]
+    fn observe_grid(
+        &self,
+        py: Python<'_>,
+        frame: Vec<Vec<u8>>,
+        memory: Option<&PyGridMemory>,
+        turn_start: bool,
+        executed_action: Option<grid::Action>,
+        disabled_definition: Option<&str>,
+    ) -> PyResult<PyGridMemory> {
+        let action = executed_action.map(grid::action).transpose()?;
+        let memory = memory.map(|m| &m.inner);
+        py.detach(|| {
+            self.inner
+                .observe_grid(&frame, memory, turn_start, action, disabled_definition)
+        })
+        .map(|inner| PyGridMemory { inner })
+        .map_err(xlog_err)
+    }
+
+    /// Predict sixteen colour log probabilities and progress, reading attention from the same forward.
+    #[pyo3(signature = (memory, queries, *, disabled_definition=None))]
+    fn predict_grid_actions(
+        &self,
+        py: Python<'_>,
+        memory: &PyGridMemory,
+        queries: Vec<grid::Query>,
+        disabled_definition: Option<&str>,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let queries = queries
+            .into_iter()
+            .map(grid::Query::into_query)
+            .collect::<PyResult<Vec<_>>>()?;
+        let memory = &memory.inner;
+        let results = py
+            .detach(|| {
+                self.inner
+                    .predict_grid_actions(memory, &queries, disabled_definition)
+            })
+            .map_err(xlog_err)?;
+        results
+            .into_iter()
+            .map(|value| {
+                let row = PyDict::new(py);
+                row.set_item("color_log_probs", value.color_log_probs)?;
+                row.set_item("expected_progress", value.expected_progress)?;
+                row.set_item("attention_mass", value.attention_mass)?;
+                Ok(row.unbind())
+            })
+            .collect()
+    }
+
+    /// Fit one mean minibatch from recorded moves. A missing progress label leaves colour loss active.
+    fn fit_grid_batch(
+        &mut self,
+        py: Python<'_>,
+        examples: Vec<(PyRef<'_, PyGridMemory>, grid::Query, u32, Option<f32>)>,
+    ) -> PyResult<(f32, f32, u64)> {
+        let examples = examples
+            .into_iter()
+            .map(|(memory, query, color, progress)| {
+                Ok((memory.inner.clone(), query.into_query()?, color, progress))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        py.detach(|| self.inner.fit_grid_batch(&examples))
+            .map(|r| (r.mean_loss, r.gradient_norm, r.step))
+            .map_err(xlog_err)
     }
 
     /// Fork a candidate; the source model and its retained outputs stay unchanged.

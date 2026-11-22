@@ -206,7 +206,7 @@ impl NativeCausalModel {
             let FuncBody::Numerical(body) = &function.body else {
                 return None;
             };
-            if matches!(body.signature, TensorSignature::Decoder) {
+            if body.signature.is_entrypoint() {
                 return None;
             }
             Some((function.name.clone(), json!({
@@ -508,7 +508,7 @@ impl NativeCausalModel {
             };
             if body.vocabulary != program.vocabulary
                 || body.max_context != program.max_context
-                || matches!(body.signature, TensorSignature::Decoder)
+                || body.signature.is_entrypoint()
             {
                 return Err(invalid(
                     "acquired definition has a different causal contract",
@@ -744,7 +744,14 @@ impl NativeCausalModel {
             .optimizers
             .insert(projection, self.executor.optimizer(projection, &tensor)?);
         candidate.parameters.push(tensor);
+        candidate.version = Arc::new(());
         candidate.adaptation.trainable = ids;
+        if let Some(grid) = &candidate.adaptation.grid {
+            candidate
+                .adaptation
+                .trainable
+                .extend([grid.sensor, grid.readout]);
+        }
         candidate.adaptation.trainable.push(projection);
         candidate.adaptation.down_projection = train_down_projection.then_some(down);
         if train_down_projection {
@@ -775,7 +782,9 @@ impl NativeCausalModel {
             .collect::<BTreeSet<_>>();
         let parameters = self.program().parameters.iter().enumerate().map(|(id, parameter)| serde_json::json!({
             "id": id, "name": parameter.name, "shape": parameter.shape, "dtype": if parameter.float32 { "f32" } else { "bf16" },
-            "role": if projections.contains(&id) { "projection" } else if owned.contains(&id) { "acquired_constant" }
+            "role": if self.adaptation.grid.as_ref().is_some_and(|g| g.sensor == id) { "observation_sensor" }
+                else if self.adaptation.grid.as_ref().is_some_and(|g| g.readout == id) { "observation_readout" }
+                else if projections.contains(&id) { "projection" } else if owned.contains(&id) { "acquired_constant" }
                 else if self.optimizers.contains_key(&id) { "backbone_down_projection" } else { "frozen_backbone" },
             "optimizer_step": self.optimizers.get(&id).map(TensorAdamState::step),
         })).collect::<Vec<_>>();

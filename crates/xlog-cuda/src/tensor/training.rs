@@ -2,13 +2,20 @@
 
 use super::*;
 
-/// A supervised loss on the complete native vocabulary row.
+/// A supervised loss on a native numerical output row.
 #[derive(Clone, Copy)]
 pub enum TensorLoss {
     /// Cross entropy over every original vocabulary coordinate.
     Token {
         /// Original vocabulary ID of the supervised next token.
         target: u32,
+    },
+    /// Categorical NLL on all but the last coordinate, optionally fitting a continuous target.
+    CategoricalRegression {
+        /// Observed class in the categorical part of the row.
+        target: u32,
+        /// Optional target for the final scalar, with half squared error.
+        regression: Option<f32>,
     },
     /// Bernoulli NLL of sigmoid(logit[positive] - logit[negative]).
     Binary {
@@ -22,9 +29,22 @@ pub enum TensorLoss {
 }
 
 impl TensorLoss {
-    fn arguments(self, vocabulary: usize) -> Result<(u32, u32, u32, u32)> {
+    fn arguments(self, vocabulary: usize) -> Result<(u32, u32, u32, u32, f32)> {
         match self {
-            Self::Token { target } if (target as usize) < vocabulary => Ok((0, target, 0, 0)),
+            Self::Token { target } if (target as usize) < vocabulary => Ok((0, target, 0, 0, 0.0)),
+            Self::CategoricalRegression { target, regression }
+                if vocabulary >= 2
+                    && (target as usize) < vocabulary - 1
+                    && regression.is_none_or(f32::is_finite) =>
+            {
+                Ok((
+                    if regression.is_some() { 3 } else { 2 },
+                    target,
+                    0,
+                    0,
+                    regression.unwrap_or_default(),
+                ))
+            }
             Self::Binary {
                 negative,
                 positive,
@@ -33,7 +53,7 @@ impl TensorLoss {
                 && (negative as usize) < vocabulary
                 && (positive as usize) < vocabulary =>
             {
-                Ok((1, u32::from(outcome), negative, positive))
+                Ok((1, u32::from(outcome), negative, positive, 0.0))
             }
             _ => Err(failure(
                 "training target is outside the vocabulary or binary IDs coincide",
@@ -364,7 +384,7 @@ impl TensorExecutor {
         program: &TensorProgram,
         parameters: &[NativeTensor],
         trainable: &[usize],
-        token_ids: &[u32],
+        inputs: TensorInputs<'_>,
         prediction_position: usize,
         history_span: Option<(usize, usize)>,
         loss: TensorLoss,
@@ -387,13 +407,14 @@ impl TensorExecutor {
                 }
             }
         }
-        let mut values = self.execute_retaining(
+        let (mut values, _) = self.execute_retaining(
             program,
             parameters,
-            token_ids,
+            inputs,
             prediction_position,
             history_span,
             &retained,
+            None,
         )?;
         let logits = values[program.output]
             .as_ref()
@@ -404,7 +425,8 @@ impl TensorExecutor {
             columns: 1,
             float32: true,
         })?;
-        let (kind, target, negative, positive) = loss.arguments(program.vocabulary)?;
+        let width = logits.shape.columns;
+        let (kind, target, negative, positive, regression) = loss.arguments(width)?;
         let mut recorder = self.recorder(&[logits], &seed);
         recorder.write(scalar.storage.as_ref());
         self.launch(
@@ -415,11 +437,12 @@ impl TensorExecutor {
                 logits.pointer(),
                 seed.pointer(),
                 scalar.pointer(),
-                program.vocabulary as u32,
+                u32::try_from(width).map_err(|_| failure("supervised output width exceeds u32"))?,
                 kind,
                 target,
                 negative,
                 positive,
+                regression,
             ),
         )?;
         let loss = self.read_logits(&scalar, &[0])?[0];
@@ -636,8 +659,7 @@ impl TensorExecutor {
         })
     }
 
-    /// Differentiate all selected parameters in one reverse pass per prefix,
-    /// clip their joint mean gradient, and prepare an atomic set of Adam updates.
+    /// Train the selected parameters on original token prefixes.
     pub fn train_parameters(
         &self,
         parameters: &[NativeTensor],
@@ -645,6 +667,32 @@ impl TensorExecutor {
         batch: &[(
             &TensorProgram,
             &[u32],
+            usize,
+            Option<(usize, usize)>,
+            TensorLoss,
+        )],
+    ) -> Result<(
+        Vec<(usize, NativeTensor, TensorAdamState)>,
+        TensorTrainingResult,
+    )> {
+        let inputs = batch
+            .iter()
+            .map(|&(program, ids, position, span, loss)| {
+                (program, TensorInputs::Tokens(ids), position, span, loss)
+            })
+            .collect::<Vec<_>>();
+        self.train_inputs(parameters, states, &inputs)
+    }
+
+    /// Differentiate all selected parameters in one reverse pass per prefix,
+    /// clip their joint mean gradient, and prepare an atomic set of Adam updates.
+    pub fn train_inputs(
+        &self,
+        parameters: &[NativeTensor],
+        states: &[(&TensorAdamState, f32)],
+        batch: &[(
+            &TensorProgram,
+            TensorInputs<'_>,
             usize,
             Option<(usize, usize)>,
             TensorLoss,

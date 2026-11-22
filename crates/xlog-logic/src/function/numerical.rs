@@ -64,11 +64,11 @@ impl FunctionRegistry {
             return Err(invalid("raw history span is outside the causal input"));
         }
         let entry = self.numerical(name)?;
-        if entry.signature != TensorSignature::Decoder {
-            return Err(invalid("execution entry must be a decoder"));
+        if !entry.signature.is_entrypoint() {
+            return Err(invalid("execution requires a numerical entrypoint"));
         }
         if let Some(disabled) = disabled_definition {
-            if self.numerical(disabled)?.signature == TensorSignature::Decoder {
+            if self.numerical(disabled)?.signature.is_entrypoint() {
                 return Err(invalid("only a numerical callee can be disabled"));
             }
         }
@@ -82,7 +82,18 @@ impl FunctionRegistry {
             disabled_calls: 0,
             stack: Vec::new(),
         };
-        program.output = self.expand_numerical(name, &[], &mut program, &mut expansion)?;
+        let arguments = (0..entry.signature.arguments(tokens)?.len())
+            .map(|argument| emit(&mut program, Op::Argument { argument }))
+            .collect::<NativeResult<Vec<_>>>()?;
+        program.output = self.expand_numerical(name, &arguments, &mut program, &mut expansion)?;
+        if matches!(program.signature, TensorSignature::Observations { .. })
+            && program
+                .operations
+                .iter()
+                .any(|op| matches!(op, Op::TokenIndicators { .. } | Op::Embedding { .. }))
+        {
+            return Err(invalid("a numerical observation cannot read token IDs"));
+        }
         program.shapes(tokens, position)?;
         Ok((program, expansion.disabled_calls))
     }

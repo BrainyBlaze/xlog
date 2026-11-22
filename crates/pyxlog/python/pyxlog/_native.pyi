@@ -58,6 +58,20 @@ _Path = Union[str, PathLike[str]]
 class NativeFunctionResultNonFiniteError(RuntimeError):
     """Observed nonfinite causal-function result in fit_binary before update commit."""
 
+class NativeGridMemory:
+    """Immutable episode state after one public grid observation."""
+
+class _GridQuery(TypedDict):
+    available_actions: Sequence[int]
+    action: dict[str, int]
+    target: tuple[int, int]
+    attention_patch: tuple[int, int]
+
+class _GridPrediction(TypedDict):
+    color_log_probs: list[float]
+    expected_progress: float
+    attention_mass: float
+
 class NativeCausalModel:
     """Native decoder with canonical acquired definitions and atomic candidate training."""
 
@@ -78,6 +92,17 @@ class NativeCausalModel:
     ) -> NativeLogits:
         """Run the active decoder, disable one named callee, or select the original decoder."""
         ...
+    def fork_grid(self, *, seed: int, insertion_layer: int = 17) -> NativeCausalModel: ...
+    def observe_grid(
+        self, frame: Sequence[Sequence[int]], *, memory: Optional[NativeGridMemory], turn_start: bool,
+        executed_action: Optional[dict[str, int]] = None, disabled_definition: Optional[str] = None,
+    ) -> NativeGridMemory: ...
+    def predict_grid_actions(
+        self, memory: NativeGridMemory, queries: Sequence[_GridQuery], *, disabled_definition: Optional[str] = None,
+    ) -> list[_GridPrediction]: ...
+    def fit_grid_batch(
+        self, examples: Sequence[tuple[NativeGridMemory, _GridQuery, int, Optional[float]]],
+    ) -> tuple[float, float, int]: ...
     def fork_trainable(self, *, down_projection_layer: int) -> NativeCausalModel: ...
     def fork_candidate(self) -> NativeCausalModel: ...
     def acquisition_language(

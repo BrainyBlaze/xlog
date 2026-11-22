@@ -15,7 +15,7 @@ impl TensorExecutor {
         operation: &Op,
         parameters: &[NativeTensor],
         values: &[Option<NativeTensor>],
-        tokens: &TrackedCudaSlice<u32>,
+        tokens: Option<&TrackedCudaSlice<u32>>,
         history_span: Option<(usize, usize)>,
         output: &NativeTensor,
     ) -> Result<()> {
@@ -55,6 +55,8 @@ impl TensorExecutor {
                 )
             }
             Op::TokenIndicators { token_ids } => {
+                let tokens =
+                    tokens.ok_or_else(|| failure("token indicators require token inputs"))?;
                 let (start, end) = history_span
                     .ok_or_else(|| failure("token indicators require a raw history span"))?;
                 let ids = self.indices(token_ids)?;
@@ -191,6 +193,36 @@ impl TensorExecutor {
                 "numerical calls and arguments must be resolved before execution",
             )),
         }
+    }
+
+    /// Make a numerical sequence with the retained state in its first row.
+    pub fn state_prefix(
+        &self,
+        rows: usize,
+        columns: usize,
+        state: Option<&NativeTensor>,
+    ) -> Result<NativeTensor> {
+        let output = self.zeros(TensorValueShape {
+            rows,
+            columns,
+            float32: true,
+        })?;
+        if let Some(state) = state {
+            if state.shape
+                != (TensorValueShape {
+                    rows: 1,
+                    columns,
+                    float32: true,
+                })
+                || state.device != self.provider.device().ordinal()
+            {
+                return Err(failure(
+                    "retained state differs from this execution boundary",
+                ));
+            }
+            self.copy_row(state, 0, &output, 0)?;
+        }
+        Ok(output)
     }
 
     fn copy_row(

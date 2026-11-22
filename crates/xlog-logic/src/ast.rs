@@ -1510,7 +1510,10 @@ impl FuncDef {
         };
         let one = FunctionDimension::Fixed { size: 1 };
         let mut params = Vec::new();
-        if !matches!(signature, TensorSignature::Pure { .. }) {
+        if matches!(
+            signature,
+            TensorSignature::Decoder | TensorSignature::Causal { .. }
+        ) {
             params.push(FuncParam {
                 name: "tokens".into(),
                 typ: Some(FunctionType::Tensor {
@@ -1520,6 +1523,22 @@ impl FuncDef {
             });
         }
         let result = match signature {
+            TensorSignature::Observations {
+                input_widths,
+                output_width,
+            } => {
+                for (id, &width) in input_widths.iter().enumerate() {
+                    params.push(FuncParam {
+                        name: format!("observation_{id}"),
+                        typ: Some(tensor(sequence.clone(), width)),
+                    });
+                }
+                params.push(FuncParam {
+                    name: "prediction_position".into(),
+                    typ: Some(ScalarType::U32.into()),
+                });
+                tensor(one, *output_width)
+            }
             TensorSignature::Decoder => {
                 params.push(FuncParam {
                     name: "prediction_position".into(),

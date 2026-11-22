@@ -67,6 +67,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "tensor_silu_gate_bf16",
             "tensor_attention_pack_bf16",
             "tensor_attention_unpack_bf16",
+            "tensor_attention_mass_f32",
             "tensor_causal_softmax_bf16",
             "tensor_prediction_row_bf16",
             "tensor_bf16_to_f32",

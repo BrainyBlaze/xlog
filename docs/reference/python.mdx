@@ -179,6 +179,29 @@ and canonical parameter bytes actually imported, not a substitute for checking
 the publisher's file hashes. `model.max_context` and `model.vocabulary_size`
 expose the admitted dimensions.
 
+For public colour grids, call `model.fork_grid(seed=seed, insertion_layer=17)`.
+The fork shares the checkpoint's causal layers and installs numerical input and
+output projections. It splits rectangular grids of up to 64 by 64 cells into
+4 by 4 patches. A distinct padding channel bounds each partial patch. The largest
+grid requires a context of 258 positions including memory and query.
+
+Call `observe_grid(frame, memory=None, turn_start=True)` for the first frame.
+Subsequent turn starts take the previous memory and `executed_action`. Intermediate
+frames take the previous memory and `turn_start=False`. Each call returns a new
+immutable state. A query for `predict_grid_actions(memory, queries)` supplies
+`available_actions`, `action`, `target=(y,x)` and `attention_patch=(patch_y,patch_x)`.
+Only action 6 takes `x` and `y` coordinates. Each prediction contains sixteen
+natural-log colour probabilities, expected level gain and mean attention probability
+at the selected patch in the first attention layer after insertion. The optional
+`disabled_definition` applies during observation or readout, including nested calls.
+
+`fit_grid_batch(examples)` takes (memory, query, observed colour, level gain)
+tuples for moves actually played. Each term differentiates the current query on
+its retained recurrent state. A missing level gain omits that scalar's loss.
+An update produces a new weight version. Replay the public frames to build memory
+for that version. Snapshots store the projections, their optimizer and acquired
+definitions. A restored process starts a new episode at its first public frame.
+
 For greedy generation, `NativeLogits.select_greedy(allowed_mask=None)` reduces
 the actual vocabulary row on CUDA. An optional mask contains exactly
 `ceil(vocabulary_size / 8)` bytes: token `i` uses bit `i % 8` of byte `i // 8`.
