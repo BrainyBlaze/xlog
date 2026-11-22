@@ -365,11 +365,24 @@ impl NativeCausalModel {
         limit: usize,
         seed: u64,
     ) -> Result<Vec<NumericalEdit>> {
+        self.enumerate_edits_with_seed(target, limit, seed, false)
+    }
+
+    /// Share proposal draws across compatible sites while binding each edit to its actual parent.
+    pub fn enumerate_edits_with_seed(
+        &self,
+        target: Option<&str>,
+        limit: usize,
+        seed: u64,
+        shared_seed: bool,
+    ) -> Result<Vec<NumericalEdit>> {
         let site = self.edit_site(target)?;
         let parent = self.program_id()?;
-        let mut rng = NumericalSeed(
-            seed ^ u64::from_str_radix(&parent[..16], 16).map_err(|e| invalid(e.to_string()))?,
-        );
+        let mut rng = NumericalSeed(if shared_seed {
+            seed
+        } else {
+            seed ^ u64::from_str_radix(&parent[..16], 16).map_err(|e| invalid(e.to_string()))?
+        });
         let mut seen = BTreeSet::new();
         let mut edits = Vec::new();
         for _ in 0..limit.saturating_mul(8) {
@@ -497,14 +510,35 @@ impl NativeCausalModel {
 
     /// Apply one complete typed edit on a fork, preserving older callable versions and their weights.
     pub fn apply_edit(&self, edit: &NumericalEdit, seed: u64) -> Result<(Self, String)> {
+        self.apply_edit_with_features(edit, seed, false)
+    }
+
+    /// Fork a capacity-matched linear control on seeded coordinates of the same parent state.
+    pub fn apply_edit_control(&self, edit: &NumericalEdit, seed: u64) -> Result<(Self, String)> {
+        self.apply_edit_with_features(edit, seed, true)
+    }
+
+    fn apply_edit_with_features(
+        &self,
+        edit: &NumericalEdit,
+        seed: u64,
+        linear_control: bool,
+    ) -> Result<(Self, String)> {
         self.require_editable_functions()?;
         let site = self.check_edit(edit, &self.program_id()?)?;
+        if linear_control && site.rule {
+            return Err(invalid("a linear feature control requires a feature edit"));
+        }
         let mut rng = NumericalSeed(seed);
-        let name = format!(
-            "{}::{}",
-            if site.rule { "rule" } else { "feature" },
-            edit.edit_id
-        );
+        let name = if linear_control {
+            format!("linear_control::{}::{seed:016x}", edit.edit_id)
+        } else {
+            format!(
+                "{}::{}",
+                if site.rule { "rule" } else { "feature" },
+                edit.edit_id
+            )
+        };
         let signature = if site.rule {
             self.score_abi(1)?
         } else {
@@ -518,7 +552,29 @@ impl NativeCausalModel {
         if site.rule {
             append(&mut body, Op::Argument { argument: 1 });
         }
-        let expression = self.edit_expression(&mut body, edit, &site);
+        // Draw these before sampling control coordinates so both feature arms start
+        // with the same physical weights, including the zero residual projection.
+        let weights = if site.rule {
+            Vec::new()
+        } else {
+            (0..WIDTH * WIDTH).map(|_| rng.weight(WIDTH)).collect()
+        };
+        let expression = if linear_control {
+            let mut coordinates: Vec<_> = (0..site.hidden).collect();
+            for i in 0..WIDTH.min(site.hidden) {
+                let j = i + rng.index(site.hidden - i);
+                coordinates.swap(i, j);
+            }
+            append(
+                &mut body,
+                Op::GatherColumns {
+                    input: 0,
+                    indices: coordinates.into_iter().cycle().take(WIDTH).collect(),
+                },
+            )
+        } else {
+            self.edit_expression(&mut body, edit, &site)
+        };
         let rows = if site.rule { 1 } else { WIDTH };
         let weight_name = format!("{name}::readout");
         let result = append(
@@ -546,15 +602,16 @@ impl NativeCausalModel {
         } else {
             result
         };
-        body.parameters.push(TensorParameter {
+        let parameter = TensorParameter {
             name: weight_name.clone(),
             shape: vec![rows, WIDTH],
             float32: true,
-        });
+        };
+        body.parameters.push(parameter.clone());
         if site.rule {
             let mut fork = self.fork_candidate();
             let mut root = self.program().clone();
-            let id = fork.add_matrix(&mut root, weight_name, rows, WIDTH, &mut rng)?;
+            let id = fork.add_zero_projection(&mut root, parameter)?;
             let mut functions = (*self.functions).clone();
             register(&mut functions, &name, body)?;
             fork.adaptation
@@ -566,7 +623,6 @@ impl NativeCausalModel {
             fork.publish_edit_root(functions, format!("model::grid::{}", edit.edit_id), root)?;
             Ok((fork, name))
         } else {
-            let weights = (0..rows * WIDTH).map(|_| rng.weight(WIDTH)).collect();
             let definitions = vec![FuncDef::numerical(name.clone(), body)?];
             let insertion_layer = self.grid()?.insertion_layer;
             let model = self.fork_acquired_definitions(

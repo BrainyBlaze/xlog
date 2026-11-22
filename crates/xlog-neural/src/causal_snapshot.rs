@@ -64,6 +64,13 @@ pub struct GridAdaptation {
 }
 
 impl GridAdaptation {
+    /// The extra prior input is the action-query indicator, independent of all cell features.
+    pub fn has_action_prefix(&self, program: &TensorProgram) -> bool {
+        self.color_prior
+            .and_then(|id| program.parameters.get(id))
+            .is_some_and(|parameter| parameter.shape == [17, 17])
+    }
+
     /// Hidden query state shared by the observation update and the prediction head.
     pub fn prediction_state(&self, program: &TensorProgram) -> Result<usize> {
         use xlog_ir::tensor::TensorOperation as Op;
@@ -85,6 +92,30 @@ impl GridAdaptation {
                 ));
             }
             projection = *left;
+            if self.has_action_prefix(program) {
+                let Some(Op::Select {
+                    positive, negative, ..
+                }) = program.operations.get(projection)
+                else {
+                    return Err(invalid("grid output lacks its action-specific readout"));
+                };
+                let Some(Op::Linear {
+                    input: action,
+                    weight,
+                }) = program.operations.get(*positive)
+                else {
+                    return Err(invalid("grid progress projection is absent"));
+                };
+                if *weight != self.readout
+                    || !matches!(
+                        program.operations.get(*action),
+                        Some(Op::Row { row: 0, .. })
+                    )
+                {
+                    return Err(invalid("grid progress must read the first causal position"));
+                }
+                projection = *negative;
+            }
         }
         match program.operations.get(projection) {
             Some(Op::Linear { input, weight }) if *weight == self.readout => Ok(*input),
@@ -171,12 +202,12 @@ impl NativeAdaptation {
                 if !program
                     .parameters
                     .get(id)
-                    .is_some_and(|p| p.float32 && p.shape == [17, 16])
+                    .is_some_and(|p| p.float32 && (p.shape == [17, 16] || p.shape == [17, 17]))
                     || optimizer_ids.contains(&id)
                     || *output_width != 17
                 {
                     return Err(invalid(
-                        "grid colour prior must be a frozen 17 by 16 matrix",
+                        "grid prior requires sixteen colour inputs and an optional action intercept",
                     ));
                 }
             }

@@ -516,7 +516,8 @@ extern "C" __global__ void tensor_causal_softmax_vjp_f32(
 // Full categorical row, binary margin, or a categorical row followed by a regression coordinate.
 extern "C" __global__ void tensor_loss_f32(
     const float* logits, float* cotangent, float* loss,
-    uint32_t vocabulary, uint32_t kind, uint32_t target, uint32_t negative, uint32_t positive, float regression
+    uint32_t vocabulary, uint32_t kind, uint32_t target, uint32_t negative, uint32_t positive,
+    float regression, float class_weight
 ) {
     if (kind == 1 || kind == 4) {
         const float weight = kind == 4 ? regression : 1.0f;
@@ -542,10 +543,10 @@ extern "C" __global__ void tensor_loss_f32(
         for (uint32_t i = threadIdx.x; i < classes; i += blockDim.x) denominator += expf(logits[i] - maximum);
         denominator = block_sum(denominator);
         for (uint32_t i = threadIdx.x; i < classes; i += blockDim.x) {
-            cotangent[i] = expf(logits[i] - maximum) / denominator - (i == target ? 1.0f : 0.0f);
+            cotangent[i] = class_weight * (expf(logits[i] - maximum) / denominator - (i == target ? 1.0f : 0.0f));
         }
         if (threadIdx.x == 0) {
-            float nll = maximum - logits[target] + logf(denominator);
+            float nll = class_weight * (maximum - logits[target] + logf(denominator));
             if (kind >= 2) {
                 const float error = kind == 3 ? logits[classes] - regression : 0.0f;
                 cotangent[classes] = error;

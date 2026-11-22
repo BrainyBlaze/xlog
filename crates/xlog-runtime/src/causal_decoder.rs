@@ -160,6 +160,19 @@ impl NativeCausalModel {
         Ok(id)
     }
 
+    fn add_zero_projection(
+        &mut self,
+        program: &mut TensorProgram,
+        parameter: xlog_ir::tensor::TensorParameter,
+    ) -> Result<usize> {
+        let id = program.parameters.len();
+        let (value, optimizer) = self.zero_projection(id, &parameter)?;
+        self.parameters.push(value);
+        self.optimizers.insert(id, optimizer);
+        program.parameters.push(parameter);
+        Ok(id)
+    }
+
     fn zero_projection(
         &self,
         id: usize,

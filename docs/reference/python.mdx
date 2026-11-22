@@ -197,8 +197,8 @@ the add-one-smoothed distribution for each previous colour. Its output starts
 with a zero correction to the log frequencies and fresh output-layer Adam
 moments. The progress coordinate uses softplus and starts at the supplied
 positive mean, in levels. The sensor, decoder and editor retain their weights.
-Both priors and the query encoding survive cold restoration. Older snapshots
-replay their original position-only queries and linear progress output.
+Both priors and the query encoding survive cold restoration. Earlier snapshots
+replay the query encoding and progress head saved in their numerical program.
 
 Call `observe_grid(frame, memory=None, turn_start=True)` for the first frame.
 Subsequent turn starts take the previous memory and `executed_action`. Intermediate
@@ -213,12 +213,30 @@ every frame in that memory's history. Each prediction's `disabled_calls` counts
 substitutions in that single query. `memory.sequence_rows` gives the number of
 numerical positions per query for accounting.
 
+On a fresh grid, `predict_grid_progress(memory, available_actions, actions)`
+returns one `expected_progress` in levels and a `disabled_calls` count per
+proposed action. It consumes one causal position per action. The position
+contains retained episode state, the available actions, the proposal and its
+click coordinates. The joint grid predictor reads its progress correction
+from this same position before the board patches and the target-cell window.
+The optional `disabled_definition` also applies to an action-only read.
+
 `fit_grid_batch(examples)` takes (memory, query, observed colour, level gain)
 tuples for moves actually played. Each term differentiates the current query on
 its retained recurrent state. A missing level gain omits that scalar's loss.
 When several cells share a move, supply its observed gain only for the primary
 prediction. Use `shared_only=True` to fit a parent control on the same common
 weights as a candidate while keeping its earlier acquired functions frozen.
+With `color_weights`, the loss sums weighted colour NLL and the half-squared
+errors for supplied level gains, then divides by total colour weight. For
+several cells per move, weights summing to one per move give a mean over moves.
+Use `definition_only=True` to train the latest feature's own parameters and
+its residual projection. The sensor, shared output, decoder and previous
+definitions retain their weights and optimizer state. At another fork of the
+same parent, `apply_edit_control(edit, seed=seed)` fits a linear control on
+seeded hidden coordinates. Use the same seed as `apply_edit`. The two forks
+receive identical initial feature weights and zero residual connections.
+Their trainable dimensions match, and either can acquire another definition.
 An update produces a new weight version. Replay the public frames to build memory
 for that version. Snapshots store the projections, their optimizer and acquired
 definitions. A restored process starts a new episode at its first public frame.
@@ -243,6 +261,11 @@ operands. Coordinates read the actual hidden state or edit description. A
 function operand invokes a retained definition with matching argument and result
 shapes. A null target creates a new observation feature. A named target extends
 that version's output with a learned residual.
+Pass `shared_seed=True` to draw the same operations and operands across sites
+with the same available choices. Every edit is bound to its own parent program.
+On creation, a new acquisition rule adds a zero-initialized projection to its
+parent's score. `fit_edit_preference` for the new rule updates this projection
+from measured alternatives while preserving the parent's rule and ordinary editor.
 
 On a calibrated grid, edits to an acquisition rule propose a new term that
 can change relative edit scores across histories. Products and conditional

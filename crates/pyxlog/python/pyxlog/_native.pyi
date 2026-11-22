@@ -71,11 +71,13 @@ class _GridQuery(TypedDict):
     target: tuple[int, int]
     attention_patch: tuple[int, int]
 
-class _GridPrediction(TypedDict):
-    color_log_probs: list[float]
+class _GridProgress(TypedDict):
     expected_progress: float
-    attention_mass: float
     disabled_calls: int
+
+class _GridPrediction(_GridProgress):
+    color_log_probs: list[float]
+    attention_mass: float
 
 class NativeCausalModel:
     """Native decoder with canonical acquired definitions and atomic candidate training."""
@@ -108,9 +110,13 @@ class NativeCausalModel:
     def predict_grid_actions(
         self, memory: NativeGridMemory, queries: Sequence[_GridQuery], *, disabled_definition: Optional[str] = None,
     ) -> list[_GridPrediction]: ...
+    def predict_grid_progress(
+        self, memory: NativeGridMemory, available_actions: Sequence[int], actions: Sequence[dict[str, int]],
+        *, disabled_definition: Optional[str] = None,
+    ) -> list[_GridProgress]: ...
     def fit_grid_batch(
         self, examples: Sequence[tuple[NativeGridMemory, _GridQuery, int, Optional[float]]],
-        *, shared_only: bool = False,
+        *, shared_only: bool = False, definition_only: bool = False, color_weights: Optional[Sequence[float]] = None,
     ) -> tuple[float, float, int]: ...
     def fork_grid_function_comparison(
         self, definition_id: str, *, seed: int,
@@ -124,11 +130,14 @@ class NativeCausalModel:
     def program_id(self) -> str: ...
     @property
     def initial_rule_id(self) -> str: ...
-    def enumerate_edits(self, *, target: Optional[str], limit: int, seed: int) -> list[dict[str, Any]]: ...
+    def enumerate_edits(
+        self, *, target: Optional[str], limit: int, seed: int, shared_seed: bool = False,
+    ) -> list[dict[str, Any]]: ...
     def score_edits(
         self, memory: NativeGridMemory, edits: Sequence[dict[str, Any]], *, rule_id: str,
     ) -> list[dict[str, Any]]: ...
     def apply_edit(self, edit: dict[str, Any], *, seed: int) -> tuple[NativeCausalModel, str]: ...
+    def apply_edit_control(self, edit: dict[str, Any], *, seed: int) -> tuple[NativeCausalModel, str]: ...
     def fit_edit_preference(
         self, memory: NativeGridMemory, left_edit: dict[str, Any], right_edit: dict[str, Any],
         *, left_loss: float, right_loss: float, rule_id: str,
