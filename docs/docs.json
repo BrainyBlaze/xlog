@@ -107,7 +107,8 @@
               "architecture/device-runtime",
               "architecture/arithmetic",
               "architecture/language-completeness",
-              "architecture/dilp-training"
+              "architecture/dilp-training",
+              "architecture/structured-neural-integration"
             ]
           },
           {
